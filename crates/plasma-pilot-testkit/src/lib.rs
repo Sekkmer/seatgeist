@@ -328,6 +328,12 @@ pub struct MockAccessibilityTextPaste {
     pub offset: i32,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct MockAccessibilityValueSet {
+    pub node_id: String,
+    pub value: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct MockAccessibilityBackend {
     focused_tree: AccessibilityNode,
@@ -340,6 +346,7 @@ pub struct MockAccessibilityBackend {
     text_copies: Arc<Mutex<Vec<MockAccessibilityTextCopy>>>,
     text_cuts: Arc<Mutex<Vec<MockAccessibilityTextCut>>>,
     text_pastes: Arc<Mutex<Vec<MockAccessibilityTextPaste>>>,
+    value_sets: Arc<Mutex<Vec<MockAccessibilityValueSet>>>,
 }
 
 impl MockAccessibilityBackend {
@@ -355,6 +362,7 @@ impl MockAccessibilityBackend {
             text_copies: Arc::new(Mutex::new(Vec::new())),
             text_cuts: Arc::new(Mutex::new(Vec::new())),
             text_pastes: Arc::new(Mutex::new(Vec::new())),
+            value_sets: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -393,6 +401,10 @@ impl MockAccessibilityBackend {
 
     pub fn text_pastes(&self) -> Result<Vec<MockAccessibilityTextPaste>> {
         Ok(lock(&self.text_pastes)?.clone())
+    }
+
+    pub fn value_sets(&self) -> Result<Vec<MockAccessibilityValueSet>> {
+        Ok(lock(&self.value_sets)?.clone())
     }
 }
 
@@ -469,6 +481,14 @@ impl AccessibilityBackend for MockAccessibilityBackend {
         lock(&self.text_pastes)?.push(MockAccessibilityTextPaste {
             node_id: node_id.to_string(),
             offset,
+        });
+        Ok(())
+    }
+
+    async fn set_value(&self, node_id: &str, value: f64) -> Result<()> {
+        lock(&self.value_sets)?.push(MockAccessibilityValueSet {
+            node_id: node_id.to_string(),
+            value,
         });
         Ok(())
     }
@@ -615,6 +635,7 @@ mod tests {
         backend.copy_text("atspi://sample/text", 2, 4).await?;
         backend.cut_text("atspi://sample/text", 3, 5).await?;
         backend.paste_text("atspi://sample/text", 4).await?;
+        backend.set_value("atspi://sample/value", 0.75).await?;
         assert_eq!(
             backend.invocations()?,
             vec![MockAccessibilityInvocation {
@@ -666,6 +687,13 @@ mod tests {
             vec![MockAccessibilityTextPaste {
                 node_id: "atspi://sample/text".to_string(),
                 offset: 4,
+            }]
+        );
+        assert_eq!(
+            backend.value_sets()?,
+            vec![MockAccessibilityValueSet {
+                node_id: "atspi://sample/value".to_string(),
+                value: 0.75,
             }]
         );
         Ok(())
