@@ -1,0 +1,27 @@
+[package]
+name = "plasma-pilotd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "User-session daemon for PlasmaPilot."
+
+[[bin]]
+name = "plasma-pilotd"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+libplasma-pilot.workspace = true
+plasma-pilot-policy.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

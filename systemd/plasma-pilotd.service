@@ -1,0 +1,10 @@
+[Unit]
+Description=PlasmaPilot desktop-control daemon
+
+[Service]
+ExecStart=%h/.cargo/bin/plasma-pilotd --socket %t/plasma-pilot/plasma-pilotd.sock
+Restart=on-failure
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

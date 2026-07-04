@@ -1,0 +1,17 @@
+[package]
+name = "plasma-pilot-policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Policy classification and enforcement for PlasmaPilot actions."
+
+[dependencies]
+libplasma-pilot.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

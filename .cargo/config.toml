@@ -1,0 +1,3 @@
+[alias]
+xtask-check = "check --workspace --all-targets"
+xtask-test = "test --workspace"

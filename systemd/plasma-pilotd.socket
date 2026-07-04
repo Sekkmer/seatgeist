@@ -1,0 +1,10 @@
+[Unit]
+Description=PlasmaPilot daemon socket
+
+[Socket]
+ListenStream=%t/plasma-pilot/plasma-pilotd.sock
+SocketMode=0600
+DirectoryMode=0700
+
+[Install]
+WantedBy=sockets.target
