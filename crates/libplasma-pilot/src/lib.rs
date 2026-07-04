@@ -15,11 +15,11 @@ pub use protocol::{
     InputBackendStatus, JournalEntry, JournalTailRequest, JournalWindowContext, KeyComboRequest,
     KwinBridgeStatus, KwinMetadataStatus, LibeiStatus, MovePointerRequest, ObserveRequest,
     PanicStopStatus, PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
-    PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus, ReplayTrace, ScreenshotInfo,
-    ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
-    ScrollPointerRequest, SelectItemRequest, SelectMenuRequest, SetPanicStopRequest,
-    SetTextFieldRequest, SetValueRequest, SpectacleStatus, ToggleCheckRequest, TraceStep,
-    TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult,
+    PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus, ReplayTrace, SafetyStatus,
+    ScreenshotInfo, ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest,
+    ScreenshotTransform, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
+    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, SpectacleStatus, ToggleCheckRequest,
+    TraceStep, TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult,
 };
 pub use runtime::{
     current_egid, current_euid, default_approval_file_path, default_journal_path,

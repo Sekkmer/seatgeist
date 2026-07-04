@@ -231,6 +231,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         "plasma.health" => Ok(DaemonRequest::Health),
         "plasma.capabilities" => Ok(DaemonRequest::Capabilities),
         "plasma.policy_status" => Ok(DaemonRequest::PolicyStatus),
+        "plasma.safety_status" => Ok(DaemonRequest::SafetyStatus),
         "plasma.panic_stop_status" => Ok(DaemonRequest::PanicStopStatus),
         "plasma.panic_stop_enable" => Ok(DaemonRequest::SetPanicStop(SetPanicStopRequest {
             enabled: true,
@@ -583,6 +584,14 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status.default_clipboard_read,
             status.default_clipboard_write
         ),
+        DaemonResponse::SafetyStatus(status) => format!(
+            "focus_guard={} human_pause={} human_signal_fresh={} human_quiet_ms={} redactions={}",
+            status.require_focus_guard,
+            status.pause_on_human_input,
+            status.human_input_signal_fresh,
+            status.human_input_quiet_ms,
+            status.screenshot_redaction_count
+        ),
         DaemonResponse::PanicStop(status) => format!(
             "panic-stop enabled={} path={}",
             status.enabled,
@@ -719,6 +728,12 @@ fn tool_definitions() -> Vec<Value> {
             "plasma.policy_status",
             "Policy Status",
             "Read current daemon policy defaults.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.safety_status",
+            "Safety Status",
+            "Read active daemon safety gates such as focus guards, human-input pause, and screenshot redaction count.",
             object_schema(vec![], vec![]),
         ),
         tool(
@@ -1723,6 +1738,7 @@ fn i64_to_i32(value: i64) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use libplasma_pilot::SafetyStatus;
     use libplasma_pilot::{ScreenshotInfo, ScreenshotTransform, WaitForChangeResult};
 
     #[test]
@@ -1762,6 +1778,27 @@ mod tests {
     }
 
     #[test]
+    fn safety_status_compact_text_reports_active_gates() {
+        let text = compact_tool_text(
+            "plasma.safety_status",
+            &DaemonResponse::SafetyStatus(SafetyStatus {
+                require_focus_guard: true,
+                pause_on_human_input: true,
+                human_input_activity_file: Some(PathBuf::from(
+                    "/run/user/1000/plasma-pilot/human-input-active",
+                )),
+                human_input_quiet_ms: 2500,
+                human_input_signal_fresh: true,
+                human_input_signal_age_ms: Some(100),
+                screenshot_redaction_count: 2,
+            }),
+        );
+        assert!(text.contains("focus_guard=true"));
+        assert!(text.contains("human_signal_fresh=true"));
+        assert!(text.contains("redactions=2"));
+    }
+
+    #[test]
     fn lists_compact_tool_definitions() {
         let tools = tool_definitions();
         assert!(
@@ -1778,6 +1815,11 @@ mod tests {
             tools
                 .iter()
                 .any(|tool| tool["name"] == "plasma.panic_stop_status")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.safety_status")
         );
         assert!(
             tools
@@ -2141,6 +2183,11 @@ mod tests {
 
     #[test]
     fn maps_panic_stop_tools() {
+        assert_eq!(
+            daemon_request_for_tool("plasma.safety_status", &json!({}))
+                .expect("safety status maps"),
+            DaemonRequest::SafetyStatus
+        );
         assert_eq!(
             daemon_request_for_tool("plasma.panic_stop_status", &json!({}))
                 .expect("panic-stop status maps"),

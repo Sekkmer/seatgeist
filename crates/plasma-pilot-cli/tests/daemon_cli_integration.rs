@@ -9,7 +9,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use libplasma_pilot::{
     BackendCapability, CapabilitySet, DaemonRequest, DaemonResponse, HealthStatus, JournalEntry,
-    PanicStopStatus, PolicyStatus, ReplayTrace, ToolApprovalLevel, TraceStep, UinputStatus,
+    PanicStopStatus, PolicyStatus, ReplayTrace, SafetyStatus, ToolApprovalLevel, TraceStep,
+    UinputStatus,
 };
 use std::os::unix::fs::PermissionsExt;
 
@@ -96,6 +97,7 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
     };
     assert!(capabilities.contains(&BackendCapability::DaemonHealth));
     assert!(capabilities.contains(&BackendCapability::DaemonPolicyStatus));
+    assert!(capabilities.contains(&BackendCapability::DaemonSafetyStatus));
 
     let policy = daemon.cli_json(&["policy-status"])?;
     assert_eq!(
@@ -108,6 +110,20 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
             default_full_resolution_screenshot: ToolApprovalLevel::Prompt,
             default_clipboard_read: ToolApprovalLevel::Prompt,
             default_clipboard_write: ToolApprovalLevel::Allow,
+        })
+    );
+
+    let safety = daemon.cli_json(&["safety-status"])?;
+    assert_eq!(
+        safety,
+        DaemonResponse::SafetyStatus(SafetyStatus {
+            require_focus_guard: false,
+            pause_on_human_input: false,
+            human_input_activity_file: None,
+            human_input_quiet_ms: 1500,
+            human_input_signal_fresh: false,
+            human_input_signal_age_ms: None,
+            screenshot_redaction_count: 0,
         })
     );
 
@@ -148,6 +164,7 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
             "health",
             "capabilities",
             "policy_status",
+            "safety_status",
             "uinput_status",
             "input_backend_status",
             "capture_backend_status",
@@ -337,9 +354,6 @@ fn assert_methods(entries: &[JournalEntry], expected: &[&str]) {
 fn daemon_binary() -> Result<PathBuf> {
     let candidate =
         PathBuf::from(env!("CARGO_BIN_EXE_plasma-pilot-cli")).with_file_name("plasma-pilotd");
-    if candidate.exists() {
-        return Ok(candidate);
-    }
 
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

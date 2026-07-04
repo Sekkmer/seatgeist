@@ -41,6 +41,7 @@ enum Command {
     Doctor,
     Capabilities,
     PolicyStatus,
+    SafetyStatus,
     KwinBridgeStatus,
     CaptureBackends,
     Monitors,
@@ -549,6 +550,7 @@ fn main() -> Result<()> {
         Command::Doctor => print_daemon_response(&socket, DaemonRequest::Health)?,
         Command::Capabilities => print_daemon_response(&socket, DaemonRequest::Capabilities)?,
         Command::PolicyStatus => print_daemon_response(&socket, DaemonRequest::PolicyStatus)?,
+        Command::SafetyStatus => print_daemon_response(&socket, DaemonRequest::SafetyStatus)?,
         Command::KwinBridgeStatus => {
             print_daemon_response(&socket, DaemonRequest::KwinBridgeStatus)?;
         }

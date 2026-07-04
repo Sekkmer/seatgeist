@@ -24,13 +24,13 @@ use libplasma_pilot::{
     JournalWindowContext, KeyComboRequest, KwinBridgeStatus, KwinMetadataStatus, LibeiStatus,
     MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton,
     PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
-    PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus, SafetyClass, ScreenshotInfo,
-    ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
-    ScrollPointerRequest, SelectItemRequest, SelectMenuRequest, SetPanicStopRequest,
-    SetTextFieldRequest, SetValueRequest, SpectacleStatus, ToggleCheckRequest, ToolApprovalLevel,
-    TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult, WindowGeometry,
-    WindowInfo, current_egid, current_euid, default_journal_path, default_panic_stop_path,
-    default_socket_path,
+    PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus, SafetyClass, SafetyStatus,
+    ScreenshotInfo, ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest,
+    ScreenshotTransform, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
+    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, SpectacleStatus, ToggleCheckRequest,
+    ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult,
+    WindowGeometry, WindowInfo, current_egid, current_euid, default_journal_path,
+    default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -765,6 +765,12 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
         DaemonRequest::PolicyStatus => {
             DaemonResponse::PolicyStatus(policy_status_from_config(runtime.policy.config()))
         }
+        DaemonRequest::SafetyStatus => match safety_status(&runtime.safety_settings) {
+            Ok(status) => DaemonResponse::SafetyStatus(status),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::PanicStopStatus => DaemonResponse::PanicStop(runtime.panic_stop.status()),
         DaemonRequest::SetPanicStop(request) => {
             match set_panic_stop(&runtime.panic_stop, request) {
@@ -1064,6 +1070,19 @@ fn policy_status_from_config(config: &PolicyConfig) -> PolicyStatus {
         default_clipboard_read: config.default_clipboard_read.clone(),
         default_clipboard_write: config.default_clipboard_write.clone(),
     }
+}
+
+fn safety_status(settings: &SafetySettings) -> Result<SafetyStatus> {
+    let (human_input_signal_fresh, human_input_signal_age_ms) = human_input_signal_state(settings)?;
+    Ok(SafetyStatus {
+        require_focus_guard: settings.require_focus_guard,
+        pause_on_human_input: settings.pause_on_human_input,
+        human_input_activity_file: settings.human_input_activity_file.clone(),
+        human_input_quiet_ms: settings.human_input_quiet_ms,
+        human_input_signal_fresh,
+        human_input_signal_age_ms,
+        screenshot_redaction_count: settings.screenshot_redactions.len(),
+    })
 }
 
 fn load_daemon_config(explicit_path: Option<&Path>) -> Result<DaemonConfigFile> {
@@ -1807,18 +1826,8 @@ fn enforce_human_input_pause(settings: &SafetySettings, request: &DaemonRequest)
     let Some(path) = &settings.human_input_activity_file else {
         return Ok(());
     };
-    let metadata = match fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).with_context(|| format!("stat {}", path.display())),
-    };
-    let modified = metadata
-        .modified()
-        .with_context(|| format!("read mtime for {}", path.display()))?;
-    let quiet_for = SystemTime::now()
-        .duration_since(modified)
-        .unwrap_or(Duration::ZERO);
-    if quiet_for <= Duration::from_millis(settings.human_input_quiet_ms) {
+    let (fresh, _) = human_input_signal_state(settings)?;
+    if fresh {
         bail!(
             "human input activity signal is fresh at {}; refusing {:?} until quiet for {}ms",
             path.display(),
@@ -1827,6 +1836,31 @@ fn enforce_human_input_pause(settings: &SafetySettings, request: &DaemonRequest)
         );
     }
     Ok(())
+}
+
+fn human_input_signal_state(settings: &SafetySettings) -> Result<(bool, Option<u64>)> {
+    if !settings.pause_on_human_input {
+        return Ok((false, None));
+    }
+    let Some(path) = &settings.human_input_activity_file else {
+        return Ok((false, None));
+    };
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok((false, None)),
+        Err(err) => return Err(err).with_context(|| format!("stat {}", path.display())),
+    };
+    let modified = metadata
+        .modified()
+        .with_context(|| format!("read mtime for {}", path.display()))?;
+    let quiet_for = SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or(Duration::ZERO);
+    let age_ms = u64::try_from(quiet_for.as_millis()).unwrap_or(u64::MAX);
+    Ok((
+        quiet_for <= Duration::from_millis(settings.human_input_quiet_ms),
+        Some(age_ms),
+    ))
 }
 
 fn enforce_required_focus_guard(settings: &SafetySettings, request: &DaemonRequest) -> Result<()> {
@@ -2013,6 +2047,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         DaemonRequest::Health
         | DaemonRequest::Capabilities
         | DaemonRequest::PolicyStatus
+        | DaemonRequest::SafetyStatus
         | DaemonRequest::PanicStopStatus
         | DaemonRequest::SetPanicStop(_)
         | DaemonRequest::UinputStatus
@@ -2172,6 +2207,7 @@ fn current_capabilities() -> Vec<BackendCapability> {
     let mut capabilities = vec![
         BackendCapability::DaemonHealth,
         BackendCapability::DaemonPolicyStatus,
+        BackendCapability::DaemonSafetyStatus,
     ];
     if command_exists("spectacle") || screenshot_portal_status().screenshot_interface_available {
         capabilities.push(BackendCapability::Screenshot);
@@ -4521,6 +4557,13 @@ fn summarize_response(response: &DaemonResponse) -> String {
             format!("{} capabilities", capabilities.capabilities.len())
         }
         DaemonResponse::PolicyStatus(_) => "policy status".to_string(),
+        DaemonResponse::SafetyStatus(status) => format!(
+            "safety focus_guard={} human_pause={} human_fresh={} redactions={}",
+            status.require_focus_guard,
+            status.pause_on_human_input,
+            status.human_input_signal_fresh,
+            status.screenshot_redaction_count
+        ),
         DaemonResponse::PanicStop(status) => format!(
             "panic-stop enabled={} path={}",
             status.enabled,

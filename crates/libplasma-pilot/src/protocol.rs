@@ -37,6 +37,17 @@ pub struct PolicyStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SafetyStatus {
+    pub require_focus_guard: bool,
+    pub pause_on_human_input: bool,
+    pub human_input_activity_file: Option<PathBuf>,
+    pub human_input_quiet_ms: u64,
+    pub human_input_signal_fresh: bool,
+    pub human_input_signal_age_ms: Option<u64>,
+    pub screenshot_redaction_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PanicStopStatus {
     pub enabled: bool,
     pub path: PathBuf,
@@ -569,6 +580,7 @@ pub enum DaemonRequest {
     Health,
     Capabilities,
     PolicyStatus,
+    SafetyStatus,
     PanicStopStatus,
     SetPanicStop(SetPanicStopRequest),
     KwinBridgeStatus,
@@ -618,6 +630,7 @@ impl DaemonRequest {
             Self::Health => "health",
             Self::Capabilities => "capabilities",
             Self::PolicyStatus => "policy_status",
+            Self::SafetyStatus => "safety_status",
             Self::PanicStopStatus => "panic_stop_status",
             Self::SetPanicStop(_) => "set_panic_stop",
             Self::KwinBridgeStatus => "kwin_bridge_status",
@@ -669,6 +682,7 @@ pub enum DaemonResponse {
     Health(HealthStatus),
     Capabilities(CapabilitySet),
     PolicyStatus(PolicyStatus),
+    SafetyStatus(SafetyStatus),
     PanicStop(PanicStopStatus),
     KwinBridgeStatus(KwinBridgeStatus),
     UinputStatus(UinputStatus),
@@ -695,6 +709,7 @@ impl DaemonResponse {
             Self::Health(_) => "health",
             Self::Capabilities(_) => "capabilities",
             Self::PolicyStatus(_) => "policy_status",
+            Self::SafetyStatus(_) => "safety_status",
             Self::PanicStop(_) => "panic_stop",
             Self::KwinBridgeStatus(_) => "kwin_bridge_status",
             Self::UinputStatus(_) => "uinput_status",
@@ -976,6 +991,26 @@ mod tests {
 
     #[test]
     fn serializes_panic_stop_requests() {
+        let safety = DaemonRequest::SafetyStatus;
+        assert_eq!(
+            serde_json::to_string(&safety).expect("safety status serializes"),
+            r#"{"method":"safety_status"}"#
+        );
+
+        let response = DaemonResponse::SafetyStatus(SafetyStatus {
+            require_focus_guard: true,
+            pause_on_human_input: true,
+            human_input_activity_file: Some(PathBuf::from("/run/user/1000/plasma-pilot/human")),
+            human_input_quiet_ms: 1500,
+            human_input_signal_fresh: false,
+            human_input_signal_age_ms: Some(3000),
+            screenshot_redaction_count: 2,
+        });
+        let encoded = serde_json::to_string(&response).expect("safety response serializes");
+        assert!(encoded.contains(r#""type":"safety_status""#));
+        assert!(encoded.contains(r#""require_focus_guard":true"#));
+        assert_eq!(response.response_type(), "safety_status");
+
         let status = DaemonRequest::PanicStopStatus;
         assert_eq!(
             serde_json::to_string(&status).expect("panic status serializes"),

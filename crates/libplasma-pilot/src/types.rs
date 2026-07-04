@@ -213,6 +213,7 @@ impl FromStr for SafetyClass {
 pub enum BackendCapability {
     DaemonHealth,
     DaemonPolicyStatus,
+    DaemonSafetyStatus,
     Screenshot,
     MonitorMetadata,
     WindowList,

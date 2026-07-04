@@ -11,7 +11,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use libplasma_pilot::{
     CapabilitySet, DaemonRequest, DaemonResponse, HealthStatus, JournalEntry, JournalTailRequest,
-    PanicStopStatus, PolicyStatus, SetPanicStopRequest, ToolApprovalLevel, UinputStatus,
+    PanicStopStatus, PolicyStatus, SafetyStatus, SetPanicStopRequest, ToolApprovalLevel,
+    UinputStatus,
 };
 
 struct DaemonFixture {
@@ -169,6 +170,21 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
     };
     assert!(capabilities.contains(&libplasma_pilot::BackendCapability::DaemonHealth));
     assert!(capabilities.contains(&libplasma_pilot::BackendCapability::DaemonPolicyStatus));
+    assert!(capabilities.contains(&libplasma_pilot::BackendCapability::DaemonSafetyStatus));
+
+    let safety = daemon.request(&DaemonRequest::SafetyStatus)?;
+    assert_eq!(
+        safety,
+        DaemonResponse::SafetyStatus(SafetyStatus {
+            require_focus_guard: false,
+            pause_on_human_input: false,
+            human_input_activity_file: None,
+            human_input_quiet_ms: 1500,
+            human_input_signal_fresh: false,
+            human_input_signal_age_ms: None,
+            screenshot_redaction_count: 0,
+        })
+    );
 
     let panic_stop = daemon.request(&DaemonRequest::PanicStopStatus)?;
     let DaemonResponse::PanicStop(PanicStopStatus { enabled, path }) = panic_stop else {
@@ -236,6 +252,7 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
             "health",
             "policy_status",
             "capabilities",
+            "safety_status",
             "panic_stop_status",
             "uinput_status",
             "input_backend_status",
