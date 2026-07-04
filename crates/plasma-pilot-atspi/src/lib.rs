@@ -140,6 +140,13 @@ pub fn insert_text(node_id: &str, offset: i32, text: &str) -> Result<()> {
     bus.insert_text(&node, offset, text)
 }
 
+pub fn delete_text(node_id: &str, start_offset: i32, end_offset: i32) -> Result<()> {
+    validate_text_range(start_offset, end_offset)?;
+    let node = parse_node_id(node_id)?;
+    let bus = AtspiBus::connect()?;
+    bus.delete_text(&node, start_offset, end_offset)
+}
+
 pub fn set_current_value(node_id: &str, value: f64) -> Result<()> {
     if !value.is_finite() {
         return Err(PilotError::InvalidRequest(
@@ -564,6 +571,42 @@ impl AtspiBus {
         }
     }
 
+    fn delete_text(&self, node: &AtspiRef, start_offset: i32, end_offset: i32) -> Result<()> {
+        let role = self
+            .role_name(node)
+            .unwrap_or_else(|_| "unknown".to_string());
+        if is_sensitive_role(&role) {
+            return Err(PilotError::PolicyDenied(
+                "refusing to delete text on sensitive accessibility node".to_string(),
+            ));
+        }
+        let interfaces = self.interfaces(node)?;
+        if !interfaces
+            .iter()
+            .any(|interface| interface == ATSPI_EDITABLE_TEXT)
+        {
+            return Err(PilotError::InvalidRequest(
+                "node does not expose org.a11y.atspi.EditableText".to_string(),
+            ));
+        }
+        let start = start_offset.to_string();
+        let end = end_offset.to_string();
+        let output = self.call_with_args(
+            &node.service,
+            &node.path,
+            ATSPI_EDITABLE_TEXT,
+            "DeleteText",
+            &["ii", &start, &end],
+        )?;
+        if parse_bool_value(&output)? {
+            Ok(())
+        } else {
+            Err(PilotError::BackendUnavailable(
+                "AT-SPI DeleteText returned false".to_string(),
+            ))
+        }
+    }
+
     fn set_current_value(&self, node: &AtspiRef, value: f64) -> Result<()> {
         let role = self
             .role_name(node)
@@ -669,6 +712,20 @@ fn validate_set_text(text: &str) -> Result<()> {
         return Err(PilotError::InvalidRequest(format!(
             "text exceeds {DEFAULT_SET_TEXT_MAX_CHARS} character limit"
         )));
+    }
+    Ok(())
+}
+
+fn validate_text_range(start_offset: i32, end_offset: i32) -> Result<()> {
+    if start_offset < 0 {
+        return Err(PilotError::InvalidRequest(
+            "start_offset must be greater than or equal to zero".to_string(),
+        ));
+    }
+    if end_offset <= start_offset {
+        return Err(PilotError::InvalidRequest(
+            "end_offset must be greater than start_offset".to_string(),
+        ));
     }
     Ok(())
 }

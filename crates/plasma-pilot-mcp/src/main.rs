@@ -7,16 +7,17 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use libplasma_pilot::{
-    AccessibilityAction, AccessibilityFindRequest, AccessibilityInsertTextRequest,
-    AccessibilityInvokeRequest, AccessibilitySetTextRequest, ActivateTabRequest, ActiveWindowGuard,
-    ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest,
-    CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
-    DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
-    DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
-    KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton, ScreenshotRequest,
-    ScreenshotTileRequest, ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest,
-    SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
-    WaitForChangeRequest, default_socket_path,
+    AccessibilityAction, AccessibilityDeleteTextRequest, AccessibilityFindRequest,
+    AccessibilityInsertTextRequest, AccessibilityInvokeRequest, AccessibilitySetTextRequest,
+    ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest, ClickPointerRequest,
+    ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES,
+    DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
+    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest, DaemonResponse, FocusWindowRequest,
+    FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, MovePointerRequest,
+    ObserveRequest, Point, PointerButton, ScreenshotRequest, ScreenshotTileRequest,
+    ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
+    SetValueRequest, ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest,
+    default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -360,6 +361,14 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 node_id: required_string(arguments, "node_id")?,
                 offset: required_i32(arguments, "offset")?,
                 text: required_string(arguments, "text")?,
+                guard: active_window_guard(arguments)?,
+            },
+        )),
+        "plasma.a11y_delete_text" => Ok(DaemonRequest::AccessibilityDeleteText(
+            AccessibilityDeleteTextRequest {
+                node_id: required_string(arguments, "node_id")?,
+                start_offset: required_i32(arguments, "start_offset")?,
+                end_offset: required_i32(arguments, "end_offset")?,
                 guard: active_window_guard(arguments)?,
             },
         )),
@@ -1219,6 +1228,28 @@ fn tool_definitions() -> Vec<Value> {
                     ),
                 ]),
                 vec!["node_id", "offset", "text"],
+            ),
+        ),
+        tool(
+            "plasma.a11y_delete_text",
+            "Delete Accessibility Text",
+            "Delete a character-offset range from a non-sensitive AT-SPI EditableText node without copying it to clipboard. This is policy-gated semantic control and summaries report offsets only.",
+            object_schema(
+                with_guard_properties(vec![
+                    (
+                        "node_id",
+                        json!({"type": "string", "description": "AT-SPI node id from a previous accessibility result."}),
+                    ),
+                    (
+                        "start_offset",
+                        json!({"type": "integer", "minimum": 0, "description": "Starting character offset to delete."}),
+                    ),
+                    (
+                        "end_offset",
+                        json!({"type": "integer", "minimum": 1, "description": "First character offset past the deleted range."}),
+                    ),
+                ]),
+                vec!["node_id", "start_offset", "end_offset"],
             ),
         ),
         tool(
@@ -2137,6 +2168,28 @@ mod tests {
                 node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
                 offset: 5,
                 text: "hello".to_string(),
+                guard: None,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_accessibility_delete_text_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.a11y_delete_text",
+            &json!({
+                "node_id": "atspi://:1.42/org/a11y/atspi/accessible/7",
+                "start_offset": 2,
+                "end_offset": 5
+            }),
+        )
+        .expect("a11y delete-text args map");
+        assert_eq!(
+            request,
+            DaemonRequest::AccessibilityDeleteText(AccessibilityDeleteTextRequest {
+                node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                start_offset: 2,
+                end_offset: 5,
                 guard: None,
             })
         );

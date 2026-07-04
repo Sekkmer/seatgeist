@@ -31,6 +31,7 @@ Default rules:
 - AT-SPI invoke is semantic control: it may only run through the policy engine and action journal, and defaults to prompt/deny when no approval channel is available.
 - AT-SPI set-text is semantic control: it must reject sensitive nodes by default and journal replacement length rather than replacement contents.
 - AT-SPI insert-text is semantic control: it must reject sensitive nodes by default and journal inserted-text length plus offset rather than inserted contents.
+- AT-SPI delete-text is semantic control: it must reject sensitive nodes by default and journal only the deleted offset range, not deleted contents.
 - High-level semantic actions must refuse ambiguous matches instead of choosing one candidate implicitly; ambiguity errors should include bounded non-sensitive candidate choices so the caller can disambiguate.
 
 The current human-input pause uses a file-backed activity signal so a future KDE/libinput watcher can touch the file when the user takes over.

@@ -3,10 +3,10 @@ pub mod runtime;
 pub mod types;
 
 pub use protocol::{
-    AccessibilityFindRequest, AccessibilityInsertTextRequest, AccessibilityInvokeRequest,
-    AccessibilitySetTextRequest, ActionRequest, ActionResult, ActivateTabRequest,
-    ActiveWindowGuard, CapabilitySet, ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest,
-    ClipboardSetRequest, ClipboardText, DEFAULT_CLIPBOARD_MAX_BYTES,
+    AccessibilityDeleteTextRequest, AccessibilityFindRequest, AccessibilityInsertTextRequest,
+    AccessibilityInvokeRequest, AccessibilitySetTextRequest, ActionRequest, ActionResult,
+    ActivateTabRequest, ActiveWindowGuard, CapabilitySet, ClickButtonRequest, ClickPointerRequest,
+    ClipboardGetRequest, ClipboardSetRequest, ClipboardText, DEFAULT_CLIPBOARD_MAX_BYTES,
     DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
     DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest, DaemonResponse, DesktopObservation,
     FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus,

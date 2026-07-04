@@ -3,16 +3,17 @@ use std::{fs, path::PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use libplasma_pilot::{
-    AccessibilityAction, AccessibilityFindRequest, AccessibilityInsertTextRequest,
-    AccessibilityInvokeRequest, AccessibilitySetTextRequest, ActivateTabRequest, ActiveWindowGuard,
-    ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest,
-    CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
-    DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
-    DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
-    KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton, ReplayTrace,
-    ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectMenuRequest,
-    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
-    WaitForChangeRequest, default_socket_path,
+    AccessibilityAction, AccessibilityDeleteTextRequest, AccessibilityFindRequest,
+    AccessibilityInsertTextRequest, AccessibilityInvokeRequest, AccessibilitySetTextRequest,
+    ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest, ClickPointerRequest,
+    ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES,
+    DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
+    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest, DaemonResponse, FocusWindowRequest,
+    FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, MovePointerRequest,
+    ObserveRequest, Point, PointerButton, ReplayTrace, ScreenshotRequest, ScreenshotTileRequest,
+    ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
+    SetValueRequest, ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest,
+    default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -262,6 +263,20 @@ enum AtspiCommand {
         offset: i32,
         #[arg(value_name = "TEXT")]
         text: String,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
+    DeleteText {
+        #[arg(long)]
+        node: String,
+        #[arg(long)]
+        start_offset: i32,
+        #[arg(long)]
+        end_offset: i32,
         #[arg(long)]
         expected_active_window: Option<String>,
         #[arg(long)]
@@ -751,6 +766,29 @@ fn main() -> Result<()> {
                 node_id: node,
                 offset,
                 text,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
+        )?,
+        Command::Atspi {
+            command:
+                AtspiCommand::DeleteText {
+                    node,
+                    start_offset,
+                    end_offset,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::AccessibilityDeleteText(AccessibilityDeleteTextRequest {
+                node_id: node,
+                start_offset,
+                end_offset,
                 guard: active_window_guard(
                     expected_active_window,
                     expected_active_app,

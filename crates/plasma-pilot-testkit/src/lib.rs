@@ -244,6 +244,13 @@ pub struct MockAccessibilityTextInsert {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MockAccessibilityTextDelete {
+    pub node_id: String,
+    pub start_offset: i32,
+    pub end_offset: i32,
+}
+
 #[derive(Debug, Clone)]
 pub struct MockAccessibilityBackend {
     focused_tree: AccessibilityNode,
@@ -252,6 +259,7 @@ pub struct MockAccessibilityBackend {
     invocations: Arc<Mutex<Vec<MockAccessibilityInvocation>>>,
     text_sets: Arc<Mutex<Vec<MockAccessibilityTextSet>>>,
     text_inserts: Arc<Mutex<Vec<MockAccessibilityTextInsert>>>,
+    text_deletes: Arc<Mutex<Vec<MockAccessibilityTextDelete>>>,
 }
 
 impl MockAccessibilityBackend {
@@ -263,6 +271,7 @@ impl MockAccessibilityBackend {
             invocations: Arc::new(Mutex::new(Vec::new())),
             text_sets: Arc::new(Mutex::new(Vec::new())),
             text_inserts: Arc::new(Mutex::new(Vec::new())),
+            text_deletes: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -285,6 +294,10 @@ impl MockAccessibilityBackend {
 
     pub fn text_inserts(&self) -> Result<Vec<MockAccessibilityTextInsert>> {
         Ok(lock(&self.text_inserts)?.clone())
+    }
+
+    pub fn text_deletes(&self) -> Result<Vec<MockAccessibilityTextDelete>> {
+        Ok(lock(&self.text_deletes)?.clone())
     }
 }
 
@@ -326,6 +339,15 @@ impl AccessibilityBackend for MockAccessibilityBackend {
             node_id: node_id.to_string(),
             offset,
             text: text.to_string(),
+        });
+        Ok(())
+    }
+
+    async fn delete_text(&self, node_id: &str, start_offset: i32, end_offset: i32) -> Result<()> {
+        lock(&self.text_deletes)?.push(MockAccessibilityTextDelete {
+            node_id: node_id.to_string(),
+            start_offset,
+            end_offset,
         });
         Ok(())
     }
@@ -443,6 +465,7 @@ mod tests {
         backend
             .insert_text("atspi://sample/text", 5, " world")
             .await?;
+        backend.delete_text("atspi://sample/text", 1, 3).await?;
         assert_eq!(
             backend.invocations()?,
             vec![MockAccessibilityInvocation {
@@ -463,6 +486,14 @@ mod tests {
                 node_id: "atspi://sample/text".to_string(),
                 offset: 5,
                 text: " world".to_string(),
+            }]
+        );
+        assert_eq!(
+            backend.text_deletes()?,
+            vec![MockAccessibilityTextDelete {
+                node_id: "atspi://sample/text".to_string(),
+                start_offset: 1,
+                end_offset: 3,
             }]
         );
         Ok(())
