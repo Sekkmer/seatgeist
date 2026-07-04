@@ -67,6 +67,15 @@ impl DaemonFixture {
         require_success(args, &output)?;
         serde_json::from_slice(&output.stdout).context("parse CLI JSON value")
     }
+
+    fn cli_output(&self, args: &[&str]) -> Result<Output> {
+        Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+            .arg("--socket")
+            .arg(&self.socket)
+            .args(args)
+            .output()
+            .with_context(|| format!("run plasma-pilot-cli {}", args.join(" ")))
+    }
 }
 
 impl Drop for DaemonFixture {
@@ -171,6 +180,46 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
         ],
     );
     assert!(entries.iter().all(|entry| entry.ok));
+    Ok(())
+}
+
+#[test]
+fn cli_routes_atspi_text_attribute_validation_to_daemon() -> Result<()> {
+    let daemon = DaemonFixture::start()?;
+
+    let output = daemon.cli_output(&[
+        "atspi",
+        "text-attributes",
+        "--node",
+        "",
+        "--offset",
+        "0",
+        "--include-defaults",
+    ])?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("node_id must be non-empty"),
+        "stderr did not contain validation error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let journal = daemon.cli_json(&["journal", "tail", "--limit", "10"])?;
+    let DaemonResponse::Journal(entries) = journal else {
+        bail!("expected journal response, got {journal:?}");
+    };
+    assert_methods(&entries, &["accessibility_text_attributes"]);
+    let Some(entry) = entries
+        .iter()
+        .find(|entry| entry.method == "accessibility_text_attributes")
+    else {
+        bail!("missing accessibility_text_attributes journal entry: {entries:?}");
+    };
+    assert!(!entry.ok);
+    assert_eq!(
+        entry.safety_class,
+        Some(libplasma_pilot::SafetyClass::Observe)
+    );
     Ok(())
 }
 
