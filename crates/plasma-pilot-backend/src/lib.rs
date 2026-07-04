@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use libplasma_pilot::{
-    AccessibilityAction, AccessibilityNode, MonitorInfo, PilotError, Point, ScreenshotTarget,
-    WindowId, WindowInfo,
+    AccessibilityAction, AccessibilityFindRequest, AccessibilityNode, MonitorInfo, PilotError,
+    Point, ScreenshotTarget, WindowId, WindowInfo,
 };
 
 pub type Result<T> = std::result::Result<T, PilotError>;
@@ -43,5 +43,7 @@ pub trait ClipboardBackend: Send + Sync {
 #[async_trait]
 pub trait AccessibilityBackend: Send + Sync {
     async fn focused_tree(&self, depth: usize) -> Result<AccessibilityNode>;
+    async fn find(&self, request: AccessibilityFindRequest) -> Result<Vec<AccessibilityNode>>;
     async fn invoke(&self, node_id: &str, action: AccessibilityAction) -> Result<()>;
+    async fn set_text(&self, node_id: &str, text: &str) -> Result<()>;
 }

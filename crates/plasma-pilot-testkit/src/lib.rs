@@ -2,8 +2,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use libplasma_pilot::{
-    AccessibilityAction, AccessibilityNode, CoordinateSpace, MonitorInfo, PilotError, Point,
-    ScreenshotTarget, WindowGeometry, WindowId, WindowInfo,
+    AccessibilityAction, AccessibilityFindRequest, AccessibilityNode, CoordinateSpace, MonitorInfo,
+    PilotError, Point, ScreenshotTarget, WindowGeometry, WindowId, WindowInfo,
 };
 use plasma_pilot_backend::{
     AccessibilityBackend, ClipboardBackend, InputBackend, Result, ScreenBackend, Screenshot,
@@ -231,22 +231,47 @@ pub struct MockAccessibilityInvocation {
     pub action: AccessibilityAction,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MockAccessibilityTextSet {
+    pub node_id: String,
+    pub text: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct MockAccessibilityBackend {
     focused_tree: AccessibilityNode,
+    find_matches: Vec<AccessibilityNode>,
+    find_requests: Arc<Mutex<Vec<AccessibilityFindRequest>>>,
     invocations: Arc<Mutex<Vec<MockAccessibilityInvocation>>>,
+    text_sets: Arc<Mutex<Vec<MockAccessibilityTextSet>>>,
 }
 
 impl MockAccessibilityBackend {
     pub fn new(focused_tree: AccessibilityNode) -> Self {
         Self {
             focused_tree,
+            find_matches: Vec::new(),
+            find_requests: Arc::new(Mutex::new(Vec::new())),
             invocations: Arc::new(Mutex::new(Vec::new())),
+            text_sets: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    pub fn with_find_matches(mut self, find_matches: Vec<AccessibilityNode>) -> Self {
+        self.find_matches = find_matches;
+        self
+    }
+
+    pub fn find_requests(&self) -> Result<Vec<AccessibilityFindRequest>> {
+        Ok(lock(&self.find_requests)?.clone())
     }
 
     pub fn invocations(&self) -> Result<Vec<MockAccessibilityInvocation>> {
         Ok(lock(&self.invocations)?.clone())
+    }
+
+    pub fn text_sets(&self) -> Result<Vec<MockAccessibilityTextSet>> {
+        Ok(lock(&self.text_sets)?.clone())
     }
 }
 
@@ -262,10 +287,23 @@ impl AccessibilityBackend for MockAccessibilityBackend {
         Ok(self.focused_tree.clone())
     }
 
+    async fn find(&self, request: AccessibilityFindRequest) -> Result<Vec<AccessibilityNode>> {
+        lock(&self.find_requests)?.push(request);
+        Ok(self.find_matches.clone())
+    }
+
     async fn invoke(&self, node_id: &str, action: AccessibilityAction) -> Result<()> {
         lock(&self.invocations)?.push(MockAccessibilityInvocation {
             node_id: node_id.to_string(),
             action,
+        });
+        Ok(())
+    }
+
+    async fn set_text(&self, node_id: &str, text: &str) -> Result<()> {
+        lock(&self.text_sets)?.push(MockAccessibilityTextSet {
+            node_id: node_id.to_string(),
+            text: text.to_string(),
         });
         Ok(())
     }
@@ -279,7 +317,9 @@ fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
 
 #[cfg(test)]
 mod tests {
-    use libplasma_pilot::{AccessibilityAction, CoordinateSpace, Point, ScreenshotTarget};
+    use libplasma_pilot::{
+        AccessibilityAction, AccessibilityFindRequest, CoordinateSpace, Point, ScreenshotTarget,
+    };
     use plasma_pilot_backend::{
         AccessibilityBackend, ClipboardBackend, InputBackend, ScreenBackend, WindowBackend,
     };
@@ -346,17 +386,50 @@ mod tests {
 
     #[tokio::test]
     async fn mock_accessibility_returns_tree_and_records_invocations() -> Result<()> {
-        let backend = MockAccessibilityBackend::default();
+        let match_node = AccessibilityNode {
+            id: "atspi://sample/button".to_string(),
+            role: "button".to_string(),
+            name: Some("OK".to_string()),
+            value: None,
+            value_truncated: false,
+            sensitive: false,
+            states: vec!["enabled".to_string()],
+            bounds: None,
+            available_actions: vec!["press".to_string()],
+            actions: vec![AccessibilityAction::Press],
+            children: Vec::new(),
+        };
+        let backend =
+            MockAccessibilityBackend::default().with_find_matches(vec![match_node.clone()]);
+        let find_request = AccessibilityFindRequest {
+            role: Some("button".to_string()),
+            name_contains: Some("OK".to_string()),
+            app: None,
+            window_name_contains: None,
+            depth: 4,
+            max_results: 8,
+            max_nodes: 128,
+        };
 
         assert_eq!(backend.focused_tree(1).await?, sample_accessibility_node());
+        assert_eq!(backend.find(find_request.clone()).await?, vec![match_node]);
+        assert_eq!(backend.find_requests()?, vec![find_request]);
         backend
             .invoke("atspi://sample/root", AccessibilityAction::Press)
             .await?;
+        backend.set_text("atspi://sample/text", "hello").await?;
         assert_eq!(
             backend.invocations()?,
             vec![MockAccessibilityInvocation {
                 node_id: "atspi://sample/root".to_string(),
                 action: AccessibilityAction::Press,
+            }]
+        );
+        assert_eq!(
+            backend.text_sets()?,
+            vec![MockAccessibilityTextSet {
+                node_id: "atspi://sample/text".to_string(),
+                text: "hello".to_string(),
             }]
         );
         Ok(())
