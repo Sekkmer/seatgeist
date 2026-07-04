@@ -1,3 +1,4 @@
 {
-  "hooks": {}
+  "hooks": {},
+  "disabled_reason": "Hooks are intentionally disabled until the Codex hook schema and trust flow are validated for PlasmaPilot."
 }

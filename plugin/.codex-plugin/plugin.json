@@ -2,6 +2,12 @@
   "name": "plasmapilot",
   "version": "0.1.0",
   "description": "KDE Plasma desktop-control substrate for Codex CLI via MCP, skills, hooks, and a local daemon.",
+  "author": {
+    "name": "Sekkmer",
+    "email": "sekkmer@gmail.com"
+  },
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["codex", "mcp", "kde", "plasma", "wayland", "computer-use", "desktop-automation"],
   "skills": "./skills",
   "mcpServers": "./.mcp.json",
   "interface": {

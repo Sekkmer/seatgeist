@@ -25,3 +25,5 @@ args = ["--stdio"]
 ```
 
 The plugin bundle points at `plugin/.mcp.json` through `.codex-plugin/plugin.json`, so an installed plugin can provide the same MCP server config. The `plasma-pilot-mcp` binary must be on `PATH` for the current initial config.
+
+The plugin bundle is validated by `make validate-plugin`, and the validator is included in `make verify`.

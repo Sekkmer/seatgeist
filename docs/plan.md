@@ -163,6 +163,7 @@ Create this initial layout:
 │   ├── threat-model.md
 │   ├── mcp-tools.md
 │   ├── backends.md
+│   ├── plugin.md
 │   ├── uinput-setup.md
 │   ├── kde-wayland-notes.md
 │   └── safety.md
@@ -495,12 +496,14 @@ Initial manifest skeleton:
   "name": "plasmapilot",
   "version": "0.1.0",
   "description": "KDE Plasma desktop control substrate for Codex CLI via MCP, skills, hooks, and a local daemon.",
-  "author": "Sekkmer",
+  "author": {
+    "name": "Sekkmer",
+    "email": "sekkmer@gmail.com"
+  },
   "license": "MIT OR Apache-2.0",
   "keywords": ["codex", "mcp", "kde", "plasma", "wayland", "computer-use", "desktop-automation"],
   "skills": "./skills",
   "mcpServers": "./.mcp.json",
-  "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "PlasmaPilot",
     "shortDescription": "Use KDE Plasma desktop apps from Codex through local MCP tools.",
@@ -598,7 +601,7 @@ Initial hook goals:
 
 Initial `hooks.json` should be conservative and may be a placeholder until exact Codex hook command schema is validated in the current installed Codex version.
 
-Current scaffold note: `plugin/hooks/hooks.json` intentionally contains no active hooks. This avoids shipping untrusted lifecycle commands before the hook behavior and trust flow are tested locally.
+Current scaffold note: `plugin/hooks/hooks.json` intentionally contains no active hooks. This avoids shipping untrusted lifecycle commands before the hook behavior and trust flow are tested locally. `plugin/.codex-plugin/plugin.json` does not override the hook path; the bundle relies on default `hooks/hooks.json` discovery while the skeleton is disabled.
 
 ## 13. Safety and threat model
 
@@ -868,12 +871,12 @@ Goal: installable Codex plugin bundle.
 
 Tasks:
 
-- Finalize `plugin/.codex-plugin/plugin.json`.
-- Finalize `plugin/.mcp.json`.
-- Write the four skills.
-- Create hook skeleton.
-- Add plugin install instructions.
-- Add examples:
+- [x] Finalize `plugin/.codex-plugin/plugin.json`. Current status: manifest has real author, license, keyword, interface, skills, and MCP metadata with relative paths.
+- [x] Finalize `plugin/.mcp.json`. Current status: bundled MCP config points at `plasma-pilot-mcp --stdio`, with daemon socket resolution handled by the MCP/daemon defaults or `PLASMA_PILOT_SOCKET`.
+- [x] Write the four skills. Current status: the skills describe current `plasma.*` MCP tools, safety guards, observation flow, browser debugging, GUI testing, and desktop triage.
+- [x] Create hook skeleton. Current status: `plugin/hooks/hooks.json` exists with no active hooks and a disabled reason until hook schema and trust flow are validated locally.
+- [x] Add plugin install instructions. Current status: `docs/plugin.md` documents bundle contents, preconditions, validation, and local-use examples.
+- [x] Add examples:
   - “Open Kate and type hello.”
   - “Use Firefox to verify localhost UI.”
   - “Reproduce this GUI bug and write a failing test.”
@@ -884,6 +887,7 @@ Acceptance criteria:
 - Codex can select the generic Plasma computer-use skill implicitly from a GUI task.
 - Codex can use the bundled MCP server.
 - Hooks either run safely or are disabled with a clear TODO if schema verification is pending.
+  Current status: `make validate-plugin` checks the plugin manifest, MCP config, skill frontmatter, required skill set, and disabled hook skeleton; `make verify` runs the plugin validator.
 
 ### Phase 7: Clipboard backend
 

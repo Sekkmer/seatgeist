@@ -1,7 +1,7 @@
 SHELL := /usr/bin/bash
 .ONESHELL:
 
-.PHONY: fmt check test clippy verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-pointer-calibration smoke-gui-input smoke-mcp gui-eval install-kwin-script
+.PHONY: fmt check test clippy validate-plugin verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-pointer-calibration smoke-gui-input smoke-mcp gui-eval install-kwin-script
 
 fmt:
 	cargo fmt --all
@@ -15,7 +15,10 @@ test:
 clippy:
 	cargo clippy --workspace --all-targets -- -D warnings
 
-verify: fmt check test clippy
+validate-plugin:
+	scripts/validate-plugin.py plugin
+
+verify: fmt check test clippy validate-plugin
 	git diff --check -- . ':(exclude)target'
 
 smoke:

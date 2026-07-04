@@ -7,9 +7,19 @@ Use terminal commands, files, APIs, and structured integrations first when they 
 
 When GUI state matters, use PlasmaPilot tools through MCP:
 
-1. Call `pilot.observe()` before acting.
-2. Prefer semantic or window-targeted actions over raw coordinates.
-3. Include focus/window guards for every click, key, type, drag, or scroll when possible.
-4. Observe again after each action unless performing one bounded text-entry sequence.
-5. Stop if the active window is not the expected target.
-6. Do not interact with password fields, payment flows, account-security settings, or destructive dialogs without explicit user approval.
+1. Call `plasma.observe` before acting. Include a bounded screenshot only when visual state matters.
+2. Prefer `plasma.click_button`, `plasma.set_text_field`, `plasma.select_menu`, `plasma.activate_tab`, and `plasma.focus_window` over raw coordinates.
+3. Use `plasma.a11y_focused_tree` or `plasma.a11y_find` before semantic actions when the target is not obvious from `plasma.observe`.
+4. Before pointer actions, call `plasma.pointer_calibration` and use only explicit `physical_pixel` coordinates.
+5. Include `expected_active_window`, `expected_active_app`, or `active_title_contains` on every focus, semantic, keyboard, pointer, and scroll action when current window context is known.
+6. Observe again after each action unless performing one bounded text-entry sequence.
+7. Stop if `plasma.active_window` or `plasma.observe` reports a different target than expected.
+8. Check `plasma.panic_stop_status` if control actions are unexpectedly denied or the desktop appears unsafe.
+9. Do not interact with password fields, payment flows, account-security settings, or destructive dialogs without explicit user approval.
+
+Useful control tools:
+
+- `plasma.type_text` and `plasma.key_combo` for guarded text entry and shortcuts.
+- `plasma.move_pointer`, `plasma.click_pointer`, and `plasma.scroll_pointer` only after semantic routes are unavailable.
+- `plasma.wait_for_change` to confirm bounded visual changes without repeatedly dumping screenshots.
+- `plasma.journal_tail` to inspect compact action history when debugging a run.

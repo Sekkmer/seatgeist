@@ -4,3 +4,16 @@ description: Test Linux/KDE desktop apps and browser UI visually with PlasmaPilo
 ---
 
 Start the app under test from the terminal when possible. Use PlasmaPilot screenshots and observations for visual confirmation, record reproduction steps, and convert the understood behavior into deterministic tests whenever practical.
+
+Workflow:
+
+1. Start the application from a shell command when possible so logs and process state are available.
+2. Use `plasma.observe` to capture monitors, windows, active-window state, and optionally a bounded screenshot.
+3. Use `plasma.focus_window` with an active-window guard before interacting with the app under test.
+4. Prefer `plasma.a11y_find`, `plasma.click_button`, `plasma.set_text_field`, `plasma.select_menu`, and `plasma.activate_tab` for repeatable UI operations.
+5. Use `plasma.pointer_calibration` plus guarded `plasma.click_pointer` only when semantic access is unavailable.
+6. Use `plasma.wait_for_change` after actions that should visibly update the UI.
+7. Save repro artifacts under the repo test/evidence path when the task calls for evidence.
+8. Convert the reproduction into a deterministic unit, integration, Playwright, or smoke test once the behavior is understood.
+
+Do not use PlasmaPilot control tools against unrelated windows. Stop on ambiguous targets, sensitive fields, policy denial, or unexpected active-window changes.
