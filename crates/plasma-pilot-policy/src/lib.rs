@@ -6,6 +6,7 @@ pub struct PolicyConfig {
     pub default_observe: ToolApprovalLevel,
     pub default_control: ToolApprovalLevel,
     pub default_destructive_actions: ToolApprovalLevel,
+    pub default_secret_fields: ToolApprovalLevel,
     pub default_full_resolution_screenshot: ToolApprovalLevel,
     pub default_clipboard_read: ToolApprovalLevel,
     pub default_clipboard_write: ToolApprovalLevel,
@@ -17,6 +18,7 @@ impl Default for PolicyConfig {
             default_observe: ToolApprovalLevel::Allow,
             default_control: ToolApprovalLevel::Prompt,
             default_destructive_actions: ToolApprovalLevel::Prompt,
+            default_secret_fields: ToolApprovalLevel::Deny,
             default_full_resolution_screenshot: ToolApprovalLevel::Prompt,
             default_clipboard_read: ToolApprovalLevel::Prompt,
             default_clipboard_write: ToolApprovalLevel::Allow,
@@ -47,6 +49,7 @@ impl PolicyEngine {
             SafetyClass::ClipboardRead => self.config.default_clipboard_read.clone(),
             SafetyClass::ClipboardWrite => self.config.default_clipboard_write.clone(),
             SafetyClass::DestructiveAction => self.config.default_destructive_actions.clone(),
+            SafetyClass::SecretField => self.config.default_secret_fields.clone(),
             SafetyClass::ControlPointer
             | SafetyClass::ControlKeyboard
             | SafetyClass::ControlSemantic => self.config.default_control.clone(),
@@ -82,5 +85,12 @@ mod tests {
         let policy = PolicyEngine::new(PolicyConfig::default());
         let decision = policy.decide(&SafetyClass::DestructiveAction);
         assert_eq!(decision.level, ToolApprovalLevel::Prompt);
+    }
+
+    #[test]
+    fn secret_fields_are_denied_by_default() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let decision = policy.decide(&SafetyClass::SecretField);
+        assert_eq!(decision.level, ToolApprovalLevel::Deny);
     }
 }

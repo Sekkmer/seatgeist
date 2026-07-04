@@ -470,10 +470,11 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             format!("{} capabilities", capabilities.capabilities.len())
         }
         DaemonResponse::PolicyStatus(status) => format!(
-            "observe={:?} control={:?} destructive_actions={:?} full_resolution_screenshot={:?} clipboard_read={:?} clipboard_write={:?}",
+            "observe={:?} control={:?} destructive_actions={:?} secret_fields={:?} full_resolution_screenshot={:?} clipboard_read={:?} clipboard_write={:?}",
             status.default_observe,
             status.default_control,
             status.default_destructive_actions,
+            status.default_secret_fields,
             status.default_full_resolution_screenshot,
             status.default_clipboard_read,
             status.default_clipboard_write

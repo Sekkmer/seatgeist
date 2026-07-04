@@ -112,6 +112,7 @@ panic_stop_file = "__PANIC_STOP__"
 default_observe = "allow"
 default_control = "deny"
 destructive_actions = "deny"
+secret_fields = "prompt"
 default_clipboard_read = "allow"
 default_clipboard_write = "prompt"
 full_resolution_screenshot = "deny"
@@ -125,6 +126,7 @@ full_resolution_screenshot = "deny"
             default_observe: ToolApprovalLevel::Allow,
             default_control: ToolApprovalLevel::Deny,
             default_destructive_actions: ToolApprovalLevel::Deny,
+            default_secret_fields: ToolApprovalLevel::Prompt,
             default_full_resolution_screenshot: ToolApprovalLevel::Deny,
             default_clipboard_read: ToolApprovalLevel::Allow,
             default_clipboard_write: ToolApprovalLevel::Prompt,
@@ -154,6 +156,7 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
             default_observe: ToolApprovalLevel::Allow,
             default_control: ToolApprovalLevel::Prompt,
             default_destructive_actions: ToolApprovalLevel::Prompt,
+            default_secret_fields: ToolApprovalLevel::Deny,
             default_full_resolution_screenshot: ToolApprovalLevel::Prompt,
             default_clipboard_read: ToolApprovalLevel::Prompt,
             default_clipboard_write: ToolApprovalLevel::Allow,

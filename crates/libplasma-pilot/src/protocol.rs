@@ -30,6 +30,7 @@ pub struct PolicyStatus {
     pub default_observe: ToolApprovalLevel,
     pub default_control: ToolApprovalLevel,
     pub default_destructive_actions: ToolApprovalLevel,
+    pub default_secret_fields: ToolApprovalLevel,
     pub default_full_resolution_screenshot: ToolApprovalLevel,
     pub default_clipboard_read: ToolApprovalLevel,
     pub default_clipboard_write: ToolApprovalLevel,

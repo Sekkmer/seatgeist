@@ -15,6 +15,7 @@ Default rules:
 - The daemon reads optional path and policy defaults from `~/.config/plasma-pilot/config.toml` or `--config` / `PLASMA_PILOT_CONFIG`. Explicit CLI/env approval flags override file policy defaults for intentional local sessions.
 - Configured app deny rules block control-class actions before backend execution. If an app allow list is configured, control-class actions require a matching app id; deny rules take precedence.
 - `[policy].destructive_actions` applies to requests explicitly marked `destructive` and to high-level button/menu labels that obviously imply delete, remove, discard, quit, shutdown, restart, or similar state loss.
+- `[policy].secret_fields` applies to high-level text-field targets whose names look secret-related, and defaults to deny.
 - `[safety].require_focus_guard = true` makes active-window guards mandatory for control-class requests before backend execution.
 - `[safety].pause_on_human_input = true` blocks control-class requests when the configured human-input activity file is newer than `human_input_quiet_ms`.
 - `[[safety.redact_regions]]` physical-pixel rectangles are mapped through screenshot output transforms and black-filled before screenshots leave the daemon.
@@ -26,7 +27,7 @@ Default rules:
 - `wait_for_change` is observe-class and stores only the caller-requested bounded screenshot output path plus compact delta metadata in journal/MCP summaries.
 - Clipboard journal entries and compact MCP status text must not echo clipboard contents; they should report metadata such as text length.
 - Clipboard read tools should be bounded by default and require an explicit full-read option for unbounded content.
-- AT-SPI password-text nodes must be marked sensitive before they are used for any future semantic control action.
+- AT-SPI password-text nodes are marked sensitive and excluded from current semantic action candidates.
 - AT-SPI invoke is semantic control: it may only run through the policy engine and action journal, and defaults to prompt/deny when no approval channel is available.
 - AT-SPI set-text is semantic control: it must reject sensitive nodes by default and journal replacement length rather than replacement contents.
 - High-level semantic actions must refuse ambiguous matches instead of choosing one candidate implicitly.

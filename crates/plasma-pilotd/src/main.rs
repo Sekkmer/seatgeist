@@ -262,6 +262,7 @@ struct PolicyFileConfig {
     default_observe: Option<ToolApprovalLevel>,
     default_control: Option<ToolApprovalLevel>,
     destructive_actions: Option<ToolApprovalLevel>,
+    secret_fields: Option<ToolApprovalLevel>,
     default_clipboard_read: Option<ToolApprovalLevel>,
     default_clipboard_write: Option<ToolApprovalLevel>,
     #[serde(alias = "full_resolution_screenshot")]
@@ -770,6 +771,7 @@ fn policy_status_from_config(config: &PolicyConfig) -> PolicyStatus {
         default_observe: config.default_observe.clone(),
         default_control: config.default_control.clone(),
         default_destructive_actions: config.default_destructive_actions.clone(),
+        default_secret_fields: config.default_secret_fields.clone(),
         default_full_resolution_screenshot: config.default_full_resolution_screenshot.clone(),
         default_clipboard_read: config.default_clipboard_read.clone(),
         default_clipboard_write: config.default_clipboard_write.clone(),
@@ -845,6 +847,9 @@ fn policy_config(
         }
         if let Some(level) = &file_policy.destructive_actions {
             config.default_destructive_actions = level.clone();
+        }
+        if let Some(level) = &file_policy.secret_fields {
+            config.default_secret_fields = level.clone();
         }
         if let Some(level) = &file_policy.default_clipboard_read {
             config.default_clipboard_read = level.clone();
@@ -1381,6 +1386,7 @@ fn is_control_safety_class(safety_class: &SafetyClass) -> bool {
             | SafetyClass::ControlKeyboard
             | SafetyClass::ControlSemantic
             | SafetyClass::DestructiveAction
+            | SafetyClass::SecretField
     )
 }
 
@@ -1512,10 +1518,47 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
                 SafetyClass::ControlSemantic
             }
         }
-        DaemonRequest::SetTextField(_) | DaemonRequest::ActivateTab(_) => {
-            SafetyClass::ControlSemantic
+        DaemonRequest::SetTextField(request) => {
+            if secret_field_label(&request.name) {
+                SafetyClass::SecretField
+            } else {
+                SafetyClass::ControlSemantic
+            }
         }
+        DaemonRequest::ActivateTab(_) => SafetyClass::ControlSemantic,
     }
+}
+
+fn secret_field_label(label: &str) -> bool {
+    let normalized = label.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "password"
+            | "passcode"
+            | "pin"
+            | "secret"
+            | "token"
+            | "api key"
+            | "api token"
+            | "access token"
+            | "private key"
+            | "recovery key"
+            | "seed phrase"
+            | "mnemonic"
+            | "credential"
+            | "credentials"
+            | "security code"
+            | "cvv"
+            | "cvc"
+            | "card number"
+    ) || normalized.contains("password")
+        || normalized.contains("passcode")
+        || normalized.contains("api key")
+        || normalized.contains("access token")
+        || normalized.contains("secret")
+        || normalized.contains("private key")
+        || normalized.contains("recovery key")
+        || normalized.contains("seed phrase")
 }
 
 fn destructive_label(label: &str) -> bool {
@@ -3675,6 +3718,7 @@ mod tests {
             default_observe: Some(ToolApprovalLevel::Deny),
             default_control: Some(ToolApprovalLevel::Deny),
             destructive_actions: Some(ToolApprovalLevel::Allow),
+            secret_fields: Some(ToolApprovalLevel::Prompt),
             default_clipboard_read: Some(ToolApprovalLevel::Allow),
             default_clipboard_write: Some(ToolApprovalLevel::Prompt),
             default_full_resolution_screenshot: Some(ToolApprovalLevel::Deny),
@@ -3685,6 +3729,7 @@ mod tests {
         assert_eq!(config.default_observe, ToolApprovalLevel::Deny);
         assert_eq!(config.default_control, ToolApprovalLevel::Deny);
         assert_eq!(config.default_destructive_actions, ToolApprovalLevel::Allow);
+        assert_eq!(config.default_secret_fields, ToolApprovalLevel::Prompt);
         assert_eq!(config.default_clipboard_read, ToolApprovalLevel::Allow);
         assert_eq!(config.default_clipboard_write, ToolApprovalLevel::Prompt);
         assert_eq!(
@@ -3699,6 +3744,7 @@ mod tests {
             default_observe: None,
             default_control: Some(ToolApprovalLevel::Deny),
             destructive_actions: Some(ToolApprovalLevel::Allow),
+            secret_fields: Some(ToolApprovalLevel::Deny),
             default_clipboard_read: Some(ToolApprovalLevel::Deny),
             default_clipboard_write: None,
             default_full_resolution_screenshot: Some(ToolApprovalLevel::Deny),
@@ -4133,6 +4179,7 @@ panic_stop_file = "$XDG_RUNTIME_DIR/plasma-pilot/configured-panic-stop"
 default_observe = "allow"
 default_control = "deny"
 destructive_actions = "deny"
+secret_fields = "prompt"
 default_clipboard_read = "allow"
 default_clipboard_write = "prompt"
 full_resolution_screenshot = "deny"
@@ -4166,6 +4213,7 @@ height = 40
         let policy = config.policy.expect("policy section is present");
         assert_eq!(policy.default_control, Some(ToolApprovalLevel::Deny));
         assert_eq!(policy.destructive_actions, Some(ToolApprovalLevel::Deny));
+        assert_eq!(policy.secret_fields, Some(ToolApprovalLevel::Prompt));
         assert_eq!(
             policy.default_full_resolution_screenshot,
             Some(ToolApprovalLevel::Deny)
@@ -4791,6 +4839,42 @@ height = 40
         )
         .expect_err("set text field requires control approval by default");
         assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
+    fn secret_text_field_uses_secret_field_policy() {
+        let policy = PolicyEngine::new(PolicyConfig {
+            default_control: ToolApprovalLevel::Allow,
+            default_secret_fields: ToolApprovalLevel::Deny,
+            ..PolicyConfig::default()
+        });
+
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::SetTextField(SetTextFieldRequest {
+                name: "Password".to_string(),
+                text: "not logged".to_string(),
+                app: Some("login".to_string()),
+                window_name_contains: Some("sign in".to_string()),
+                max_nodes: 256,
+                guard: None,
+            }),
+        )
+        .expect_err("secret-looking text fields use secret-field policy");
+        assert!(err.to_string().contains("SecretField"));
+
+        enforce_policy(
+            &policy,
+            &DaemonRequest::SetTextField(SetTextFieldRequest {
+                name: "Search".to_string(),
+                text: "query".to_string(),
+                app: Some("kate".to_string()),
+                window_name_contains: Some("settings".to_string()),
+                max_nodes: 256,
+                guard: None,
+            }),
+        )
+        .expect("non-secret text fields still use default control policy");
     }
 
     #[test]

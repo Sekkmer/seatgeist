@@ -182,6 +182,7 @@ pub enum SafetyClass {
     ControlKeyboard,
     ControlSemantic,
     DestructiveAction,
+    SecretField,
     Policy,
 }
 

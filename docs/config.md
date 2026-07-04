@@ -20,6 +20,7 @@ panic_stop_file = "$XDG_RUNTIME_DIR/plasma-pilot/panic-stop"
 default_observe = "allow"
 default_control = "prompt"
 destructive_actions = "prompt"
+secret_fields = "deny"
 default_clipboard_read = "prompt"
 default_clipboard_write = "allow"
 full_resolution_screenshot = "prompt"
@@ -52,6 +53,8 @@ Precedence is:
 Explicit local approval flags such as `--allow-control`, `--allow-clipboard-read`, and `--allow-full-resolution-screenshot` override file policy defaults for that daemon run.
 
 `[policy].destructive_actions` applies after ordinary control policy for requests marked destructive and for obvious destructive labels in high-level semantic controls, such as delete, remove, discard, quit, shutdown, and restart. The default is `prompt`, which fails closed until a trusted approval channel exists; set it to `allow` only for an intentional local session.
+
+`[policy].secret_fields` applies to high-level text-field requests whose target name looks secret-related, such as password, passcode, token, API key, private key, seed phrase, card number, or CVV. The default is `deny`. AT-SPI nodes already marked sensitive remain non-viable for semantic actions regardless of text-field name matching.
 
 `[apps].deny` blocks control-class actions when the relevant app id matches. Deny rules win over allow rules. If `[apps].allow` is non-empty, control-class actions are allowed only for matching app ids. For focus requests, the daemon checks the target window app id; for keyboard, pointer, and semantic control, it checks the active window app id and fails closed if app policy is configured but the app id is unavailable.
 
