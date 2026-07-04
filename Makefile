@@ -222,10 +222,13 @@ smoke-atspi:
 	grep -q "policy" "$$out"
 	if target/debug/plasma-pilot-cli --socket "$$socket" atspi set-text --node atspi://:1.42/org/a11y/atspi/accessible/7 smoke-text >"$$out" 2>&1; then cat "$$out"; exit 1; fi
 	grep -q "policy" "$$out"
+	if target/debug/plasma-pilot-cli --socket "$$socket" semantic click-button --name OK --max-nodes 128 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
+	grep -q "policy" "$$out"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "focused_accessibility_tree"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "accessibility_find"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "accessibility_invoke"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "accessibility_set_text"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "click_button"
 
 smoke-mcp:
 	set -euo pipefail
@@ -264,6 +267,7 @@ smoke-mcp:
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.list_windows")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.clipboard_get_text")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.clipboard_set_text")' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.click_button")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_focused_tree")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_find")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_invoke")' "$$out" >/dev/null

@@ -15,12 +15,12 @@ use clap::Parser;
 use image::{GenericImageView, imageops::FilterType};
 use libplasma_pilot::{
     AccessibilityFindRequest, AccessibilityInvokeRequest, AccessibilitySetTextRequest,
-    ActionResult, BackendCapability, CapabilitySet, ClipboardGetRequest, ClipboardText,
-    CoordinateSpace, DaemonRequest, DaemonResponse, DesktopObservation, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, HealthStatus, JournalEntry, ObserveRequest, PolicyStatus,
-    SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
-    ToolApprovalLevel, WindowGeometry, WindowInfo, current_euid, default_journal_path,
-    default_socket_path,
+    ActionResult, BackendCapability, CapabilitySet, ClickButtonRequest, ClipboardGetRequest,
+    ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse, DesktopObservation,
+    FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus, JournalEntry,
+    ObserveRequest, PolicyStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest,
+    ScreenshotTileRequest, ScreenshotTransform, ToolApprovalLevel, WindowGeometry, WindowInfo,
+    current_euid, default_journal_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -405,6 +405,12 @@ fn handle_request(
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::ClickButton(request) => match click_button(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::JournalTail(request) => match journal.tail(request.limit) {
             Ok(entries) => DaemonResponse::Journal(entries),
             Err(err) => DaemonResponse::Error {
@@ -484,7 +490,8 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         DaemonRequest::ClipboardSet(_) => SafetyClass::ClipboardWrite,
         DaemonRequest::FocusWindow(_)
         | DaemonRequest::AccessibilityInvoke(_)
-        | DaemonRequest::AccessibilitySetText(_) => SafetyClass::ControlSemantic,
+        | DaemonRequest::AccessibilitySetText(_)
+        | DaemonRequest::ClickButton(_) => SafetyClass::ControlSemantic,
     }
 }
 
@@ -835,6 +842,90 @@ fn accessibility_set_text(request: AccessibilitySetTextRequest) -> Result<Action
             request.node_id
         )),
     })
+}
+
+fn click_button(request: ClickButtonRequest) -> Result<ActionResult> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        bail!("button name must be non-empty");
+    }
+    if request.max_nodes == 0 {
+        bail!("max_nodes must be greater than zero");
+    }
+
+    let matches = accessibility_find(AccessibilityFindRequest {
+        role: Some("button".to_string()),
+        name_contains: Some(name.to_string()),
+        app: request.app.clone(),
+        window_name_contains: request.window_name_contains.clone(),
+        depth: 0,
+        max_results: 5,
+        max_nodes: request.max_nodes,
+    })?;
+    let target = resolve_click_button_match(name, matches)?;
+    plasma_pilot_atspi::invoke(&target.id, libplasma_pilot::AccessibilityAction::Press)
+        .map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "clicked button name={} node={}",
+            target.name.as_deref().unwrap_or(name),
+            target.id
+        )),
+    })
+}
+
+fn resolve_click_button_match(
+    name: &str,
+    matches: Vec<libplasma_pilot::AccessibilityNode>,
+) -> Result<libplasma_pilot::AccessibilityNode> {
+    let mut viable = matches
+        .into_iter()
+        .filter(|node| !node.sensitive)
+        .filter(|node| {
+            node.actions
+                .contains(&libplasma_pilot::AccessibilityAction::Press)
+        })
+        .collect::<Vec<_>>();
+    if viable.is_empty() {
+        bail!("no non-sensitive pressable button matched name={name}");
+    }
+
+    let exact = viable
+        .iter()
+        .filter(|node| {
+            node.name
+                .as_deref()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !exact.is_empty() {
+        viable = exact;
+    }
+
+    if viable.len() == 1 {
+        return Ok(viable.remove(0));
+    }
+
+    let choices = viable
+        .iter()
+        .take(5)
+        .map(|node| {
+            format!(
+                "{}:{}",
+                node.id,
+                node.name.as_deref().unwrap_or("<unnamed>")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    bail!(
+        "ambiguous button match for name={name}: {} candidates: {choices}",
+        viable.len()
+    );
 }
 
 fn temporary_capture_path(output: &Path) -> PathBuf {
@@ -1327,6 +1418,51 @@ mod tests {
     }
 
     #[test]
+    fn click_button_is_control_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::ClickButton(ClickButtonRequest {
+                name: "OK".to_string(),
+                app: Some("kate".to_string()),
+                window_name_contains: Some("settings".to_string()),
+                max_nodes: 256,
+            }),
+        )
+        .expect_err("click button requires control approval by default");
+        assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
+    fn click_button_resolver_prefers_exact_match() {
+        let target = resolve_click_button_match(
+            "OK",
+            vec![button_node("1", "OK-ish"), button_node("2", "OK")],
+        )
+        .expect("exact match resolves");
+        assert_eq!(target.id, "2");
+    }
+
+    #[test]
+    fn click_button_resolver_refuses_ambiguous_matches() {
+        let err = resolve_click_button_match(
+            "Open",
+            vec![button_node("1", "Open"), button_node("2", "Open")],
+        )
+        .expect_err("multiple exact matches are ambiguous");
+        assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn click_button_resolver_requires_pressable_non_sensitive_match() {
+        let mut sensitive = button_node("1", "Delete");
+        sensitive.sensitive = true;
+        let err = resolve_click_button_match("Delete", vec![sensitive])
+            .expect_err("sensitive buttons are not viable");
+        assert!(err.to_string().contains("no non-sensitive"));
+    }
+
+    #[test]
     fn allow_control_config_allows_focus_policy() {
         let policy = PolicyEngine::new(policy_config(true, false));
         enforce_policy(
@@ -1428,5 +1564,21 @@ mod tests {
             }),
         )
         .expect("accessibility find is observe policy");
+    }
+
+    fn button_node(id: &str, name: &str) -> libplasma_pilot::AccessibilityNode {
+        libplasma_pilot::AccessibilityNode {
+            id: id.to_string(),
+            role: "button".to_string(),
+            name: Some(name.to_string()),
+            value: None,
+            value_truncated: false,
+            sensitive: false,
+            states: Vec::new(),
+            bounds: None,
+            available_actions: vec!["click".to_string()],
+            actions: vec![libplasma_pilot::AccessibilityAction::Press],
+            children: Vec::new(),
+        }
     }
 }

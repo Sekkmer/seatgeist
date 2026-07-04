@@ -16,5 +16,6 @@ Default rules:
 - AT-SPI password-text nodes must be marked sensitive before they are used for any future semantic control action.
 - AT-SPI invoke is semantic control: it may only run through the policy engine and action journal, and defaults to prompt/deny when no approval channel is available.
 - AT-SPI set-text is semantic control: it must reject sensitive nodes by default and journal replacement length rather than replacement contents.
+- High-level semantic actions must refuse ambiguous matches instead of choosing one candidate implicitly.
 
 The daemon should pause automation when panic-stop is active or when configured human-input detection indicates the user has taken over.

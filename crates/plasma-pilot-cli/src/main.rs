@@ -2,12 +2,12 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use libplasma_pilot::AccessibilitySetTextRequest;
 use libplasma_pilot::{
-    AccessibilityAction, AccessibilityFindRequest, AccessibilityInvokeRequest, ClipboardGetRequest,
-    ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse,
-    FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest,
-    ScreenshotRequest, ScreenshotTileRequest, default_socket_path,
+    AccessibilityAction, AccessibilityFindRequest, AccessibilityInvokeRequest,
+    AccessibilitySetTextRequest, ClickButtonRequest, ClipboardGetRequest, ClipboardSetRequest,
+    DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse, FocusWindowRequest,
+    FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest, ScreenshotRequest,
+    ScreenshotTileRequest, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -72,6 +72,10 @@ enum Command {
         #[command(subcommand)]
         command: AtspiCommand,
     },
+    Semantic {
+        #[command(subcommand)]
+        command: SemanticCommand,
+    },
     Journal {
         #[command(subcommand)]
         command: JournalCommand,
@@ -129,6 +133,20 @@ enum AtspiCommand {
         node: String,
         #[arg(value_name = "TEXT")]
         text: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SemanticCommand {
+    ClickButton {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long)]
+        window_name_contains: Option<String>,
+        #[arg(long, default_value_t = 1024)]
+        max_nodes: usize,
     },
 }
 
@@ -286,6 +304,23 @@ fn main() -> Result<()> {
             DaemonRequest::AccessibilitySetText(AccessibilitySetTextRequest {
                 node_id: node,
                 text,
+            }),
+        )?,
+        Command::Semantic {
+            command:
+                SemanticCommand::ClickButton {
+                    name,
+                    app,
+                    window_name_contains,
+                    max_nodes,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::ClickButton(ClickButtonRequest {
+                name,
+                app,
+                window_name_contains,
+                max_nodes,
             }),
         )?,
         Command::Journal {

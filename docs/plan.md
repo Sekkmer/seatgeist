@@ -924,12 +924,12 @@ Goal: robust high-level UI operations.
 Tasks:
 
 - Implement high-level tools:
-  - `pilot.click_button(name, app/window guard)`
+  - [x] `pilot.click_button(name, app/window guard)`
   - `pilot.set_text_field(name, text, app/window guard)`
   - `pilot.select_menu(path, app/window guard)`
   - `pilot.activate_tab(name, app/window guard)`
-- Use AT-SPI first, fallback to screenshot+coordinate only when safe.
-- Add confidence scoring and refusal when ambiguous.
+- [x] Use AT-SPI first for `click_button`; screenshot+coordinate fallback remains future work and must only happen when safe.
+- [x] Add ambiguity refusal for `click_button`; broader confidence scoring remains future work.
 
 Acceptance criteria:
 

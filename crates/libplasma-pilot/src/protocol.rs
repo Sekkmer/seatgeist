@@ -135,6 +135,14 @@ pub struct AccessibilitySetTextRequest {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClickButtonRequest {
+    pub name: String,
+    pub app: Option<String>,
+    pub window_name_contains: Option<String>,
+    pub max_nodes: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DesktopObservation {
     pub active_window: Option<WindowInfo>,
@@ -166,6 +174,7 @@ pub enum DaemonRequest {
     AccessibilityFind(AccessibilityFindRequest),
     AccessibilityInvoke(AccessibilityInvokeRequest),
     AccessibilitySetText(AccessibilitySetTextRequest),
+    ClickButton(ClickButtonRequest),
     JournalTail(JournalTailRequest),
     FocusWindow(FocusWindowRequest),
 }
@@ -188,6 +197,7 @@ impl DaemonRequest {
             Self::AccessibilityFind(_) => "accessibility_find",
             Self::AccessibilityInvoke(_) => "accessibility_invoke",
             Self::AccessibilitySetText(_) => "accessibility_set_text",
+            Self::ClickButton(_) => "click_button",
             Self::JournalTail(_) => "journal_tail",
             Self::FocusWindow(_) => "focus_window",
         }
@@ -397,6 +407,21 @@ mod tests {
             encoded,
             r#"{"method":"accessibility_set_text","node_id":"atspi://:1.42/org/a11y/atspi/accessible/7","text":"hello"}"#
         );
+    }
+
+    #[test]
+    fn serializes_click_button_request() {
+        let request = DaemonRequest::ClickButton(ClickButtonRequest {
+            name: "OK".to_string(),
+            app: Some("kate".to_string()),
+            window_name_contains: Some("settings".to_string()),
+            max_nodes: 512,
+        });
+        let encoded = serde_json::to_string(&request).expect("click button request serializes");
+        assert!(encoded.contains(r#""method":"click_button""#));
+        assert!(encoded.contains(r#""name":"OK""#));
+        assert!(encoded.contains(r#""app":"kate""#));
+        assert!(encoded.contains(r#""window_name_contains":"settings""#));
     }
 
     #[test]
