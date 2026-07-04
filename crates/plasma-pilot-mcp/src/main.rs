@@ -11,8 +11,8 @@ use libplasma_pilot::{
     AccessibilitySetTextRequest, ActivateTabRequest, ClickButtonRequest, ClipboardGetRequest,
     ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse,
     FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest,
-    ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest, SetTextFieldRequest,
-    default_socket_path,
+    ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest, SetPanicStopRequest,
+    SetTextFieldRequest, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -225,6 +225,13 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         "plasma.health" => Ok(DaemonRequest::Health),
         "plasma.capabilities" => Ok(DaemonRequest::Capabilities),
         "plasma.policy_status" => Ok(DaemonRequest::PolicyStatus),
+        "plasma.panic_stop_status" => Ok(DaemonRequest::PanicStopStatus),
+        "plasma.panic_stop_enable" => Ok(DaemonRequest::SetPanicStop(SetPanicStopRequest {
+            enabled: true,
+        })),
+        "plasma.panic_stop_disable" => Ok(DaemonRequest::SetPanicStop(SetPanicStopRequest {
+            enabled: false,
+        })),
         "plasma.list_monitors" => Ok(DaemonRequest::ListMonitors),
         "plasma.list_windows" => Ok(DaemonRequest::ListWindows),
         "plasma.active_window" => Ok(DaemonRequest::ActiveWindow),
@@ -476,6 +483,24 @@ fn tool_definitions() -> Vec<Value> {
             "plasma.policy_status",
             "Policy Status",
             "Read current daemon policy defaults.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.panic_stop_status",
+            "Panic Stop Status",
+            "Read whether the daemon panic-stop flag is active.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.panic_stop_enable",
+            "Enable Panic Stop",
+            "Enable the daemon panic-stop flag. This is journaled and blocks control-class actions.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.panic_stop_disable",
+            "Disable Panic Stop",
+            "Disable the daemon panic-stop flag after explicit local operator intent.",
             object_schema(vec![], vec![]),
         ),
         tool(
@@ -957,6 +982,21 @@ mod tests {
         assert!(
             tools
                 .iter()
+                .any(|tool| tool["name"] == "plasma.panic_stop_status")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.panic_stop_enable")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.panic_stop_disable")
+        );
+        assert!(
+            tools
+                .iter()
                 .any(|tool| tool["name"] == "plasma.click_button")
         );
         assert!(
@@ -1036,6 +1076,25 @@ mod tests {
             DaemonRequest::FocusWindow(FocusWindowRequest {
                 window_id: "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn maps_panic_stop_tools() {
+        assert_eq!(
+            daemon_request_for_tool("plasma.panic_stop_status", &json!({}))
+                .expect("panic-stop status maps"),
+            DaemonRequest::PanicStopStatus
+        );
+        assert_eq!(
+            daemon_request_for_tool("plasma.panic_stop_enable", &json!({}))
+                .expect("panic-stop enable maps"),
+            DaemonRequest::SetPanicStop(SetPanicStopRequest { enabled: true })
+        );
+        assert_eq!(
+            daemon_request_for_tool("plasma.panic_stop_disable", &json!({}))
+                .expect("panic-stop disable maps"),
+            DaemonRequest::SetPanicStop(SetPanicStopRequest { enabled: false })
         );
     }
 
