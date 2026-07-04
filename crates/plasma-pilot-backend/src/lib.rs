@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use libplasma_pilot::{
     AccessibilityAction, AccessibilityFindRequest, AccessibilityNode, MonitorInfo, PilotError,
-    Point, ScreenshotTarget, WindowId, WindowInfo,
+    Point, PointerButton, ScreenshotTarget, WindowId, WindowInfo,
 };
 
 pub type Result<T> = std::result::Result<T, PilotError>;
@@ -30,6 +30,13 @@ pub trait WindowBackend: Send + Sync {
 pub trait InputBackend: Send + Sync {
     async fn move_pointer(&self, point: Point) -> Result<()>;
     async fn click(&self, point: Point) -> Result<()>;
+    async fn drag(
+        &self,
+        from: Point,
+        to: Point,
+        button: PointerButton,
+        duration_ms: u64,
+    ) -> Result<()>;
     async fn type_text(&self, text: &str) -> Result<()>;
     async fn key_combo(&self, combo: &str) -> Result<()>;
 }

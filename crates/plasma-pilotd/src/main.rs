@@ -19,16 +19,16 @@ use libplasma_pilot::{
     AccessibilityPasteTextRequest, AccessibilitySetTextRequest, ActionResult, ActivateLinkRequest,
     ActivateTabRequest, ActiveWindowGuard, BackendCapability, CapabilitySet, ClickButtonRequest,
     ClickPointerRequest, ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest,
-    DaemonResponse, DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest,
-    HealthStatus, InputBackendStatus, JournalEntry, KeyComboRequest, KwinBridgeStatus, LibeiStatus,
-    MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton,
-    PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
-    PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus, SafetyClass, ScreenshotInfo,
-    ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest,
-    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest,
-    ToggleCheckRequest, ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest,
-    WaitForChangeResult, WindowGeometry, WindowInfo, current_egid, current_euid,
-    default_journal_path, default_panic_stop_path, default_socket_path,
+    DaemonResponse, DesktopObservation, DragPointerRequest, FocusWindowRequest,
+    FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus, JournalEntry,
+    KeyComboRequest, KwinBridgeStatus, LibeiStatus, MovePointerRequest, ObserveRequest,
+    PanicStopStatus, Point, PointerButton, PointerCalibrationPoint, PointerCalibrationStatus,
+    PointerMonitorCalibration, PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus,
+    SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
+    ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
+    SetValueRequest, ToggleCheckRequest, ToolApprovalLevel, TypeTextRequest, UinputStatus,
+    WaitForChangeRequest, WaitForChangeResult, WindowGeometry, WindowInfo, current_egid,
+    current_euid, default_journal_path, default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -733,6 +733,12 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
             },
         },
         DaemonRequest::ClickPointer(request) => match click_pointer(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
+        DaemonRequest::DragPointer(request) => match drag_pointer(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
             Err(err) => DaemonResponse::Error {
                 message: format_error_chain(&err),
@@ -1502,6 +1508,7 @@ fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWin
         DaemonRequest::KeyCombo(request) => request.guard.as_ref(),
         DaemonRequest::MovePointer(request) => request.guard.as_ref(),
         DaemonRequest::ClickPointer(request) => request.guard.as_ref(),
+        DaemonRequest::DragPointer(request) => request.guard.as_ref(),
         DaemonRequest::ScrollPointer(request) => request.guard.as_ref(),
         DaemonRequest::ClickButton(request) => request.guard.as_ref(),
         DaemonRequest::SetTextField(request) => request.guard.as_ref(),
@@ -1555,6 +1562,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         DaemonRequest::ClipboardSet(_) => SafetyClass::ClipboardWrite,
         DaemonRequest::MovePointer(_)
         | DaemonRequest::ClickPointer(_)
+        | DaemonRequest::DragPointer(_)
         | DaemonRequest::ScrollPointer(_) => SafetyClass::ControlPointer,
         DaemonRequest::TypeText(_) | DaemonRequest::KeyCombo(_) => SafetyClass::ControlKeyboard,
         DaemonRequest::FocusWindow(_)
@@ -2619,6 +2627,40 @@ fn click_pointer(request: ClickPointerRequest) -> Result<ActionResult> {
         message: Some(format!(
             "clicked pointer button={:?} clicks={} x={:.0} y={:.0} space={:?}",
             request.button, request.clicks, request.point.x, request.point.y, request.point.space
+        )),
+    })
+}
+
+fn drag_pointer(request: DragPointerRequest) -> Result<ActionResult> {
+    if request.duration_ms > 10_000 {
+        bail!("duration_ms must be at most 10000");
+    }
+    let bounds = physical_pointer_bounds()?;
+    validate_pointer_point(request.from, bounds)?;
+    validate_pointer_point(request.to, bounds)?;
+    plasma_pilot_uinput::drag_pointer(
+        request.from.x,
+        request.from.y,
+        request.to.x,
+        request.to.y,
+        bounds,
+        pointer_button_to_uinput(request.button),
+        request.duration_ms,
+    )
+    .map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "dragged pointer button={:?} from={:.0},{:.0} to={:.0},{:.0} duration_ms={} space={:?}",
+            request.button,
+            request.from.x,
+            request.from.y,
+            request.to.x,
+            request.to.y,
+            request.duration_ms,
+            request.from.space
         )),
     })
 }
@@ -5138,6 +5180,19 @@ height = 40
             }),
         )
         .expect_err("click pointer requires pointer control approval by default");
+        assert!(err.to_string().contains("ControlPointer"));
+
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::DragPointer(DragPointerRequest {
+                from: physical_point(100.0, 200.0),
+                to: physical_point(300.0, 400.0),
+                button: PointerButton::Left,
+                duration_ms: 250,
+                guard: None,
+            }),
+        )
+        .expect_err("drag pointer requires pointer control approval by default");
         assert!(err.to_string().contains("ControlPointer"));
 
         let err = enforce_policy(

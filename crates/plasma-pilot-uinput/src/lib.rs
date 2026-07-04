@@ -14,6 +14,8 @@ const UINPUT_PATH: &str = "/dev/uinput";
 const UINPUT_IOCTL_BASE: u8 = b'U';
 const UINPUT_MAX_NAME_SIZE: usize = 80;
 const DEVICE_SETTLE_MS: u64 = 100;
+const DRAG_STEP_MS: u64 = 16;
+const MAX_DRAG_STEPS: u64 = 120;
 
 const IOC_NRBITS: u8 = 8;
 const IOC_TYPEBITS: u8 = 8;
@@ -480,12 +482,57 @@ impl UinputPointer {
         self.move_to(x, y)?;
         let code = button_code(button);
         for _ in 0..clicks {
-            self.emit(EV_KEY, code, 1)?;
-            self.sync()?;
-            self.emit(EV_KEY, code, 0)?;
-            self.sync()?;
+            self.button_down(code)?;
+            self.button_up(code)?;
         }
         Ok(())
+    }
+
+    fn drag(
+        &mut self,
+        from_x: f64,
+        from_y: f64,
+        to_x: f64,
+        to_y: f64,
+        button: PointerButton,
+        duration_ms: u64,
+    ) -> Result<()> {
+        let code = button_code(button);
+        self.move_to(from_x, from_y)?;
+        self.button_down(code)?;
+        let result = self.drag_while_pressed(from_x, from_y, to_x, to_y, duration_ms);
+        let release_result = self.button_up(code);
+        result.and(release_result)
+    }
+
+    fn drag_while_pressed(
+        &mut self,
+        from_x: f64,
+        from_y: f64,
+        to_x: f64,
+        to_y: f64,
+        duration_ms: u64,
+    ) -> Result<()> {
+        let steps = drag_steps(duration_ms);
+        let sleep_ms = duration_ms / steps;
+        for step in 1..=steps {
+            let t = step as f64 / steps as f64;
+            self.move_to(from_x + (to_x - from_x) * t, from_y + (to_y - from_y) * t)?;
+            if sleep_ms > 0 && step < steps {
+                thread::sleep(Duration::from_millis(sleep_ms));
+            }
+        }
+        Ok(())
+    }
+
+    fn button_down(&mut self, code: u16) -> Result<()> {
+        self.emit(EV_KEY, code, 1)?;
+        self.sync()
+    }
+
+    fn button_up(&mut self, code: u16) -> Result<()> {
+        self.emit(EV_KEY, code, 0)?;
+        self.sync()
     }
 
     fn scroll(&mut self, vertical: i32, horizontal: i32) -> Result<()> {
@@ -590,6 +637,19 @@ pub fn click_pointer(
     pointer.click(x, y, button, clicks)
 }
 
+pub fn drag_pointer(
+    from_x: f64,
+    from_y: f64,
+    to_x: f64,
+    to_y: f64,
+    bounds: PointerBounds,
+    button: PointerButton,
+    duration_ms: u64,
+) -> Result<()> {
+    let mut pointer = UinputPointer::create(bounds)?;
+    pointer.drag(from_x, from_y, to_x, to_y, button, duration_ms)
+}
+
 pub fn scroll_pointer(vertical: i32, horizontal: i32, bounds: PointerBounds) -> Result<()> {
     let mut pointer = UinputPointer::create(bounds)?;
     pointer.scroll(vertical, horizontal)
@@ -634,6 +694,10 @@ fn button_code(button: PointerButton) -> u16 {
         PointerButton::Middle => BTN_MIDDLE,
         PointerButton::Right => BTN_RIGHT,
     }
+}
+
+fn drag_steps(duration_ms: u64) -> u64 {
+    (duration_ms / DRAG_STEP_MS).clamp(1, MAX_DRAG_STEPS)
 }
 
 fn ioctl_noarg(fd: libc::c_int, request: libc::c_ulong) -> Result<()> {
@@ -935,6 +999,13 @@ mod tests {
             map_pointer_point(3840.0, 2160.0, bounds).expect("center maps"),
             (16_386, 16_387)
         );
+    }
+
+    #[test]
+    fn drag_steps_are_bounded() {
+        assert_eq!(drag_steps(0), 1);
+        assert_eq!(drag_steps(250), 15);
+        assert_eq!(drag_steps(60_000), MAX_DRAG_STEPS);
     }
 
     #[test]

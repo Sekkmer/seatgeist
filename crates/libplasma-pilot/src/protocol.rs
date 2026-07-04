@@ -387,6 +387,16 @@ pub struct ClickPointerRequest {
     pub guard: Option<ActiveWindowGuard>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DragPointerRequest {
+    pub from: Point,
+    pub to: Point,
+    pub button: PointerButton,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScrollPointerRequest {
     pub vertical: i32,
@@ -526,6 +536,7 @@ pub enum DaemonRequest {
     KeyCombo(KeyComboRequest),
     MovePointer(MovePointerRequest),
     ClickPointer(ClickPointerRequest),
+    DragPointer(DragPointerRequest),
     ScrollPointer(ScrollPointerRequest),
     ClickButton(ClickButtonRequest),
     SetTextField(SetTextFieldRequest),
@@ -572,6 +583,7 @@ impl DaemonRequest {
             Self::KeyCombo(_) => "key_combo",
             Self::MovePointer(_) => "move_pointer",
             Self::ClickPointer(_) => "click_pointer",
+            Self::DragPointer(_) => "drag_pointer",
             Self::ScrollPointer(_) => "scroll_pointer",
             Self::ClickButton(_) => "click_button",
             Self::SetTextField(_) => "set_text_field",
@@ -901,6 +913,28 @@ mod tests {
         assert!(encoded.contains(r#""button":"left""#));
         assert!(encoded.contains(r#""clicks":2"#));
         assert!(encoded.contains(r#""expected_window_id":"current-window""#));
+
+        let drag_pointer = DaemonRequest::DragPointer(DragPointerRequest {
+            from: Point {
+                x: 100.0,
+                y: 200.0,
+                space: CoordinateSpace::PhysicalPixel,
+            },
+            to: Point {
+                x: 500.0,
+                y: 600.0,
+                space: CoordinateSpace::PhysicalPixel,
+            },
+            button: PointerButton::Left,
+            duration_ms: 250,
+            guard: None,
+        });
+        let encoded =
+            serde_json::to_string(&drag_pointer).expect("drag pointer request serializes");
+        assert!(encoded.contains(r#""method":"drag_pointer""#));
+        assert!(encoded.contains(r#""from":{"x":100.0"#));
+        assert!(encoded.contains(r#""to":{"x":500.0"#));
+        assert!(encoded.contains(r#""duration_ms":250"#));
 
         let scroll_pointer = DaemonRequest::ScrollPointer(ScrollPointerRequest {
             vertical: -3,

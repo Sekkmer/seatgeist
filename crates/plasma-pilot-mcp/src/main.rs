@@ -14,10 +14,10 @@ use libplasma_pilot::{
     ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace,
     DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
     DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
-    DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
-    KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton, ScreenshotRequest,
-    ScreenshotTileRequest, ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest,
-    SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
+    DaemonResponse, DragPointerRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest,
+    JournalTailRequest, KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton,
+    ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectMenuRequest,
+    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
     WaitForChangeRequest, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
@@ -425,6 +425,25 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 .unwrap_or(1),
             guard: active_window_guard(arguments)?,
         })),
+        "plasma.drag_pointer" => {
+            let coordinate_space = required_coordinate_space(arguments, "coordinate_space")?;
+            Ok(DaemonRequest::DragPointer(DragPointerRequest {
+                from: Point {
+                    x: required_f64(arguments, "from_x")?,
+                    y: required_f64(arguments, "from_y")?,
+                    space: coordinate_space,
+                },
+                to: Point {
+                    x: required_f64(arguments, "to_x")?,
+                    y: required_f64(arguments, "to_y")?,
+                    space: coordinate_space,
+                },
+                button: optional_pointer_button(arguments, "button")?
+                    .unwrap_or(PointerButton::Left),
+                duration_ms: optional_u64(arguments, "duration_ms")?.unwrap_or(250),
+                guard: active_window_guard(arguments)?,
+            }))
+        }
         "plasma.scroll_pointer" => Ok(DaemonRequest::ScrollPointer(ScrollPointerRequest {
             vertical: optional_i32(arguments, "vertical")?.unwrap_or(0),
             horizontal: optional_i32(arguments, "horizontal")?.unwrap_or(0),
@@ -920,6 +939,44 @@ fn tool_definitions() -> Vec<Value> {
                     ),
                 ]),
                 vec!["x", "y", "coordinate_space", "button"],
+            ),
+        ),
+        tool(
+            "plasma.drag_pointer",
+            "Drag Pointer",
+            "Drag from one explicit desktop coordinate to another by pressing, moving, and releasing a pointer button. This is policy-gated pointer control; the current daemon accepts physical_pixel coordinates.",
+            object_schema(
+                with_guard_properties(vec![
+                    (
+                        "from_x",
+                        json!({"type": "number", "description": "Starting x coordinate."}),
+                    ),
+                    (
+                        "from_y",
+                        json!({"type": "number", "description": "Starting y coordinate."}),
+                    ),
+                    (
+                        "to_x",
+                        json!({"type": "number", "description": "Ending x coordinate."}),
+                    ),
+                    (
+                        "to_y",
+                        json!({"type": "number", "description": "Ending y coordinate."}),
+                    ),
+                    (
+                        "coordinate_space",
+                        json!({"type": "string", "enum": ["physical_pixel", "logical_pixel", "window_local", "accessibility_node"], "description": "Coordinate space for all coordinates. Current daemon support is physical_pixel."}),
+                    ),
+                    (
+                        "button",
+                        json!({"type": "string", "enum": ["left", "middle", "right"], "description": "Pointer button to hold during the drag. Defaults to left."}),
+                    ),
+                    (
+                        "duration_ms",
+                        json!({"type": "integer", "minimum": 0, "maximum": 10000, "description": "Approximate drag duration in milliseconds. Defaults to 250."}),
+                    ),
+                ]),
+                vec!["from_x", "from_y", "to_x", "to_y", "coordinate_space"],
             ),
         ),
         tool(
@@ -1564,6 +1621,12 @@ fn required_pointer_button(arguments: &Value, key: &str) -> Result<PointerButton
         .map_err(|err: String| anyhow!(err))
 }
 
+fn optional_pointer_button(arguments: &Value, key: &str) -> Result<Option<PointerButton>> {
+    optional_string(arguments, key)?
+        .map(|value| value.parse().map_err(|err: String| anyhow!(err)))
+        .transpose()
+}
+
 fn required_string_array(arguments: &Value, key: &str) -> Result<Vec<String>> {
     let array = arguments
         .get(key)
@@ -1682,6 +1745,11 @@ mod tests {
             tools
                 .iter()
                 .any(|tool| tool["name"] == "plasma.click_pointer")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.drag_pointer")
         );
         assert!(
             tools
@@ -1923,6 +1991,43 @@ mod tests {
                 button: PointerButton::Left,
                 clicks: 2,
                 guard: None,
+            })
+        );
+
+        let drag_pointer = daemon_request_for_tool(
+            "plasma.drag_pointer",
+            &json!({
+                "from_x": 100.0,
+                "from_y": 200.0,
+                "to_x": 300.0,
+                "to_y": 400.0,
+                "coordinate_space": "physical_pixel",
+                "button": "right",
+                "duration_ms": 500,
+                "active_title_contains": "Canvas"
+            }),
+        )
+        .expect("drag pointer maps");
+        assert_eq!(
+            drag_pointer,
+            DaemonRequest::DragPointer(DragPointerRequest {
+                from: Point {
+                    x: 100.0,
+                    y: 200.0,
+                    space: CoordinateSpace::PhysicalPixel,
+                },
+                to: Point {
+                    x: 300.0,
+                    y: 400.0,
+                    space: CoordinateSpace::PhysicalPixel,
+                },
+                button: PointerButton::Right,
+                duration_ms: 500,
+                guard: Some(ActiveWindowGuard {
+                    expected_window_id: None,
+                    expected_app_id: None,
+                    title_contains: Some("Canvas".to_string()),
+                }),
             })
         );
 

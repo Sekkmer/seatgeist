@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 use libplasma_pilot::{
     AccessibilityAction, AccessibilityFindRequest, AccessibilityNode, CoordinateSpace, MonitorInfo,
-    PilotError, Point, ScreenshotTarget, WindowGeometry, WindowId, WindowInfo,
+    PilotError, Point, PointerButton, ScreenshotTarget, WindowGeometry, WindowId, WindowInfo,
 };
 use plasma_pilot_backend::{
     AccessibilityBackend, ClipboardBackend, InputBackend, Result, ScreenBackend, Screenshot,
@@ -156,6 +156,12 @@ impl WindowBackend for MockWindowBackend {
 pub enum MockInputEvent {
     MovePointer(Point),
     Click(Point),
+    Drag {
+        from: Point,
+        to: Point,
+        button: PointerButton,
+        duration_ms: u64,
+    },
     TypeText(String),
     KeyCombo(String),
 }
@@ -180,6 +186,22 @@ impl InputBackend for MockInputBackend {
 
     async fn click(&self, point: Point) -> Result<()> {
         lock(&self.events)?.push(MockInputEvent::Click(point));
+        Ok(())
+    }
+
+    async fn drag(
+        &self,
+        from: Point,
+        to: Point,
+        button: PointerButton,
+        duration_ms: u64,
+    ) -> Result<()> {
+        lock(&self.events)?.push(MockInputEvent::Drag {
+            from,
+            to,
+            button,
+            duration_ms,
+        });
         Ok(())
     }
 
@@ -467,6 +489,7 @@ mod tests {
 
         backend.move_pointer(point).await?;
         backend.click(point).await?;
+        backend.drag(point, point, PointerButton::Left, 250).await?;
         backend.type_text("hello").await?;
         backend.key_combo("Ctrl+L").await?;
 
@@ -475,6 +498,12 @@ mod tests {
             vec![
                 MockInputEvent::MovePointer(point),
                 MockInputEvent::Click(point),
+                MockInputEvent::Drag {
+                    from: point,
+                    to: point,
+                    button: PointerButton::Left,
+                    duration_ms: 250,
+                },
                 MockInputEvent::TypeText("hello".to_string()),
                 MockInputEvent::KeyCombo("Ctrl+L".to_string()),
             ]

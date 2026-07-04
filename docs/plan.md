@@ -236,6 +236,7 @@ plasma-pilot-cli windows
 plasma-pilot-cli active-window
 plasma-pilot-cli focus --window <id>
 plasma-pilot-cli input click-pointer --x <x> --y <y> --coordinate-space physical-pixel --button left
+plasma-pilot-cli input drag-pointer --from-x <x> --from-y <y> --to-x <x> --to-y <y> --coordinate-space physical-pixel
 plasma-pilot-cli input type-text "hello"
 plasma-pilot-cli input key-combo Ctrl+L
 plasma-pilot-cli clipboard get
@@ -829,7 +830,7 @@ Tasks:
 - [x] Implement initial keyboard input backend using uinput. Current status: `plasma-pilot-uinput` creates a short-lived `/dev/uinput` virtual keyboard with `UI_DEV_SETUP`; daemon/CLI/MCP expose `type_text` and `key_combo` as policy-gated `ControlKeyboard`.
 - [x] Create virtual pointer device and absolute/relative pointer mapping. Current status: `plasma-pilot-uinput` creates a short-lived `/dev/uinput` virtual pointer with absolute X/Y axes and relative wheel axes; the daemon maps physical desktop coordinates into the absolute input range.
 - [x] Add udev/polkit/systemd instructions. Current status: skeleton files exist, `docs/uinput-setup.md` documents the optional udev rule, user service setup, current polkit placeholder state, and `input status` diagnostics. Uinput access still relies on `/dev/uinput` being readable/writable by the daemon process.
-- [x] Implement move, click, double-click, and scroll. Current status: daemon/CLI/MCP expose `move_pointer`, `click_pointer`, and `scroll_pointer` as policy-gated `ControlPointer`; click supports one or two left/middle/right clicks, and scroll supports vertical/horizontal deltas.
+- [x] Implement move, click, double-click, drag, and scroll. Current status: daemon/CLI/MCP expose `move_pointer`, `click_pointer`, `drag_pointer`, and `scroll_pointer` as policy-gated `ControlPointer`; click supports one or two left/middle/right clicks, drag supports bounded press-move-release with left/middle/right buttons, and scroll supports vertical/horizontal deltas.
 - [x] Implement key combo and type text. Current status: US evdev ASCII text plus newline/tab and named key combos such as `Ctrl+L` are supported; non-US text is rejected instead of guessed.
 - [x] Implement focus guard checks before actions. Current status: current daemon control requests accept optional active-window guards (`expected_active_window`, `expected_active_app`, and `active_title_contains`) and reject stale guards before execution.
 - [x] Add panic-stop flag. Current status: `plasma-pilotd` has a file-backed panic-stop state, `plasma-pilot-cli panic-stop status|enable|disable` journals state changes, and active panic-stop blocks control-class daemon requests before execution.
@@ -876,7 +877,7 @@ Tasks:
 - [x] Expose clipboard_set/get after the backing daemon capability exists.
 - [x] Expose wait_for_change after the backing daemon capability exists.
 - [x] Expose key and type_text after the backing daemon capabilities exist.
-- [x] Expose pointer move/click/scroll after the backing daemon capability exists.
+- [x] Expose pointer move/click/drag/scroll after the backing daemon capability exists.
 - [x] Add MCP-side argument validation for exposed tools.
 - [x] Add docs for installing MCP manually and through plugin.
 - [x] Ensure outputs are model-friendly for exposed tools: tool results include compact text plus structured JSON.
@@ -1074,7 +1075,7 @@ cargo check --workspace
 - [x] Add backend notes doc.
 - [x] Implement Phase 1.
 - [x] Implement Phase 2.
-- [x] Implement Phase 3. Current status: keyboard and pointer command paths, uinput setup diagnostics/docs, portal/libei input backend probes, pointer calibration diagnostics, and guarded KWrite GUI input smoke exist.
+- [x] Implement Phase 3. Current status: keyboard and pointer command paths including bounded pointer drag, uinput setup diagnostics/docs, portal/libei input backend probes, pointer calibration diagnostics, and guarded KWrite GUI input smoke exist.
 
 ## 20. Definition of done for v0.1
 

@@ -10,9 +10,9 @@ use libplasma_pilot::{
     ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace,
     DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
     DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
-    DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
-    KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton, ReplayTrace,
-    ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectMenuRequest,
+    DaemonResponse, DragPointerRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest,
+    JournalTailRequest, KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton,
+    ReplayTrace, ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectMenuRequest,
     SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
     WaitForChangeRequest, default_socket_path,
 };
@@ -164,6 +164,28 @@ enum InputCommand {
         button: PointerButton,
         #[arg(long, default_value_t = 1)]
         clicks: u8,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
+    DragPointer {
+        #[arg(long)]
+        from_x: f64,
+        #[arg(long)]
+        from_y: f64,
+        #[arg(long)]
+        to_x: f64,
+        #[arg(long)]
+        to_y: f64,
+        #[arg(long)]
+        coordinate_space: CoordinateSpace,
+        #[arg(long, default_value = "left")]
+        button: PointerButton,
+        #[arg(long, default_value_t = 250)]
+        duration_ms: u64,
         #[arg(long)]
         expected_active_window: Option<String>,
         #[arg(long)]
@@ -655,6 +677,42 @@ fn main() -> Result<()> {
                 },
                 button,
                 clicks,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
+        )?,
+        Command::Input {
+            command:
+                InputCommand::DragPointer {
+                    from_x,
+                    from_y,
+                    to_x,
+                    to_y,
+                    coordinate_space,
+                    button,
+                    duration_ms,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::DragPointer(DragPointerRequest {
+                from: Point {
+                    x: from_x,
+                    y: from_y,
+                    space: coordinate_space,
+                },
+                to: Point {
+                    x: to_x,
+                    y: to_y,
+                    space: coordinate_space,
+                },
+                button,
+                duration_ms,
                 guard: active_window_guard(
                     expected_active_window,
                     expected_active_app,

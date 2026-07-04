@@ -25,6 +25,6 @@ Useful control tools:
 - `plasma.a11y_delete_text` only when a known non-sensitive `EditableText` node needs range deletion at specific character offsets.
 - `plasma.a11y_copy_text` and `plasma.a11y_cut_text` only when a known non-sensitive `EditableText` node needs clipboard copy/cut at specific character offsets.
 - `plasma.a11y_paste_text` only when a known non-sensitive `EditableText` node needs clipboard paste at a specific character offset and the clipboard was intentionally prepared.
-- `plasma.move_pointer`, `plasma.click_pointer`, and `plasma.scroll_pointer` only after semantic routes are unavailable.
+- `plasma.move_pointer`, `plasma.click_pointer`, `plasma.drag_pointer`, and `plasma.scroll_pointer` only after semantic routes are unavailable.
 - `plasma.wait_for_change` to confirm bounded visual changes without repeatedly dumping screenshots.
 - `plasma.journal_tail` to inspect compact action history when debugging a run.
