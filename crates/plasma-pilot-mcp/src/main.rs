@@ -8,11 +8,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use libplasma_pilot::{
     AccessibilityAction, AccessibilityFindRequest, AccessibilityInvokeRequest,
-    AccessibilitySetTextRequest, ActivateTabRequest, ClickButtonRequest, ClipboardGetRequest,
-    ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse,
-    FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest,
-    ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest, SetPanicStopRequest,
-    SetTextFieldRequest, default_socket_path,
+    AccessibilitySetTextRequest, ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest,
+    ClipboardGetRequest, ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest,
+    DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
+    ObserveRequest, ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest,
+    SetPanicStopRequest, SetTextFieldRequest, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -323,12 +323,14 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
             AccessibilityInvokeRequest {
                 node_id: required_string(arguments, "node_id")?,
                 action: required_accessibility_action(arguments, "action")?,
+                guard: active_window_guard(arguments)?,
             },
         )),
         "plasma.a11y_set_text" => Ok(DaemonRequest::AccessibilitySetText(
             AccessibilitySetTextRequest {
                 node_id: required_string(arguments, "node_id")?,
                 text: required_string(arguments, "text")?,
+                guard: active_window_guard(arguments)?,
             },
         )),
         "plasma.click_button" => Ok(DaemonRequest::ClickButton(ClickButtonRequest {
@@ -339,6 +341,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 .map(u64_to_usize)
                 .transpose()?
                 .unwrap_or(1024),
+            guard: active_window_guard(arguments)?,
         })),
         "plasma.set_text_field" => Ok(DaemonRequest::SetTextField(SetTextFieldRequest {
             name: required_string(arguments, "name")?,
@@ -349,6 +352,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 .map(u64_to_usize)
                 .transpose()?
                 .unwrap_or(1024),
+            guard: active_window_guard(arguments)?,
         })),
         "plasma.activate_tab" => Ok(DaemonRequest::ActivateTab(ActivateTabRequest {
             name: required_string(arguments, "name")?,
@@ -358,6 +362,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 .map(u64_to_usize)
                 .transpose()?
                 .unwrap_or(1024),
+            guard: active_window_guard(arguments)?,
         })),
         "plasma.select_menu" => Ok(DaemonRequest::SelectMenu(SelectMenuRequest {
             path: required_string_array(arguments, "path")?,
@@ -367,9 +372,11 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 .map(u64_to_usize)
                 .transpose()?
                 .unwrap_or(1024),
+            guard: active_window_guard(arguments)?,
         })),
         "plasma.focus_window" => Ok(DaemonRequest::FocusWindow(FocusWindowRequest {
             window_id: required_string(arguments, "window_id")?,
+            guard: active_window_guard(arguments)?,
         })),
         _ => bail!("unknown tool: {name}"),
     }
@@ -594,10 +601,10 @@ fn tool_definitions() -> Vec<Value> {
             "Focus Window",
             "Focus a listed KWin window by id. This is policy-gated control and usually requires explicit daemon approval mode.",
             object_schema(
-                vec![(
+                with_guard_properties(vec![(
                     "window_id",
                     json!({"type": "string", "description": "KWin window id from plasma.list_windows."}),
-                )],
+                )]),
                 vec!["window_id"],
             ),
         ),
@@ -606,7 +613,7 @@ fn tool_definitions() -> Vec<Value> {
             "Click Button",
             "Find a named non-sensitive AT-SPI button and invoke its press action only when exactly one viable match is found. This is policy-gated semantic control.",
             object_schema(
-                vec![
+                with_guard_properties(vec![
                     (
                         "name",
                         json!({"type": "string", "description": "Accessible button name to match."}),
@@ -623,7 +630,7 @@ fn tool_definitions() -> Vec<Value> {
                         "max_nodes",
                         json!({"type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum accessibility nodes to scan. Defaults to 1024."}),
                     ),
-                ],
+                ]),
                 vec!["name"],
             ),
         ),
@@ -632,7 +639,7 @@ fn tool_definitions() -> Vec<Value> {
             "Set Text Field",
             "Find a named non-sensitive AT-SPI text field and replace its contents only when exactly one viable match is found. This is policy-gated semantic control and summaries report text length only.",
             object_schema(
-                vec![
+                with_guard_properties(vec![
                     (
                         "name",
                         json!({"type": "string", "description": "Accessible text field name to match."}),
@@ -653,7 +660,7 @@ fn tool_definitions() -> Vec<Value> {
                         "max_nodes",
                         json!({"type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum accessibility nodes to scan. Defaults to 1024."}),
                     ),
-                ],
+                ]),
                 vec!["name", "text"],
             ),
         ),
@@ -662,7 +669,7 @@ fn tool_definitions() -> Vec<Value> {
             "Activate Tab",
             "Find a named non-sensitive AT-SPI tab and activate it only when exactly one viable match is found. This is policy-gated semantic control.",
             object_schema(
-                vec![
+                with_guard_properties(vec![
                     (
                         "name",
                         json!({"type": "string", "description": "Accessible tab name to match."}),
@@ -679,7 +686,7 @@ fn tool_definitions() -> Vec<Value> {
                         "max_nodes",
                         json!({"type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum accessibility nodes to scan. Defaults to 1024."}),
                     ),
-                ],
+                ]),
                 vec!["name"],
             ),
         ),
@@ -688,7 +695,7 @@ fn tool_definitions() -> Vec<Value> {
             "Select Menu",
             "Select a visible AT-SPI menu path only when exactly one non-sensitive activatable item matches. This is policy-gated semantic control.",
             object_schema(
-                vec![
+                with_guard_properties(vec![
                     (
                         "path",
                         json!({"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Visible menu path segments, such as [\"File\", \"Open\"]."}),
@@ -705,7 +712,7 @@ fn tool_definitions() -> Vec<Value> {
                         "max_nodes",
                         json!({"type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum accessibility nodes to scan. Defaults to 1024."}),
                     ),
-                ],
+                ]),
                 vec!["path"],
             ),
         ),
@@ -800,7 +807,7 @@ fn tool_definitions() -> Vec<Value> {
             "Invoke Accessibility Action",
             "Invoke a normalized AT-SPI action on a node returned by an accessibility tree/find call. This is policy-gated semantic control.",
             object_schema(
-                vec![
+                with_guard_properties(vec![
                     (
                         "node_id",
                         json!({"type": "string", "description": "AT-SPI node id from a previous accessibility result."}),
@@ -809,7 +816,7 @@ fn tool_definitions() -> Vec<Value> {
                         "action",
                         json!({"type": "string", "enum": ["press", "focus", "select"], "description": "Normalized action to invoke."}),
                     ),
-                ],
+                ]),
                 vec!["node_id", "action"],
             ),
         ),
@@ -818,7 +825,7 @@ fn tool_definitions() -> Vec<Value> {
             "Set Accessibility Text",
             "Replace text on a non-sensitive AT-SPI EditableText node. This is policy-gated semantic control and summaries report text length only.",
             object_schema(
-                vec![
+                with_guard_properties(vec![
                     (
                         "node_id",
                         json!({"type": "string", "description": "AT-SPI node id from a previous accessibility result."}),
@@ -827,7 +834,7 @@ fn tool_definitions() -> Vec<Value> {
                         "text",
                         json!({"type": "string", "description": "Replacement text for the editable node."}),
                     ),
-                ],
+                ]),
                 vec!["node_id", "text"],
             ),
         ),
@@ -876,6 +883,42 @@ fn object_schema(properties: Vec<(&str, Value)>, required: Vec<&str>) -> Value {
         "required": required,
         "additionalProperties": false
     })
+}
+
+fn guard_properties() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "expected_active_window",
+            json!({"type": "string", "description": "Optional current active-window id guard."}),
+        ),
+        (
+            "expected_active_app",
+            json!({"type": "string", "description": "Optional current active-window app id guard."}),
+        ),
+        (
+            "active_title_contains",
+            json!({"type": "string", "description": "Optional current active-window title substring guard."}),
+        ),
+    ]
+}
+
+fn with_guard_properties(mut properties: Vec<(&'static str, Value)>) -> Vec<(&'static str, Value)> {
+    properties.extend(guard_properties());
+    properties
+}
+
+fn active_window_guard(arguments: &Value) -> Result<Option<ActiveWindowGuard>> {
+    let expected_window_id = optional_string(arguments, "expected_active_window")?;
+    let expected_app_id = optional_string(arguments, "expected_active_app")?;
+    let title_contains = optional_string(arguments, "active_title_contains")?;
+    if expected_window_id.is_none() && expected_app_id.is_none() && title_contains.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(ActiveWindowGuard {
+        expected_window_id,
+        expected_app_id,
+        title_contains,
+    }))
 }
 
 fn required_string(arguments: &Value, key: &str) -> Result<String> {
@@ -1087,6 +1130,32 @@ mod tests {
             request,
             DaemonRequest::FocusWindow(FocusWindowRequest {
                 window_id: "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}".to_string(),
+                guard: None,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_active_window_guard_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.focus_window",
+            &json!({
+                "window_id": "target-window",
+                "expected_active_window": "current-window",
+                "expected_active_app": "org.kde.kate",
+                "active_title_contains": "main.rs"
+            }),
+        )
+        .expect("guarded focus args map");
+        assert_eq!(
+            request,
+            DaemonRequest::FocusWindow(FocusWindowRequest {
+                window_id: "target-window".to_string(),
+                guard: Some(ActiveWindowGuard {
+                    expected_window_id: Some("current-window".to_string()),
+                    expected_app_id: Some("org.kde.kate".to_string()),
+                    title_contains: Some("main.rs".to_string()),
+                }),
             })
         );
     }
@@ -1129,6 +1198,7 @@ mod tests {
                 app: Some("kate".to_string()),
                 window_name_contains: Some("settings".to_string()),
                 max_nodes: 256,
+                guard: None,
             })
         );
     }
@@ -1154,6 +1224,7 @@ mod tests {
                 app: Some("kate".to_string()),
                 window_name_contains: Some("settings".to_string()),
                 max_nodes: 256,
+                guard: None,
             })
         );
     }
@@ -1177,6 +1248,7 @@ mod tests {
                 app: Some("settings".to_string()),
                 window_name_contains: Some("preferences".to_string()),
                 max_nodes: 256,
+                guard: None,
             })
         );
     }
@@ -1200,6 +1272,7 @@ mod tests {
                 app: Some("kate".to_string()),
                 window_name_contains: Some("editor".to_string()),
                 max_nodes: 256,
+                guard: None,
             })
         );
     }
@@ -1320,6 +1393,7 @@ mod tests {
             DaemonRequest::AccessibilityInvoke(AccessibilityInvokeRequest {
                 node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
                 action: AccessibilityAction::Press,
+                guard: None,
             })
         );
     }
@@ -1339,6 +1413,7 @@ mod tests {
             DaemonRequest::AccessibilitySetText(AccessibilitySetTextRequest {
                 node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
                 text: "hello".to_string(),
+                guard: None,
             })
         );
     }

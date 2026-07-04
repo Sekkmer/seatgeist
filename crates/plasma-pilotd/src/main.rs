@@ -15,13 +15,13 @@ use clap::Parser;
 use image::{GenericImageView, imageops::FilterType};
 use libplasma_pilot::{
     AccessibilityFindRequest, AccessibilityInvokeRequest, AccessibilitySetTextRequest,
-    ActionResult, ActivateTabRequest, BackendCapability, CapabilitySet, ClickButtonRequest,
-    ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse,
-    DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus,
-    JournalEntry, ObserveRequest, PanicStopStatus, PolicyStatus, SafetyClass, ScreenshotInfo,
-    ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform, SelectMenuRequest,
-    SetPanicStopRequest, SetTextFieldRequest, ToolApprovalLevel, WindowGeometry, WindowInfo,
-    current_euid, default_journal_path, default_panic_stop_path, default_socket_path,
+    ActionResult, ActivateTabRequest, ActiveWindowGuard, BackendCapability, CapabilitySet,
+    ClickButtonRequest, ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest,
+    DaemonResponse, DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest,
+    HealthStatus, JournalEntry, ObserveRequest, PanicStopStatus, PolicyStatus, SafetyClass,
+    ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
+    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, ToolApprovalLevel, WindowGeometry,
+    WindowInfo, current_euid, default_journal_path, default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -410,6 +410,11 @@ fn handle_request(
             message: format_error_chain(&err),
         };
     }
+    if let Err(err) = enforce_active_window_guard(active_window_state, &request) {
+        return DaemonResponse::Error {
+            message: format_error_chain(&err),
+        };
+    }
 
     match request {
         DaemonRequest::Health => DaemonResponse::Health(health()),
@@ -604,6 +609,62 @@ fn enforce_panic_stop(panic_stop: &PanicStopState, request: &DaemonRequest) -> R
         );
     }
     Ok(())
+}
+
+fn enforce_active_window_guard(
+    active_window_state: &ActiveWindowState,
+    request: &DaemonRequest,
+) -> Result<()> {
+    let Some(guard) = active_window_guard_for_request(request) else {
+        return Ok(());
+    };
+    let window = active_window(active_window_state)
+        .context("active-window guard could not read active window")?
+        .ok_or_else(|| anyhow::anyhow!("active-window guard failed: no active window"))?;
+
+    if let Some(expected) = &guard.expected_window_id
+        && window.id != *expected
+    {
+        bail!(
+            "active-window guard failed: expected window id {}, got {}",
+            expected,
+            window.id
+        );
+    }
+    if let Some(expected) = &guard.expected_app_id
+        && window.app_id.as_deref() != Some(expected.as_str())
+    {
+        bail!(
+            "active-window guard failed: expected app id {}, got {}",
+            expected,
+            window.app_id.as_deref().unwrap_or("")
+        );
+    }
+    if let Some(expected) = &guard.title_contains {
+        let title = window.title.to_ascii_lowercase();
+        let expected = expected.to_ascii_lowercase();
+        if !title.contains(&expected) {
+            bail!(
+                "active-window guard failed: expected title containing {}, got {}",
+                guard.title_contains.as_deref().unwrap_or(""),
+                window.title
+            );
+        }
+    }
+    Ok(())
+}
+
+fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWindowGuard> {
+    match request {
+        DaemonRequest::FocusWindow(request) => request.guard.as_ref(),
+        DaemonRequest::AccessibilityInvoke(request) => request.guard.as_ref(),
+        DaemonRequest::AccessibilitySetText(request) => request.guard.as_ref(),
+        DaemonRequest::ClickButton(request) => request.guard.as_ref(),
+        DaemonRequest::SetTextField(request) => request.guard.as_ref(),
+        DaemonRequest::ActivateTab(request) => request.guard.as_ref(),
+        DaemonRequest::SelectMenu(request) => request.guard.as_ref(),
+        _ => None,
+    }
 }
 
 fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
@@ -1933,6 +1994,7 @@ mod tests {
             &panic_stop,
             &DaemonRequest::FocusWindow(FocusWindowRequest {
                 window_id: "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}".to_string(),
+                guard: None,
             }),
         )
         .expect_err("panic-stop blocks allowed control");
@@ -1942,6 +2004,7 @@ mod tests {
             &policy,
             &DaemonRequest::FocusWindow(FocusWindowRequest {
                 window_id: "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}".to_string(),
+                guard: None,
             }),
         )
         .expect("control policy is explicitly allowed");
@@ -1962,12 +2025,72 @@ mod tests {
     }
 
     #[test]
+    fn active_window_guard_allows_matching_active_window() {
+        let state = ActiveWindowState::default();
+        state
+            .update_from_payload(
+                r#"{
+                    "active": true,
+                    "id": "current-window",
+                    "title": "main.rs - Kate",
+                    "app_id": "org.kde.kate",
+                    "pid": 1234,
+                    "geometry": {"x": 10, "y": 20, "width": 800, "height": 600}
+                }"#,
+            )
+            .expect("payload updates active-window state");
+
+        enforce_active_window_guard(
+            &state,
+            &DaemonRequest::FocusWindow(FocusWindowRequest {
+                window_id: "target-window".to_string(),
+                guard: Some(ActiveWindowGuard {
+                    expected_window_id: Some("current-window".to_string()),
+                    expected_app_id: Some("org.kde.kate".to_string()),
+                    title_contains: Some("main.rs".to_string()),
+                }),
+            }),
+        )
+        .expect("matching active-window guard passes");
+    }
+
+    #[test]
+    fn active_window_guard_rejects_changed_active_window() {
+        let state = ActiveWindowState::default();
+        state
+            .update_from_payload(
+                r#"{
+                    "active": true,
+                    "id": "other-window",
+                    "title": "Terminal",
+                    "app_id": "org.kde.konsole"
+                }"#,
+            )
+            .expect("payload updates active-window state");
+
+        let err = enforce_active_window_guard(
+            &state,
+            &DaemonRequest::FocusWindow(FocusWindowRequest {
+                window_id: "target-window".to_string(),
+                guard: Some(ActiveWindowGuard {
+                    expected_window_id: Some("current-window".to_string()),
+                    expected_app_id: None,
+                    title_contains: None,
+                }),
+            }),
+        )
+        .expect_err("stale active-window guard fails");
+        assert!(err.to_string().contains("active-window guard failed"));
+    }
+
+    #[test]
     fn focus_window_is_control_policy() {
         let policy = PolicyEngine::new(PolicyConfig::default());
         let err = enforce_policy(
             &policy,
             &DaemonRequest::FocusWindow(FocusWindowRequest {
                 window_id: "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}".to_string(),
+                guard: None,
             }),
         )
         .expect_err("focus requires control approval by default");
@@ -1982,6 +2105,7 @@ mod tests {
             &DaemonRequest::AccessibilityInvoke(AccessibilityInvokeRequest {
                 node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
                 action: libplasma_pilot::AccessibilityAction::Press,
+                guard: None,
             }),
         )
         .expect_err("accessibility invoke requires control approval by default");
@@ -1996,6 +2120,7 @@ mod tests {
             &DaemonRequest::AccessibilitySetText(AccessibilitySetTextRequest {
                 node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
                 text: "hello".to_string(),
+                guard: None,
             }),
         )
         .expect_err("accessibility set-text requires control approval by default");
@@ -2012,6 +2137,7 @@ mod tests {
                 app: Some("kate".to_string()),
                 window_name_contains: Some("settings".to_string()),
                 max_nodes: 256,
+                guard: None,
             }),
         )
         .expect_err("click button requires control approval by default");
@@ -2029,6 +2155,7 @@ mod tests {
                 app: Some("kate".to_string()),
                 window_name_contains: Some("settings".to_string()),
                 max_nodes: 256,
+                guard: None,
             }),
         )
         .expect_err("set text field requires control approval by default");
@@ -2045,6 +2172,7 @@ mod tests {
                 app: Some("settings".to_string()),
                 window_name_contains: Some("preferences".to_string()),
                 max_nodes: 256,
+                guard: None,
             }),
         )
         .expect_err("activate tab requires control approval by default");
@@ -2061,6 +2189,7 @@ mod tests {
                 app: Some("kate".to_string()),
                 window_name_contains: Some("editor".to_string()),
                 max_nodes: 256,
+                guard: None,
             }),
         )
         .expect_err("select menu requires control approval by default");
@@ -2240,6 +2369,7 @@ mod tests {
             &policy,
             &DaemonRequest::FocusWindow(FocusWindowRequest {
                 window_id: "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}".to_string(),
+                guard: None,
             }),
         )
         .expect("explicit control override allows focus policy");

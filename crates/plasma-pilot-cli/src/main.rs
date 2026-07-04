@@ -4,11 +4,11 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use libplasma_pilot::{
     AccessibilityAction, AccessibilityFindRequest, AccessibilityInvokeRequest,
-    AccessibilitySetTextRequest, ActivateTabRequest, ClickButtonRequest, ClipboardGetRequest,
-    ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse,
-    FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest,
-    ReplayTrace, ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest, SetPanicStopRequest,
-    SetTextFieldRequest, default_socket_path,
+    AccessibilitySetTextRequest, ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest,
+    ClipboardGetRequest, ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest,
+    DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
+    ObserveRequest, ReplayTrace, ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest,
+    SetPanicStopRequest, SetTextFieldRequest, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -64,6 +64,12 @@ enum Command {
     Focus {
         #[arg(long)]
         window: String,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
     },
     Clipboard {
         #[command(subcommand)]
@@ -136,12 +142,24 @@ enum AtspiCommand {
         node: String,
         #[arg(long)]
         action: AccessibilityAction,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
     },
     SetText {
         #[arg(long)]
         node: String,
         #[arg(value_name = "TEXT")]
         text: String,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
     },
 }
 
@@ -156,6 +174,12 @@ enum SemanticCommand {
         window_name_contains: Option<String>,
         #[arg(long, default_value_t = 1024)]
         max_nodes: usize,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
     },
     SetTextField {
         #[arg(long)]
@@ -168,6 +192,12 @@ enum SemanticCommand {
         window_name_contains: Option<String>,
         #[arg(long, default_value_t = 1024)]
         max_nodes: usize,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
     },
     ActivateTab {
         #[arg(long)]
@@ -178,6 +208,12 @@ enum SemanticCommand {
         window_name_contains: Option<String>,
         #[arg(long, default_value_t = 1024)]
         max_nodes: usize,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
     },
     SelectMenu {
         #[arg(long)]
@@ -188,6 +224,12 @@ enum SemanticCommand {
         window_name_contains: Option<String>,
         #[arg(long, default_value_t = 1024)]
         max_nodes: usize,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
     },
 }
 
@@ -288,9 +330,21 @@ fn main() -> Result<()> {
         )?,
         Command::Windows => print_daemon_response(&socket, DaemonRequest::ListWindows)?,
         Command::ActiveWindow => print_daemon_response(&socket, DaemonRequest::ActiveWindow)?,
-        Command::Focus { window } => print_daemon_response(
+        Command::Focus {
+            window,
+            expected_active_window,
+            expected_active_app,
+            active_title_contains,
+        } => print_daemon_response(
             &socket,
-            DaemonRequest::FocusWindow(FocusWindowRequest { window_id: window }),
+            DaemonRequest::FocusWindow(FocusWindowRequest {
+                window_id: window,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
         )?,
         Command::Clipboard {
             command: ClipboardCommand::Get { max_bytes, full },
@@ -349,21 +403,45 @@ fn main() -> Result<()> {
             }),
         )?,
         Command::Atspi {
-            command: AtspiCommand::Invoke { node, action },
+            command:
+                AtspiCommand::Invoke {
+                    node,
+                    action,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                },
         } => print_daemon_response(
             &socket,
             DaemonRequest::AccessibilityInvoke(AccessibilityInvokeRequest {
                 node_id: node,
                 action,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
             }),
         )?,
         Command::Atspi {
-            command: AtspiCommand::SetText { node, text },
+            command:
+                AtspiCommand::SetText {
+                    node,
+                    text,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                },
         } => print_daemon_response(
             &socket,
             DaemonRequest::AccessibilitySetText(AccessibilitySetTextRequest {
                 node_id: node,
                 text,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
             }),
         )?,
         Command::Semantic {
@@ -373,6 +451,9 @@ fn main() -> Result<()> {
                     app,
                     window_name_contains,
                     max_nodes,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
                 },
         } => print_daemon_response(
             &socket,
@@ -381,6 +462,11 @@ fn main() -> Result<()> {
                 app,
                 window_name_contains,
                 max_nodes,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
             }),
         )?,
         Command::Semantic {
@@ -391,6 +477,9 @@ fn main() -> Result<()> {
                     app,
                     window_name_contains,
                     max_nodes,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
                 },
         } => print_daemon_response(
             &socket,
@@ -400,6 +489,11 @@ fn main() -> Result<()> {
                 app,
                 window_name_contains,
                 max_nodes,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
             }),
         )?,
         Command::Semantic {
@@ -409,6 +503,9 @@ fn main() -> Result<()> {
                     app,
                     window_name_contains,
                     max_nodes,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
                 },
         } => print_daemon_response(
             &socket,
@@ -417,6 +514,11 @@ fn main() -> Result<()> {
                 app,
                 window_name_contains,
                 max_nodes,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
             }),
         )?,
         Command::Semantic {
@@ -426,6 +528,9 @@ fn main() -> Result<()> {
                     app,
                     window_name_contains,
                     max_nodes,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
                 },
         } => print_daemon_response(
             &socket,
@@ -434,6 +539,11 @@ fn main() -> Result<()> {
                 app,
                 window_name_contains,
                 max_nodes,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
             }),
         )?,
         Command::Journal {
@@ -475,6 +585,21 @@ fn parse_menu_path_argument(path: &str) -> Vec<String> {
         .filter(|part| !part.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn active_window_guard(
+    expected_window_id: Option<String>,
+    expected_app_id: Option<String>,
+    title_contains: Option<String>,
+) -> Option<ActiveWindowGuard> {
+    if expected_window_id.is_none() && expected_app_id.is_none() && title_contains.is_none() {
+        return None;
+    }
+    Some(ActiveWindowGuard {
+        expected_window_id,
+        expected_app_id,
+        title_contains,
+    })
 }
 
 fn print_daemon_response(socket: &PathBuf, request: DaemonRequest) -> Result<()> {

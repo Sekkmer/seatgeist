@@ -804,7 +804,7 @@ Tasks:
 - Create virtual keyboard and pointer devices.
 - Add udev/polkit/systemd instructions.
 - Implement move, click, double-click, scroll, key combo, type text.
-- Implement focus guard checks before actions.
+- Implement focus guard checks before actions. Current status: current daemon control requests accept optional active-window guards (`expected_active_window`, `expected_active_app`, and `active_title_contains`) and reject stale guards before execution.
 - [x] Add panic-stop flag. Current status: `plasma-pilotd` has a file-backed panic-stop state, `plasma-pilot-cli panic-stop status|enable|disable` journals state changes, and active panic-stop blocks control-class daemon requests before execution.
 - Probe whether xdg-desktop-portal RemoteDesktop or libei can satisfy input needs before requiring uinput on the local machine.
 
@@ -813,7 +813,7 @@ Acceptance criteria:
 - CLI can type into Kate/KWrite.
 - CLI can click a known point in a test window.
 - Panic-stop prevents further input actions.
-- Focus guard rejects action if active window changed.
+- Focus guard rejects action if active window changed. Current implementation covers current daemon control requests when a guard is supplied.
 
 ### Phase 4: Window backend through KDE/KWin
 

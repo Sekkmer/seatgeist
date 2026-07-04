@@ -170,12 +170,26 @@ pub struct AccessibilityFindRequest {
 pub struct AccessibilityInvokeRequest {
     pub node_id: String,
     pub action: AccessibilityAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessibilitySetTextRequest {
     pub node_id: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveWindowGuard {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_app_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_contains: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,6 +198,8 @@ pub struct ClickButtonRequest {
     pub app: Option<String>,
     pub window_name_contains: Option<String>,
     pub max_nodes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +209,8 @@ pub struct SetTextFieldRequest {
     pub app: Option<String>,
     pub window_name_contains: Option<String>,
     pub max_nodes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,6 +219,8 @@ pub struct ActivateTabRequest {
     pub app: Option<String>,
     pub window_name_contains: Option<String>,
     pub max_nodes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,6 +229,8 @@ pub struct SelectMenuRequest {
     pub app: Option<String>,
     pub window_name_contains: Option<String>,
     pub max_nodes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -222,6 +244,8 @@ pub struct DesktopObservation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FocusWindowRequest {
     pub window_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -552,10 +576,12 @@ mod tests {
     fn serializes_focus_window_request() {
         let request = DaemonRequest::FocusWindow(FocusWindowRequest {
             window_id: "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}".to_string(),
+            guard: None,
         });
         let encoded = serde_json::to_string(&request).expect("focus request serializes");
         assert!(encoded.contains(r#""method":"focus_window""#));
         assert!(encoded.contains(r#""window_id":"{96d3c5da-75ec-4a2a-b75f-05c4c077153b}""#));
+        assert!(!encoded.contains("guard"));
     }
 
     #[test]
@@ -623,6 +649,7 @@ mod tests {
         let request = DaemonRequest::AccessibilityInvoke(AccessibilityInvokeRequest {
             node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
             action: AccessibilityAction::Press,
+            guard: None,
         });
         let encoded = serde_json::to_string(&request).expect("a11y invoke request serializes");
         assert_eq!(
@@ -636,6 +663,7 @@ mod tests {
         let request = DaemonRequest::AccessibilitySetText(AccessibilitySetTextRequest {
             node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
             text: "hello".to_string(),
+            guard: None,
         });
         let encoded = serde_json::to_string(&request).expect("a11y set-text request serializes");
         assert_eq!(
@@ -651,6 +679,7 @@ mod tests {
             app: Some("kate".to_string()),
             window_name_contains: Some("settings".to_string()),
             max_nodes: 512,
+            guard: None,
         });
         let encoded = serde_json::to_string(&request).expect("click button request serializes");
         assert!(encoded.contains(r#""method":"click_button""#));
@@ -667,6 +696,7 @@ mod tests {
             app: Some("kate".to_string()),
             window_name_contains: Some("settings".to_string()),
             max_nodes: 512,
+            guard: None,
         });
         let encoded = serde_json::to_string(&request).expect("set text field request serializes");
         assert!(encoded.contains(r#""method":"set_text_field""#));
@@ -682,6 +712,7 @@ mod tests {
             app: Some("settings".to_string()),
             window_name_contains: Some("preferences".to_string()),
             max_nodes: 512,
+            guard: None,
         });
         let encoded = serde_json::to_string(&request).expect("activate tab request serializes");
         assert!(encoded.contains(r#""method":"activate_tab""#));
@@ -697,11 +728,29 @@ mod tests {
             app: Some("kate".to_string()),
             window_name_contains: Some("editor".to_string()),
             max_nodes: 512,
+            guard: None,
         });
         let encoded = serde_json::to_string(&request).expect("select menu request serializes");
         assert!(encoded.contains(r#""method":"select_menu""#));
         assert!(encoded.contains(r#""path":["File","Open"]"#));
         assert!(encoded.contains(r#""app":"kate""#));
+    }
+
+    #[test]
+    fn serializes_control_request_with_active_window_guard() {
+        let request = DaemonRequest::FocusWindow(FocusWindowRequest {
+            window_id: "target-window".to_string(),
+            guard: Some(ActiveWindowGuard {
+                expected_window_id: Some("current-window".to_string()),
+                expected_app_id: Some("org.kde.kate".to_string()),
+                title_contains: Some("main.rs".to_string()),
+            }),
+        });
+        let encoded = serde_json::to_string(&request).expect("guarded focus request serializes");
+        assert!(encoded.contains(r#""method":"focus_window""#));
+        assert!(encoded.contains(r#""expected_window_id":"current-window""#));
+        assert!(encoded.contains(r#""expected_app_id":"org.kde.kate""#));
+        assert!(encoded.contains(r#""title_contains":"main.rs""#));
     }
 
     #[test]

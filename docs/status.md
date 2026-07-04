@@ -55,4 +55,5 @@ Phase 1 first slice is implemented:
 - `plasma-pilot-cli panic-stop status|enable|disable` now controls a daemon-side file-backed panic-stop flag. The daemon journals these requests and rejects control-class actions while the flag is active, even when control policy is explicitly allowed.
 - MCP now exposes `plasma.panic_stop_status`, `plasma.panic_stop_enable`, and `plasma.panic_stop_disable` through the same daemon-backed panic-stop protocol.
 - `plasma-pilot-cli journal tail` and MCP `plasma.journal_tail` now support method and success filters for compact troubleshooting, for example `--method focus_window --ok false`.
+- Current control requests now support optional active-window guards. CLI/MCP callers can pass expected active window id, app id, or title substring; the daemon rejects the request before execution if the active window no longer matches.
 - Pointer/keyboard input, richer AT-SPI edit operations, remaining high-level semantic actions, MCP wait/change tools, portal/KDE-native clipboard fallback, portal/KWin-native capture backends, and persistent active-window bridge installation checks remain future work.
