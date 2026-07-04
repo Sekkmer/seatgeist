@@ -9,7 +9,7 @@ pub use protocol::{
     DaemonRequest, DaemonResponse, DesktopObservation, FocusWindowRequest,
     FocusedAccessibilityTreeRequest, HealthStatus, JournalEntry, JournalTailRequest,
     ObserveRequest, PolicyStatus, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest,
-    ScreenshotTransform, SetTextFieldRequest,
+    ScreenshotTransform, SelectMenuRequest, SetTextFieldRequest,
 };
 pub use runtime::{current_euid, default_journal_path, default_socket_path};
 pub use types::{

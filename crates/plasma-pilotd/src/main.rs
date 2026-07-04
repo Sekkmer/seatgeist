@@ -19,8 +19,9 @@ use libplasma_pilot::{
     ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse,
     DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus,
     JournalEntry, ObserveRequest, PolicyStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest,
-    ScreenshotTileRequest, ScreenshotTransform, SetTextFieldRequest, ToolApprovalLevel,
-    WindowGeometry, WindowInfo, current_euid, default_journal_path, default_socket_path,
+    ScreenshotTileRequest, ScreenshotTransform, SelectMenuRequest, SetTextFieldRequest,
+    ToolApprovalLevel, WindowGeometry, WindowInfo, current_euid, default_journal_path,
+    default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -423,6 +424,12 @@ fn handle_request(
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::SelectMenu(request) => match select_menu(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::JournalTail(request) => match journal.tail(request.limit) {
             Ok(entries) => DaemonResponse::Journal(entries),
             Err(err) => DaemonResponse::Error {
@@ -505,7 +512,8 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::AccessibilitySetText(_)
         | DaemonRequest::ClickButton(_)
         | DaemonRequest::SetTextField(_)
-        | DaemonRequest::ActivateTab(_) => SafetyClass::ControlSemantic,
+        | DaemonRequest::ActivateTab(_)
+        | DaemonRequest::SelectMenu(_) => SafetyClass::ControlSemantic,
     }
 }
 
@@ -957,6 +965,40 @@ fn activate_tab(request: ActivateTabRequest) -> Result<ActionResult> {
     })
 }
 
+fn select_menu(request: SelectMenuRequest) -> Result<ActionResult> {
+    let path = normalize_semantic_path(&request.path);
+    if path.is_empty() {
+        bail!("menu path must contain at least one non-empty segment");
+    }
+    if request.max_nodes == 0 {
+        bail!("max_nodes must be greater than zero");
+    }
+    let first = path[0].clone();
+    let search_depth = path.len().saturating_add(2);
+    let matches = accessibility_find(AccessibilityFindRequest {
+        role: None,
+        name_contains: Some(first),
+        app: request.app.clone(),
+        window_name_contains: request.window_name_contains.clone(),
+        depth: search_depth,
+        max_results: 20,
+        max_nodes: request.max_nodes,
+    })?;
+    let (target, action) = resolve_menu_path_match(&path, matches)?;
+    plasma_pilot_atspi::invoke(&target.id, action.clone()).map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "selected menu path={} action={} node={}",
+            path.join("/"),
+            action.as_str(),
+            target.id
+        )),
+    })
+}
+
 fn resolve_click_button_match(
     name: &str,
     matches: Vec<libplasma_pilot::AccessibilityNode>,
@@ -1005,6 +1047,51 @@ fn resolve_click_button_match(
     bail!(
         "ambiguous button match for name={name}: {} candidates: {choices}",
         viable.len()
+    );
+}
+
+fn resolve_menu_path_match(
+    path: &[String],
+    matches: Vec<libplasma_pilot::AccessibilityNode>,
+) -> Result<(
+    libplasma_pilot::AccessibilityNode,
+    libplasma_pilot::AccessibilityAction,
+)> {
+    if path.is_empty() {
+        bail!("menu path must contain at least one segment");
+    }
+    let mut candidates = Vec::new();
+    for node in &matches {
+        collect_menu_path_candidates(node, path, 0, &mut candidates);
+    }
+    candidates.retain(|(node, _)| !node.sensitive);
+
+    if candidates.is_empty() {
+        bail!(
+            "no visible non-sensitive menu item matched path={}",
+            path.join("/")
+        );
+    }
+    if candidates.len() == 1 {
+        return Ok(candidates.remove(0));
+    }
+
+    let choices = candidates
+        .iter()
+        .take(5)
+        .map(|(node, _)| {
+            format!(
+                "{}:{}",
+                node.id,
+                node.name.as_deref().unwrap_or("<unnamed>")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    bail!(
+        "ambiguous menu path={} matched {} candidates: {choices}",
+        path.join("/"),
+        candidates.len()
     );
 }
 
@@ -1062,6 +1149,67 @@ fn resolve_tab_match(
     );
 }
 
+fn collect_menu_path_candidates(
+    node: &libplasma_pilot::AccessibilityNode,
+    path: &[String],
+    index: usize,
+    candidates: &mut Vec<(
+        libplasma_pilot::AccessibilityNode,
+        libplasma_pilot::AccessibilityAction,
+    )>,
+) {
+    if node_name_matches(node, &path[index]) {
+        if index + 1 == path.len() {
+            if let Some(action) = menu_activation_action(node) {
+                candidates.push((node.clone(), action));
+            }
+        } else {
+            for child in &node.children {
+                collect_menu_path_candidates(child, path, index + 1, candidates);
+            }
+        }
+    }
+
+    for child in &node.children {
+        collect_menu_path_candidates(child, path, index, candidates);
+    }
+}
+
+fn normalize_semantic_path(path: &[String]) -> Vec<String> {
+    path.iter()
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn node_name_matches(node: &libplasma_pilot::AccessibilityNode, name: &str) -> bool {
+    node.name
+        .as_deref()
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+}
+
+fn menu_activation_action(
+    node: &libplasma_pilot::AccessibilityNode,
+) -> Option<libplasma_pilot::AccessibilityAction> {
+    if !is_menu_item_candidate(node) {
+        return None;
+    }
+    if node
+        .actions
+        .contains(&libplasma_pilot::AccessibilityAction::Select)
+    {
+        Some(libplasma_pilot::AccessibilityAction::Select)
+    } else if node
+        .actions
+        .contains(&libplasma_pilot::AccessibilityAction::Press)
+    {
+        Some(libplasma_pilot::AccessibilityAction::Press)
+    } else {
+        None
+    }
+}
+
 fn resolve_text_field_match(
     name: &str,
     matches: Vec<libplasma_pilot::AccessibilityNode>,
@@ -1108,6 +1256,13 @@ fn resolve_text_field_match(
         "ambiguous text field match for name={name}: {} candidates: {choices}",
         viable.len()
     );
+}
+
+fn is_menu_item_candidate(node: &libplasma_pilot::AccessibilityNode) -> bool {
+    matches!(
+        node.role.to_ascii_lowercase().as_str(),
+        "menu item" | "check menu item" | "radio menu item"
+    )
 }
 
 fn is_tab_candidate(node: &libplasma_pilot::AccessibilityNode) -> bool {
@@ -1686,6 +1841,22 @@ mod tests {
     }
 
     #[test]
+    fn select_menu_is_control_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::SelectMenu(SelectMenuRequest {
+                path: vec!["File".to_string(), "Open".to_string()],
+                app: Some("kate".to_string()),
+                window_name_contains: Some("editor".to_string()),
+                max_nodes: 256,
+            }),
+        )
+        .expect_err("select menu requires control approval by default");
+        assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
     fn click_button_resolver_prefers_exact_match() {
         let target = resolve_click_button_match(
             "OK",
@@ -1782,6 +1953,61 @@ mod tests {
         let err = resolve_tab_match("Security", vec![sensitive])
             .expect_err("sensitive tabs are not viable");
         assert!(err.to_string().contains("no non-sensitive"));
+    }
+
+    #[test]
+    fn menu_resolver_matches_visible_path_and_select_action() {
+        let (target, action) = resolve_menu_path_match(
+            &["File".to_string(), "Open".to_string()],
+            vec![menu_node(
+                "menu",
+                "File",
+                vec![menu_item_node("open", "Open")],
+            )],
+        )
+        .expect("visible menu path resolves");
+        assert_eq!(target.id, "open");
+        assert_eq!(action, libplasma_pilot::AccessibilityAction::Select);
+    }
+
+    #[test]
+    fn menu_resolver_uses_press_when_select_is_unavailable() {
+        let (target, action) = resolve_menu_path_match(
+            &["File".to_string(), "Open".to_string()],
+            vec![menu_node(
+                "menu",
+                "File",
+                vec![press_menu_item_node("open", "Open")],
+            )],
+        )
+        .expect("pressable menu item resolves");
+        assert_eq!(target.id, "open");
+        assert_eq!(action, libplasma_pilot::AccessibilityAction::Press);
+    }
+
+    #[test]
+    fn menu_resolver_refuses_ambiguous_visible_paths() {
+        let err = resolve_menu_path_match(
+            &["File".to_string(), "Open".to_string()],
+            vec![
+                menu_node("menu1", "File", vec![menu_item_node("open1", "Open")]),
+                menu_node("menu2", "File", vec![menu_item_node("open2", "Open")]),
+            ],
+        )
+        .expect_err("duplicate visible menu paths are ambiguous");
+        assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn menu_resolver_refuses_sensitive_menu_item() {
+        let mut sensitive = menu_item_node("secret", "Secrets");
+        sensitive.sensitive = true;
+        let err = resolve_menu_path_match(
+            &["File".to_string(), "Secrets".to_string()],
+            vec![menu_node("menu", "File", vec![sensitive])],
+        )
+        .expect_err("sensitive menu items are not viable");
+        assert!(err.to_string().contains("no visible non-sensitive"));
     }
 
     #[test]
@@ -1934,6 +2160,52 @@ mod tests {
         libplasma_pilot::AccessibilityNode {
             id: id.to_string(),
             role: "page tab".to_string(),
+            name: Some(name.to_string()),
+            value: None,
+            value_truncated: false,
+            sensitive: false,
+            states: Vec::new(),
+            bounds: None,
+            available_actions: vec!["press".to_string()],
+            actions: vec![libplasma_pilot::AccessibilityAction::Press],
+            children: Vec::new(),
+        }
+    }
+
+    fn menu_node(
+        id: &str,
+        name: &str,
+        children: Vec<libplasma_pilot::AccessibilityNode>,
+    ) -> libplasma_pilot::AccessibilityNode {
+        libplasma_pilot::AccessibilityNode {
+            id: id.to_string(),
+            role: "menu".to_string(),
+            name: Some(name.to_string()),
+            value: None,
+            value_truncated: false,
+            sensitive: false,
+            states: Vec::new(),
+            bounds: None,
+            available_actions: Vec::new(),
+            actions: Vec::new(),
+            children,
+        }
+    }
+
+    fn menu_item_node(id: &str, name: &str) -> libplasma_pilot::AccessibilityNode {
+        let mut node = press_menu_item_node(id, name);
+        node.actions = vec![
+            libplasma_pilot::AccessibilityAction::Press,
+            libplasma_pilot::AccessibilityAction::Select,
+        ];
+        node.available_actions = vec!["press".to_string(), "select".to_string()];
+        node
+    }
+
+    fn press_menu_item_node(id: &str, name: &str) -> libplasma_pilot::AccessibilityNode {
+        libplasma_pilot::AccessibilityNode {
+            id: id.to_string(),
+            role: "menu item".to_string(),
             name: Some(name.to_string()),
             value: None,
             value_truncated: false,

@@ -11,7 +11,8 @@ use libplasma_pilot::{
     AccessibilitySetTextRequest, ActivateTabRequest, ClickButtonRequest, ClipboardGetRequest,
     ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse,
     FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest,
-    ScreenshotRequest, ScreenshotTileRequest, SetTextFieldRequest, default_socket_path,
+    ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest, SetTextFieldRequest,
+    default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -349,6 +350,15 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 .transpose()?
                 .unwrap_or(1024),
         })),
+        "plasma.select_menu" => Ok(DaemonRequest::SelectMenu(SelectMenuRequest {
+            path: required_string_array(arguments, "path")?,
+            app: optional_string(arguments, "app")?,
+            window_name_contains: optional_string(arguments, "window_name_contains")?,
+            max_nodes: optional_u64(arguments, "max_nodes")?
+                .map(u64_to_usize)
+                .transpose()?
+                .unwrap_or(1024),
+        })),
         "plasma.focus_window" => Ok(DaemonRequest::FocusWindow(FocusWindowRequest {
             window_id: required_string(arguments, "window_id")?,
         })),
@@ -642,6 +652,32 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "plasma.select_menu",
+            "Select Menu",
+            "Select a visible AT-SPI menu path only when exactly one non-sensitive activatable item matches. This is policy-gated semantic control.",
+            object_schema(
+                vec![
+                    (
+                        "path",
+                        json!({"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Visible menu path segments, such as [\"File\", \"Open\"]."}),
+                    ),
+                    (
+                        "app",
+                        json!({"type": "string", "description": "Optional application accessible-name guard."}),
+                    ),
+                    (
+                        "window_name_contains",
+                        json!({"type": "string", "description": "Optional containing frame/dialog/window accessible-name guard."}),
+                    ),
+                    (
+                        "max_nodes",
+                        json!({"type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum accessibility nodes to scan. Defaults to 1024."}),
+                    ),
+                ],
+                vec!["path"],
+            ),
+        ),
+        tool(
             "plasma.clipboard_get_text",
             "Clipboard Get Text",
             "Read UTF-8 text from the Wayland clipboard. This is policy-gated and bounded by default.",
@@ -854,6 +890,27 @@ fn required_accessibility_action(arguments: &Value, key: &str) -> Result<Accessi
         .map_err(|err: String| anyhow!(err))
 }
 
+fn required_string_array(arguments: &Value, key: &str) -> Result<Vec<String>> {
+    let array = arguments
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("argument '{key}' is required and must be an array of strings"))?;
+    let values = array
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| value.trim().to_string())
+                .ok_or_else(|| anyhow!("argument '{key}' must contain non-empty strings"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if values.is_empty() {
+        bail!("argument '{key}' must contain at least one string");
+    }
+    Ok(values)
+}
+
 fn u64_to_u32(value: u64) -> Result<u32> {
     u32::try_from(value).map_err(|_| anyhow!("integer argument {value} exceeds u32"))
 }
@@ -906,6 +963,11 @@ mod tests {
             tools
                 .iter()
                 .any(|tool| tool["name"] == "plasma.activate_tab")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.select_menu")
         );
         assert!(
             tools
@@ -1038,6 +1100,29 @@ mod tests {
                 name: "General".to_string(),
                 app: Some("settings".to_string()),
                 window_name_contains: Some("preferences".to_string()),
+                max_nodes: 256,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_select_menu_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.select_menu",
+            &json!({
+                "path": ["File", "Open"],
+                "app": "kate",
+                "window_name_contains": "editor",
+                "max_nodes": 256
+            }),
+        )
+        .expect("select menu args map");
+        assert_eq!(
+            request,
+            DaemonRequest::SelectMenu(SelectMenuRequest {
+                path: vec!["File".to_string(), "Open".to_string()],
+                app: Some("kate".to_string()),
+                window_name_contains: Some("editor".to_string()),
                 max_nodes: 256,
             })
         );

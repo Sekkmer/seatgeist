@@ -7,7 +7,8 @@ use libplasma_pilot::{
     AccessibilitySetTextRequest, ActivateTabRequest, ClickButtonRequest, ClipboardGetRequest,
     ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse,
     FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest,
-    ScreenshotRequest, ScreenshotTileRequest, SetTextFieldRequest, default_socket_path,
+    ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest, SetTextFieldRequest,
+    default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -163,6 +164,16 @@ enum SemanticCommand {
     ActivateTab {
         #[arg(long)]
         name: String,
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long)]
+        window_name_contains: Option<String>,
+        #[arg(long, default_value_t = 1024)]
+        max_nodes: usize,
+    },
+    SelectMenu {
+        #[arg(long)]
+        path: String,
         #[arg(long)]
         app: Option<String>,
         #[arg(long)]
@@ -381,6 +392,23 @@ fn main() -> Result<()> {
                 max_nodes,
             }),
         )?,
+        Command::Semantic {
+            command:
+                SemanticCommand::SelectMenu {
+                    path,
+                    app,
+                    window_name_contains,
+                    max_nodes,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::SelectMenu(SelectMenuRequest {
+                path: parse_menu_path_argument(&path),
+                app,
+                window_name_contains,
+                max_nodes,
+            }),
+        )?,
         Command::Journal {
             command: JournalCommand::Tail { limit },
         } => print_daemon_response(
@@ -390,6 +418,14 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn parse_menu_path_argument(path: &str) -> Vec<String> {
+    path.split(['/', '>'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn print_daemon_response(socket: &PathBuf, request: DaemonRequest) -> Result<()> {

@@ -926,10 +926,10 @@ Tasks:
 - Implement high-level tools:
   - [x] `pilot.click_button(name, app/window guard)`
   - [x] `pilot.set_text_field(name, text, app/window guard)`
-  - `pilot.select_menu(path, app/window guard)`
+  - [x] `pilot.select_menu(path, app/window guard)` for visible AT-SPI menu paths.
   - [x] `pilot.activate_tab(name, app/window guard)`
-- [x] Use AT-SPI first for `click_button`, `set_text_field`, and `activate_tab`; screenshot+coordinate fallback remains future work and must only happen when safe.
-- [x] Add ambiguity refusal for `click_button`, `set_text_field`, and `activate_tab`; broader confidence scoring remains future work.
+- [x] Use AT-SPI first for `click_button`, `set_text_field`, `select_menu`, and `activate_tab`; screenshot+coordinate fallback remains future work and must only happen when safe.
+- [x] Add ambiguity refusal for `click_button`, `set_text_field`, `select_menu`, and `activate_tab`; broader confidence scoring remains future work.
 
 Acceptance criteria:
 

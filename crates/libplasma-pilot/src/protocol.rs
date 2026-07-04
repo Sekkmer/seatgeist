@@ -160,6 +160,14 @@ pub struct ActivateTabRequest {
     pub max_nodes: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelectMenuRequest {
+    pub path: Vec<String>,
+    pub app: Option<String>,
+    pub window_name_contains: Option<String>,
+    pub max_nodes: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DesktopObservation {
     pub active_window: Option<WindowInfo>,
@@ -194,6 +202,7 @@ pub enum DaemonRequest {
     ClickButton(ClickButtonRequest),
     SetTextField(SetTextFieldRequest),
     ActivateTab(ActivateTabRequest),
+    SelectMenu(SelectMenuRequest),
     JournalTail(JournalTailRequest),
     FocusWindow(FocusWindowRequest),
 }
@@ -219,6 +228,7 @@ impl DaemonRequest {
             Self::ClickButton(_) => "click_button",
             Self::SetTextField(_) => "set_text_field",
             Self::ActivateTab(_) => "activate_tab",
+            Self::SelectMenu(_) => "select_menu",
             Self::JournalTail(_) => "journal_tail",
             Self::FocusWindow(_) => "focus_window",
         }
@@ -474,6 +484,20 @@ mod tests {
         assert!(encoded.contains(r#""name":"General""#));
         assert!(encoded.contains(r#""app":"settings""#));
         assert!(encoded.contains(r#""window_name_contains":"preferences""#));
+    }
+
+    #[test]
+    fn serializes_select_menu_request() {
+        let request = DaemonRequest::SelectMenu(SelectMenuRequest {
+            path: vec!["File".to_string(), "Open".to_string()],
+            app: Some("kate".to_string()),
+            window_name_contains: Some("editor".to_string()),
+            max_nodes: 512,
+        });
+        let encoded = serde_json::to_string(&request).expect("select menu request serializes");
+        assert!(encoded.contains(r#""method":"select_menu""#));
+        assert!(encoded.contains(r#""path":["File","Open"]"#));
+        assert!(encoded.contains(r#""app":"kate""#));
     }
 
     #[test]
