@@ -7,8 +7,8 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use libplasma_pilot::{
-    DaemonRequest, DaemonResponse, FocusWindowRequest, JournalTailRequest, ScreenshotRequest,
-    ScreenshotTileRequest, default_socket_path,
+    DaemonRequest, DaemonResponse, FocusWindowRequest, JournalTailRequest, ObserveRequest,
+    ScreenshotRequest, ScreenshotTileRequest, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -224,6 +224,19 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         "plasma.list_monitors" => Ok(DaemonRequest::ListMonitors),
         "plasma.list_windows" => Ok(DaemonRequest::ListWindows),
         "plasma.active_window" => Ok(DaemonRequest::ActiveWindow),
+        "plasma.observe" => {
+            let screenshot = match optional_string(arguments, "screenshot_output")? {
+                Some(output) => Some(ScreenshotRequest {
+                    output: output.into(),
+                    max_edge: optional_u64(arguments, "max_edge")?
+                        .map(u64_to_u32)
+                        .transpose()?,
+                    full_resolution: optional_bool(arguments, "full_resolution")?.unwrap_or(false),
+                }),
+                None => None,
+            };
+            Ok(DaemonRequest::Observe(ObserveRequest { screenshot }))
+        }
         "plasma.journal_tail" => Ok(DaemonRequest::JournalTail(JournalTailRequest {
             limit: optional_u64(arguments, "limit")?.unwrap_or(20) as usize,
         })),
@@ -291,6 +304,13 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
         ),
         DaemonResponse::Monitors(monitors) => format!("{} monitors", monitors.len()),
         DaemonResponse::Windows(windows) => format!("{} windows", windows.len()),
+        DaemonResponse::Observation(observation) => format!(
+            "observe {} monitors {} windows active={} screenshot={}",
+            observation.monitors.len(),
+            observation.windows.len(),
+            observation.active_window.is_some(),
+            observation.screenshot.is_some()
+        ),
         DaemonResponse::ActiveWindow(Some(window)) => format!(
             "active window id={} app={} title={}",
             window.id,
@@ -353,6 +373,28 @@ fn tool_definitions() -> Vec<Value> {
             "Active Window",
             "Read the latest active-window bridge update.",
             object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.observe",
+            "Observe Desktop",
+            "Return compact desktop state: monitors, windows, active window, and optional bounded screenshot metadata.",
+            object_schema(
+                vec![
+                    (
+                        "screenshot_output",
+                        json!({"type": "string", "description": "Optional PNG output path. When omitted, observe returns metadata only."}),
+                    ),
+                    (
+                        "max_edge",
+                        json!({"type": "integer", "minimum": 1, "description": "Screenshot preview max edge in pixels."}),
+                    ),
+                    (
+                        "full_resolution",
+                        json!({"type": "boolean", "description": "Capture the source image without downscaling."}),
+                    ),
+                ],
+                vec![],
+            ),
         ),
         tool(
             "plasma.screenshot",
@@ -474,6 +516,17 @@ fn optional_u64(arguments: &Value, key: &str) -> Result<Option<u64>> {
     }
 }
 
+fn optional_string(arguments: &Value, key: &str) -> Result<Option<String>> {
+    match arguments.get(key) {
+        Some(Value::Null) | None => Ok(None),
+        Some(value) => value
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| Some(value.to_string()))
+            .ok_or_else(|| anyhow!("argument '{key}' must be a non-empty string")),
+    }
+}
+
 fn optional_bool(arguments: &Value, key: &str) -> Result<Option<bool>> {
     match arguments.get(key) {
         Some(Value::Null) | None => Ok(None),
@@ -558,6 +611,39 @@ mod tests {
             request,
             DaemonRequest::FocusWindow(FocusWindowRequest {
                 window_id: "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn maps_observe_arguments_without_screenshot() {
+        let request =
+            daemon_request_for_tool("plasma.observe", &json!({})).expect("observe args map");
+        assert_eq!(
+            request,
+            DaemonRequest::Observe(ObserveRequest { screenshot: None })
+        );
+    }
+
+    #[test]
+    fn maps_observe_arguments_with_screenshot() {
+        let request = daemon_request_for_tool(
+            "plasma.observe",
+            &json!({
+                "screenshot_output": "/tmp/observe.png",
+                "max_edge": 1200,
+                "full_resolution": false
+            }),
+        )
+        .expect("observe screenshot args map");
+        assert_eq!(
+            request,
+            DaemonRequest::Observe(ObserveRequest {
+                screenshot: Some(ScreenshotRequest {
+                    output: "/tmp/observe.png".into(),
+                    max_edge: Some(1200),
+                    full_resolution: false,
+                }),
             })
         );
     }

@@ -15,9 +15,10 @@ use clap::Parser;
 use image::{GenericImageView, imageops::FilterType};
 use libplasma_pilot::{
     ActionResult, BackendCapability, CapabilitySet, CoordinateSpace, DaemonRequest, DaemonResponse,
-    FocusWindowRequest, HealthStatus, JournalEntry, PolicyStatus, SafetyClass, ScreenshotInfo,
-    ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform, ToolApprovalLevel,
-    WindowGeometry, WindowInfo, current_euid, default_journal_path, default_socket_path,
+    DesktopObservation, FocusWindowRequest, HealthStatus, JournalEntry, ObserveRequest,
+    PolicyStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest,
+    ScreenshotTransform, ToolApprovalLevel, WindowGeometry, WindowInfo, current_euid,
+    default_journal_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -343,6 +344,12 @@ fn handle_request(
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::Observe(request) => match observe_desktop(request, active_window_state) {
+            Ok(observation) => DaemonResponse::Observation(Box::new(observation)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::Screenshot(request) => match capture_screenshot(request) {
             Ok(info) => DaemonResponse::Screenshot(info),
             Err(err) => DaemonResponse::Error {
@@ -422,6 +429,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         DaemonRequest::ListMonitors
         | DaemonRequest::ListWindows
         | DaemonRequest::ActiveWindow
+        | DaemonRequest::Observe(_)
         | DaemonRequest::Screenshot(_)
         | DaemonRequest::ScreenshotTile(_) => SafetyClass::Observe,
         DaemonRequest::FocusWindow(_) => SafetyClass::ControlSemantic,
@@ -598,6 +606,26 @@ fn active_window(active_window_state: &ActiveWindowState) -> Result<Option<Windo
         return Ok(window);
     }
     plasma_pilot_kwin::active_window().map_err(|err| anyhow::anyhow!(err))
+}
+
+fn observe_desktop(
+    request: ObserveRequest,
+    active_window_state: &ActiveWindowState,
+) -> Result<DesktopObservation> {
+    let monitors = list_monitors().unwrap_or_default();
+    let windows = list_windows().unwrap_or_default();
+    let active_window = active_window(active_window_state).unwrap_or_default();
+    let screenshot = match request.screenshot {
+        Some(request) => Some(capture_screenshot(request)?),
+        None => None,
+    };
+
+    Ok(DesktopObservation {
+        active_window,
+        windows,
+        monitors,
+        screenshot,
+    })
 }
 
 fn focus_window(request: FocusWindowRequest) -> Result<ActionResult> {
@@ -781,6 +809,13 @@ fn summarize_response(response: &DaemonResponse) -> String {
         DaemonResponse::PolicyStatus(_) => "policy status".to_string(),
         DaemonResponse::Monitors(monitors) => format!("{} monitors", monitors.len()),
         DaemonResponse::Windows(windows) => format!("{} windows", windows.len()),
+        DaemonResponse::Observation(observation) => format!(
+            "observe {} monitors {} windows active={} screenshot={}",
+            observation.monitors.len(),
+            observation.windows.len(),
+            observation.active_window.is_some(),
+            observation.screenshot.is_some()
+        ),
         DaemonResponse::ActiveWindow(Some(window)) => {
             format!(
                 "active window app={}",

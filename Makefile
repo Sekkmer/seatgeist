@@ -175,11 +175,13 @@ smoke-mcp:
 		printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
 		printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 		printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"plasma.health","arguments":{}}}'
+		printf '%s\n' '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"plasma.observe","arguments":{}}}'
 	} | PLASMA_PILOT_SOCKET="$$socket" target/debug/plasma-pilot-mcp --stdio >"$$out"
-	test "$$(wc -l <"$$out")" = "3"
+	test "$$(wc -l <"$$out")" = "4"
 	jq -e 'select(.id == 1) | .result.capabilities.tools.listChanged == false' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.list_windows")' "$$out" >/dev/null
 	jq -e 'select(.id == 3) | .result.isError == false and .result.structuredContent.type == "health"' "$$out" >/dev/null
+	jq -e 'select(.id == 4) | .result.isError == false and .result.structuredContent.type == "observation"' "$$out" >/dev/null
 
 install-kwin-script:
 	set -euo pipefail

@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use libplasma_pilot::{
-    DaemonRequest, DaemonResponse, FocusWindowRequest, JournalTailRequest, ScreenshotRequest,
-    ScreenshotTileRequest, default_socket_path,
+    DaemonRequest, DaemonResponse, FocusWindowRequest, JournalTailRequest, ObserveRequest,
+    ScreenshotRequest, ScreenshotTileRequest, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -46,6 +46,14 @@ enum Command {
         height: u32,
         #[arg(long, default_value_t = 1600)]
         max_edge: u32,
+    },
+    Observe {
+        #[arg(long)]
+        screenshot_output: Option<String>,
+        #[arg(long, default_value_t = 1600)]
+        max_edge: u32,
+        #[arg(long)]
+        full_resolution: bool,
     },
     Windows,
     ActiveWindow,
@@ -117,6 +125,24 @@ fn main() -> Result<()> {
                 }),
             )?;
         }
+        Command::Observe {
+            screenshot_output,
+            max_edge,
+            full_resolution,
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::Observe(ObserveRequest {
+                screenshot: screenshot_output.map(|output| ScreenshotRequest {
+                    output: output.into(),
+                    max_edge: if full_resolution {
+                        None
+                    } else {
+                        Some(max_edge)
+                    },
+                    full_resolution,
+                }),
+            }),
+        )?,
         Command::Windows => print_daemon_response(&socket, DaemonRequest::ListWindows)?,
         Command::ActiveWindow => print_daemon_response(&socket, DaemonRequest::ActiveWindow)?,
         Command::Focus { window } => print_daemon_response(

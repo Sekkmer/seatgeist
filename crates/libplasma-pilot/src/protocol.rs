@@ -83,6 +83,19 @@ pub struct JournalTailRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObserveRequest {
+    pub screenshot: Option<ScreenshotRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DesktopObservation {
+    pub active_window: Option<WindowInfo>,
+    pub windows: Vec<WindowInfo>,
+    pub monitors: Vec<MonitorInfo>,
+    pub screenshot: Option<ScreenshotInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FocusWindowRequest {
     pub window_id: String,
 }
@@ -96,6 +109,7 @@ pub enum DaemonRequest {
     ListMonitors,
     ListWindows,
     ActiveWindow,
+    Observe(ObserveRequest),
     Screenshot(ScreenshotRequest),
     ScreenshotTile(ScreenshotTileRequest),
     JournalTail(JournalTailRequest),
@@ -111,6 +125,7 @@ impl DaemonRequest {
             Self::ListMonitors => "list_monitors",
             Self::ListWindows => "list_windows",
             Self::ActiveWindow => "active_window",
+            Self::Observe(_) => "observe",
             Self::Screenshot(_) => "screenshot",
             Self::ScreenshotTile(_) => "screenshot_tile",
             Self::JournalTail(_) => "journal_tail",
@@ -128,6 +143,7 @@ pub enum DaemonResponse {
     Monitors(Vec<MonitorInfo>),
     Windows(Vec<WindowInfo>),
     ActiveWindow(Option<WindowInfo>),
+    Observation(Box<DesktopObservation>),
     Screenshot(ScreenshotInfo),
     Journal(Vec<JournalEntry>),
     Action(Box<ActionResult>),
@@ -232,5 +248,20 @@ mod tests {
         let encoded = serde_json::to_string(&request).expect("focus request serializes");
         assert!(encoded.contains(r#""method":"focus_window""#));
         assert!(encoded.contains(r#""window_id":"{96d3c5da-75ec-4a2a-b75f-05c4c077153b}""#));
+    }
+
+    #[test]
+    fn serializes_observe_request_with_optional_screenshot() {
+        let request = DaemonRequest::Observe(ObserveRequest {
+            screenshot: Some(ScreenshotRequest {
+                output: PathBuf::from("/tmp/observe.png"),
+                max_edge: Some(1200),
+                full_resolution: false,
+            }),
+        });
+        let encoded = serde_json::to_string(&request).expect("observe request serializes");
+        assert!(encoded.contains(r#""method":"observe""#));
+        assert!(encoded.contains(r#"/tmp/observe.png"#));
+        assert!(encoded.contains(r#""max_edge":1200"#));
     }
 }

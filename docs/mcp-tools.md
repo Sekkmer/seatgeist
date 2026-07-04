@@ -10,9 +10,9 @@ Initial tool groups:
 
 All coordinate-bearing tools must require an explicit coordinate space. Full-resolution screenshots and clipboard reads are policy-gated.
 
-Current daemon protocol exposes `screenshot`, `screenshot-tile`, window listing, active-window bridge reads, `focus_window`, and `journal_tail` through the CLI. The MCP stdio server exposes these current daemon-backed tools as `plasma.health`, `plasma.capabilities`, `plasma.policy_status`, `plasma.list_monitors`, `plasma.list_windows`, `plasma.active_window`, `plasma.screenshot`, `plasma.screenshot_tile`, `plasma.focus_window`, and `plasma.journal_tail`.
+Current daemon protocol exposes `observe`, `screenshot`, `screenshot-tile`, window listing, active-window bridge reads, `focus_window`, and `journal_tail` through the CLI. The MCP stdio server exposes these current daemon-backed tools as `plasma.health`, `plasma.capabilities`, `plasma.policy_status`, `plasma.list_monitors`, `plasma.list_windows`, `plasma.active_window`, `plasma.observe`, `plasma.screenshot`, `plasma.screenshot_tile`, `plasma.focus_window`, and `plasma.journal_tail`.
 
-Tile coordinates are physical screenshot pixels. Screenshot responses include full source dimensions, output dimensions, source origin, scale factors, and monitor metadata when KWin responds. Focus is policy-gated control. MCP tool responses return compact text plus structured JSON from the daemon.
+`plasma.observe` returns monitors, windows, active-window state when available, and optional bounded screenshot metadata if `screenshot_output` is provided. Tile coordinates are physical screenshot pixels. Screenshot responses include full source dimensions, output dimensions, source origin, scale factors, and monitor metadata when KWin responds. Focus is policy-gated control. MCP tool responses return compact text plus structured JSON from the daemon.
 
 ## Installation
 
