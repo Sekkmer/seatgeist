@@ -21,14 +21,15 @@ use libplasma_pilot::{
     ClickPointerRequest, ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest,
     DaemonResponse, DesktopObservation, DragPointerRequest, FocusWindowRequest,
     FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus, JournalEntry,
-    KeyComboRequest, KwinBridgeStatus, LibeiStatus, MovePointerRequest, ObserveRequest,
-    PanicStopStatus, Point, PointerButton, PointerCalibrationPoint, PointerCalibrationStatus,
-    PointerMonitorCalibration, PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus,
-    SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
-    ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
-    SetValueRequest, ToggleCheckRequest, ToolApprovalLevel, TypeTextRequest, UinputStatus,
-    WaitForChangeRequest, WaitForChangeResult, WindowGeometry, WindowInfo, current_egid,
-    current_euid, default_journal_path, default_panic_stop_path, default_socket_path,
+    JournalWindowContext, KeyComboRequest, KwinBridgeStatus, LibeiStatus, MovePointerRequest,
+    ObserveRequest, PanicStopStatus, Point, PointerButton, PointerCalibrationPoint,
+    PointerCalibrationStatus, PointerMonitorCalibration, PointerPhysicalBounds, PolicyStatus,
+    RemoteDesktopPortalStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest,
+    ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest, SelectMenuRequest,
+    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, ToggleCheckRequest,
+    ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult,
+    WindowGeometry, WindowInfo, current_egid, current_euid, default_journal_path,
+    default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -57,11 +58,19 @@ impl ActionJournal {
         }
     }
 
-    fn record(&self, method: &str, response: &DaemonResponse) -> Result<()> {
+    fn record(
+        &self,
+        method: &str,
+        context: JournalContext,
+        response: &DaemonResponse,
+    ) -> Result<()> {
         let entry = JournalEntry {
             sequence: self.next_sequence()?,
             unix_time_ms: unix_time_ms()?,
             method: method.to_string(),
+            safety_class: Some(context.safety_class),
+            guard_present: context.guard_present,
+            active_window_before: context.active_window_before,
             ok: !matches!(response, DaemonResponse::Error { .. }),
             summary: summarize_response(response),
         };
@@ -85,6 +94,13 @@ impl ActionJournal {
         *sequence += 1;
         Ok(*sequence)
     }
+}
+
+#[derive(Debug, Clone)]
+struct JournalContext {
+    safety_class: SafetyClass,
+    guard_present: bool,
+    active_window_before: Option<JournalWindowContext>,
 }
 
 const KWIN_BRIDGE_SERVICE: &str = "org.plasmapilot.KWinBridge";
@@ -498,10 +514,11 @@ async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()>
 
     let request = serde_json::from_str::<DaemonRequest>(&line).context("parse daemon request")?;
     let method = request.method_name();
+    let journal_context = journal_context_for_request(&request, &runtime);
     let response = handle_request(request, &runtime);
     runtime
         .journal
-        .record(method, &response)
+        .record(method, journal_context, &response)
         .context("record request in action journal")?;
     let mut stream = reader.into_inner();
     let response_line = serde_json::to_string(&response).context("serialize daemon response")?;
@@ -511,6 +528,49 @@ async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()>
         .context("write response")?;
     stream.write_all(b"\n").await.context("write newline")?;
     Ok(())
+}
+
+fn journal_context_for_request(request: &DaemonRequest, runtime: &DaemonRuntime) -> JournalContext {
+    let safety_class = safety_class_for_request(request);
+    let active_window_before = if is_control_safety_class(&safety_class) {
+        active_window(&runtime.active_window_state)
+            .ok()
+            .flatten()
+            .map(journal_window_context)
+    } else {
+        None
+    };
+    JournalContext {
+        safety_class,
+        guard_present: active_window_guard_for_request(request).is_some(),
+        active_window_before,
+    }
+}
+
+fn journal_window_context(window: WindowInfo) -> JournalWindowContext {
+    JournalWindowContext {
+        id: window.id,
+        app_id: window.app_id,
+        title: compact_journal_title(window.title),
+        monitor_id: window.monitor_id,
+    }
+}
+
+fn compact_journal_title(mut title: String) -> String {
+    const MAX_TITLE_CHARS: usize = 160;
+    if title.chars().count() <= MAX_TITLE_CHARS {
+        return title;
+    }
+    let mut end = 0;
+    for (count, (index, character)) in title.char_indices().enumerate() {
+        if count == MAX_TITLE_CHARS {
+            break;
+        }
+        end = index + character.len_utf8();
+    }
+    title.truncate(end);
+    title.push_str("...");
+    title
 }
 
 fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResponse {
@@ -4154,6 +4214,11 @@ mod tests {
         journal
             .record(
                 "health",
+                JournalContext {
+                    safety_class: SafetyClass::Policy,
+                    guard_present: false,
+                    active_window_before: None,
+                },
                 &DaemonResponse::Health(HealthStatus {
                     service: "plasma-pilotd".to_string(),
                     version: "0.1.0".to_string(),
@@ -4164,6 +4229,16 @@ mod tests {
         journal
             .record(
                 "capabilities",
+                JournalContext {
+                    safety_class: SafetyClass::Observe,
+                    guard_present: true,
+                    active_window_before: Some(JournalWindowContext {
+                        id: "window-1".to_string(),
+                        app_id: Some("org.kde.kate".to_string()),
+                        title: "main.rs".to_string(),
+                        monitor_id: Some("main".to_string()),
+                    }),
+                },
                 &DaemonResponse::Capabilities(CapabilitySet {
                     capabilities: vec![BackendCapability::DaemonHealth],
                 }),
@@ -4176,6 +4251,15 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].sequence, 2);
         assert_eq!(entries[0].method, "capabilities");
+        assert_eq!(entries[0].safety_class, Some(SafetyClass::Observe));
+        assert!(entries[0].guard_present);
+        assert_eq!(
+            entries[0]
+                .active_window_before
+                .as_ref()
+                .and_then(|window| window.app_id.as_deref()),
+            Some("org.kde.kate")
+        );
         assert!(entries[0].ok);
 
         let entries = journal

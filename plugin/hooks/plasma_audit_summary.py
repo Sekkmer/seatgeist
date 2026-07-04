@@ -52,8 +52,9 @@ def recent_journal_entries(root: Path, limit: int = 20) -> list[dict[str, Any]]:
                     "sequence": entry.get("sequence"),
                     "method": entry.get("method"),
                     "ok": entry.get("ok"),
-                    "response_type": entry.get("response_type"),
                     "safety_class": entry.get("safety_class"),
+                    "guard_present": entry.get("guard_present", False),
+                    "active_window_before": entry.get("active_window_before"),
                 }
             )
     return entries[-limit:]

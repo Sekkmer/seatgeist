@@ -145,8 +145,24 @@ pub struct JournalEntry {
     pub sequence: u64,
     pub unix_time_ms: u64,
     pub method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safety_class: Option<SafetyClass>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub guard_present: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_window_before: Option<JournalWindowContext>,
     pub ok: bool,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalWindowContext {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -861,6 +877,41 @@ mod tests {
         assert!(encoded.contains(r#""limit":10"#));
         assert!(encoded.contains(r#""method_filter":"focus_window""#));
         assert!(encoded.contains(r#""ok":false"#));
+    }
+
+    #[test]
+    fn parses_legacy_journal_entry_without_context() {
+        let entry = serde_json::from_str::<JournalEntry>(
+            r#"{"sequence":1,"unix_time_ms":1000,"method":"health","ok":true,"summary":"ok"}"#,
+        )
+        .expect("legacy journal entry parses");
+        assert_eq!(entry.safety_class, None);
+        assert!(!entry.guard_present);
+        assert_eq!(entry.active_window_before, None);
+    }
+
+    #[test]
+    fn serializes_journal_entry_context() {
+        let entry = JournalEntry {
+            sequence: 2,
+            unix_time_ms: 1001,
+            method: "focus_window".to_string(),
+            safety_class: Some(SafetyClass::ControlSemantic),
+            guard_present: true,
+            active_window_before: Some(JournalWindowContext {
+                id: "window-1".to_string(),
+                app_id: Some("org.kde.kate".to_string()),
+                title: "main.rs".to_string(),
+                monitor_id: Some("main".to_string()),
+            }),
+            ok: false,
+            summary: "policy denied".to_string(),
+        };
+        let encoded = serde_json::to_string(&entry).expect("journal context serializes");
+        assert!(encoded.contains(r#""safety_class":"control_semantic""#));
+        assert!(encoded.contains(r#""guard_present":true"#));
+        assert!(encoded.contains(r#""active_window_before""#));
+        assert!(encoded.contains(r#""app_id":"org.kde.kate""#));
     }
 
     #[test]

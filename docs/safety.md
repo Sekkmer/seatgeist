@@ -10,7 +10,7 @@ Default rules:
 - Full-resolution screenshots default to prompt and require an explicit daemon approval mode before the backend capture path runs.
 - Privileged input backends default to prompt.
 - Focus guards should be supplied for pointer, keyboard, and semantic control actions whenever the caller has active-window context.
-- Daemon requests are journaled as compact JSONL records with restrictive file permissions.
+- Daemon requests are journaled as compact JSONL records with restrictive file permissions. Journal entries include safety class and guard/context metadata, but must not store raw request payload text or screenshot contents.
 - Daemon requests pass through the policy engine before execution; prompt-level decisions fail closed until a trusted approval channel is implemented.
 - The daemon reads optional path and policy defaults from `~/.config/plasma-pilot/config.toml` or `--config` / `PLASMA_PILOT_CONFIG`. Explicit CLI/env approval flags override file policy defaults for intentional local sessions.
 - Configured app deny rules block control-class actions before backend execution. If an app allow list is configured, control-class actions require a matching app id; deny rules take precedence.
