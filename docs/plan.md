@@ -755,12 +755,14 @@ Tasks:
 - Implement `health`, `capabilities`, `policy_status`.
 - Implement CLI commands for health/capabilities.
 - Add systemd user service/socket files.
+- Add a focused daemon/CLI smoke command using a temporary socket before enabling the user service.
 
 Acceptance criteria:
 
 - `systemctl --user start plasma-pilotd` works.
 - `plasma-pilot-cli doctor` reports daemon status.
 - Daemon refuses clients from wrong UID or unsafe socket permissions.
+- `plasma-pilot-cli capabilities` and `plasma-pilot-cli policy-status` return daemon responses.
 
 ### Phase 2: Screenshot and monitor observation
 

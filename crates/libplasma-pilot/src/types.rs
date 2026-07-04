@@ -5,6 +5,7 @@ use uuid::Uuid;
 pub type WindowId = String;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CoordinateSpace {
     PhysicalPixel,
     LogicalPixel,
@@ -20,6 +21,7 @@ pub struct Point {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ScreenshotTarget {
     ActiveWindow,
     Monitor(String),
@@ -78,6 +80,7 @@ pub struct AccessibilityNode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AccessibilityAction {
     Press,
     SetText,
@@ -86,6 +89,7 @@ pub enum AccessibilityAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolApprovalLevel {
     Allow,
     Prompt,
@@ -93,6 +97,7 @@ pub enum ToolApprovalLevel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SafetyClass {
     Observe,
     ClipboardRead,
@@ -104,7 +109,10 @@ pub enum SafetyClass {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BackendCapability {
+    DaemonHealth,
+    DaemonPolicyStatus,
     Screenshot,
     MonitorMetadata,
     WindowList,
