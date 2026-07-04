@@ -4,16 +4,16 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use libplasma_pilot::{
     AccessibilityAction, AccessibilityDeleteTextRequest, AccessibilityFindRequest,
-    AccessibilityInsertTextRequest, AccessibilityInvokeRequest, AccessibilitySetTextRequest,
-    ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest, ClickPointerRequest,
-    ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES,
-    DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
-    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest, DaemonResponse, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, MovePointerRequest,
-    ObserveRequest, Point, PointerButton, ReplayTrace, ScreenshotRequest, ScreenshotTileRequest,
-    ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
-    SetValueRequest, ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest,
-    default_socket_path,
+    AccessibilityInsertTextRequest, AccessibilityInvokeRequest, AccessibilityPasteTextRequest,
+    AccessibilitySetTextRequest, ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest,
+    ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace,
+    DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
+    DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
+    DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
+    KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton, ReplayTrace,
+    ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectMenuRequest,
+    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
+    WaitForChangeRequest, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -277,6 +277,18 @@ enum AtspiCommand {
         start_offset: i32,
         #[arg(long)]
         end_offset: i32,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
+    PasteText {
+        #[arg(long)]
+        node: String,
+        #[arg(long)]
+        offset: i32,
         #[arg(long)]
         expected_active_window: Option<String>,
         #[arg(long)]
@@ -789,6 +801,27 @@ fn main() -> Result<()> {
                 node_id: node,
                 start_offset,
                 end_offset,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
+        )?,
+        Command::Atspi {
+            command:
+                AtspiCommand::PasteText {
+                    node,
+                    offset,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::AccessibilityPasteText(AccessibilityPasteTextRequest {
+                node_id: node,
+                offset,
                 guard: active_window_guard(
                     expected_active_window,
                     expected_active_app,

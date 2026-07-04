@@ -351,6 +351,7 @@ trait AccessibilityBackend {
     fn set_text(&self, node: NodeId, text: &str) -> Result<()>;
     fn insert_text(&self, node: NodeId, offset: i32, text: &str) -> Result<()>;
     fn delete_text(&self, node: NodeId, start_offset: i32, end_offset: i32) -> Result<()>;
+    fn paste_text(&self, node: NodeId, offset: i32) -> Result<()>;
 }
 ```
 
@@ -477,6 +478,7 @@ pilot.a11y_invoke(node_id, action, guard?)
 pilot.a11y_set_text(node_id, text, guard?)
 pilot.a11y_insert_text(node_id, offset, text, guard?)
 pilot.a11y_delete_text(node_id, start_offset, end_offset, guard?)
+pilot.a11y_paste_text(node_id, offset, guard?)
 ```
 
 These should be added after the pixel/control MVP is stable.
@@ -938,6 +940,7 @@ Tasks:
 - [x] Implement set text where `org.a11y.atspi.EditableText` is supported.
 - [x] Implement insert text where `org.a11y.atspi.EditableText` is supported. Current status: CLI/MCP expose policy-gated `a11y_insert_text` with active-window guards, offset validation, an 8192-character text cap, and content-free summaries.
 - [x] Implement delete text where `org.a11y.atspi.EditableText` is supported. Current status: CLI/MCP expose policy-gated `a11y_delete_text` with active-window guards, range validation, and offset-only summaries.
+- [x] Implement paste text where `org.a11y.atspi.EditableText` is supported. Current status: CLI/MCP expose policy-gated `a11y_paste_text` with active-window guards, offset validation, and offset-only summaries; PlasmaPilot does not read clipboard contents for this operation.
 - [x] Add secret/password-field detection.
 
 Acceptance criteria:
@@ -973,7 +976,7 @@ Goal: prevent regressions and measure usefulness.
 
 Tasks:
 
-- Add mock backends for unit tests. Current status: `plasma-pilot-testkit` provides deterministic screen, window, input, clipboard, and accessibility mocks with call recording; the accessibility mock now covers focused-tree reads, find requests, invoke calls, set-text calls, insert-text calls, and delete-text calls.
+- Add mock backends for unit tests. Current status: `plasma-pilot-testkit` provides deterministic screen, window, input, clipboard, and accessibility mocks with call recording; the accessibility mock now covers focused-tree reads, find requests, invoke calls, set-text calls, insert-text calls, delete-text calls, and paste-text calls.
 - Add integration tests for CLI and daemon protocol. Current status: daemon core protocol and low-risk CLI status commands have Rust integration tests; GUI/desktop CLI coverage remains in smoke targets.
 - Add optional local GUI eval scripts. Current status: `scripts/gui-eval.sh` runs current non-control evals for daemon status, observe, default clipboard-read denial, bounded screenshot preview metadata, screenshot preview coordinate mapping, full-resolution screenshot policy denial, and journal output; `scripts/gui-eval.sh control-safety` and `make gui-eval-control-safety` start a private control-approved daemon and verify active-window guard denial plus panic-stop denial before backend control can execute.
 - Add replayable action traces. Current status: `ReplayTrace` stores daemon requests with expected response metadata, and `plasma-pilot-cli trace replay --file <path>` replays each step through the daemon so policy checks and journaling still apply.

@@ -322,6 +322,14 @@ pub struct AccessibilityDeleteTextRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessibilityPasteTextRequest {
+    pub node_id: String,
+    pub offset: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActiveWindowGuard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_window_id: Option<String>,
@@ -483,6 +491,7 @@ pub enum DaemonRequest {
     AccessibilitySetText(AccessibilitySetTextRequest),
     AccessibilityInsertText(AccessibilityInsertTextRequest),
     AccessibilityDeleteText(AccessibilityDeleteTextRequest),
+    AccessibilityPasteText(AccessibilityPasteTextRequest),
     TypeText(TypeTextRequest),
     KeyCombo(KeyComboRequest),
     MovePointer(MovePointerRequest),
@@ -525,6 +534,7 @@ impl DaemonRequest {
             Self::AccessibilitySetText(_) => "accessibility_set_text",
             Self::AccessibilityInsertText(_) => "accessibility_insert_text",
             Self::AccessibilityDeleteText(_) => "accessibility_delete_text",
+            Self::AccessibilityPasteText(_) => "accessibility_paste_text",
             Self::TypeText(_) => "type_text",
             Self::KeyCombo(_) => "key_combo",
             Self::MovePointer(_) => "move_pointer",
@@ -1180,6 +1190,20 @@ mod tests {
         assert_eq!(
             encoded,
             r#"{"method":"accessibility_delete_text","node_id":"atspi://:1.42/org/a11y/atspi/accessible/7","start_offset":2,"end_offset":5}"#
+        );
+    }
+
+    #[test]
+    fn serializes_accessibility_paste_text_request() {
+        let request = DaemonRequest::AccessibilityPasteText(AccessibilityPasteTextRequest {
+            node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+            offset: 5,
+            guard: None,
+        });
+        let encoded = serde_json::to_string(&request).expect("a11y paste-text request serializes");
+        assert_eq!(
+            encoded,
+            r#"{"method":"accessibility_paste_text","node_id":"atspi://:1.42/org/a11y/atspi/accessible/7","offset":5}"#
         );
     }
 

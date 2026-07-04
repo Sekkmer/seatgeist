@@ -48,4 +48,5 @@ pub trait AccessibilityBackend: Send + Sync {
     async fn set_text(&self, node_id: &str, text: &str) -> Result<()>;
     async fn insert_text(&self, node_id: &str, offset: i32, text: &str) -> Result<()>;
     async fn delete_text(&self, node_id: &str, start_offset: i32, end_offset: i32) -> Result<()>;
+    async fn paste_text(&self, node_id: &str, offset: i32) -> Result<()>;
 }

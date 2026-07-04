@@ -230,6 +230,8 @@ smoke-atspi:
 	grep -q "policy" "$$out"
 	if target/debug/plasma-pilot-cli --socket "$$socket" atspi delete-text --node atspi://:1.42/org/a11y/atspi/accessible/7 --start-offset 0 --end-offset 1 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
 	grep -q "policy" "$$out"
+	if target/debug/plasma-pilot-cli --socket "$$socket" atspi paste-text --node atspi://:1.42/org/a11y/atspi/accessible/7 --offset 0 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
+	grep -q "policy" "$$out"
 	if target/debug/plasma-pilot-cli --socket "$$socket" semantic click-button --name OK --max-nodes 128 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
 	grep -q "policy" "$$out"
 	if target/debug/plasma-pilot-cli --socket "$$socket" semantic set-text-field --name Search smoke-text --max-nodes 128 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
@@ -248,6 +250,7 @@ smoke-atspi:
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "accessibility_set_text"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "accessibility_insert_text"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "accessibility_delete_text"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "accessibility_paste_text"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "click_button"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "set_text_field"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "activate_tab"

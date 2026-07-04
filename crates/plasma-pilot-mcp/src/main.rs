@@ -8,16 +8,16 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use libplasma_pilot::{
     AccessibilityAction, AccessibilityDeleteTextRequest, AccessibilityFindRequest,
-    AccessibilityInsertTextRequest, AccessibilityInvokeRequest, AccessibilitySetTextRequest,
-    ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest, ClickPointerRequest,
-    ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES,
-    DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
-    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest, DaemonResponse, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, MovePointerRequest,
-    ObserveRequest, Point, PointerButton, ScreenshotRequest, ScreenshotTileRequest,
-    ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
-    SetValueRequest, ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest,
-    default_socket_path,
+    AccessibilityInsertTextRequest, AccessibilityInvokeRequest, AccessibilityPasteTextRequest,
+    AccessibilitySetTextRequest, ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest,
+    ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace,
+    DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
+    DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
+    DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
+    KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton, ScreenshotRequest,
+    ScreenshotTileRequest, ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest,
+    SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
+    WaitForChangeRequest, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -369,6 +369,13 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 node_id: required_string(arguments, "node_id")?,
                 start_offset: required_i32(arguments, "start_offset")?,
                 end_offset: required_i32(arguments, "end_offset")?,
+                guard: active_window_guard(arguments)?,
+            },
+        )),
+        "plasma.a11y_paste_text" => Ok(DaemonRequest::AccessibilityPasteText(
+            AccessibilityPasteTextRequest {
+                node_id: required_string(arguments, "node_id")?,
+                offset: required_i32(arguments, "offset")?,
                 guard: active_window_guard(arguments)?,
             },
         )),
@@ -1253,6 +1260,24 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "plasma.a11y_paste_text",
+            "Paste Accessibility Text",
+            "Paste current system clipboard text at a character offset on a non-sensitive AT-SPI EditableText node. This is policy-gated semantic control and summaries report offset only.",
+            object_schema(
+                with_guard_properties(vec![
+                    (
+                        "node_id",
+                        json!({"type": "string", "description": "AT-SPI node id from a previous accessibility result."}),
+                    ),
+                    (
+                        "offset",
+                        json!({"type": "integer", "minimum": 0, "description": "Character offset at which to paste clipboard text."}),
+                    ),
+                ]),
+                vec!["node_id", "offset"],
+            ),
+        ),
+        tool(
             "plasma.journal_tail",
             "Journal Tail",
             "Read recent compact daemon journal entries.",
@@ -1612,6 +1637,11 @@ mod tests {
             tools
                 .iter()
                 .any(|tool| tool["name"] == "plasma.a11y_set_text")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.a11y_paste_text")
         );
     }
 
@@ -2190,6 +2220,26 @@ mod tests {
                 node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
                 start_offset: 2,
                 end_offset: 5,
+                guard: None,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_accessibility_paste_text_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.a11y_paste_text",
+            &json!({
+                "node_id": "atspi://:1.42/org/a11y/atspi/accessible/7",
+                "offset": 5
+            }),
+        )
+        .expect("a11y paste-text args map");
+        assert_eq!(
+            request,
+            DaemonRequest::AccessibilityPasteText(AccessibilityPasteTextRequest {
+                node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                offset: 5,
                 guard: None,
             })
         );
