@@ -116,11 +116,12 @@ smoke-focus:
 	socket="/tmp/plasma-pilot-focus-smoke/plasma-pilotd.sock"
 	log="target/plasma-pilot-focus-smoke-daemon.log"
 	journal="target/plasma-pilot-focus-smoke-journal.jsonl"
+	approval_file="target/plasma-pilot-focus-smoke/approvals.jsonl"
 	windows="target/plasma-pilot-focus-smoke-windows.json"
 	focus="target/plasma-pilot-focus-smoke-action.json"
-	rm -rf /tmp/plasma-pilot-focus-smoke "$$log" "$$journal" "$$windows" "$$focus"
+	rm -rf /tmp/plasma-pilot-focus-smoke target/plasma-pilot-focus-smoke "$$log" "$$journal" "$$windows" "$$focus"
 	cargo build -p plasma-pilotd -p plasma-pilot-cli
-	target/debug/plasma-pilotd --socket "$$socket" --journal "$$journal" --allow-control >"$$log" 2>&1 &
+	target/debug/plasma-pilotd --socket "$$socket" --journal "$$journal" --approval-file "$$approval_file" >"$$log" 2>&1 &
 	pid=$$!
 	cleanup() {
 		kill "$$pid" 2>/dev/null || true
@@ -137,6 +138,8 @@ smoke-focus:
 		cat "$$log"
 		exit 1
 	fi
+	target/debug/plasma-pilot-cli --socket "$$socket" approve --approval-file "$$approval_file" --safety-class control-semantic --method focus_window --ttl-ms 60000 --reason "smoke-focus" >/dev/null
+	test "$$(stat -c '%a' "$$approval_file")" = "600"
 	target/debug/plasma-pilot-cli --socket "$$socket" windows >"$$windows"
 	match_id=$$(qdbus6 --literal org.kde.KWin /WindowsRunner org.kde.krunner1.Match "" | sed -n 's/.*(sssida{sv}) "\(0_{[^"]*}\)".*/\1/p' | head -n 1)
 	if [[ -z "$$match_id" ]]; then
@@ -153,13 +156,14 @@ smoke-clipboard:
 	socket="/tmp/plasma-pilot-clipboard-smoke/plasma-pilotd.sock"
 	log="target/plasma-pilot-clipboard-smoke-daemon.log"
 	journal="target/plasma-pilot-clipboard-smoke-journal.jsonl"
+	approval_file="target/plasma-pilot-clipboard-smoke/approvals.jsonl"
 	previous_json="target/plasma-pilot-clipboard-previous.json"
 	previous_text="target/plasma-pilot-clipboard-previous.txt"
 	current_json="target/plasma-pilot-clipboard-current.json"
 	set_result="target/plasma-pilot-clipboard-set.json"
-	rm -rf /tmp/plasma-pilot-clipboard-smoke "$$log" "$$journal" "$$previous_json" "$$previous_text" "$$current_json" "$$set_result"
+	rm -rf /tmp/plasma-pilot-clipboard-smoke target/plasma-pilot-clipboard-smoke "$$log" "$$journal" "$$previous_json" "$$previous_text" "$$current_json" "$$set_result"
 	cargo build -p plasma-pilotd -p plasma-pilot-cli
-	target/debug/plasma-pilotd --socket "$$socket" --journal "$$journal" --allow-clipboard-read >"$$log" 2>&1 &
+	target/debug/plasma-pilotd --socket "$$socket" --journal "$$journal" --approval-file "$$approval_file" >"$$log" 2>&1 &
 	pid=$$!
 	cleanup() {
 		if [[ -f "$$previous_text" ]]; then
@@ -180,6 +184,8 @@ smoke-clipboard:
 		cat "$$log"
 		exit 1
 	fi
+	target/debug/plasma-pilot-cli --socket "$$socket" approve --approval-file "$$approval_file" --safety-class clipboard-read --method clipboard_get --ttl-ms 60000 --reason "smoke-clipboard read" >/dev/null
+	test "$$(stat -c '%a' "$$approval_file")" = "600"
 	if target/debug/plasma-pilot-cli --socket "$$socket" clipboard get >"$$previous_json" 2>/dev/null; then
 		jq -r '.data.text' "$$previous_json" >"$$previous_text"
 	fi
