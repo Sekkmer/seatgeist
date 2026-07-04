@@ -8,9 +8,9 @@ use libplasma_pilot::{
     ClipboardGetRequest, ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES,
     DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
     DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest, DaemonResponse, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest, ReplayTrace,
-    ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest, SetPanicStopRequest,
-    SetTextFieldRequest, WaitForChangeRequest, default_socket_path,
+    FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, ObserveRequest,
+    ReplayTrace, ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest, SetPanicStopRequest,
+    SetTextFieldRequest, TypeTextRequest, WaitForChangeRequest, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -90,6 +90,10 @@ enum Command {
         #[command(subcommand)]
         command: ClipboardCommand,
     },
+    Input {
+        #[command(subcommand)]
+        command: InputCommand,
+    },
     Atspi {
         #[command(subcommand)]
         command: AtspiCommand,
@@ -123,6 +127,30 @@ enum ClipboardCommand {
     Set {
         #[arg(value_name = "TEXT")]
         text: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum InputCommand {
+    TypeText {
+        #[arg(value_name = "TEXT")]
+        text: String,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
+    KeyCombo {
+        #[arg(value_name = "COMBO")]
+        combo: String,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
     },
 }
 
@@ -393,6 +421,44 @@ fn main() -> Result<()> {
         } => print_daemon_response(
             &socket,
             DaemonRequest::ClipboardSet(ClipboardSetRequest { text }),
+        )?,
+        Command::Input {
+            command:
+                InputCommand::TypeText {
+                    text,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::TypeText(TypeTextRequest {
+                text,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
+        )?,
+        Command::Input {
+            command:
+                InputCommand::KeyCombo {
+                    combo,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::KeyCombo(KeyComboRequest {
+                combo,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
         )?,
         Command::Atspi {
             command:

@@ -12,9 +12,9 @@ use libplasma_pilot::{
     ClipboardGetRequest, ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES,
     DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
     DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest, DaemonResponse, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest, ScreenshotRequest,
-    ScreenshotTileRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
-    WaitForChangeRequest, default_socket_path,
+    FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, ObserveRequest,
+    ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest, SetPanicStopRequest,
+    SetTextFieldRequest, TypeTextRequest, WaitForChangeRequest, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -349,6 +349,14 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 guard: active_window_guard(arguments)?,
             },
         )),
+        "plasma.type_text" => Ok(DaemonRequest::TypeText(TypeTextRequest {
+            text: required_string(arguments, "text")?,
+            guard: active_window_guard(arguments)?,
+        })),
+        "plasma.key_combo" => Ok(DaemonRequest::KeyCombo(KeyComboRequest {
+            combo: required_string(arguments, "combo")?,
+            guard: active_window_guard(arguments)?,
+        })),
         "plasma.click_button" => Ok(DaemonRequest::ClickButton(ClickButtonRequest {
             name: required_string(arguments, "name")?,
             app: optional_string(arguments, "app")?,
@@ -676,6 +684,30 @@ fn tool_definitions() -> Vec<Value> {
                     json!({"type": "string", "description": "KWin window id from plasma.list_windows."}),
                 )]),
                 vec!["window_id"],
+            ),
+        ),
+        tool(
+            "plasma.type_text",
+            "Type Text",
+            "Type US-keyboard-mapped text through the Linux uinput backend. This is policy-gated keyboard control and summaries report text length only.",
+            object_schema(
+                with_guard_properties(vec![(
+                    "text",
+                    json!({"type": "string", "description": "Text to type. Current uinput backend supports US keyboard ASCII plus newline and tab."}),
+                )]),
+                vec!["text"],
+            ),
+        ),
+        tool(
+            "plasma.key_combo",
+            "Key Combo",
+            "Send a key combination through the Linux uinput backend, such as Ctrl+L or Alt+F4. This is policy-gated keyboard control.",
+            object_schema(
+                with_guard_properties(vec![(
+                    "combo",
+                    json!({"type": "string", "description": "Key combination, such as Ctrl+L, Shift+F4, or Super+Space."}),
+                )]),
+                vec!["combo"],
             ),
         ),
         tool(
@@ -1139,6 +1171,8 @@ mod tests {
                 .iter()
                 .any(|tool| tool["name"] == "plasma.wait_for_change")
         );
+        assert!(tools.iter().any(|tool| tool["name"] == "plasma.type_text"));
+        assert!(tools.iter().any(|tool| tool["name"] == "plasma.key_combo"));
         assert!(
             tools
                 .iter()
@@ -1271,6 +1305,29 @@ mod tests {
                     expected_app_id: Some("org.kde.kate".to_string()),
                     title_contains: Some("main.rs".to_string()),
                 }),
+            })
+        );
+    }
+
+    #[test]
+    fn maps_keyboard_input_arguments() {
+        let type_text = daemon_request_for_tool("plasma.type_text", &json!({"text": "hello"}))
+            .expect("type text maps");
+        assert_eq!(
+            type_text,
+            DaemonRequest::TypeText(TypeTextRequest {
+                text: "hello".to_string(),
+                guard: None,
+            })
+        );
+
+        let key_combo = daemon_request_for_tool("plasma.key_combo", &json!({"combo": "Ctrl+L"}))
+            .expect("key combo maps");
+        assert_eq!(
+            key_combo,
+            DaemonRequest::KeyCombo(KeyComboRequest {
+                combo: "Ctrl+L".to_string(),
+                guard: None,
             })
         );
     }

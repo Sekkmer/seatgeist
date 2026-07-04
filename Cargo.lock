@@ -632,6 +632,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "plasma-pilot-uinput"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+]
+
+[[package]]
 name = "plasma-pilotd"
 version = "0.1.0"
 dependencies = [
@@ -642,6 +650,7 @@ dependencies = [
  "plasma-pilot-atspi",
  "plasma-pilot-kwin",
  "plasma-pilot-policy",
+ "plasma-pilot-uinput",
  "serde",
  "serde_json",
  "tokio",

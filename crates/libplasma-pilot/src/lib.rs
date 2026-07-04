@@ -9,10 +9,10 @@ pub use protocol::{
     DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
     DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
     DaemonResponse, DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest,
-    HealthStatus, JournalEntry, JournalTailRequest, KwinBridgeStatus, ObserveRequest,
-    PanicStopStatus, PolicyStatus, ReplayTrace, ScreenshotInfo, ScreenshotRequest,
+    HealthStatus, JournalEntry, JournalTailRequest, KeyComboRequest, KwinBridgeStatus,
+    ObserveRequest, PanicStopStatus, PolicyStatus, ReplayTrace, ScreenshotInfo, ScreenshotRequest,
     ScreenshotTileRequest, ScreenshotTransform, SelectMenuRequest, SetPanicStopRequest,
-    SetTextFieldRequest, TraceStep, WaitForChangeRequest, WaitForChangeResult,
+    SetTextFieldRequest, TraceStep, TypeTextRequest, WaitForChangeRequest, WaitForChangeResult,
 };
 pub use runtime::{
     current_euid, default_journal_path, default_panic_stop_path, default_socket_path,

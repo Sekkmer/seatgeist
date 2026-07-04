@@ -226,6 +226,20 @@ pub struct ActiveWindowGuard {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypeTextRequest {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyComboRequest {
+    pub combo: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClickButtonRequest {
     pub name: String,
     pub app: Option<String>,
@@ -303,6 +317,8 @@ pub enum DaemonRequest {
     AccessibilityFind(AccessibilityFindRequest),
     AccessibilityInvoke(AccessibilityInvokeRequest),
     AccessibilitySetText(AccessibilitySetTextRequest),
+    TypeText(TypeTextRequest),
+    KeyCombo(KeyComboRequest),
     ClickButton(ClickButtonRequest),
     SetTextField(SetTextFieldRequest),
     ActivateTab(ActivateTabRequest),
@@ -333,6 +349,8 @@ impl DaemonRequest {
             Self::AccessibilityFind(_) => "accessibility_find",
             Self::AccessibilityInvoke(_) => "accessibility_invoke",
             Self::AccessibilitySetText(_) => "accessibility_set_text",
+            Self::TypeText(_) => "type_text",
+            Self::KeyCombo(_) => "key_combo",
             Self::ClickButton(_) => "click_button",
             Self::SetTextField(_) => "set_text_field",
             Self::ActivateTab(_) => "activate_tab",
@@ -864,6 +882,23 @@ mod tests {
         assert!(encoded.contains(r#""expected_window_id":"current-window""#));
         assert!(encoded.contains(r#""expected_app_id":"org.kde.kate""#));
         assert!(encoded.contains(r#""title_contains":"main.rs""#));
+    }
+
+    #[test]
+    fn serializes_keyboard_control_requests() {
+        let type_text = DaemonRequest::TypeText(TypeTextRequest {
+            text: "hello".to_string(),
+            guard: None,
+        });
+        let encoded = serde_json::to_string(&type_text).expect("type text request serializes");
+        assert_eq!(encoded, r#"{"method":"type_text","text":"hello"}"#);
+
+        let key_combo = DaemonRequest::KeyCombo(KeyComboRequest {
+            combo: "Ctrl+L".to_string(),
+            guard: None,
+        });
+        let encoded = serde_json::to_string(&key_combo).expect("key combo request serializes");
+        assert_eq!(encoded, r#"{"method":"key_combo","combo":"Ctrl+L"}"#);
     }
 
     #[test]

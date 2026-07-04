@@ -18,11 +18,11 @@ use libplasma_pilot::{
     ActionResult, ActivateTabRequest, ActiveWindowGuard, BackendCapability, CapabilitySet,
     ClickButtonRequest, ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest,
     DaemonResponse, DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest,
-    HealthStatus, JournalEntry, KwinBridgeStatus, ObserveRequest, PanicStopStatus, PolicyStatus,
-    SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
-    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, ToolApprovalLevel,
-    WaitForChangeRequest, WaitForChangeResult, WindowGeometry, WindowInfo, current_euid,
-    default_journal_path, default_panic_stop_path, default_socket_path,
+    HealthStatus, JournalEntry, KeyComboRequest, KwinBridgeStatus, ObserveRequest, PanicStopStatus,
+    PolicyStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest,
+    ScreenshotTransform, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
+    ToolApprovalLevel, TypeTextRequest, WaitForChangeRequest, WaitForChangeResult, WindowGeometry,
+    WindowInfo, current_euid, default_journal_path, default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -529,6 +529,18 @@ fn handle_request(
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::TypeText(request) => match type_text(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
+        DaemonRequest::KeyCombo(request) => match key_combo(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::ClickButton(request) => match click_button(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
             Err(err) => DaemonResponse::Error {
@@ -765,6 +777,8 @@ fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWin
         DaemonRequest::FocusWindow(request) => request.guard.as_ref(),
         DaemonRequest::AccessibilityInvoke(request) => request.guard.as_ref(),
         DaemonRequest::AccessibilitySetText(request) => request.guard.as_ref(),
+        DaemonRequest::TypeText(request) => request.guard.as_ref(),
+        DaemonRequest::KeyCombo(request) => request.guard.as_ref(),
         DaemonRequest::ClickButton(request) => request.guard.as_ref(),
         DaemonRequest::SetTextField(request) => request.guard.as_ref(),
         DaemonRequest::ActivateTab(request) => request.guard.as_ref(),
@@ -793,6 +807,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::AccessibilityFind(_) => SafetyClass::Observe,
         DaemonRequest::ClipboardGet(_) => SafetyClass::ClipboardRead,
         DaemonRequest::ClipboardSet(_) => SafetyClass::ClipboardWrite,
+        DaemonRequest::TypeText(_) | DaemonRequest::KeyCombo(_) => SafetyClass::ControlKeyboard,
         DaemonRequest::FocusWindow(_)
         | DaemonRequest::AccessibilityInvoke(_)
         | DaemonRequest::AccessibilitySetText(_)
@@ -825,6 +840,9 @@ fn current_capabilities() -> Vec<BackendCapability> {
     }
     if command_exists("wl-copy") && command_exists("wl-paste") {
         capabilities.push(BackendCapability::ClipboardText);
+    }
+    if plasma_pilot_uinput::available() {
+        capabilities.push(BackendCapability::KeyboardInput);
     }
     if command_exists("busctl") && plasma_pilot_atspi::available() {
         capabilities.push(BackendCapability::AccessibilityTree);
@@ -1264,6 +1282,39 @@ fn accessibility_set_text(request: AccessibilitySetTextRequest) -> Result<Action
             request.text.chars().count(),
             request.node_id
         )),
+    })
+}
+
+fn type_text(request: TypeTextRequest) -> Result<ActionResult> {
+    if request.text.is_empty() {
+        bail!("text must be non-empty");
+    }
+    if request.text.chars().count() > 8192 {
+        bail!("text must be at most 8192 characters");
+    }
+    plasma_pilot_uinput::type_text(&request.text).map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "typed text length={}",
+            request.text.chars().count()
+        )),
+    })
+}
+
+fn key_combo(request: KeyComboRequest) -> Result<ActionResult> {
+    if request.combo.trim().is_empty() {
+        bail!("combo must be non-empty");
+    }
+    let key_count =
+        plasma_pilot_uinput::key_combo(&request.combo).map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!("sent key combo keys={key_count}")),
     })
 }
 
@@ -2413,6 +2464,48 @@ mod tests {
         )
         .expect_err("focus requires control approval by default");
         assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
+    fn keyboard_input_is_control_keyboard_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::TypeText(TypeTextRequest {
+                text: "hello".to_string(),
+                guard: None,
+            }),
+        )
+        .expect_err("type_text requires keyboard control approval by default");
+        assert!(err.to_string().contains("ControlKeyboard"));
+
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::KeyCombo(KeyComboRequest {
+                combo: "Ctrl+L".to_string(),
+                guard: None,
+            }),
+        )
+        .expect_err("key_combo requires keyboard control approval by default");
+        assert!(err.to_string().contains("ControlKeyboard"));
+    }
+
+    #[test]
+    fn panic_stop_blocks_keyboard_input_after_policy_allows_it() {
+        let path = temp_test_path("panic-stop-blocks-keyboard");
+        fs::write(&path, "enabled").expect("panic-stop fixture file is written");
+        let panic_stop = PanicStopState::new(path.clone());
+
+        let err = enforce_panic_stop(
+            &panic_stop,
+            &DaemonRequest::TypeText(TypeTextRequest {
+                text: "hello".to_string(),
+                guard: None,
+            }),
+        )
+        .expect_err("panic-stop blocks keyboard control");
+        assert!(err.to_string().contains("panic-stop is active"));
+        fs::remove_file(&path).ok();
     }
 
     #[test]

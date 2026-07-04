@@ -800,17 +800,18 @@ Goal: Codex can click/type through controlled virtual input.
 
 Tasks:
 
-- Implement `InputBackend` using uinput.
-- Create virtual keyboard and pointer devices.
-- Add udev/polkit/systemd instructions.
-- Implement move, click, double-click, scroll, key combo, type text.
+- [x] Implement initial keyboard input backend using uinput. Current status: `plasma-pilot-uinput` creates a short-lived `/dev/uinput` virtual keyboard with `UI_DEV_SETUP`; daemon/CLI/MCP expose `type_text` and `key_combo` as policy-gated `ControlKeyboard`.
+- Create virtual pointer device and absolute/relative pointer mapping.
+- Add udev/polkit/systemd instructions. Current status: skeleton files exist; keyboard uinput access currently relies on `/dev/uinput` being readable/writable by the daemon process.
+- Implement move, click, double-click, and scroll.
+- [x] Implement key combo and type text. Current status: US evdev ASCII text plus newline/tab and named key combos such as `Ctrl+L` are supported; non-US text is rejected instead of guessed.
 - Implement focus guard checks before actions. Current status: current daemon control requests accept optional active-window guards (`expected_active_window`, `expected_active_app`, and `active_title_contains`) and reject stale guards before execution.
 - [x] Add panic-stop flag. Current status: `plasma-pilotd` has a file-backed panic-stop state, `plasma-pilot-cli panic-stop status|enable|disable` journals state changes, and active panic-stop blocks control-class daemon requests before execution.
 - Probe whether xdg-desktop-portal RemoteDesktop or libei can satisfy input needs before requiring uinput on the local machine.
 
 Acceptance criteria:
 
-- CLI can type into Kate/KWrite.
+- CLI can type into Kate/KWrite. Current implementation provides the daemon-backed command path; host GUI smoke remains to be added once `/dev/uinput` access is configured.
 - CLI can click a known point in a test window.
 - Panic-stop prevents further input actions.
 - Focus guard rejects action if active window changed. Current implementation covers current daemon control requests when a guard is supplied.
@@ -846,7 +847,8 @@ Tasks:
 - [x] Expose current daemon tools: health, capabilities, policy status, monitor/window listing, active-window, observe, screenshot, screenshot tile, focus window, and journal tail.
 - [x] Expose clipboard_set/get after the backing daemon capability exists.
 - [x] Expose wait_for_change after the backing daemon capability exists.
-- [ ] Expose click, key, and type_text after the backing daemon capabilities exist.
+- [x] Expose key and type_text after the backing daemon capabilities exist.
+- [ ] Expose click after the backing daemon capability exists.
 - [x] Add MCP-side argument validation for exposed tools.
 - Add docs for installing MCP manually and through plugin.
 - [x] Ensure outputs are model-friendly for exposed tools: tool results include compact text plus structured JSON.
