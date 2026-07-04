@@ -15,11 +15,46 @@ pub enum CoordinateSpace {
     AccessibilityNode,
 }
 
+impl FromStr for CoordinateSpace {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "physical_pixel" | "physical" | "pixel" => Ok(Self::PhysicalPixel),
+            "logical_pixel" | "logical" => Ok(Self::LogicalPixel),
+            "window_local" | "window" => Ok(Self::WindowLocal),
+            "accessibility_node" | "accessibility" | "a11y" => Ok(Self::AccessibilityNode),
+            other => Err(format!("unsupported coordinate space: {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Point {
     pub x: f64,
     pub y: f64,
     pub space: CoordinateSpace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PointerButton {
+    Left,
+    Middle,
+    Right,
+}
+
+impl FromStr for PointerButton {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "left" | "primary" => Ok(Self::Left),
+            "middle" => Ok(Self::Middle),
+            "right" | "secondary" => Ok(Self::Right),
+            other => Err(format!("unsupported pointer button: {other}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

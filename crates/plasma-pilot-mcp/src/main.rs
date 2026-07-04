@@ -9,11 +9,12 @@ use clap::Parser;
 use libplasma_pilot::{
     AccessibilityAction, AccessibilityFindRequest, AccessibilityInvokeRequest,
     AccessibilitySetTextRequest, ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest,
-    ClipboardGetRequest, ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES,
-    DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
-    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest, DaemonResponse, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, ObserveRequest,
-    ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest, SetPanicStopRequest,
+    ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace,
+    DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
+    DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
+    DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
+    KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton, ScreenshotRequest,
+    ScreenshotTileRequest, ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest,
     SetTextFieldRequest, TypeTextRequest, WaitForChangeRequest, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
@@ -355,6 +356,32 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         })),
         "plasma.key_combo" => Ok(DaemonRequest::KeyCombo(KeyComboRequest {
             combo: required_string(arguments, "combo")?,
+            guard: active_window_guard(arguments)?,
+        })),
+        "plasma.move_pointer" => Ok(DaemonRequest::MovePointer(MovePointerRequest {
+            point: Point {
+                x: required_f64(arguments, "x")?,
+                y: required_f64(arguments, "y")?,
+                space: required_coordinate_space(arguments, "coordinate_space")?,
+            },
+            guard: active_window_guard(arguments)?,
+        })),
+        "plasma.click_pointer" => Ok(DaemonRequest::ClickPointer(ClickPointerRequest {
+            point: Point {
+                x: required_f64(arguments, "x")?,
+                y: required_f64(arguments, "y")?,
+                space: required_coordinate_space(arguments, "coordinate_space")?,
+            },
+            button: required_pointer_button(arguments, "button")?,
+            clicks: optional_u64(arguments, "clicks")?
+                .map(u64_to_u8)
+                .transpose()?
+                .unwrap_or(1),
+            guard: active_window_guard(arguments)?,
+        })),
+        "plasma.scroll_pointer" => Ok(DaemonRequest::ScrollPointer(ScrollPointerRequest {
+            vertical: optional_i32(arguments, "vertical")?.unwrap_or(0),
+            horizontal: optional_i32(arguments, "horizontal")?.unwrap_or(0),
             guard: active_window_guard(arguments)?,
         })),
         "plasma.click_button" => Ok(DaemonRequest::ClickButton(ClickButtonRequest {
@@ -711,6 +738,76 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "plasma.move_pointer",
+            "Move Pointer",
+            "Move the pointer to an explicit desktop coordinate. This is policy-gated pointer control; the current daemon accepts physical_pixel coordinates.",
+            object_schema(
+                with_guard_properties(vec![
+                    (
+                        "x",
+                        json!({"type": "number", "description": "Target x coordinate."}),
+                    ),
+                    (
+                        "y",
+                        json!({"type": "number", "description": "Target y coordinate."}),
+                    ),
+                    (
+                        "coordinate_space",
+                        json!({"type": "string", "enum": ["physical_pixel", "logical_pixel", "window_local", "accessibility_node"], "description": "Coordinate space for x and y. Current daemon support is physical_pixel."}),
+                    ),
+                ]),
+                vec!["x", "y", "coordinate_space"],
+            ),
+        ),
+        tool(
+            "plasma.click_pointer",
+            "Click Pointer",
+            "Move the pointer to an explicit desktop coordinate and click once or twice. This is policy-gated pointer control; the current daemon accepts physical_pixel coordinates.",
+            object_schema(
+                with_guard_properties(vec![
+                    (
+                        "x",
+                        json!({"type": "number", "description": "Target x coordinate."}),
+                    ),
+                    (
+                        "y",
+                        json!({"type": "number", "description": "Target y coordinate."}),
+                    ),
+                    (
+                        "coordinate_space",
+                        json!({"type": "string", "enum": ["physical_pixel", "logical_pixel", "window_local", "accessibility_node"], "description": "Coordinate space for x and y. Current daemon support is physical_pixel."}),
+                    ),
+                    (
+                        "button",
+                        json!({"type": "string", "enum": ["left", "middle", "right"], "description": "Pointer button to click."}),
+                    ),
+                    (
+                        "clicks",
+                        json!({"type": "integer", "minimum": 1, "maximum": 2, "description": "Click count. Defaults to 1; use 2 for double-click."}),
+                    ),
+                ]),
+                vec!["x", "y", "coordinate_space", "button"],
+            ),
+        ),
+        tool(
+            "plasma.scroll_pointer",
+            "Scroll Pointer",
+            "Emit vertical and/or horizontal wheel deltas at the current pointer position. This is policy-gated pointer control.",
+            object_schema(
+                with_guard_properties(vec![
+                    (
+                        "vertical",
+                        json!({"type": "integer", "description": "Vertical wheel delta. Positive values scroll up in evdev wheel units."}),
+                    ),
+                    (
+                        "horizontal",
+                        json!({"type": "integer", "description": "Horizontal wheel delta. Positive values scroll left in evdev wheel units."}),
+                    ),
+                ]),
+                vec![],
+            ),
+        ),
+        tool(
             "plasma.click_button",
             "Click Button",
             "Find a named non-sensitive AT-SPI button and invoke its press action only when exactly one viable match is found. This is policy-gated semantic control.",
@@ -1040,6 +1137,17 @@ fn required_u32(arguments: &Value, key: &str) -> Result<u32> {
     u64_to_u32(value)
 }
 
+fn required_f64(arguments: &Value, key: &str) -> Result<f64> {
+    let value = arguments
+        .get(key)
+        .and_then(Value::as_f64)
+        .ok_or_else(|| anyhow!("argument '{key}' is required and must be a number"))?;
+    if !value.is_finite() {
+        bail!("argument '{key}' must be finite");
+    }
+    Ok(value)
+}
+
 fn optional_u64(arguments: &Value, key: &str) -> Result<Option<u64>> {
     match arguments.get(key) {
         Some(Value::Null) | None => Ok(None),
@@ -1047,6 +1155,18 @@ fn optional_u64(arguments: &Value, key: &str) -> Result<Option<u64>> {
             .as_u64()
             .map(Some)
             .ok_or_else(|| anyhow!("argument '{key}' must be an unsigned integer")),
+    }
+}
+
+fn optional_i32(arguments: &Value, key: &str) -> Result<Option<i32>> {
+    match arguments.get(key) {
+        Some(Value::Null) | None => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .map(i64_to_i32)
+            .transpose()?
+            .map(Some)
+            .ok_or_else(|| anyhow!("argument '{key}' must be a signed integer")),
     }
 }
 
@@ -1087,6 +1207,18 @@ fn required_accessibility_action(arguments: &Value, key: &str) -> Result<Accessi
         .map_err(|err: String| anyhow!(err))
 }
 
+fn required_coordinate_space(arguments: &Value, key: &str) -> Result<CoordinateSpace> {
+    required_string(arguments, key)?
+        .parse()
+        .map_err(|err: String| anyhow!(err))
+}
+
+fn required_pointer_button(arguments: &Value, key: &str) -> Result<PointerButton> {
+    required_string(arguments, key)?
+        .parse()
+        .map_err(|err: String| anyhow!(err))
+}
+
 fn required_string_array(arguments: &Value, key: &str) -> Result<Vec<String>> {
     let array = arguments
         .get(key)
@@ -1114,6 +1246,14 @@ fn u64_to_u32(value: u64) -> Result<u32> {
 
 fn u64_to_usize(value: u64) -> Result<usize> {
     usize::try_from(value).map_err(|_| anyhow!("integer argument {value} exceeds usize"))
+}
+
+fn u64_to_u8(value: u64) -> Result<u8> {
+    u8::try_from(value).map_err(|_| anyhow!("integer argument {value} exceeds u8"))
+}
+
+fn i64_to_i32(value: i64) -> Result<i32> {
+    i32::try_from(value).map_err(|_| anyhow!("integer argument {value} exceeds i32"))
 }
 
 #[cfg(test)]
@@ -1173,6 +1313,21 @@ mod tests {
         );
         assert!(tools.iter().any(|tool| tool["name"] == "plasma.type_text"));
         assert!(tools.iter().any(|tool| tool["name"] == "plasma.key_combo"));
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.move_pointer")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.click_pointer")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.scroll_pointer")
+        );
         assert!(
             tools
                 .iter()
@@ -1327,6 +1482,77 @@ mod tests {
             key_combo,
             DaemonRequest::KeyCombo(KeyComboRequest {
                 combo: "Ctrl+L".to_string(),
+                guard: None,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_pointer_input_arguments() {
+        let move_pointer = daemon_request_for_tool(
+            "plasma.move_pointer",
+            &json!({
+                "x": 3840.0,
+                "y": 2160.0,
+                "coordinate_space": "physical_pixel",
+                "expected_active_app": "org.kde.kate"
+            }),
+        )
+        .expect("move pointer maps");
+        assert_eq!(
+            move_pointer,
+            DaemonRequest::MovePointer(MovePointerRequest {
+                point: Point {
+                    x: 3840.0,
+                    y: 2160.0,
+                    space: CoordinateSpace::PhysicalPixel,
+                },
+                guard: Some(ActiveWindowGuard {
+                    expected_window_id: None,
+                    expected_app_id: Some("org.kde.kate".to_string()),
+                    title_contains: None,
+                }),
+            })
+        );
+
+        let click_pointer = daemon_request_for_tool(
+            "plasma.click_pointer",
+            &json!({
+                "x": 100.0,
+                "y": 200.0,
+                "coordinate_space": "physical_pixel",
+                "button": "left",
+                "clicks": 2
+            }),
+        )
+        .expect("click pointer maps");
+        assert_eq!(
+            click_pointer,
+            DaemonRequest::ClickPointer(ClickPointerRequest {
+                point: Point {
+                    x: 100.0,
+                    y: 200.0,
+                    space: CoordinateSpace::PhysicalPixel,
+                },
+                button: PointerButton::Left,
+                clicks: 2,
+                guard: None,
+            })
+        );
+
+        let scroll_pointer = daemon_request_for_tool(
+            "plasma.scroll_pointer",
+            &json!({
+                "vertical": -3,
+                "horizontal": 1
+            }),
+        )
+        .expect("scroll pointer maps");
+        assert_eq!(
+            scroll_pointer,
+            DaemonRequest::ScrollPointer(ScrollPointerRequest {
+                vertical: -3,
+                horizontal: 1,
                 guard: None,
             })
         );

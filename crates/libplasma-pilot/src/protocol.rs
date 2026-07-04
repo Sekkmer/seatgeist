@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::types::{
     AccessibilityAction, AccessibilityNode, BackendCapability, CoordinateSpace, MonitorInfo,
-    Observation, Point, SafetyClass, ToolApprovalLevel, WindowInfo,
+    Observation, Point, PointerButton, SafetyClass, ToolApprovalLevel, WindowInfo,
 };
 
 pub const DEFAULT_CLIPBOARD_MAX_BYTES: usize = 64 * 1024;
@@ -239,6 +239,30 @@ pub struct KeyComboRequest {
     pub guard: Option<ActiveWindowGuard>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MovePointerRequest {
+    pub point: Point,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClickPointerRequest {
+    pub point: Point,
+    pub button: PointerButton,
+    pub clicks: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScrollPointerRequest {
+    pub vertical: i32,
+    pub horizontal: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClickButtonRequest {
     pub name: String,
@@ -319,6 +343,9 @@ pub enum DaemonRequest {
     AccessibilitySetText(AccessibilitySetTextRequest),
     TypeText(TypeTextRequest),
     KeyCombo(KeyComboRequest),
+    MovePointer(MovePointerRequest),
+    ClickPointer(ClickPointerRequest),
+    ScrollPointer(ScrollPointerRequest),
     ClickButton(ClickButtonRequest),
     SetTextField(SetTextFieldRequest),
     ActivateTab(ActivateTabRequest),
@@ -351,6 +378,9 @@ impl DaemonRequest {
             Self::AccessibilitySetText(_) => "accessibility_set_text",
             Self::TypeText(_) => "type_text",
             Self::KeyCombo(_) => "key_combo",
+            Self::MovePointer(_) => "move_pointer",
+            Self::ClickPointer(_) => "click_pointer",
+            Self::ScrollPointer(_) => "scroll_pointer",
             Self::ClickButton(_) => "click_button",
             Self::SetTextField(_) => "set_text_field",
             Self::ActivateTab(_) => "activate_tab",
@@ -632,6 +662,53 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&set).expect("panic set serializes"),
             r#"{"method":"set_panic_stop","enabled":true}"#
+        );
+    }
+
+    #[test]
+    fn serializes_pointer_control_requests() {
+        let move_pointer = DaemonRequest::MovePointer(MovePointerRequest {
+            point: Point {
+                x: 3840.0,
+                y: 2160.0,
+                space: CoordinateSpace::PhysicalPixel,
+            },
+            guard: None,
+        });
+        let encoded =
+            serde_json::to_string(&move_pointer).expect("move pointer request serializes");
+        assert!(encoded.contains(r#""method":"move_pointer""#));
+        assert!(encoded.contains(r#""space":"physical_pixel""#));
+
+        let click_pointer = DaemonRequest::ClickPointer(ClickPointerRequest {
+            point: Point {
+                x: 100.0,
+                y: 200.0,
+                space: CoordinateSpace::PhysicalPixel,
+            },
+            button: PointerButton::Left,
+            clicks: 2,
+            guard: Some(ActiveWindowGuard {
+                expected_window_id: Some("current-window".to_string()),
+                expected_app_id: None,
+                title_contains: None,
+            }),
+        });
+        let encoded =
+            serde_json::to_string(&click_pointer).expect("click pointer request serializes");
+        assert!(encoded.contains(r#""method":"click_pointer""#));
+        assert!(encoded.contains(r#""button":"left""#));
+        assert!(encoded.contains(r#""clicks":2"#));
+        assert!(encoded.contains(r#""expected_window_id":"current-window""#));
+
+        let scroll_pointer = DaemonRequest::ScrollPointer(ScrollPointerRequest {
+            vertical: -3,
+            horizontal: 1,
+            guard: None,
+        });
+        assert_eq!(
+            serde_json::to_string(&scroll_pointer).expect("scroll pointer request serializes"),
+            r#"{"method":"scroll_pointer","vertical":-3,"horizontal":1}"#
         );
     }
 

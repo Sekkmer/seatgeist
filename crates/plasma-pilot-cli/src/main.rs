@@ -5,12 +5,14 @@ use clap::{Parser, Subcommand};
 use libplasma_pilot::{
     AccessibilityAction, AccessibilityFindRequest, AccessibilityInvokeRequest,
     AccessibilitySetTextRequest, ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest,
-    ClipboardGetRequest, ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES,
-    DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
-    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest, DaemonResponse, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, ObserveRequest,
-    ReplayTrace, ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest, SetPanicStopRequest,
-    SetTextFieldRequest, TypeTextRequest, WaitForChangeRequest, default_socket_path,
+    ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace,
+    DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
+    DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
+    DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
+    KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton, ReplayTrace,
+    ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectMenuRequest,
+    SetPanicStopRequest, SetTextFieldRequest, TypeTextRequest, WaitForChangeRequest,
+    default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -132,6 +134,50 @@ enum ClipboardCommand {
 
 #[derive(Debug, Subcommand)]
 enum InputCommand {
+    MovePointer {
+        #[arg(long)]
+        x: f64,
+        #[arg(long)]
+        y: f64,
+        #[arg(long)]
+        coordinate_space: CoordinateSpace,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
+    ClickPointer {
+        #[arg(long)]
+        x: f64,
+        #[arg(long)]
+        y: f64,
+        #[arg(long)]
+        coordinate_space: CoordinateSpace,
+        #[arg(long)]
+        button: PointerButton,
+        #[arg(long, default_value_t = 1)]
+        clicks: u8,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
+    ScrollPointer {
+        #[arg(long, default_value_t = 0)]
+        vertical: i32,
+        #[arg(long, default_value_t = 0)]
+        horizontal: i32,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
     TypeText {
         #[arg(value_name = "TEXT")]
         text: String,
@@ -421,6 +467,81 @@ fn main() -> Result<()> {
         } => print_daemon_response(
             &socket,
             DaemonRequest::ClipboardSet(ClipboardSetRequest { text }),
+        )?,
+        Command::Input {
+            command:
+                InputCommand::MovePointer {
+                    x,
+                    y,
+                    coordinate_space,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::MovePointer(MovePointerRequest {
+                point: Point {
+                    x,
+                    y,
+                    space: coordinate_space,
+                },
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
+        )?,
+        Command::Input {
+            command:
+                InputCommand::ClickPointer {
+                    x,
+                    y,
+                    coordinate_space,
+                    button,
+                    clicks,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::ClickPointer(ClickPointerRequest {
+                point: Point {
+                    x,
+                    y,
+                    space: coordinate_space,
+                },
+                button,
+                clicks,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
+        )?,
+        Command::Input {
+            command:
+                InputCommand::ScrollPointer {
+                    vertical,
+                    horizontal,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::ScrollPointer(ScrollPointerRequest {
+                vertical,
+                horizontal,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
         )?,
         Command::Input {
             command:

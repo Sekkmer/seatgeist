@@ -233,9 +233,9 @@ plasma-pilot-cli screenshot --output /tmp/screen.png
 plasma-pilot-cli windows
 plasma-pilot-cli active-window
 plasma-pilot-cli focus --window <id>
-plasma-pilot-cli click --x <x> --y <y>
-plasma-pilot-cli type --text "hello"
-plasma-pilot-cli key --combo Ctrl+L
+plasma-pilot-cli input click-pointer --x <x> --y <y> --coordinate-space physical-pixel --button left
+plasma-pilot-cli input type-text "hello"
+plasma-pilot-cli input key-combo Ctrl+L
 plasma-pilot-cli clipboard get
 plasma-pilot-cli clipboard set "text"
 plasma-pilot-cli atspi tree --focused
@@ -801,18 +801,19 @@ Goal: Codex can click/type through controlled virtual input.
 Tasks:
 
 - [x] Implement initial keyboard input backend using uinput. Current status: `plasma-pilot-uinput` creates a short-lived `/dev/uinput` virtual keyboard with `UI_DEV_SETUP`; daemon/CLI/MCP expose `type_text` and `key_combo` as policy-gated `ControlKeyboard`.
-- Create virtual pointer device and absolute/relative pointer mapping.
-- Add udev/polkit/systemd instructions. Current status: skeleton files exist; keyboard uinput access currently relies on `/dev/uinput` being readable/writable by the daemon process.
-- Implement move, click, double-click, and scroll.
+- [x] Create virtual pointer device and absolute/relative pointer mapping. Current status: `plasma-pilot-uinput` creates a short-lived `/dev/uinput` virtual pointer with absolute X/Y axes and relative wheel axes; the daemon maps physical desktop coordinates into the absolute input range.
+- Add udev/polkit/systemd instructions. Current status: skeleton files exist; uinput access currently relies on `/dev/uinput` being readable/writable by the daemon process.
+- [x] Implement move, click, double-click, and scroll. Current status: daemon/CLI/MCP expose `move_pointer`, `click_pointer`, and `scroll_pointer` as policy-gated `ControlPointer`; click supports one or two left/middle/right clicks, and scroll supports vertical/horizontal deltas.
 - [x] Implement key combo and type text. Current status: US evdev ASCII text plus newline/tab and named key combos such as `Ctrl+L` are supported; non-US text is rejected instead of guessed.
 - Implement focus guard checks before actions. Current status: current daemon control requests accept optional active-window guards (`expected_active_window`, `expected_active_app`, and `active_title_contains`) and reject stale guards before execution.
 - [x] Add panic-stop flag. Current status: `plasma-pilotd` has a file-backed panic-stop state, `plasma-pilot-cli panic-stop status|enable|disable` journals state changes, and active panic-stop blocks control-class daemon requests before execution.
 - Probe whether xdg-desktop-portal RemoteDesktop or libei can satisfy input needs before requiring uinput on the local machine.
+- Add pointer calibration diagnostics and host GUI smoke for a known test window before treating pixel-click use as production-ready.
 
 Acceptance criteria:
 
 - CLI can type into Kate/KWrite. Current implementation provides the daemon-backed command path; host GUI smoke remains to be added once `/dev/uinput` access is configured.
-- CLI can click a known point in a test window.
+- CLI can click a known point in a test window. Current implementation provides the daemon-backed command path and physical bounds validation; host GUI smoke remains to be added once `/dev/uinput` access is configured.
 - Panic-stop prevents further input actions.
 - Focus guard rejects action if active window changed. Current implementation covers current daemon control requests when a guard is supplied.
 
@@ -848,9 +849,9 @@ Tasks:
 - [x] Expose clipboard_set/get after the backing daemon capability exists.
 - [x] Expose wait_for_change after the backing daemon capability exists.
 - [x] Expose key and type_text after the backing daemon capabilities exist.
-- [ ] Expose click after the backing daemon capability exists.
+- [x] Expose pointer move/click/scroll after the backing daemon capability exists.
 - [x] Add MCP-side argument validation for exposed tools.
-- Add docs for installing MCP manually and through plugin.
+- [x] Add docs for installing MCP manually and through plugin.
 - [x] Ensure outputs are model-friendly for exposed tools: tool results include compact text plus structured JSON.
 
 Acceptance criteria:
@@ -1035,9 +1036,9 @@ cargo check --workspace
 - [x] Add systemd user service/socket skeleton.
 - [x] Add threat model doc.
 - [x] Add backend notes doc.
-- [ ] Implement Phase 1.
-- [ ] Implement Phase 2.
-- [ ] Implement Phase 3.
+- [x] Implement Phase 1.
+- [x] Implement Phase 2.
+- [ ] Implement Phase 3. Current status: keyboard and pointer command paths exist; udev/polkit access docs and host GUI smoke remain.
 
 ## 20. Definition of done for v0.1
 

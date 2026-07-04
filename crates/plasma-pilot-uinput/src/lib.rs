@@ -45,13 +45,23 @@ const fn iow<T>(ty: u8, nr: u8) -> libc::c_ulong {
 const UI_DEV_CREATE: libc::c_ulong = io(UINPUT_IOCTL_BASE, 1);
 const UI_DEV_DESTROY: libc::c_ulong = io(UINPUT_IOCTL_BASE, 2);
 const UI_DEV_SETUP: libc::c_ulong = iow::<UinputSetup>(UINPUT_IOCTL_BASE, 3);
+const UI_ABS_SETUP: libc::c_ulong = iow::<UinputAbsSetup>(UINPUT_IOCTL_BASE, 4);
 const UI_SET_EVBIT: libc::c_ulong = iow::<libc::c_int>(UINPUT_IOCTL_BASE, 100);
 const UI_SET_KEYBIT: libc::c_ulong = iow::<libc::c_int>(UINPUT_IOCTL_BASE, 101);
+const UI_SET_RELBIT: libc::c_ulong = iow::<libc::c_int>(UINPUT_IOCTL_BASE, 102);
+const UI_SET_ABSBIT: libc::c_ulong = iow::<libc::c_int>(UINPUT_IOCTL_BASE, 103);
 
 const BUS_USB: u16 = 0x03;
 const EV_SYN: u16 = 0x00;
 const EV_KEY: u16 = 0x01;
+const EV_REL: u16 = 0x02;
+const EV_ABS: u16 = 0x03;
 const SYN_REPORT: u16 = 0;
+const REL_HWHEEL: u16 = 0x06;
+const REL_WHEEL: u16 = 0x08;
+const ABS_X: u16 = 0x00;
+const ABS_Y: u16 = 0x01;
+const ABS_MAX_VALUE: i32 = 32_767;
 
 const KEY_ESC: u16 = 1;
 const KEY_1: u16 = 2;
@@ -131,6 +141,9 @@ const KEY_PAGEDOWN: u16 = 109;
 const KEY_INSERT: u16 = 110;
 const KEY_DELETE: u16 = 111;
 const KEY_LEFTMETA: u16 = 125;
+const BTN_LEFT: u16 = 0x110;
+const BTN_RIGHT: u16 = 0x111;
+const BTN_MIDDLE: u16 = 0x112;
 
 const SUPPORTED_KEY_CODES: &[u16] = &[
     KEY_ESC,
@@ -232,6 +245,24 @@ struct UinputSetup {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct InputAbsInfo {
+    value: i32,
+    minimum: i32,
+    maximum: i32,
+    fuzz: i32,
+    flat: i32,
+    resolution: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UinputAbsSetup {
+    code: u16,
+    absinfo: InputAbsInfo,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct InputEvent {
     time: libc::timeval,
     type_: u16,
@@ -247,6 +278,27 @@ struct KeyStroke {
 
 struct UinputKeyboard {
     file: File,
+    created: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointerBounds {
+    pub min_x: i32,
+    pub min_y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerButton {
+    Left,
+    Middle,
+    Right,
+}
+
+struct UinputPointer {
+    file: File,
+    bounds: PointerBounds,
     created: bool,
 }
 
@@ -343,6 +395,139 @@ impl UinputKeyboard {
     }
 }
 
+impl UinputPointer {
+    fn create(bounds: PointerBounds) -> Result<Self> {
+        validate_pointer_bounds(bounds)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(UINPUT_PATH)
+            .with_context(|| format!("open {UINPUT_PATH} for uinput pointer"))?;
+        let pointer = Self {
+            file,
+            bounds,
+            created: false,
+        };
+        pointer.setup_bits()?;
+        pointer.setup_device()?;
+        let mut pointer = pointer;
+        ioctl_noarg(pointer.file.as_raw_fd(), UI_DEV_CREATE).context("create uinput pointer")?;
+        pointer.created = true;
+        thread::sleep(Duration::from_millis(DEVICE_SETTLE_MS));
+        Ok(pointer)
+    }
+
+    fn setup_bits(&self) -> Result<()> {
+        let fd = self.file.as_raw_fd();
+        ioctl_int(fd, UI_SET_EVBIT, EV_KEY).context("enable pointer EV_KEY")?;
+        ioctl_int(fd, UI_SET_EVBIT, EV_SYN).context("enable pointer EV_SYN")?;
+        ioctl_int(fd, UI_SET_EVBIT, EV_REL).context("enable pointer EV_REL")?;
+        ioctl_int(fd, UI_SET_EVBIT, EV_ABS).context("enable pointer EV_ABS")?;
+        ioctl_int(fd, UI_SET_KEYBIT, BTN_LEFT).context("enable BTN_LEFT")?;
+        ioctl_int(fd, UI_SET_KEYBIT, BTN_RIGHT).context("enable BTN_RIGHT")?;
+        ioctl_int(fd, UI_SET_KEYBIT, BTN_MIDDLE).context("enable BTN_MIDDLE")?;
+        ioctl_int(fd, UI_SET_RELBIT, REL_WHEEL).context("enable REL_WHEEL")?;
+        ioctl_int(fd, UI_SET_RELBIT, REL_HWHEEL).context("enable REL_HWHEEL")?;
+        ioctl_int(fd, UI_SET_ABSBIT, ABS_X).context("enable ABS_X")?;
+        ioctl_int(fd, UI_SET_ABSBIT, ABS_Y).context("enable ABS_Y")?;
+        self.setup_abs_axis(ABS_X)?;
+        self.setup_abs_axis(ABS_Y)?;
+        Ok(())
+    }
+
+    fn setup_abs_axis(&self, code: u16) -> Result<()> {
+        let setup = UinputAbsSetup {
+            code,
+            absinfo: InputAbsInfo {
+                value: 0,
+                minimum: 0,
+                maximum: ABS_MAX_VALUE,
+                fuzz: 0,
+                flat: 0,
+                resolution: 0,
+            },
+        };
+        ioctl_ptr(self.file.as_raw_fd(), UI_ABS_SETUP, &setup)
+            .with_context(|| format!("setup absolute axis {code}"))
+    }
+
+    fn setup_device(&self) -> Result<()> {
+        let mut name = [0 as libc::c_char; UINPUT_MAX_NAME_SIZE];
+        for (index, byte) in b"PlasmaPilot Virtual Pointer".iter().enumerate() {
+            name[index] = *byte as libc::c_char;
+        }
+        let setup = UinputSetup {
+            id: InputId {
+                bustype: BUS_USB,
+                vendor: 0x5050,
+                product: 0x0002,
+                version: 1,
+            },
+            name,
+            ff_effects_max: 0,
+        };
+        ioctl_ptr(self.file.as_raw_fd(), UI_DEV_SETUP, &setup).context("setup uinput pointer")
+    }
+
+    fn move_to(&mut self, x: f64, y: f64) -> Result<()> {
+        let (abs_x, abs_y) = map_pointer_point(x, y, self.bounds)?;
+        self.emit(EV_ABS, ABS_X, abs_x)?;
+        self.emit(EV_ABS, ABS_Y, abs_y)?;
+        self.sync()
+    }
+
+    fn click(&mut self, x: f64, y: f64, button: PointerButton, clicks: u8) -> Result<()> {
+        self.move_to(x, y)?;
+        let code = button_code(button);
+        for _ in 0..clicks {
+            self.emit(EV_KEY, code, 1)?;
+            self.sync()?;
+            self.emit(EV_KEY, code, 0)?;
+            self.sync()?;
+        }
+        Ok(())
+    }
+
+    fn scroll(&mut self, vertical: i32, horizontal: i32) -> Result<()> {
+        if vertical == 0 && horizontal == 0 {
+            bail!("scroll request must include a non-zero delta");
+        }
+        if vertical != 0 {
+            self.emit(EV_REL, REL_WHEEL, vertical)?;
+        }
+        if horizontal != 0 {
+            self.emit(EV_REL, REL_HWHEEL, horizontal)?;
+        }
+        self.sync()
+    }
+
+    fn emit(&mut self, type_: u16, code: u16, value: i32) -> Result<()> {
+        let event = InputEvent {
+            time: libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            type_,
+            code,
+            value,
+        };
+        let bytes = event_as_bytes(&event);
+        self.file.write_all(bytes).context("write pointer event")
+    }
+
+    fn sync(&mut self) -> Result<()> {
+        self.emit(EV_SYN, SYN_REPORT, 0)
+    }
+}
+
+impl Drop for UinputPointer {
+    fn drop(&mut self) {
+        if self.created {
+            let _ = ioctl_noarg(self.file.as_raw_fd(), UI_DEV_DESTROY);
+        }
+    }
+}
+
 impl Drop for UinputKeyboard {
     fn drop(&mut self) {
         if self.created {
@@ -384,6 +569,71 @@ pub fn key_combo(combo: &str) -> Result<usize> {
         keyboard.release_key(*code)?;
     }
     Ok(codes.len())
+}
+
+pub fn move_pointer(x: f64, y: f64, bounds: PointerBounds) -> Result<()> {
+    let mut pointer = UinputPointer::create(bounds)?;
+    pointer.move_to(x, y)
+}
+
+pub fn click_pointer(
+    x: f64,
+    y: f64,
+    bounds: PointerBounds,
+    button: PointerButton,
+    clicks: u8,
+) -> Result<()> {
+    if clicks == 0 || clicks > 2 {
+        bail!("click count must be 1 or 2");
+    }
+    let mut pointer = UinputPointer::create(bounds)?;
+    pointer.click(x, y, button, clicks)
+}
+
+pub fn scroll_pointer(vertical: i32, horizontal: i32, bounds: PointerBounds) -> Result<()> {
+    let mut pointer = UinputPointer::create(bounds)?;
+    pointer.scroll(vertical, horizontal)
+}
+
+fn validate_pointer_bounds(bounds: PointerBounds) -> Result<()> {
+    if bounds.width < 2 || bounds.height < 2 {
+        bail!("pointer bounds must be at least 2x2 pixels");
+    }
+    Ok(())
+}
+
+fn map_pointer_point(x: f64, y: f64, bounds: PointerBounds) -> Result<(i32, i32)> {
+    validate_pointer_bounds(bounds)?;
+    if !x.is_finite() || !y.is_finite() {
+        bail!("pointer coordinates must be finite");
+    }
+    let max_x = f64::from(bounds.min_x) + f64::from(bounds.width - 1);
+    let max_y = f64::from(bounds.min_y) + f64::from(bounds.height - 1);
+    if x < f64::from(bounds.min_x) || x > max_x || y < f64::from(bounds.min_y) || y > max_y {
+        bail!(
+            "pointer coordinate {},{} is outside physical desktop bounds {},{} {}x{}",
+            x,
+            y,
+            bounds.min_x,
+            bounds.min_y,
+            bounds.width,
+            bounds.height
+        );
+    }
+    let normalized_x = (x - f64::from(bounds.min_x)) / f64::from(bounds.width - 1);
+    let normalized_y = (y - f64::from(bounds.min_y)) / f64::from(bounds.height - 1);
+    Ok((
+        (normalized_x * f64::from(ABS_MAX_VALUE)).round() as i32,
+        (normalized_y * f64::from(ABS_MAX_VALUE)).round() as i32,
+    ))
+}
+
+fn button_code(button: PointerButton) -> u16 {
+    match button {
+        PointerButton::Left => BTN_LEFT,
+        PointerButton::Middle => BTN_MIDDLE,
+        PointerButton::Right => BTN_RIGHT,
+    }
 }
 
 fn ioctl_noarg(fd: libc::c_int, request: libc::c_ulong) -> Result<()> {
@@ -628,5 +878,39 @@ mod tests {
     fn rejects_empty_key_combo() {
         let err = parse_key_combo(" + ").expect_err("empty combo is rejected");
         assert!(err.to_string().contains("at least one key"));
+    }
+
+    #[test]
+    fn maps_pointer_points_to_absolute_range() {
+        let bounds = PointerBounds {
+            min_x: 0,
+            min_y: 0,
+            width: 7680,
+            height: 4320,
+        };
+        assert_eq!(
+            map_pointer_point(0.0, 0.0, bounds).expect("origin maps"),
+            (0, 0)
+        );
+        assert_eq!(
+            map_pointer_point(7679.0, 4319.0, bounds).expect("max maps"),
+            (ABS_MAX_VALUE, ABS_MAX_VALUE)
+        );
+        assert_eq!(
+            map_pointer_point(3840.0, 2160.0, bounds).expect("center maps"),
+            (16_386, 16_387)
+        );
+    }
+
+    #[test]
+    fn rejects_pointer_outside_bounds() {
+        let bounds = PointerBounds {
+            min_x: 100,
+            min_y: 200,
+            width: 640,
+            height: 480,
+        };
+        let err = map_pointer_point(99.0, 200.0, bounds).expect_err("x below bounds");
+        assert!(err.to_string().contains("outside physical desktop bounds"));
     }
 }

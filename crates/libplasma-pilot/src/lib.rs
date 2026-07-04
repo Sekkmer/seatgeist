@@ -5,20 +5,21 @@ pub mod types;
 pub use protocol::{
     AccessibilityFindRequest, AccessibilityInvokeRequest, AccessibilitySetTextRequest,
     ActionRequest, ActionResult, ActivateTabRequest, ActiveWindowGuard, CapabilitySet,
-    ClickButtonRequest, ClipboardGetRequest, ClipboardSetRequest, ClipboardText,
-    DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
+    ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest,
+    ClipboardText, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
     DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
     DaemonResponse, DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest,
     HealthStatus, JournalEntry, JournalTailRequest, KeyComboRequest, KwinBridgeStatus,
-    ObserveRequest, PanicStopStatus, PolicyStatus, ReplayTrace, ScreenshotInfo, ScreenshotRequest,
-    ScreenshotTileRequest, ScreenshotTransform, SelectMenuRequest, SetPanicStopRequest,
-    SetTextFieldRequest, TraceStep, TypeTextRequest, WaitForChangeRequest, WaitForChangeResult,
+    MovePointerRequest, ObserveRequest, PanicStopStatus, PolicyStatus, ReplayTrace, ScreenshotInfo,
+    ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest,
+    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, TraceStep, TypeTextRequest,
+    WaitForChangeRequest, WaitForChangeResult,
 };
 pub use runtime::{
     current_euid, default_journal_path, default_panic_stop_path, default_socket_path,
 };
 pub use types::{
     AccessibilityAction, AccessibilityBounds, AccessibilityNode, BackendCapability,
-    CoordinateSpace, MonitorInfo, Observation, PilotError, Point, PolicyDecision, SafetyClass,
-    ScreenshotTarget, ToolApprovalLevel, WindowGeometry, WindowId, WindowInfo,
+    CoordinateSpace, MonitorInfo, Observation, PilotError, Point, PointerButton, PolicyDecision,
+    SafetyClass, ScreenshotTarget, ToolApprovalLevel, WindowGeometry, WindowId, WindowInfo,
 };

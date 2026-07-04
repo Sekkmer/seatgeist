@@ -16,11 +16,12 @@ use image::{GenericImageView, imageops::FilterType};
 use libplasma_pilot::{
     AccessibilityFindRequest, AccessibilityInvokeRequest, AccessibilitySetTextRequest,
     ActionResult, ActivateTabRequest, ActiveWindowGuard, BackendCapability, CapabilitySet,
-    ClickButtonRequest, ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest,
-    DaemonResponse, DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest,
-    HealthStatus, JournalEntry, KeyComboRequest, KwinBridgeStatus, ObserveRequest, PanicStopStatus,
-    PolicyStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest,
-    ScreenshotTransform, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
+    ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardText, CoordinateSpace,
+    DaemonRequest, DaemonResponse, DesktopObservation, FocusWindowRequest,
+    FocusedAccessibilityTreeRequest, HealthStatus, JournalEntry, KeyComboRequest, KwinBridgeStatus,
+    MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton, PolicyStatus,
+    SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
+    ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
     ToolApprovalLevel, TypeTextRequest, WaitForChangeRequest, WaitForChangeResult, WindowGeometry,
     WindowInfo, current_euid, default_journal_path, default_panic_stop_path, default_socket_path,
 };
@@ -541,6 +542,24 @@ fn handle_request(
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::MovePointer(request) => match move_pointer(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
+        DaemonRequest::ClickPointer(request) => match click_pointer(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
+        DaemonRequest::ScrollPointer(request) => match scroll_pointer(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::ClickButton(request) => match click_button(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
             Err(err) => DaemonResponse::Error {
@@ -779,6 +798,9 @@ fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWin
         DaemonRequest::AccessibilitySetText(request) => request.guard.as_ref(),
         DaemonRequest::TypeText(request) => request.guard.as_ref(),
         DaemonRequest::KeyCombo(request) => request.guard.as_ref(),
+        DaemonRequest::MovePointer(request) => request.guard.as_ref(),
+        DaemonRequest::ClickPointer(request) => request.guard.as_ref(),
+        DaemonRequest::ScrollPointer(request) => request.guard.as_ref(),
         DaemonRequest::ClickButton(request) => request.guard.as_ref(),
         DaemonRequest::SetTextField(request) => request.guard.as_ref(),
         DaemonRequest::ActivateTab(request) => request.guard.as_ref(),
@@ -807,6 +829,9 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::AccessibilityFind(_) => SafetyClass::Observe,
         DaemonRequest::ClipboardGet(_) => SafetyClass::ClipboardRead,
         DaemonRequest::ClipboardSet(_) => SafetyClass::ClipboardWrite,
+        DaemonRequest::MovePointer(_)
+        | DaemonRequest::ClickPointer(_)
+        | DaemonRequest::ScrollPointer(_) => SafetyClass::ControlPointer,
         DaemonRequest::TypeText(_) | DaemonRequest::KeyCombo(_) => SafetyClass::ControlKeyboard,
         DaemonRequest::FocusWindow(_)
         | DaemonRequest::AccessibilityInvoke(_)
@@ -843,6 +868,7 @@ fn current_capabilities() -> Vec<BackendCapability> {
     }
     if plasma_pilot_uinput::available() {
         capabilities.push(BackendCapability::KeyboardInput);
+        capabilities.push(BackendCapability::PointerInput);
     }
     if command_exists("busctl") && plasma_pilot_atspi::available() {
         capabilities.push(BackendCapability::AccessibilityTree);
@@ -1316,6 +1342,160 @@ fn key_combo(request: KeyComboRequest) -> Result<ActionResult> {
         observation: None,
         message: Some(format!("sent key combo keys={key_count}")),
     })
+}
+
+fn move_pointer(request: MovePointerRequest) -> Result<ActionResult> {
+    let bounds = physical_pointer_bounds()?;
+    validate_pointer_point(request.point, bounds)?;
+    plasma_pilot_uinput::move_pointer(request.point.x, request.point.y, bounds)
+        .map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "moved pointer x={:.0} y={:.0} space={:?}",
+            request.point.x, request.point.y, request.point.space
+        )),
+    })
+}
+
+fn click_pointer(request: ClickPointerRequest) -> Result<ActionResult> {
+    if request.clicks == 0 || request.clicks > 2 {
+        bail!("clicks must be 1 or 2");
+    }
+    let bounds = physical_pointer_bounds()?;
+    validate_pointer_point(request.point, bounds)?;
+    plasma_pilot_uinput::click_pointer(
+        request.point.x,
+        request.point.y,
+        bounds,
+        pointer_button_to_uinput(request.button),
+        request.clicks,
+    )
+    .map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "clicked pointer button={:?} clicks={} x={:.0} y={:.0} space={:?}",
+            request.button, request.clicks, request.point.x, request.point.y, request.point.space
+        )),
+    })
+}
+
+fn scroll_pointer(request: ScrollPointerRequest) -> Result<ActionResult> {
+    if request.vertical == 0 && request.horizontal == 0 {
+        bail!("scroll request must include a non-zero delta");
+    }
+    let bounds = physical_pointer_bounds()?;
+    plasma_pilot_uinput::scroll_pointer(request.vertical, request.horizontal, bounds)
+        .map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "scrolled pointer vertical={} horizontal={}",
+            request.vertical, request.horizontal
+        )),
+    })
+}
+
+fn physical_pointer_bounds() -> Result<plasma_pilot_uinput::PointerBounds> {
+    physical_pointer_bounds_from_monitors(&list_monitors()?)
+}
+
+fn physical_pointer_bounds_from_monitors(
+    monitors: &[libplasma_pilot::MonitorInfo],
+) -> Result<plasma_pilot_uinput::PointerBounds> {
+    if monitors.is_empty() {
+        bail!("no monitor metadata available for physical pointer bounds");
+    }
+
+    let mut min_x = i32::MAX;
+    let mut min_y = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut max_y = i32::MIN;
+    for monitor in monitors {
+        if monitor.physical_width < 2 || monitor.physical_height < 2 {
+            bail!("monitor {} has invalid physical dimensions", monitor.id);
+        }
+        let origin_x = scaled_physical_origin(monitor.logical_origin_x, monitor.scale_factor)?;
+        let origin_y = scaled_physical_origin(monitor.logical_origin_y, monitor.scale_factor)?;
+        let end_x = origin_x
+            .checked_add(i32::try_from(monitor.physical_width)?)
+            .ok_or_else(|| anyhow::anyhow!("monitor {} physical x range overflows", monitor.id))?;
+        let end_y = origin_y
+            .checked_add(i32::try_from(monitor.physical_height)?)
+            .ok_or_else(|| anyhow::anyhow!("monitor {} physical y range overflows", monitor.id))?;
+        min_x = min_x.min(origin_x);
+        min_y = min_y.min(origin_y);
+        max_x = max_x.max(end_x);
+        max_y = max_y.max(end_y);
+    }
+
+    let width = u32::try_from(max_x - min_x).context("physical pointer width is invalid")?;
+    let height = u32::try_from(max_y - min_y).context("physical pointer height is invalid")?;
+    if width < 2 || height < 2 {
+        bail!("physical pointer bounds must be at least 2x2 pixels");
+    }
+    Ok(plasma_pilot_uinput::PointerBounds {
+        min_x,
+        min_y,
+        width,
+        height,
+    })
+}
+
+fn scaled_physical_origin(origin: i32, scale_factor: f64) -> Result<i32> {
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        bail!("monitor scale factor must be finite and positive");
+    }
+    let scaled = f64::from(origin) * scale_factor;
+    if scaled < f64::from(i32::MIN) || scaled > f64::from(i32::MAX) {
+        bail!("scaled monitor origin overflows i32");
+    }
+    Ok(scaled.round() as i32)
+}
+
+fn validate_pointer_point(point: Point, bounds: plasma_pilot_uinput::PointerBounds) -> Result<()> {
+    if point.space != CoordinateSpace::PhysicalPixel {
+        bail!(
+            "pointer actions currently require physical_pixel coordinate space, got {:?}",
+            point.space
+        );
+    }
+    if !point.x.is_finite() || !point.y.is_finite() {
+        bail!("pointer coordinates must be finite");
+    }
+    let max_x = f64::from(bounds.min_x) + f64::from(bounds.width - 1);
+    let max_y = f64::from(bounds.min_y) + f64::from(bounds.height - 1);
+    if point.x < f64::from(bounds.min_x)
+        || point.x > max_x
+        || point.y < f64::from(bounds.min_y)
+        || point.y > max_y
+    {
+        bail!(
+            "pointer coordinate {},{} is outside physical desktop bounds {},{} {}x{}",
+            point.x,
+            point.y,
+            bounds.min_x,
+            bounds.min_y,
+            bounds.width,
+            bounds.height
+        );
+    }
+    Ok(())
+}
+
+fn pointer_button_to_uinput(button: PointerButton) -> plasma_pilot_uinput::PointerButton {
+    match button {
+        PointerButton::Left => plasma_pilot_uinput::PointerButton::Left,
+        PointerButton::Middle => plasma_pilot_uinput::PointerButton::Middle,
+        PointerButton::Right => plasma_pilot_uinput::PointerButton::Right,
+    }
 }
 
 fn click_button(request: ClickButtonRequest) -> Result<ActionResult> {
@@ -2491,6 +2671,43 @@ mod tests {
     }
 
     #[test]
+    fn pointer_input_is_control_pointer_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::MovePointer(MovePointerRequest {
+                point: physical_point(3840.0, 2160.0),
+                guard: None,
+            }),
+        )
+        .expect_err("move pointer requires pointer control approval by default");
+        assert!(err.to_string().contains("ControlPointer"));
+
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::ClickPointer(ClickPointerRequest {
+                point: physical_point(100.0, 200.0),
+                button: PointerButton::Left,
+                clicks: 1,
+                guard: None,
+            }),
+        )
+        .expect_err("click pointer requires pointer control approval by default");
+        assert!(err.to_string().contains("ControlPointer"));
+
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::ScrollPointer(ScrollPointerRequest {
+                vertical: -1,
+                horizontal: 0,
+                guard: None,
+            }),
+        )
+        .expect_err("scroll pointer requires pointer control approval by default");
+        assert!(err.to_string().contains("ControlPointer"));
+    }
+
+    #[test]
     fn panic_stop_blocks_keyboard_input_after_policy_allows_it() {
         let path = temp_test_path("panic-stop-blocks-keyboard");
         fs::write(&path, "enabled").expect("panic-stop fixture file is written");
@@ -2506,6 +2723,70 @@ mod tests {
         .expect_err("panic-stop blocks keyboard control");
         assert!(err.to_string().contains("panic-stop is active"));
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn panic_stop_blocks_pointer_input_after_policy_allows_it() {
+        let path = temp_test_path("panic-stop-blocks-pointer");
+        fs::write(&path, "enabled").expect("panic-stop fixture file is written");
+        let panic_stop = PanicStopState::new(path.clone());
+
+        let err = enforce_panic_stop(
+            &panic_stop,
+            &DaemonRequest::ClickPointer(ClickPointerRequest {
+                point: physical_point(100.0, 200.0),
+                button: PointerButton::Left,
+                clicks: 1,
+                guard: None,
+            }),
+        )
+        .expect_err("panic-stop blocks pointer control");
+        assert!(err.to_string().contains("panic-stop is active"));
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn physical_pointer_bounds_cover_8k_and_scaled_negative_origins() {
+        let bounds = physical_pointer_bounds_from_monitors(&[
+            monitor("left", -1920, 0, 1920, 1080, 1920, 1080, 1.0),
+            monitor("main-8k", 0, 0, 7680, 4320, 3840, 2160, 2.0),
+        ])
+        .expect("monitor union maps to physical pointer bounds");
+
+        assert_eq!(bounds.min_x, -1920);
+        assert_eq!(bounds.min_y, 0);
+        assert_eq!(bounds.width, 9600);
+        assert_eq!(bounds.height, 4320);
+    }
+
+    #[test]
+    fn validates_physical_pointer_points() {
+        let bounds = plasma_pilot_uinput::PointerBounds {
+            min_x: -1920,
+            min_y: 0,
+            width: 9600,
+            height: 4320,
+        };
+
+        validate_pointer_point(physical_point(-1920.0, 0.0), bounds)
+            .expect("minimum physical point is valid");
+        validate_pointer_point(physical_point(7679.0, 4319.0), bounds)
+            .expect("maximum physical point is valid");
+
+        let err = validate_pointer_point(
+            Point {
+                x: 10.0,
+                y: 10.0,
+                space: CoordinateSpace::LogicalPixel,
+            },
+            bounds,
+        )
+        .expect_err("logical coordinate space is rejected for now");
+        assert!(err.to_string().contains("physical_pixel"));
+
+        let err = validate_pointer_point(physical_point(7680.0, 4319.0), bounds)
+            .expect_err("out-of-bounds coordinate is rejected");
+        assert!(err.to_string().contains("outside physical desktop bounds"));
     }
 
     #[test]
@@ -2979,6 +3260,39 @@ mod tests {
             available_actions: vec!["press".to_string()],
             actions: vec![libplasma_pilot::AccessibilityAction::Press],
             children: Vec::new(),
+        }
+    }
+
+    fn physical_point(x: f64, y: f64) -> Point {
+        Point {
+            x,
+            y,
+            space: CoordinateSpace::PhysicalPixel,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn monitor(
+        id: &str,
+        logical_origin_x: i32,
+        logical_origin_y: i32,
+        physical_width: u32,
+        physical_height: u32,
+        logical_width: u32,
+        logical_height: u32,
+        scale_factor: f64,
+    ) -> libplasma_pilot::MonitorInfo {
+        libplasma_pilot::MonitorInfo {
+            id: id.to_string(),
+            name: Some(id.to_string()),
+            physical_width,
+            physical_height,
+            logical_width,
+            logical_height,
+            scale_factor,
+            logical_origin_x,
+            logical_origin_y,
+            transform: None,
         }
     }
 
