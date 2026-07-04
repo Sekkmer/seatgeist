@@ -1,7 +1,7 @@
 SHELL := /usr/bin/bash
 .ONESHELL:
 
-.PHONY: fmt check test clippy validate-plugin verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-pointer-calibration smoke-gui-input smoke-mcp gui-eval install-kwin-script
+.PHONY: fmt check test clippy validate-plugin verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-pointer-calibration smoke-gui-input smoke-mcp gui-eval gui-eval-control-safety install-kwin-script
 
 fmt:
 	cargo fmt --all
@@ -369,6 +369,9 @@ smoke-mcp:
 
 gui-eval:
 	scripts/gui-eval.sh all
+
+gui-eval-control-safety:
+	scripts/gui-eval.sh control-safety
 
 install-kwin-script:
 	set -euo pipefail
