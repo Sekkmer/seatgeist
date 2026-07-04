@@ -12,8 +12,11 @@ const ATSPI_ROOT_PATH: &str = "/org/a11y/atspi/accessible/root";
 const ATSPI_ACCESSIBLE: &str = "org.a11y.atspi.Accessible";
 const ATSPI_COMPONENT: &str = "org.a11y.atspi.Component";
 const ATSPI_ACTION: &str = "org.a11y.atspi.Action";
+const ATSPI_TEXT: &str = "org.a11y.atspi.Text";
+const ATSPI_VALUE: &str = "org.a11y.atspi.Value";
 const STATE_FOCUSED: usize = 12;
 const DEFAULT_SEARCH_DEPTH: usize = 12;
+const DEFAULT_VALUE_MAX_CHARS: i32 = 512;
 
 pub type Result<T> = std::result::Result<T, PilotError>;
 
@@ -155,6 +158,7 @@ impl AtspiBus {
         let role = self
             .role_name(node)
             .unwrap_or_else(|_| "unknown".to_string());
+        let sensitive = is_sensitive_role(&role);
         let states = state_names(&self.states(node).unwrap_or_default());
         let interfaces = self.interfaces(node).unwrap_or_default();
         let available_actions = if interfaces.iter().any(|interface| interface == ATSPI_ACTION) {
@@ -169,6 +173,11 @@ impl AtspiBus {
             self.extents(node).ok()
         } else {
             None
+        };
+        let (value, value_truncated) = if sensitive {
+            (None, false)
+        } else {
+            self.node_value(node, &interfaces).unwrap_or((None, false))
         };
         let mut children = Vec::new();
         if depth > 0 {
@@ -186,8 +195,9 @@ impl AtspiBus {
             id: format!("atspi://{}{}", node.service, node.path),
             role: role.clone(),
             name: non_empty(self.name(node).unwrap_or_default()),
-            value: None,
-            sensitive: is_sensitive_role(&role),
+            value,
+            value_truncated,
+            sensitive,
             states,
             bounds,
             available_actions: available_actions.clone(),
@@ -391,6 +401,39 @@ impl AtspiBus {
         let output = self.call(&node.service, &node.path, ATSPI_ACTION, "GetActions")?;
         Ok(parse_action_names(&output))
     }
+
+    fn node_value(&self, node: &AtspiRef, interfaces: &[String]) -> Result<(Option<String>, bool)> {
+        if interfaces.iter().any(|interface| interface == ATSPI_TEXT) {
+            return self.text_value(node);
+        }
+        if interfaces.iter().any(|interface| interface == ATSPI_VALUE) {
+            let output =
+                self.get_property(&node.service, &node.path, ATSPI_VALUE, "CurrentValue")?;
+            return Ok((Some(parse_scalar_value(&output)?), false));
+        }
+        Ok((None, false))
+    }
+
+    fn text_value(&self, node: &AtspiRef) -> Result<(Option<String>, bool)> {
+        let output = self.get_property(&node.service, &node.path, ATSPI_TEXT, "CharacterCount")?;
+        let character_count = parse_i32_value(&output)?.max(0);
+        if character_count == 0 {
+            return Ok((None, false));
+        }
+        let end = character_count.min(DEFAULT_VALUE_MAX_CHARS);
+        let end_string = end.to_string();
+        let text = self.call_with_args(
+            &node.service,
+            &node.path,
+            ATSPI_TEXT,
+            "GetText",
+            &["ii", "0", &end_string],
+        )?;
+        Ok((
+            non_empty(parse_single_string(&text)?),
+            character_count > end,
+        ))
+    }
 }
 
 fn accessibility_bus_address() -> Result<String> {
@@ -543,6 +586,23 @@ fn parse_extents(output: &str) -> Result<(i32, i32, u32, u32)> {
         values[2].max(0) as u32,
         values[3].max(0) as u32,
     ))
+}
+
+fn parse_i32_value(output: &str) -> Result<i32> {
+    output
+        .split_whitespace()
+        .rev()
+        .find_map(|value| value.parse::<i32>().ok())
+        .ok_or_else(|| PilotError::InvalidRequest(format!("expected i32 value: {output}")))
+}
+
+fn parse_scalar_value(output: &str) -> Result<String> {
+    output
+        .split_whitespace()
+        .last()
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| PilotError::InvalidRequest(format!("expected scalar value: {output}")))
 }
 
 fn parse_action_names(output: &str) -> Vec<String> {
@@ -729,6 +789,16 @@ mod tests {
         assert_eq!(
             normalize_actions(&actions),
             vec![AccessibilityAction::Press]
+        );
+    }
+
+    #[test]
+    fn parses_numeric_property_values() {
+        assert_eq!(parse_i32_value("i 42").expect("i32 parses"), 42);
+        assert_eq!(parse_i32_value("v i 7").expect("variant i32 parses"), 7);
+        assert_eq!(
+            parse_scalar_value("d 0.75").expect("double scalar parses"),
+            "0.75"
         );
     }
 

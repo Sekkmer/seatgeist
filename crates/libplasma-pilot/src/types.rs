@@ -74,6 +74,7 @@ pub struct AccessibilityNode {
     pub role: String,
     pub name: Option<String>,
     pub value: Option<String>,
+    pub value_truncated: bool,
     pub sensitive: bool,
     pub states: Vec<String>,
     pub bounds: Option<AccessibilityBounds>,

@@ -905,7 +905,7 @@ Tasks:
 
 - [x] Implement focused accessibility tree.
 - [x] Return compact node summaries: role, name, state, bounds, actions.
-- [ ] Return text/value summaries for supported nodes.
+- [x] Return text/value summaries for supported nodes.
 - [x] Implement find by role/name/app/window.
 - Implement invoke action and set text where supported.
 - Add secret/password-field detection.

@@ -216,6 +216,8 @@ smoke-atspi:
 	jq -e '.type == "accessibility_tree"' "$$out" >/dev/null
 	target/debug/plasma-pilot-cli --socket "$$socket" atspi find --role application --max-results 1 --max-nodes 128 >"$$out"
 	jq -e '.type == "accessibility_matches" and (.data | length) >= 1' "$$out" >/dev/null
+	target/debug/plasma-pilot-cli --socket "$$socket" atspi find --role slider --max-results 1 --max-nodes 1500 >"$$out"
+	jq -e '.type == "accessibility_matches" and (.data | length) >= 1 and .data[0].value != null' "$$out" >/dev/null
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "focused_accessibility_tree"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "accessibility_find"
 
