@@ -14,4 +14,5 @@ Phase 1 first slice is implemented:
 - `plasma-pilotd` binds a Unix socket, enforces restrictive socket directory/socket permissions, and rejects clients from another UID using Unix peer credentials.
 - The daemon serves newline-delimited JSON requests for `health`, `capabilities`, and `policy_status`.
 - `plasma-pilot-cli doctor`, `capabilities`, and `policy-status` call the daemon over the Unix socket.
+- `make smoke` starts a temporary daemon, calls the CLI health/capability/policy commands, and verifies socket directory/socket modes.
 - Screenshot, input, KWin, AT-SPI, real MCP tools, and journaling remain future work.

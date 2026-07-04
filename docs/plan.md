@@ -734,7 +734,7 @@ Tasks:
 - [x] Create crates listed in the repository layout.
 - [x] Create `docs/architecture.md`, `docs/threat-model.md`, `docs/mcp-tools.md`, `docs/backends.md`, `docs/safety.md`.
 - [x] Create plugin skeleton.
-- [ ] Add `justfile` or `Makefile` with common commands.
+- [x] Add `justfile` or `Makefile` with common commands.
 - [x] Add `AGENTS.md` with coding instructions for Codex.
 
 Acceptance criteria:
@@ -1005,7 +1005,7 @@ cargo check --workspace
 
 ## 19. Immediate TODO checklist
 
-- [ ] Create repository structure.
+- [x] Create repository structure.
 - [x] Add this file as `docs/plan.md`.
 - [x] Add `AGENTS.md`.
 - [x] Create Cargo workspace.

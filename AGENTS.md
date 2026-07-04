@@ -22,3 +22,9 @@ cargo fmt --all
 cargo test --workspace
 cargo check --workspace
 ```
+
+When changing daemon/CLI protocol behavior, also run:
+
+```bash
+make smoke
+```
