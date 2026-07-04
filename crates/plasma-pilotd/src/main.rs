@@ -16,9 +16,10 @@ use image::{GenericImageView, imageops::FilterType};
 use libplasma_pilot::{
     ActionResult, BackendCapability, CapabilitySet, ClipboardGetRequest, ClipboardText,
     CoordinateSpace, DaemonRequest, DaemonResponse, DesktopObservation, FocusWindowRequest,
-    HealthStatus, JournalEntry, ObserveRequest, PolicyStatus, SafetyClass, ScreenshotInfo,
-    ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform, ToolApprovalLevel,
-    WindowGeometry, WindowInfo, current_euid, default_journal_path, default_socket_path,
+    FocusedAccessibilityTreeRequest, HealthStatus, JournalEntry, ObserveRequest, PolicyStatus,
+    SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
+    ToolApprovalLevel, WindowGeometry, WindowInfo, current_euid, default_journal_path,
+    default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -377,6 +378,14 @@ fn handle_request(
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::FocusedAccessibilityTree(request) => {
+            match focused_accessibility_tree(request) {
+                Ok(tree) => DaemonResponse::AccessibilityTree(tree),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
         DaemonRequest::JournalTail(request) => match journal.tail(request.limit) {
             Ok(entries) => DaemonResponse::Journal(entries),
             Err(err) => DaemonResponse::Error {
@@ -449,7 +458,8 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::ActiveWindow
         | DaemonRequest::Observe(_)
         | DaemonRequest::Screenshot(_)
-        | DaemonRequest::ScreenshotTile(_) => SafetyClass::Observe,
+        | DaemonRequest::ScreenshotTile(_)
+        | DaemonRequest::FocusedAccessibilityTree(_) => SafetyClass::Observe,
         DaemonRequest::ClipboardGet(_) => SafetyClass::ClipboardRead,
         DaemonRequest::ClipboardSet(_) => SafetyClass::ClipboardWrite,
         DaemonRequest::FocusWindow(_) => SafetyClass::ControlSemantic,
@@ -471,6 +481,9 @@ fn current_capabilities() -> Vec<BackendCapability> {
     }
     if command_exists("wl-copy") && command_exists("wl-paste") {
         capabilities.push(BackendCapability::ClipboardText);
+    }
+    if command_exists("busctl") && plasma_pilot_atspi::available() {
+        capabilities.push(BackendCapability::AccessibilityTree);
     }
     capabilities
 }
@@ -749,6 +762,16 @@ fn clipboard_set_text(text: &str) -> Result<ActionResult> {
     })
 }
 
+fn focused_accessibility_tree(
+    request: FocusedAccessibilityTreeRequest,
+) -> Result<Option<libplasma_pilot::AccessibilityNode>> {
+    if request.max_nodes == 0 {
+        bail!("max_nodes must be greater than zero");
+    }
+    plasma_pilot_atspi::focused_tree(request.depth, request.max_nodes)
+        .map_err(|err| anyhow::anyhow!(err))
+}
+
 fn temporary_capture_path(output: &Path) -> PathBuf {
     let file_name = output
         .file_name()
@@ -945,6 +968,13 @@ fn summarize_response(response: &DaemonResponse) -> String {
             text.truncated,
             text.original_bytes
         ),
+        DaemonResponse::AccessibilityTree(Some(node)) => format!(
+            "accessibility focused role={} name={} children={}",
+            node.role,
+            node.name.as_deref().unwrap_or(""),
+            node.children.len()
+        ),
+        DaemonResponse::AccessibilityTree(None) => "no focused accessibility node".to_string(),
         DaemonResponse::Journal(entries) => format!("{} journal entries", entries.len()),
         DaemonResponse::Action(result) => result
             .message
@@ -1271,5 +1301,18 @@ mod tests {
             }),
         )
         .expect("clipboard writes are allowed by default policy");
+    }
+
+    #[test]
+    fn focused_accessibility_tree_is_observe_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        enforce_policy(
+            &policy,
+            &DaemonRequest::FocusedAccessibilityTree(FocusedAccessibilityTreeRequest {
+                depth: 1,
+                max_nodes: 32,
+            }),
+        )
+        .expect("accessibility tree reads are observe policy");
     }
 }

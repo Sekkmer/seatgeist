@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::types::{
-    BackendCapability, CoordinateSpace, MonitorInfo, Observation, SafetyClass, ToolApprovalLevel,
-    WindowInfo,
+    AccessibilityNode, BackendCapability, CoordinateSpace, MonitorInfo, Observation, SafetyClass,
+    ToolApprovalLevel, WindowInfo,
 };
 
 pub const DEFAULT_CLIPBOARD_MAX_BYTES: usize = 64 * 1024;
@@ -106,6 +106,12 @@ pub struct ClipboardSetRequest {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FocusedAccessibilityTreeRequest {
+    pub depth: usize,
+    pub max_nodes: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DesktopObservation {
     pub active_window: Option<WindowInfo>,
@@ -133,6 +139,7 @@ pub enum DaemonRequest {
     ScreenshotTile(ScreenshotTileRequest),
     ClipboardGet(ClipboardGetRequest),
     ClipboardSet(ClipboardSetRequest),
+    FocusedAccessibilityTree(FocusedAccessibilityTreeRequest),
     JournalTail(JournalTailRequest),
     FocusWindow(FocusWindowRequest),
 }
@@ -151,6 +158,7 @@ impl DaemonRequest {
             Self::ScreenshotTile(_) => "screenshot_tile",
             Self::ClipboardGet(_) => "clipboard_get",
             Self::ClipboardSet(_) => "clipboard_set",
+            Self::FocusedAccessibilityTree(_) => "focused_accessibility_tree",
             Self::JournalTail(_) => "journal_tail",
             Self::FocusWindow(_) => "focus_window",
         }
@@ -169,6 +177,7 @@ pub enum DaemonResponse {
     Observation(Box<DesktopObservation>),
     Screenshot(ScreenshotInfo),
     ClipboardText(ClipboardText),
+    AccessibilityTree(Option<AccessibilityNode>),
     Journal(Vec<JournalEntry>),
     Action(Box<ActionResult>),
     Error { message: String },
@@ -302,5 +311,18 @@ mod tests {
         });
         let encoded = serde_json::to_string(&set).expect("clipboard set request serializes");
         assert_eq!(encoded, r#"{"method":"clipboard_set","text":"hello"}"#);
+    }
+
+    #[test]
+    fn serializes_focused_accessibility_tree_request() {
+        let request = DaemonRequest::FocusedAccessibilityTree(FocusedAccessibilityTreeRequest {
+            depth: 2,
+            max_nodes: 100,
+        });
+        let encoded = serde_json::to_string(&request).expect("accessibility request serializes");
+        assert_eq!(
+            encoded,
+            r#"{"method":"focused_accessibility_tree","depth":2,"max_nodes":100}"#
+        );
     }
 }

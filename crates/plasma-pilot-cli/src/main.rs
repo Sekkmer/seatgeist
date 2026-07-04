@@ -4,8 +4,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use libplasma_pilot::{
     ClipboardGetRequest, ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest,
-    DaemonResponse, FocusWindowRequest, JournalTailRequest, ObserveRequest, ScreenshotRequest,
-    ScreenshotTileRequest, default_socket_path,
+    DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
+    ObserveRequest, ScreenshotRequest, ScreenshotTileRequest, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -66,6 +66,10 @@ enum Command {
         #[command(subcommand)]
         command: ClipboardCommand,
     },
+    Atspi {
+        #[command(subcommand)]
+        command: AtspiCommand,
+    },
     Journal {
         #[command(subcommand)]
         command: JournalCommand,
@@ -83,6 +87,18 @@ enum ClipboardCommand {
     Set {
         #[arg(value_name = "TEXT")]
         text: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AtspiCommand {
+    Tree {
+        #[arg(long)]
+        focused: bool,
+        #[arg(long, default_value_t = 2)]
+        depth: usize,
+        #[arg(long, default_value_t = 256)]
+        max_nodes: usize,
     },
 }
 
@@ -182,6 +198,25 @@ fn main() -> Result<()> {
             &socket,
             DaemonRequest::ClipboardSet(ClipboardSetRequest { text }),
         )?,
+        Command::Atspi {
+            command:
+                AtspiCommand::Tree {
+                    focused,
+                    depth,
+                    max_nodes,
+                },
+        } => {
+            if !focused {
+                bail!("atspi tree currently requires --focused");
+            }
+            print_daemon_response(
+                &socket,
+                DaemonRequest::FocusedAccessibilityTree(FocusedAccessibilityTreeRequest {
+                    depth,
+                    max_nodes,
+                }),
+            )?;
+        }
         Command::Journal {
             command: JournalCommand::Tail { limit },
         } => print_daemon_response(

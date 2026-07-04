@@ -15,6 +15,8 @@ Current KWin focus implementation uses `org.kde.krunner1.Run` on KWin's `Windows
 
 Current clipboard text implementation uses the standard Wayland `wl-copy` and `wl-paste` commands when both are available. The daemon reports `clipboard_text` capability only in that case. Clipboard reads are policy-gated separately from clipboard writes, bounded to 64 KiB by default, and compact daemon/MCP summaries report only text length and truncation metadata. Future backend work should add portal or KDE-native clipboard integration and expose provenance/fallback diagnostics when the Wayland command backend is unavailable.
 
+Current AT-SPI implementation discovers the accessibility bus through `org.a11y.Bus.GetAddress`, then queries the separate accessibility bus with `busctl --address`. It walks application roots from `/org/a11y/atspi/accessible/root`, detects the focused node from the installed AT-SPI state bitset, and returns a bounded subtree with compact role/name/state/bounds/action metadata. This command-backed implementation is intentionally isolated inside `plasma-pilot-atspi`; a future native zbus/libatspi backend should preserve the same daemon protocol and add richer value/text extraction, find, invoke, and set-text support.
+
 ## KWin Script Bridge
 
 The repository includes `kwin/plasma-pilot-bridge`, a packaged KWin script that publishes active-window metadata to the user-session daemon over the session bus:

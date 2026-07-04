@@ -903,8 +903,9 @@ Goal: Codex can use accessibility metadata instead of only pixels.
 
 Tasks:
 
-- Implement focused accessibility tree.
-- Return compact node summaries: role, name, state, value, bounds, actions.
+- [x] Implement focused accessibility tree.
+- [x] Return compact node summaries: role, name, state, bounds, actions.
+- [ ] Return text/value summaries for supported nodes.
 - Implement find by role/name/app/window.
 - Implement invoke action and set text where supported.
 - Add secret/password-field detection.

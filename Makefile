@@ -1,7 +1,7 @@
 SHELL := /usr/bin/bash
 .ONESHELL:
 
-.PHONY: fmt check test clippy verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-mcp install-kwin-script
+.PHONY: fmt check test clippy verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-mcp install-kwin-script
 
 fmt:
 	cargo fmt --all
@@ -187,6 +187,35 @@ smoke-clipboard:
 	grep -q '"type": "action"' "$$set_result"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "clipboard"
 
+smoke-atspi:
+	set -euo pipefail
+	socket="/tmp/plasma-pilot-atspi-smoke/plasma-pilotd.sock"
+	log="target/plasma-pilot-atspi-smoke-daemon.log"
+	journal="target/plasma-pilot-atspi-smoke-journal.jsonl"
+	out="target/plasma-pilot-atspi-smoke.json"
+	rm -rf /tmp/plasma-pilot-atspi-smoke "$$log" "$$journal" "$$out"
+	cargo build -p plasma-pilotd -p plasma-pilot-cli
+	target/debug/plasma-pilotd --socket "$$socket" --journal "$$journal" >"$$log" 2>&1 &
+	pid=$$!
+	cleanup() {
+		kill "$$pid" 2>/dev/null || true
+		wait "$$pid" 2>/dev/null || true
+	}
+	trap cleanup EXIT
+	for _ in {1..50}; do
+		if [[ -S "$$socket" ]]; then
+			break
+		fi
+		sleep 0.1
+	done
+	if [[ ! -S "$$socket" ]]; then
+		cat "$$log"
+		exit 1
+	fi
+	target/debug/plasma-pilot-cli --socket "$$socket" atspi tree --focused --depth 1 --max-nodes 256 >"$$out"
+	jq -e '.type == "accessibility_tree"' "$$out" >/dev/null
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "focused_accessibility_tree"
+
 smoke-mcp:
 	set -euo pipefail
 	socket="/tmp/plasma-pilot-mcp-smoke/plasma-pilotd.sock"
@@ -224,6 +253,7 @@ smoke-mcp:
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.list_windows")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.clipboard_get_text")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.clipboard_set_text")' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_focused_tree")' "$$out" >/dev/null
 	jq -e 'select(.id == 3) | .result.isError == false and .result.structuredContent.type == "health"' "$$out" >/dev/null
 	jq -e 'select(.id == 4) | .result.isError == false and .result.structuredContent.type == "observation"' "$$out" >/dev/null
 

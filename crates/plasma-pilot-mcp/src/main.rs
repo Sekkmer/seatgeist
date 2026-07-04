@@ -8,8 +8,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use libplasma_pilot::{
     ClipboardGetRequest, ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest,
-    DaemonResponse, FocusWindowRequest, JournalTailRequest, ObserveRequest, ScreenshotRequest,
-    ScreenshotTileRequest, default_socket_path,
+    DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
+    ObserveRequest, ScreenshotRequest, ScreenshotTileRequest, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -277,6 +277,18 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         "plasma.clipboard_set_text" => Ok(DaemonRequest::ClipboardSet(ClipboardSetRequest {
             text: required_string(arguments, "text")?,
         })),
+        "plasma.a11y_focused_tree" => Ok(DaemonRequest::FocusedAccessibilityTree(
+            FocusedAccessibilityTreeRequest {
+                depth: optional_u64(arguments, "depth")?
+                    .map(u64_to_usize)
+                    .transpose()?
+                    .unwrap_or(2),
+                max_nodes: optional_u64(arguments, "max_nodes")?
+                    .map(u64_to_usize)
+                    .transpose()?
+                    .unwrap_or(256),
+            },
+        )),
         "plasma.focus_window" => Ok(DaemonRequest::FocusWindow(FocusWindowRequest {
             window_id: required_string(arguments, "window_id")?,
         })),
@@ -352,6 +364,13 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             text.truncated,
             text.original_bytes
         ),
+        DaemonResponse::AccessibilityTree(Some(node)) => format!(
+            "accessibility focused role={} name={} children={}",
+            node.role,
+            node.name.as_deref().unwrap_or(""),
+            node.children.len()
+        ),
+        DaemonResponse::AccessibilityTree(None) => "no focused accessibility node".to_string(),
         DaemonResponse::Journal(entries) => format!("{} journal entries", entries.len()),
         DaemonResponse::Action(result) => result
             .message
@@ -508,6 +527,24 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "plasma.a11y_focused_tree",
+            "Focused Accessibility Tree",
+            "Return a compact AT-SPI subtree rooted at the currently focused accessibility node.",
+            object_schema(
+                vec![
+                    (
+                        "depth",
+                        json!({"type": "integer", "minimum": 0, "description": "Child depth to return from the focused node. Defaults to 2."}),
+                    ),
+                    (
+                        "max_nodes",
+                        json!({"type": "integer", "minimum": 1, "maximum": 2000, "description": "Maximum nodes to scan and return. Defaults to 256."}),
+                    ),
+                ],
+                vec![],
+            ),
+        ),
+        tool(
             "plasma.journal_tail",
             "Journal Tail",
             "Read recent compact daemon journal entries.",
@@ -635,6 +672,11 @@ mod tests {
                 .iter()
                 .any(|tool| tool["name"] == "plasma.clipboard_get_text")
         );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.a11y_focused_tree")
+        );
     }
 
     #[test]
@@ -711,6 +753,22 @@ mod tests {
         assert_eq!(
             request,
             DaemonRequest::ClipboardGet(ClipboardGetRequest { max_bytes: None })
+        );
+    }
+
+    #[test]
+    fn maps_focused_accessibility_tree_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.a11y_focused_tree",
+            &json!({"depth": 3, "max_nodes": 128}),
+        )
+        .expect("a11y focused tree args map");
+        assert_eq!(
+            request,
+            DaemonRequest::FocusedAccessibilityTree(FocusedAccessibilityTreeRequest {
+                depth: 3,
+                max_nodes: 128,
+            })
         );
     }
 

@@ -75,8 +75,20 @@ pub struct AccessibilityNode {
     pub name: Option<String>,
     pub value: Option<String>,
     pub sensitive: bool,
+    pub states: Vec<String>,
+    pub bounds: Option<AccessibilityBounds>,
+    pub available_actions: Vec<String>,
     pub actions: Vec<AccessibilityAction>,
     pub children: Vec<AccessibilityNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessibilityBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub space: CoordinateSpace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

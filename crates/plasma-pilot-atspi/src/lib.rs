@@ -1,1 +1,569 @@
+use std::process::Command;
+
+use libplasma_pilot::{
+    AccessibilityAction, AccessibilityBounds, AccessibilityNode, CoordinateSpace, PilotError,
+};
+
 pub const BACKEND_NAME: &str = "atspi";
+
+const ATSPI_ROOT_SERVICE: &str = "org.a11y.atspi.Registry";
+const ATSPI_ROOT_PATH: &str = "/org/a11y/atspi/accessible/root";
+const ATSPI_ACCESSIBLE: &str = "org.a11y.atspi.Accessible";
+const ATSPI_COMPONENT: &str = "org.a11y.atspi.Component";
+const ATSPI_ACTION: &str = "org.a11y.atspi.Action";
+const STATE_FOCUSED: usize = 12;
+const DEFAULT_SEARCH_DEPTH: usize = 12;
+
+pub type Result<T> = std::result::Result<T, PilotError>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AtspiRef {
+    service: String,
+    path: String,
+}
+
+#[derive(Debug, Clone)]
+struct AtspiBus {
+    address: String,
+}
+
+#[derive(Debug)]
+struct NodeBudget {
+    remaining: usize,
+}
+
+impl NodeBudget {
+    fn new(max_nodes: usize) -> Self {
+        Self {
+            remaining: max_nodes,
+        }
+    }
+
+    fn take(&mut self) -> bool {
+        if self.remaining == 0 {
+            return false;
+        }
+        self.remaining -= 1;
+        true
+    }
+}
+
+pub fn available() -> bool {
+    accessibility_bus_address().is_ok()
+}
+
+pub fn focused_tree(depth: usize, max_nodes: usize) -> Result<Option<AccessibilityNode>> {
+    if max_nodes == 0 {
+        return Err(PilotError::InvalidRequest(
+            "max_nodes must be greater than zero".to_string(),
+        ));
+    }
+
+    let bus = AtspiBus::connect()?;
+    let roots = bus.children(&AtspiRef {
+        service: ATSPI_ROOT_SERVICE.to_string(),
+        path: ATSPI_ROOT_PATH.to_string(),
+    })?;
+    let mut search_budget = NodeBudget::new(max_nodes);
+    for root in roots {
+        if let Some(focused) = bus.find_focused(&root, DEFAULT_SEARCH_DEPTH, &mut search_budget)? {
+            let mut build_budget = NodeBudget::new(max_nodes);
+            return bus.node_tree(&focused, depth, &mut build_budget).map(Some);
+        }
+    }
+
+    Ok(None)
+}
+
+impl AtspiBus {
+    fn connect() -> Result<Self> {
+        Ok(Self {
+            address: accessibility_bus_address()?,
+        })
+    }
+
+    fn find_focused(
+        &self,
+        node: &AtspiRef,
+        depth: usize,
+        budget: &mut NodeBudget,
+    ) -> Result<Option<AtspiRef>> {
+        if !budget.take() {
+            return Ok(None);
+        }
+        if state_has_focused(&self.states(node).unwrap_or_default()) {
+            return Ok(Some(node.clone()));
+        }
+        if depth == 0 {
+            return Ok(None);
+        }
+        for child in self.children(node).unwrap_or_default() {
+            if let Some(focused) = self.find_focused(&child, depth - 1, budget)? {
+                return Ok(Some(focused));
+            }
+        }
+        Ok(None)
+    }
+
+    fn node_tree(
+        &self,
+        node: &AtspiRef,
+        depth: usize,
+        budget: &mut NodeBudget,
+    ) -> Result<AccessibilityNode> {
+        if !budget.take() {
+            return Err(PilotError::InvalidRequest(
+                "accessibility tree max_nodes exhausted".to_string(),
+            ));
+        }
+
+        let role = self
+            .role_name(node)
+            .unwrap_or_else(|_| "unknown".to_string());
+        let states = state_names(&self.states(node).unwrap_or_default());
+        let interfaces = self.interfaces(node).unwrap_or_default();
+        let available_actions = if interfaces.iter().any(|interface| interface == ATSPI_ACTION) {
+            self.actions(node).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let bounds = if interfaces
+            .iter()
+            .any(|interface| interface == ATSPI_COMPONENT)
+        {
+            self.extents(node).ok()
+        } else {
+            None
+        };
+        let mut children = Vec::new();
+        if depth > 0 {
+            for child in self.children(node).unwrap_or_default() {
+                if budget.remaining == 0 {
+                    break;
+                }
+                if let Ok(child) = self.node_tree(&child, depth - 1, budget) {
+                    children.push(child);
+                }
+            }
+        }
+
+        Ok(AccessibilityNode {
+            id: format!("atspi://{}{}", node.service, node.path),
+            role: role.clone(),
+            name: non_empty(self.name(node).unwrap_or_default()),
+            value: None,
+            sensitive: is_sensitive_role(&role),
+            states,
+            bounds,
+            available_actions: available_actions.clone(),
+            actions: normalize_actions(&available_actions),
+            children,
+        })
+    }
+
+    fn call(&self, service: &str, path: &str, interface: &str, method: &str) -> Result<String> {
+        let output = Command::new("busctl")
+            .args([
+                "--address",
+                &self.address,
+                "call",
+                service,
+                path,
+                interface,
+                method,
+            ])
+            .output()
+            .map_err(|err| PilotError::BackendUnavailable(format!("run busctl: {err}")))?;
+        command_output(output, "busctl AT-SPI call")
+    }
+
+    fn call_with_args(
+        &self,
+        service: &str,
+        path: &str,
+        interface: &str,
+        method: &str,
+        args: &[&str],
+    ) -> Result<String> {
+        let output = Command::new("busctl")
+            .args([
+                "--address",
+                &self.address,
+                "call",
+                service,
+                path,
+                interface,
+                method,
+            ])
+            .args(args)
+            .output()
+            .map_err(|err| PilotError::BackendUnavailable(format!("run busctl: {err}")))?;
+        command_output(output, "busctl AT-SPI call")
+    }
+
+    fn get_property(
+        &self,
+        service: &str,
+        path: &str,
+        interface: &str,
+        property: &str,
+    ) -> Result<String> {
+        let output = Command::new("busctl")
+            .args([
+                "--address",
+                &self.address,
+                "get-property",
+                service,
+                path,
+                interface,
+                property,
+            ])
+            .output()
+            .map_err(|err| PilotError::BackendUnavailable(format!("run busctl: {err}")))?;
+        command_output(output, "busctl AT-SPI get-property")
+    }
+
+    fn children(&self, node: &AtspiRef) -> Result<Vec<AtspiRef>> {
+        let output = self.call(&node.service, &node.path, ATSPI_ACCESSIBLE, "GetChildren")?;
+        Ok(parse_object_refs(&output))
+    }
+
+    fn role_name(&self, node: &AtspiRef) -> Result<String> {
+        let output = self.call(&node.service, &node.path, ATSPI_ACCESSIBLE, "GetRoleName")?;
+        parse_single_string(&output)
+    }
+
+    fn name(&self, node: &AtspiRef) -> Result<String> {
+        let output = self.get_property(&node.service, &node.path, ATSPI_ACCESSIBLE, "Name")?;
+        parse_single_string(&output)
+    }
+
+    fn states(&self, node: &AtspiRef) -> Result<Vec<u32>> {
+        let output = self.call(&node.service, &node.path, ATSPI_ACCESSIBLE, "GetState")?;
+        Ok(parse_uint_array(&output))
+    }
+
+    fn interfaces(&self, node: &AtspiRef) -> Result<Vec<String>> {
+        let output = self.call(&node.service, &node.path, ATSPI_ACCESSIBLE, "GetInterfaces")?;
+        Ok(parse_strings(&output))
+    }
+
+    fn extents(&self, node: &AtspiRef) -> Result<AccessibilityBounds> {
+        let output = self.call_with_args(
+            &node.service,
+            &node.path,
+            ATSPI_COMPONENT,
+            "GetExtents",
+            &["u", "0"],
+        )?;
+        let (x, y, width, height) = parse_extents(&output)?;
+        Ok(AccessibilityBounds {
+            x,
+            y,
+            width,
+            height,
+            space: CoordinateSpace::LogicalPixel,
+        })
+    }
+
+    fn actions(&self, node: &AtspiRef) -> Result<Vec<String>> {
+        let output = self.call(&node.service, &node.path, ATSPI_ACTION, "GetActions")?;
+        Ok(parse_action_names(&output))
+    }
+}
+
+fn accessibility_bus_address() -> Result<String> {
+    let output = Command::new("busctl")
+        .args([
+            "--user",
+            "call",
+            "org.a11y.Bus",
+            "/org/a11y/bus",
+            "org.a11y.Bus",
+            "GetAddress",
+        ])
+        .output()
+        .map_err(|err| PilotError::BackendUnavailable(format!("run busctl: {err}")))?;
+    parse_single_string(&command_output(output, "busctl org.a11y.Bus GetAddress")?)
+}
+
+fn command_output(output: std::process::Output, context: &str) -> Result<String> {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(PilotError::BackendUnavailable(format!(
+            "{context} exited with status {}: {stderr}",
+            output.status
+        )));
+    }
+    String::from_utf8(output.stdout).map_err(|err| {
+        PilotError::BackendUnavailable(format!("{context} output was not UTF-8: {err}"))
+    })
+}
+
+fn parse_object_refs(output: &str) -> Vec<AtspiRef> {
+    parse_strings(output)
+        .chunks_exact(2)
+        .map(|chunk| AtspiRef {
+            service: chunk[0].clone(),
+            path: chunk[1].clone(),
+        })
+        .collect()
+}
+
+fn parse_single_string(output: &str) -> Result<String> {
+    parse_strings(output).into_iter().next().ok_or_else(|| {
+        PilotError::InvalidRequest(format!("expected string in AT-SPI output: {output}"))
+    })
+}
+
+fn parse_strings(input: &str) -> Vec<String> {
+    let mut strings = Vec::new();
+    let mut rest = input;
+    while let Some((value, next)) = parse_quoted(rest) {
+        strings.push(value);
+        rest = next;
+    }
+    strings
+}
+
+fn parse_quoted(input: &str) -> Option<(String, &str)> {
+    let bytes = input.as_bytes();
+    let start = bytes.iter().position(|byte| *byte == b'"')?;
+    let mut output = Vec::new();
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                let rest = &input[index + 1..];
+                return String::from_utf8(output).ok().map(|value| (value, rest));
+            }
+            b'\\' => {
+                index += 1;
+                if index >= bytes.len() {
+                    return None;
+                }
+                if index + 2 < bytes.len()
+                    && bytes[index].is_ascii_digit()
+                    && bytes[index + 1].is_ascii_digit()
+                    && bytes[index + 2].is_ascii_digit()
+                {
+                    let octal = std::str::from_utf8(&bytes[index..index + 3]).ok()?;
+                    let value = u8::from_str_radix(octal, 8).ok()?;
+                    output.push(value);
+                    index += 3;
+                    continue;
+                }
+                output.push(bytes[index]);
+                index += 1;
+            }
+            byte => {
+                output.push(byte);
+                index += 1;
+            }
+        }
+    }
+    None
+}
+
+fn parse_uint_array(output: &str) -> Vec<u32> {
+    let mut parts = output.split_whitespace();
+    if parts.next() != Some("au") {
+        return Vec::new();
+    }
+    let count = parts
+        .next()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    parts
+        .take(count)
+        .filter_map(|value| value.parse::<u32>().ok())
+        .collect()
+}
+
+fn parse_extents(output: &str) -> Result<(i32, i32, u32, u32)> {
+    let values = output
+        .trim()
+        .strip_prefix("(iiii)")
+        .unwrap_or(output)
+        .split_whitespace()
+        .filter_map(|value| value.parse::<i32>().ok())
+        .collect::<Vec<_>>();
+    if values.len() != 4 {
+        return Err(PilotError::InvalidRequest(format!(
+            "expected AT-SPI extents tuple: {output}"
+        )));
+    }
+    Ok((
+        values[0],
+        values[1],
+        values[2].max(0) as u32,
+        values[3].max(0) as u32,
+    ))
+}
+
+fn parse_action_names(output: &str) -> Vec<String> {
+    parse_strings(output)
+        .chunks_exact(3)
+        .filter_map(|chunk| non_empty(chunk[0].clone()))
+        .collect()
+}
+
+fn state_has_focused(words: &[u32]) -> bool {
+    state_bit(words, STATE_FOCUSED)
+}
+
+fn state_names(words: &[u32]) -> Vec<String> {
+    STATE_NAMES
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| state_bit(words, *index))
+        .map(|(_, name)| (*name).to_string())
+        .collect()
+}
+
+fn state_bit(words: &[u32], index: usize) -> bool {
+    let word = index / 32;
+    let bit = index % 32;
+    words
+        .get(word)
+        .map(|value| value & (1_u32 << bit) != 0)
+        .unwrap_or(false)
+}
+
+fn normalize_actions(actions: &[String]) -> Vec<AccessibilityAction> {
+    let mut normalized = Vec::new();
+    for action in actions {
+        let lower = action.to_ascii_lowercase();
+        let candidate = if lower.contains("press") || lower.contains("click") {
+            Some(AccessibilityAction::Press)
+        } else if lower.contains("set") && lower.contains("text") {
+            Some(AccessibilityAction::SetText)
+        } else if lower.contains("focus") {
+            Some(AccessibilityAction::Focus)
+        } else if lower.contains("select") {
+            Some(AccessibilityAction::Select)
+        } else {
+            None
+        };
+        if let Some(candidate) = candidate
+            && !normalized.contains(&candidate)
+        {
+            normalized.push(candidate);
+        }
+    }
+    normalized
+}
+
+fn is_sensitive_role(role: &str) -> bool {
+    role.eq_ignore_ascii_case("password text") || role.eq_ignore_ascii_case("password")
+}
+
+fn non_empty(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+const STATE_NAMES: &[&str] = &[
+    "invalid",
+    "active",
+    "armed",
+    "busy",
+    "checked",
+    "collapsed",
+    "defunct",
+    "editable",
+    "enabled",
+    "expandable",
+    "expanded",
+    "focusable",
+    "focused",
+    "has_tooltip",
+    "horizontal",
+    "iconified",
+    "modal",
+    "multi_line",
+    "multiselectable",
+    "opaque",
+    "pressed",
+    "resizable",
+    "selectable",
+    "selected",
+    "sensitive",
+    "showing",
+    "single_line",
+    "stale",
+    "transient",
+    "vertical",
+    "visible",
+    "manages_descendants",
+    "indeterminate",
+    "required",
+    "truncated",
+    "animated",
+    "invalid_entry",
+    "supports_autocompletion",
+    "selectable_text",
+    "is_default",
+    "visited",
+    "checkable",
+    "has_popup",
+    "read_only",
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_object_refs_from_busctl_output() {
+        let refs = parse_object_refs(
+            r#"a(so) 2 ":1.23" "/org/a11y/atspi/accessible/root" ":1.37" "/org/a11y/atspi/accessible/1""#,
+        );
+        assert_eq!(
+            refs,
+            vec![
+                AtspiRef {
+                    service: ":1.23".to_string(),
+                    path: "/org/a11y/atspi/accessible/root".to_string(),
+                },
+                AtspiRef {
+                    service: ":1.37".to_string(),
+                    path: "/org/a11y/atspi/accessible/1".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn decodes_busctl_octal_escaped_strings() {
+        let value =
+            parse_single_string(r#"s "outfit.txt  \342\200\224 Kate""#).expect("string parses");
+        assert_eq!(value, "outfit.txt  - Kate".replace('-', "\u{2014}"));
+    }
+
+    #[test]
+    fn maps_state_bitset_to_names() {
+        let states = state_names(&[1_u32 << STATE_FOCUSED]);
+        assert_eq!(states, vec!["focused"]);
+        assert!(state_has_focused(&[1_u32 << STATE_FOCUSED]));
+    }
+
+    #[test]
+    fn parses_component_extents() {
+        let extents = parse_extents("(iiii) 10 20 640 480").expect("extents parse");
+        assert_eq!(extents, (10, 20, 640, 480));
+    }
+
+    #[test]
+    fn parses_action_names_from_triples() {
+        let actions = parse_action_names(r#"a(sss) 2 "click" "" "" "press" "desc" "Ctrl+P""#);
+        assert_eq!(actions, vec!["click", "press"]);
+        assert_eq!(
+            normalize_actions(&actions),
+            vec![AccessibilityAction::Press]
+        );
+    }
+}
