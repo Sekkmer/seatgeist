@@ -186,8 +186,9 @@ smoke-clipboard:
 	sentinel="plasma-pilot-clipboard-smoke-$$(date +%s)"
 	target/debug/plasma-pilot-cli --socket "$$socket" clipboard set "$$sentinel" >"$$set_result"
 	target/debug/plasma-pilot-cli --socket "$$socket" clipboard get >"$$current_json"
-	jq -e --arg text "$$sentinel" '.type == "clipboard_text" and .data.text == $$text' "$$current_json" >/dev/null
+	jq -e --arg text "$$sentinel" '.type == "clipboard_text" and .data.text == $$text and (.data.backend | type == "string") and (.data.backend | length > 0)' "$$current_json" >/dev/null
 	grep -q '"type": "action"' "$$set_result"
+	grep -q "backend=" "$$set_result"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "clipboard"
 
 smoke-atspi:

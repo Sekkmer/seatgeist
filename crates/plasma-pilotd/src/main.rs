@@ -1105,7 +1105,7 @@ fn current_capabilities() -> Vec<BackendCapability> {
         capabilities.push(BackendCapability::WindowList);
         capabilities.push(BackendCapability::WindowFocus);
     }
-    if command_exists("wl-copy") && command_exists("wl-paste") {
+    if clipboard_read_backend().is_some() && clipboard_write_backend().is_some() {
         capabilities.push(BackendCapability::ClipboardText);
     }
     if plasma_pilot_uinput::available() {
@@ -1508,10 +1508,20 @@ fn clipboard_get_text(request: ClipboardGetRequest) -> Result<ClipboardText> {
     if request.max_bytes == Some(0) {
         bail!("clipboard max_bytes must be greater than zero");
     }
-    if !command_exists("wl-paste") {
-        bail!("wl-paste command is not available for Wayland clipboard reads");
-    }
+    let backend = clipboard_read_backend()
+        .ok_or_else(|| anyhow::anyhow!("no clipboard text read backend is available"))?;
+    let text = match backend {
+        ClipboardBackend::WlClipboard => clipboard_get_text_wl()?,
+        ClipboardBackend::KdeKlipper => clipboard_get_text_klipper()?,
+    };
+    Ok(bound_clipboard_text(
+        text,
+        request.max_bytes,
+        backend.name().to_string(),
+    ))
+}
 
+fn clipboard_get_text_wl() -> Result<String> {
     let output = Command::new("wl-paste")
         .arg("--no-newline")
         .output()
@@ -1523,17 +1533,45 @@ fn clipboard_get_text(request: ClipboardGetRequest) -> Result<ClipboardText> {
         );
     }
 
-    let text = String::from_utf8(output.stdout).context("clipboard text is not valid UTF-8")?;
-    Ok(bound_clipboard_text(text, request.max_bytes))
+    String::from_utf8(output.stdout).context("clipboard text is not valid UTF-8")
 }
 
-fn bound_clipboard_text(mut text: String, max_bytes: Option<usize>) -> ClipboardText {
+fn clipboard_get_text_klipper() -> Result<String> {
+    let output = Command::new("qdbus6")
+        .args([
+            "org.kde.klipper",
+            "/klipper",
+            "org.kde.klipper.klipper.getClipboardContents",
+        ])
+        .output()
+        .context("run KDE Klipper clipboard read backend")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "KDE Klipper clipboard read backend exited with status {}: {stderr}",
+            output.status
+        );
+    }
+    let mut text =
+        String::from_utf8(output.stdout).context("KDE Klipper clipboard text is not UTF-8")?;
+    if text.ends_with('\n') {
+        text.pop();
+    }
+    Ok(text)
+}
+
+fn bound_clipboard_text(
+    mut text: String,
+    max_bytes: Option<usize>,
+    backend: String,
+) -> ClipboardText {
     let original_bytes = text.len();
     let Some(max_bytes) = max_bytes else {
         return ClipboardText {
             text,
             truncated: false,
             original_bytes,
+            backend,
         };
     };
     if original_bytes <= max_bytes {
@@ -1541,6 +1579,7 @@ fn bound_clipboard_text(mut text: String, max_bytes: Option<usize>) -> Clipboard
             text,
             truncated: false,
             original_bytes,
+            backend,
         };
     }
 
@@ -1553,14 +1592,31 @@ fn bound_clipboard_text(mut text: String, max_bytes: Option<usize>) -> Clipboard
         text,
         truncated: true,
         original_bytes,
+        backend,
     }
 }
 
 fn clipboard_set_text(text: &str) -> Result<ActionResult> {
-    if !command_exists("wl-copy") {
-        bail!("wl-copy command is not available for Wayland clipboard writes");
+    let backend = clipboard_write_backend()
+        .ok_or_else(|| anyhow::anyhow!("no clipboard text write backend is available"))?;
+    match backend {
+        ClipboardBackend::WlClipboard => clipboard_set_text_wl(text)?,
+        ClipboardBackend::KdeKlipper => clipboard_set_text_klipper(text)?,
     }
 
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "set clipboard text length={} backend={}",
+            text.len(),
+            backend.name()
+        )),
+    })
+}
+
+fn clipboard_set_text_wl(text: &str) -> Result<()> {
     let mut child = Command::new("wl-copy")
         .arg("--type")
         .arg("text/plain;charset=utf-8")
@@ -1580,13 +1636,80 @@ fn clipboard_set_text(text: &str) -> Result<ActionResult> {
     if !status.success() {
         bail!("wl-copy clipboard backend exited with status {status}");
     }
+    Ok(())
+}
 
-    Ok(ActionResult {
-        id: Uuid::new_v4(),
-        ok: true,
-        observation: None,
-        message: Some(format!("set clipboard text length={}", text.len())),
-    })
+fn clipboard_set_text_klipper(text: &str) -> Result<()> {
+    let status = Command::new("qdbus6")
+        .args([
+            "org.kde.klipper",
+            "/klipper",
+            "org.kde.klipper.klipper.setClipboardContents",
+            text,
+        ])
+        .status()
+        .context("run KDE Klipper clipboard write backend")?;
+    if !status.success() {
+        bail!("KDE Klipper clipboard write backend exited with status {status}");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipboardBackend {
+    WlClipboard,
+    KdeKlipper,
+}
+
+impl ClipboardBackend {
+    fn name(self) -> &'static str {
+        match self {
+            Self::WlClipboard => "wl-clipboard",
+            Self::KdeKlipper => "kde-klipper",
+        }
+    }
+}
+
+fn clipboard_read_backend() -> Option<ClipboardBackend> {
+    clipboard_read_backend_from_availability(command_exists("wl-paste"), kde_klipper_available())
+}
+
+fn clipboard_read_backend_from_availability(
+    wl_paste_available: bool,
+    kde_klipper_available: bool,
+) -> Option<ClipboardBackend> {
+    if wl_paste_available {
+        return Some(ClipboardBackend::WlClipboard);
+    }
+    if kde_klipper_available {
+        return Some(ClipboardBackend::KdeKlipper);
+    }
+    None
+}
+
+fn clipboard_write_backend() -> Option<ClipboardBackend> {
+    clipboard_write_backend_from_availability(command_exists("wl-copy"), kde_klipper_available())
+}
+
+fn clipboard_write_backend_from_availability(
+    wl_copy_available: bool,
+    kde_klipper_available: bool,
+) -> Option<ClipboardBackend> {
+    if wl_copy_available {
+        return Some(ClipboardBackend::WlClipboard);
+    }
+    if kde_klipper_available {
+        return Some(ClipboardBackend::KdeKlipper);
+    }
+    None
+}
+
+fn kde_klipper_available() -> bool {
+    Command::new("qdbus6")
+        .args(["org.kde.klipper", "/klipper"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn focused_accessibility_tree(
@@ -2599,10 +2722,11 @@ fn summarize_response(response: &DaemonResponse) -> String {
             result.screenshot.path.display()
         ),
         DaemonResponse::ClipboardText(text) => format!(
-            "clipboard text length={} truncated={} original_bytes={}",
+            "clipboard text length={} truncated={} original_bytes={} backend={}",
             text.text.len(),
             text.truncated,
-            text.original_bytes
+            text.original_bytes,
+            text.backend
         ),
         DaemonResponse::AccessibilityTree(Some(node)) => format!(
             "accessibility focused role={} name={} children={}",
@@ -3703,18 +3827,45 @@ mod tests {
 
     #[test]
     fn clipboard_text_is_bounded_on_utf8_boundary() {
-        let bounded = bound_clipboard_text("abécd".to_string(), Some(4));
+        let bounded = bound_clipboard_text("abécd".to_string(), Some(4), "test".to_string());
         assert_eq!(bounded.text, "abé");
         assert!(bounded.truncated);
         assert_eq!(bounded.original_bytes, 6);
+        assert_eq!(bounded.backend, "test");
     }
 
     #[test]
     fn clipboard_text_can_be_unbounded() {
-        let bounded = bound_clipboard_text("hello".to_string(), None);
+        let bounded = bound_clipboard_text("hello".to_string(), None, "test".to_string());
         assert_eq!(bounded.text, "hello");
         assert!(!bounded.truncated);
         assert_eq!(bounded.original_bytes, 5);
+        assert_eq!(bounded.backend, "test");
+    }
+
+    #[test]
+    fn clipboard_backend_prefers_wl_then_klipper() {
+        assert_eq!(
+            clipboard_read_backend_from_availability(true, true),
+            Some(ClipboardBackend::WlClipboard)
+        );
+        assert_eq!(
+            clipboard_read_backend_from_availability(false, true),
+            Some(ClipboardBackend::KdeKlipper)
+        );
+        assert_eq!(clipboard_read_backend_from_availability(false, false), None);
+        assert_eq!(
+            clipboard_write_backend_from_availability(true, true),
+            Some(ClipboardBackend::WlClipboard)
+        );
+        assert_eq!(
+            clipboard_write_backend_from_availability(false, true),
+            Some(ClipboardBackend::KdeKlipper)
+        );
+        assert_eq!(
+            clipboard_write_backend_from_availability(false, false),
+            None
+        );
     }
 
     #[test]

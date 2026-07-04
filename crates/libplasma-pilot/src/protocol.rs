@@ -252,6 +252,7 @@ pub struct ClipboardText {
     pub text: String,
     pub truncated: bool,
     pub original_bytes: usize,
+    pub backend: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1019,6 +1020,16 @@ mod tests {
         });
         let encoded = serde_json::to_string(&set).expect("clipboard set request serializes");
         assert_eq!(encoded, r#"{"method":"clipboard_set","text":"hello"}"#);
+
+        let response = DaemonResponse::ClipboardText(ClipboardText {
+            text: "hello".to_string(),
+            truncated: false,
+            original_bytes: 5,
+            backend: "wl-clipboard".to_string(),
+        });
+        let encoded = serde_json::to_string(&response).expect("clipboard response serializes");
+        assert!(encoded.contains(r#""type":"clipboard_text""#));
+        assert!(encoded.contains(r#""backend":"wl-clipboard""#));
     }
 
     #[test]

@@ -553,10 +553,11 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             result.screenshot.path.display()
         ),
         DaemonResponse::ClipboardText(text) => format!(
-            "clipboard text length={} truncated={} original_bytes={}",
+            "clipboard text length={} truncated={} original_bytes={} backend={}",
             text.text.len(),
             text.truncated,
-            text.original_bytes
+            text.original_bytes,
+            text.backend
         ),
         DaemonResponse::AccessibilityTree(Some(node)) => format!(
             "accessibility focused role={} name={} children={}",

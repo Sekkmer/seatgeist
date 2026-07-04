@@ -898,7 +898,7 @@ Tasks:
 - [x] Implement clipboard get/set for UTF-8 text.
 - [x] Use `wl-copy`/`wl-paste` as the first Wayland backend when available.
 - [x] Enforce clipboard read policy.
-- [ ] Add KDE/portal-native fallback and explicit provenance selection if `wl-copy`/`wl-paste` is unavailable.
+- [x] Add KDE/portal-native fallback and explicit provenance selection if `wl-copy`/`wl-paste` is unavailable. Current status: daemon clipboard reads/writes prefer `wl-clipboard` and fall back to KDE Klipper DBus (`org.kde.klipper`) when the Wayland commands are unavailable; `ClipboardText` responses and clipboard-set action summaries include backend provenance.
 - [x] Truncate large clipboard reads by default.
 
 Acceptance criteria:
@@ -906,7 +906,7 @@ Acceptance criteria:
 - CLI can set and get text clipboard.
 - MCP can set clipboard text for paste workflows.
 - Clipboard reads are logged and policy-checked.
-- Clipboard journal summaries and compact MCP status text do not echo clipboard contents.
+- Clipboard journal summaries and compact MCP status text do not echo clipboard contents. Current summaries include text length, truncation metadata, original byte count, and backend provenance only.
 
 ### Phase 8: AT-SPI semantic UI
 
