@@ -46,4 +46,5 @@ pub trait AccessibilityBackend: Send + Sync {
     async fn find(&self, request: AccessibilityFindRequest) -> Result<Vec<AccessibilityNode>>;
     async fn invoke(&self, node_id: &str, action: AccessibilityAction) -> Result<()>;
     async fn set_text(&self, node_id: &str, text: &str) -> Result<()>;
+    async fn insert_text(&self, node_id: &str, offset: i32, text: &str) -> Result<()>;
 }

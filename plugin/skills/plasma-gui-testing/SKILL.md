@@ -10,7 +10,7 @@ Workflow:
 1. Start the application from a shell command when possible so logs and process state are available.
 2. Use `plasma.observe` to capture monitors, windows, active-window state, and optionally a bounded screenshot.
 3. Use `plasma.focus_window` with an active-window guard before interacting with the app under test.
-4. Prefer `plasma.a11y_find`, `plasma.click_button`, `plasma.set_text_field`, `plasma.select_menu`, `plasma.activate_tab`, `plasma.toggle_check`, and `plasma.set_value` for repeatable UI operations.
+4. Prefer `plasma.a11y_find`, `plasma.click_button`, `plasma.set_text_field`, `plasma.select_menu`, `plasma.activate_tab`, `plasma.toggle_check`, and `plasma.set_value` for repeatable UI operations; use `plasma.a11y_insert_text` only for known non-sensitive `EditableText` offset insertion.
 5. Use `plasma.pointer_calibration` plus guarded `plasma.click_pointer` only when semantic access is unavailable.
 6. Use `plasma.wait_for_change` after actions that should visibly update the UI.
 7. Save repro artifacts under the repo test/evidence path when the task calls for evidence.

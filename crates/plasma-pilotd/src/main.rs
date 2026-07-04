@@ -14,19 +14,20 @@ use anyhow::{Context, Error, Result, bail};
 use clap::Parser;
 use image::{GenericImageView, Rgba, imageops::FilterType};
 use libplasma_pilot::{
-    AccessibilityFindRequest, AccessibilityInvokeRequest, AccessibilitySetTextRequest,
-    ActionResult, ActivateTabRequest, ActiveWindowGuard, BackendCapability, CapabilitySet,
-    ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardText, CoordinateSpace,
-    DaemonRequest, DaemonResponse, DesktopObservation, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus, JournalEntry,
-    KeyComboRequest, KwinBridgeStatus, LibeiStatus, MovePointerRequest, ObserveRequest,
-    PanicStopStatus, Point, PointerButton, PointerCalibrationPoint, PointerCalibrationStatus,
-    PointerMonitorCalibration, PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus,
-    SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
-    ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
-    SetValueRequest, ToggleCheckRequest, ToolApprovalLevel, TypeTextRequest, UinputStatus,
-    WaitForChangeRequest, WaitForChangeResult, WindowGeometry, WindowInfo, current_egid,
-    current_euid, default_journal_path, default_panic_stop_path, default_socket_path,
+    AccessibilityFindRequest, AccessibilityInsertTextRequest, AccessibilityInvokeRequest,
+    AccessibilitySetTextRequest, ActionResult, ActivateTabRequest, ActiveWindowGuard,
+    BackendCapability, CapabilitySet, ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest,
+    ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse, DesktopObservation,
+    FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus,
+    JournalEntry, KeyComboRequest, KwinBridgeStatus, LibeiStatus, MovePointerRequest,
+    ObserveRequest, PanicStopStatus, Point, PointerButton, PointerCalibrationPoint,
+    PointerCalibrationStatus, PointerMonitorCalibration, PointerPhysicalBounds, PolicyStatus,
+    RemoteDesktopPortalStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest,
+    ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest, SelectMenuRequest,
+    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, ToggleCheckRequest,
+    ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult,
+    WindowGeometry, WindowInfo, current_egid, current_euid, default_journal_path,
+    default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -678,6 +679,14 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::AccessibilityInsertText(request) => {
+            match accessibility_insert_text(request) {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
         DaemonRequest::TypeText(request) => match type_text(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
             Err(err) => DaemonResponse::Error {
@@ -1451,6 +1460,7 @@ fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWin
         DaemonRequest::FocusWindow(request) => request.guard.as_ref(),
         DaemonRequest::AccessibilityInvoke(request) => request.guard.as_ref(),
         DaemonRequest::AccessibilitySetText(request) => request.guard.as_ref(),
+        DaemonRequest::AccessibilityInsertText(request) => request.guard.as_ref(),
         DaemonRequest::TypeText(request) => request.guard.as_ref(),
         DaemonRequest::KeyCombo(request) => request.guard.as_ref(),
         DaemonRequest::MovePointer(request) => request.guard.as_ref(),
@@ -1509,9 +1519,9 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::ClickPointer(_)
         | DaemonRequest::ScrollPointer(_) => SafetyClass::ControlPointer,
         DaemonRequest::TypeText(_) | DaemonRequest::KeyCombo(_) => SafetyClass::ControlKeyboard,
-        DaemonRequest::FocusWindow(_) | DaemonRequest::AccessibilitySetText(_) => {
-            SafetyClass::ControlSemantic
-        }
+        DaemonRequest::FocusWindow(_)
+        | DaemonRequest::AccessibilitySetText(_)
+        | DaemonRequest::AccessibilityInsertText(_) => SafetyClass::ControlSemantic,
         DaemonRequest::AccessibilityInvoke(request) => {
             if request.destructive {
                 SafetyClass::DestructiveAction
@@ -2305,6 +2315,28 @@ fn accessibility_set_text(request: AccessibilitySetTextRequest) -> Result<Action
         message: Some(format!(
             "set accessibility text length={} node={}",
             request.text.chars().count(),
+            request.node_id
+        )),
+    })
+}
+
+fn accessibility_insert_text(request: AccessibilityInsertTextRequest) -> Result<ActionResult> {
+    if request.node_id.trim().is_empty() {
+        bail!("node_id must be non-empty");
+    }
+    if request.offset < 0 {
+        bail!("offset must be greater than or equal to zero");
+    }
+    plasma_pilot_atspi::insert_text(&request.node_id, request.offset, &request.text)
+        .map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "inserted accessibility text length={} offset={} node={}",
+            request.text.chars().count(),
+            request.offset,
             request.node_id
         )),
     })
@@ -5044,6 +5076,22 @@ height = 40
             }),
         )
         .expect_err("accessibility set-text requires control approval by default");
+        assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
+    fn accessibility_insert_text_is_control_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::AccessibilityInsertText(AccessibilityInsertTextRequest {
+                node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                offset: 5,
+                text: "hello".to_string(),
+                guard: None,
+            }),
+        )
+        .expect_err("accessibility insert-text requires control approval by default");
         assert!(err.to_string().contains("ControlSemantic"));
     }
 

@@ -237,6 +237,13 @@ pub struct MockAccessibilityTextSet {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MockAccessibilityTextInsert {
+    pub node_id: String,
+    pub offset: i32,
+    pub text: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct MockAccessibilityBackend {
     focused_tree: AccessibilityNode,
@@ -244,6 +251,7 @@ pub struct MockAccessibilityBackend {
     find_requests: Arc<Mutex<Vec<AccessibilityFindRequest>>>,
     invocations: Arc<Mutex<Vec<MockAccessibilityInvocation>>>,
     text_sets: Arc<Mutex<Vec<MockAccessibilityTextSet>>>,
+    text_inserts: Arc<Mutex<Vec<MockAccessibilityTextInsert>>>,
 }
 
 impl MockAccessibilityBackend {
@@ -254,6 +262,7 @@ impl MockAccessibilityBackend {
             find_requests: Arc::new(Mutex::new(Vec::new())),
             invocations: Arc::new(Mutex::new(Vec::new())),
             text_sets: Arc::new(Mutex::new(Vec::new())),
+            text_inserts: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -272,6 +281,10 @@ impl MockAccessibilityBackend {
 
     pub fn text_sets(&self) -> Result<Vec<MockAccessibilityTextSet>> {
         Ok(lock(&self.text_sets)?.clone())
+    }
+
+    pub fn text_inserts(&self) -> Result<Vec<MockAccessibilityTextInsert>> {
+        Ok(lock(&self.text_inserts)?.clone())
     }
 }
 
@@ -303,6 +316,15 @@ impl AccessibilityBackend for MockAccessibilityBackend {
     async fn set_text(&self, node_id: &str, text: &str) -> Result<()> {
         lock(&self.text_sets)?.push(MockAccessibilityTextSet {
             node_id: node_id.to_string(),
+            text: text.to_string(),
+        });
+        Ok(())
+    }
+
+    async fn insert_text(&self, node_id: &str, offset: i32, text: &str) -> Result<()> {
+        lock(&self.text_inserts)?.push(MockAccessibilityTextInsert {
+            node_id: node_id.to_string(),
+            offset,
             text: text.to_string(),
         });
         Ok(())
@@ -418,6 +440,9 @@ mod tests {
             .invoke("atspi://sample/root", AccessibilityAction::Press)
             .await?;
         backend.set_text("atspi://sample/text", "hello").await?;
+        backend
+            .insert_text("atspi://sample/text", 5, " world")
+            .await?;
         assert_eq!(
             backend.invocations()?,
             vec![MockAccessibilityInvocation {
@@ -430,6 +455,14 @@ mod tests {
             vec![MockAccessibilityTextSet {
                 node_id: "atspi://sample/text".to_string(),
                 text: "hello".to_string(),
+            }]
+        );
+        assert_eq!(
+            backend.text_inserts()?,
+            vec![MockAccessibilityTextInsert {
+                node_id: "atspi://sample/text".to_string(),
+                offset: 5,
+                text: " world".to_string(),
             }]
         );
         Ok(())

@@ -128,6 +128,18 @@ pub fn set_text(node_id: &str, text: &str) -> Result<()> {
     bus.set_text(&node, text)
 }
 
+pub fn insert_text(node_id: &str, offset: i32, text: &str) -> Result<()> {
+    if offset < 0 {
+        return Err(PilotError::InvalidRequest(
+            "offset must be greater than or equal to zero".to_string(),
+        ));
+    }
+    validate_set_text(text)?;
+    let node = parse_node_id(node_id)?;
+    let bus = AtspiBus::connect()?;
+    bus.insert_text(&node, offset, text)
+}
+
 pub fn set_current_value(node_id: &str, value: f64) -> Result<()> {
     if !value.is_finite() {
         return Err(PilotError::InvalidRequest(
@@ -512,6 +524,42 @@ impl AtspiBus {
         } else {
             Err(PilotError::BackendUnavailable(
                 "AT-SPI SetTextContents returned false".to_string(),
+            ))
+        }
+    }
+
+    fn insert_text(&self, node: &AtspiRef, offset: i32, text: &str) -> Result<()> {
+        let role = self
+            .role_name(node)
+            .unwrap_or_else(|_| "unknown".to_string());
+        if is_sensitive_role(&role) {
+            return Err(PilotError::PolicyDenied(
+                "refusing to insert text on sensitive accessibility node".to_string(),
+            ));
+        }
+        let interfaces = self.interfaces(node)?;
+        if !interfaces
+            .iter()
+            .any(|interface| interface == ATSPI_EDITABLE_TEXT)
+        {
+            return Err(PilotError::InvalidRequest(
+                "node does not expose org.a11y.atspi.EditableText".to_string(),
+            ));
+        }
+        let length = text.len().to_string();
+        let offset = offset.to_string();
+        let output = self.call_with_args(
+            &node.service,
+            &node.path,
+            ATSPI_EDITABLE_TEXT,
+            "InsertText",
+            &["i", &offset, "s", text, "i", &length],
+        )?;
+        if parse_bool_value(&output)? {
+            Ok(())
+        } else {
+            Err(PilotError::BackendUnavailable(
+                "AT-SPI InsertText returned false".to_string(),
             ))
         }
     }

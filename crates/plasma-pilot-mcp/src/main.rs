@@ -7,10 +7,10 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use libplasma_pilot::{
-    AccessibilityAction, AccessibilityFindRequest, AccessibilityInvokeRequest,
-    AccessibilitySetTextRequest, ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest,
-    ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace,
-    DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
+    AccessibilityAction, AccessibilityFindRequest, AccessibilityInsertTextRequest,
+    AccessibilityInvokeRequest, AccessibilitySetTextRequest, ActivateTabRequest, ActiveWindowGuard,
+    ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest,
+    CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
     DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
     DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
     KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton, ScreenshotRequest,
@@ -351,6 +351,14 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         "plasma.a11y_set_text" => Ok(DaemonRequest::AccessibilitySetText(
             AccessibilitySetTextRequest {
                 node_id: required_string(arguments, "node_id")?,
+                text: required_string(arguments, "text")?,
+                guard: active_window_guard(arguments)?,
+            },
+        )),
+        "plasma.a11y_insert_text" => Ok(DaemonRequest::AccessibilityInsertText(
+            AccessibilityInsertTextRequest {
+                node_id: required_string(arguments, "node_id")?,
+                offset: required_i32(arguments, "offset")?,
                 text: required_string(arguments, "text")?,
                 guard: active_window_guard(arguments)?,
             },
@@ -1192,6 +1200,28 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "plasma.a11y_insert_text",
+            "Insert Accessibility Text",
+            "Insert UTF-8 text at a character offset on a non-sensitive AT-SPI EditableText node. This is policy-gated semantic control and summaries report text length only.",
+            object_schema(
+                with_guard_properties(vec![
+                    (
+                        "node_id",
+                        json!({"type": "string", "description": "AT-SPI node id from a previous accessibility result."}),
+                    ),
+                    (
+                        "offset",
+                        json!({"type": "integer", "minimum": 0, "description": "Character offset at which to insert the text."}),
+                    ),
+                    (
+                        "text",
+                        json!({"type": "string", "description": "UTF-8 text to insert."}),
+                    ),
+                ]),
+                vec!["node_id", "offset", "text"],
+            ),
+        ),
+        tool(
             "plasma.journal_tail",
             "Journal Tail",
             "Read recent compact daemon journal entries.",
@@ -1289,6 +1319,14 @@ fn required_u32(arguments: &Value, key: &str) -> Result<u32> {
         .and_then(Value::as_u64)
         .ok_or_else(|| anyhow!("argument '{key}' is required and must be an unsigned integer"))?;
     u64_to_u32(value)
+}
+
+fn required_i32(arguments: &Value, key: &str) -> Result<i32> {
+    let value = arguments
+        .get(key)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("argument '{key}' is required and must be a signed integer"))?;
+    i64_to_i32(value)
 }
 
 fn required_f64(arguments: &Value, key: &str) -> Result<f64> {
@@ -2076,6 +2114,28 @@ mod tests {
             request,
             DaemonRequest::AccessibilitySetText(AccessibilitySetTextRequest {
                 node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                text: "hello".to_string(),
+                guard: None,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_accessibility_insert_text_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.a11y_insert_text",
+            &json!({
+                "node_id": "atspi://:1.42/org/a11y/atspi/accessible/7",
+                "offset": 5,
+                "text": "hello"
+            }),
+        )
+        .expect("a11y insert-text args map");
+        assert_eq!(
+            request,
+            DaemonRequest::AccessibilityInsertText(AccessibilityInsertTextRequest {
+                node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                offset: 5,
                 text: "hello".to_string(),
                 guard: None,
             })

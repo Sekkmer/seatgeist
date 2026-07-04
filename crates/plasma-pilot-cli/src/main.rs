@@ -3,10 +3,10 @@ use std::{fs, path::PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use libplasma_pilot::{
-    AccessibilityAction, AccessibilityFindRequest, AccessibilityInvokeRequest,
-    AccessibilitySetTextRequest, ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest,
-    ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace,
-    DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
+    AccessibilityAction, AccessibilityFindRequest, AccessibilityInsertTextRequest,
+    AccessibilityInvokeRequest, AccessibilitySetTextRequest, ActivateTabRequest, ActiveWindowGuard,
+    ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest,
+    CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
     DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
     DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
     KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton, ReplayTrace,
@@ -246,6 +246,20 @@ enum AtspiCommand {
     SetText {
         #[arg(long)]
         node: String,
+        #[arg(value_name = "TEXT")]
+        text: String,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
+    InsertText {
+        #[arg(long)]
+        node: String,
+        #[arg(long)]
+        offset: i32,
         #[arg(value_name = "TEXT")]
         text: String,
         #[arg(long)]
@@ -713,6 +727,29 @@ fn main() -> Result<()> {
             &socket,
             DaemonRequest::AccessibilitySetText(AccessibilitySetTextRequest {
                 node_id: node,
+                text,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
+        )?,
+        Command::Atspi {
+            command:
+                AtspiCommand::InsertText {
+                    node,
+                    offset,
+                    text,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::AccessibilityInsertText(AccessibilityInsertTextRequest {
+                node_id: node,
+                offset,
                 text,
                 guard: active_window_guard(
                     expected_active_window,
