@@ -22,6 +22,10 @@ default_control = "prompt"
 default_clipboard_read = "prompt"
 default_clipboard_write = "allow"
 full_resolution_screenshot = "prompt"
+
+[apps]
+allow = ["org.kde.kate", "org.mozilla.firefox"]
+deny = ["org.keepassxc.KeePassXC"]
 ```
 
 Path values can use `$XDG_RUNTIME_DIR`, `$XDG_STATE_HOME`, `$XDG_CONFIG_HOME`, and `$HOME`.
@@ -32,4 +36,8 @@ Precedence is:
 2. Config file values.
 3. Built-in defaults.
 
-Explicit local approval flags such as `--allow-control`, `--allow-clipboard-read`, and `--allow-full-resolution-screenshot` override file policy defaults for that daemon run. App allow/deny lists, destructive-action policy, and sensitive-region screenshot redaction are not implemented yet.
+Explicit local approval flags such as `--allow-control`, `--allow-clipboard-read`, and `--allow-full-resolution-screenshot` override file policy defaults for that daemon run.
+
+`[apps].deny` blocks control-class actions when the relevant app id matches. Deny rules win over allow rules. If `[apps].allow` is non-empty, control-class actions are allowed only for matching app ids. For focus requests, the daemon checks the target window app id; for keyboard, pointer, and semantic control, it checks the active window app id and fails closed if app policy is configured but the app id is unavailable.
+
+Destructive-action policy and sensitive-region screenshot redaction are not implemented yet.

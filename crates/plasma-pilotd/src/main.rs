@@ -245,6 +245,7 @@ impl From<KwinActiveWindowGeometry> for WindowGeometry {
 struct DaemonConfigFile {
     daemon: Option<DaemonFileConfig>,
     policy: Option<PolicyFileConfig>,
+    apps: Option<AppsFileConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -262,6 +263,18 @@ struct PolicyFileConfig {
     default_clipboard_write: Option<ToolApprovalLevel>,
     #[serde(alias = "full_resolution_screenshot")]
     default_full_resolution_screenshot: Option<ToolApprovalLevel>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AppsFileConfig {
+    allow: Option<Vec<String>>,
+    deny: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AppPolicy {
+    allow: Vec<String>,
+    deny: Vec<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -330,8 +343,9 @@ async fn main() -> Result<()> {
         args.allow_clipboard_read,
         args.allow_full_resolution_screenshot,
     );
+    let app_policy = app_policy(file_config.apps.as_ref());
 
-    run(socket, journal, panic_stop_file, policy_config).await
+    run(socket, journal, panic_stop_file, policy_config, app_policy).await
 }
 
 async fn run(
@@ -339,6 +353,7 @@ async fn run(
     journal_path: PathBuf,
     panic_stop_path: PathBuf,
     policy_config: PolicyConfig,
+    app_policy: AppPolicy,
 ) -> Result<()> {
     let journal = ActionJournal::new(journal_path);
     let panic_stop = PanicStopState::new(panic_stop_path);
@@ -368,6 +383,7 @@ async fn run(
         let journal = journal.clone();
         let panic_stop = panic_stop.clone();
         let policy = policy.clone();
+        let app_policy = app_policy.clone();
         tokio::spawn(async move {
             if let Err(err) = handle_client(
                 stream,
@@ -376,6 +392,7 @@ async fn run(
                 journal,
                 panic_stop,
                 policy,
+                app_policy,
             )
             .await
             {
@@ -416,6 +433,7 @@ async fn handle_client(
     journal: ActionJournal,
     panic_stop: PanicStopState,
     policy: PolicyEngine,
+    app_policy: AppPolicy,
 ) -> Result<()> {
     validate_peer_uid(&stream)?;
     let mut reader = BufReader::new(stream);
@@ -437,6 +455,7 @@ async fn handle_client(
         &journal,
         &panic_stop,
         &policy,
+        &app_policy,
     );
     journal
         .record(method, &response)
@@ -458,6 +477,7 @@ fn handle_request(
     journal: &ActionJournal,
     panic_stop: &PanicStopState,
     policy: &PolicyEngine,
+    app_policy: &AppPolicy,
 ) -> DaemonResponse {
     if let Err(err) = enforce_policy(policy, &request) {
         return DaemonResponse::Error {
@@ -470,6 +490,11 @@ fn handle_request(
         };
     }
     if let Err(err) = enforce_active_window_guard(active_window_state, &request) {
+        return DaemonResponse::Error {
+            message: format_error_chain(&err),
+        };
+    }
+    if let Err(err) = enforce_app_policy(active_window_state, app_policy, &request) {
         return DaemonResponse::Error {
             message: format_error_chain(&err),
         };
@@ -777,6 +802,27 @@ fn policy_config(
         config.default_full_resolution_screenshot = ToolApprovalLevel::Allow;
     }
     config
+}
+
+fn app_policy(file_apps: Option<&AppsFileConfig>) -> AppPolicy {
+    let Some(file_apps) = file_apps else {
+        return AppPolicy::default();
+    };
+    AppPolicy {
+        allow: normalize_app_policy_list(file_apps.allow.as_deref().unwrap_or(&[])),
+        deny: normalize_app_policy_list(file_apps.deny.as_deref().unwrap_or(&[])),
+    }
+}
+
+fn normalize_app_policy_list(values: &[String]) -> Vec<String> {
+    let mut normalized: Vec<String> = Vec::new();
+    for value in values {
+        let value = value.trim();
+        if !value.is_empty() && !normalized.iter().any(|seen| app_id_matches(seen, value)) {
+            normalized.push(value.to_string());
+        }
+    }
+    normalized
 }
 
 fn kwin_bridge_status(
@@ -1107,6 +1153,73 @@ fn enforce_panic_stop(panic_stop: &PanicStopState, request: &DaemonRequest) -> R
         );
     }
     Ok(())
+}
+
+fn enforce_app_policy(
+    active_window_state: &ActiveWindowState,
+    app_policy: &AppPolicy,
+    request: &DaemonRequest,
+) -> Result<()> {
+    if app_policy.allow.is_empty() && app_policy.deny.is_empty() {
+        return Ok(());
+    }
+    if !matches!(
+        safety_class_for_request(request),
+        SafetyClass::ControlPointer | SafetyClass::ControlKeyboard | SafetyClass::ControlSemantic
+    ) {
+        return Ok(());
+    }
+
+    if let DaemonRequest::FocusWindow(request) = request {
+        let windows = list_windows().context("app policy could not list focus targets")?;
+        let target = windows
+            .iter()
+            .find(|window| window.id == request.window_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "app policy could not find focus target window {}",
+                    request.window_id
+                )
+            })?;
+        return enforce_app_policy_for_app(app_policy, target.app_id.as_deref(), "focus target");
+    }
+
+    let window = active_window(active_window_state)
+        .context("app policy could not read active window")?
+        .ok_or_else(|| anyhow::anyhow!("app policy requires an active window for control"))?;
+    enforce_app_policy_for_app(app_policy, window.app_id.as_deref(), "active window")
+}
+
+fn enforce_app_policy_for_app(
+    app_policy: &AppPolicy,
+    app_id: Option<&str>,
+    context: &str,
+) -> Result<()> {
+    let app_id = app_id
+        .map(str::trim)
+        .filter(|app_id| !app_id.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("app policy could not determine {context} app id"))?;
+
+    if app_policy
+        .deny
+        .iter()
+        .any(|denied| app_id_matches(denied, app_id))
+    {
+        bail!("app policy denied {context} app {}", app_id);
+    }
+    if !app_policy.allow.is_empty()
+        && !app_policy
+            .allow
+            .iter()
+            .any(|allowed| app_id_matches(allowed, app_id))
+    {
+        bail!("app policy did not allow {context} app {}", app_id);
+    }
+    Ok(())
+}
+
+fn app_id_matches(policy_value: &str, app_id: &str) -> bool {
+    policy_value.eq_ignore_ascii_case(app_id)
 }
 
 fn enforce_active_window_guard(
@@ -3274,6 +3387,83 @@ mod tests {
     }
 
     #[test]
+    fn app_policy_from_config_normalizes_lists() {
+        let file_apps = AppsFileConfig {
+            allow: Some(vec![
+                " org.kde.kate ".to_string(),
+                "ORG.KDE.KATE".to_string(),
+                "".to_string(),
+            ]),
+            deny: Some(vec![" org.keepassxc.KeePassXC ".to_string()]),
+        };
+
+        let policy = app_policy(Some(&file_apps));
+
+        assert_eq!(policy.allow, vec!["org.kde.kate"]);
+        assert_eq!(policy.deny, vec!["org.keepassxc.KeePassXC"]);
+    }
+
+    #[test]
+    fn app_policy_denies_matching_app() {
+        let policy = AppPolicy {
+            allow: Vec::new(),
+            deny: vec!["org.keepassxc.KeePassXC".to_string()],
+        };
+
+        let err =
+            enforce_app_policy_for_app(&policy, Some("org.keepassxc.KeePassXC"), "active window")
+                .expect_err("deny list blocks matching app");
+
+        assert!(err.to_string().contains("app policy denied active window"));
+    }
+
+    #[test]
+    fn app_policy_deny_takes_precedence_over_allow() {
+        let policy = AppPolicy {
+            allow: vec!["org.keepassxc.KeePassXC".to_string()],
+            deny: vec!["org.keepassxc.KeePassXC".to_string()],
+        };
+
+        let err =
+            enforce_app_policy_for_app(&policy, Some("org.keepassxc.KeePassXC"), "active window")
+                .expect_err("deny list wins over allow list");
+
+        assert!(err.to_string().contains("app policy denied active window"));
+    }
+
+    #[test]
+    fn app_policy_allowlist_blocks_unlisted_app() {
+        let policy = AppPolicy {
+            allow: vec!["org.kde.kate".to_string()],
+            deny: Vec::new(),
+        };
+
+        let err = enforce_app_policy_for_app(&policy, Some("org.kde.konsole"), "active window")
+            .expect_err("allow list blocks unlisted app");
+
+        assert!(
+            err.to_string()
+                .contains("app policy did not allow active window")
+        );
+    }
+
+    #[test]
+    fn app_policy_fails_closed_without_app_id() {
+        let policy = AppPolicy {
+            allow: vec!["org.kde.kate".to_string()],
+            deny: Vec::new(),
+        };
+
+        let err = enforce_app_policy_for_app(&policy, None, "active window")
+            .expect_err("configured app policy requires app id");
+
+        assert!(
+            err.to_string()
+                .contains("could not determine active window app id")
+        );
+    }
+
+    #[test]
     fn parses_daemon_config_file() {
         let path = temp_test_path("daemon-config.toml");
         fs::write(
@@ -3290,6 +3480,10 @@ default_control = "deny"
 default_clipboard_read = "allow"
 default_clipboard_write = "prompt"
 full_resolution_screenshot = "deny"
+
+[apps]
+allow = ["org.kde.kate"]
+deny = ["org.keepassxc.KeePassXC"]
 "#,
         )
         .expect("config fixture is written");
@@ -3306,6 +3500,15 @@ full_resolution_screenshot = "deny"
         assert_eq!(
             policy.default_full_resolution_screenshot,
             Some(ToolApprovalLevel::Deny)
+        );
+        let apps = config.apps.expect("apps section is present");
+        assert_eq!(
+            apps.allow.as_deref(),
+            Some(&["org.kde.kate".to_string()][..])
+        );
+        assert_eq!(
+            apps.deny.as_deref(),
+            Some(&["org.keepassxc.KeePassXC".to_string()][..])
         );
         fs::remove_file(&path).ok();
     }
@@ -3450,6 +3653,37 @@ full_resolution_screenshot = "deny"
         )
         .expect_err("stale active-window guard fails");
         assert!(err.to_string().contains("active-window guard failed"));
+    }
+
+    #[test]
+    fn app_policy_blocks_control_for_denied_active_app() {
+        let state = ActiveWindowState::default();
+        state
+            .update_from_payload(
+                r#"{
+                    "active": true,
+                    "id": "secrets-window",
+                    "title": "Vault",
+                    "app_id": "org.keepassxc.KeePassXC"
+                }"#,
+            )
+            .expect("payload updates active-window state");
+        let policy = AppPolicy {
+            allow: Vec::new(),
+            deny: vec!["org.keepassxc.KeePassXC".to_string()],
+        };
+
+        let err = enforce_app_policy(
+            &state,
+            &policy,
+            &DaemonRequest::TypeText(TypeTextRequest {
+                text: "should-not-type".to_string(),
+                guard: None,
+            }),
+        )
+        .expect_err("denied active app blocks keyboard control");
+
+        assert!(err.to_string().contains("app policy denied active window"));
     }
 
     #[test]
