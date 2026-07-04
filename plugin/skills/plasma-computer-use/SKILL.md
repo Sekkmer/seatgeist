@@ -8,7 +8,7 @@ Use terminal commands, files, APIs, and structured integrations first when they 
 When GUI state matters, use PlasmaPilot tools through MCP:
 
 1. Call `plasma.observe` before acting. Include a bounded screenshot only when visual state matters.
-2. Prefer `plasma.click_button`, `plasma.set_text_field`, `plasma.select_menu`, `plasma.activate_tab`, and `plasma.focus_window` over raw coordinates.
+2. Prefer `plasma.click_button`, `plasma.set_text_field`, `plasma.select_menu`, `plasma.activate_tab`, `plasma.toggle_check`, and `plasma.focus_window` over raw coordinates.
 3. Use `plasma.a11y_focused_tree` or `plasma.a11y_find` before semantic actions when the target is not obvious from `plasma.observe`.
 4. Before pointer actions, call `plasma.pointer_calibration` and use only explicit `physical_pixel` coordinates.
 5. Include `expected_active_window`, `expected_active_app`, or `active_title_contains` on every focus, semantic, keyboard, pointer, and scroll action when current window context is known.

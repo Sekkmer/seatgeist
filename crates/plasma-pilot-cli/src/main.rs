@@ -11,8 +11,8 @@ use libplasma_pilot::{
     DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
     KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton, ReplayTrace,
     ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectMenuRequest,
-    SetPanicStopRequest, SetTextFieldRequest, TypeTextRequest, WaitForChangeRequest,
-    default_socket_path,
+    SetPanicStopRequest, SetTextFieldRequest, ToggleCheckRequest, TypeTextRequest,
+    WaitForChangeRequest, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -298,6 +298,24 @@ enum SemanticCommand {
     ActivateTab {
         #[arg(long)]
         name: String,
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long)]
+        window_name_contains: Option<String>,
+        #[arg(long, default_value_t = 1024)]
+        max_nodes: usize,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
+    ToggleCheck {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        checked: Option<bool>,
         #[arg(long)]
         app: Option<String>,
         #[arg(long)]
@@ -754,6 +772,33 @@ fn main() -> Result<()> {
             &socket,
             DaemonRequest::ActivateTab(ActivateTabRequest {
                 name,
+                app,
+                window_name_contains,
+                max_nodes,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
+        )?,
+        Command::Semantic {
+            command:
+                SemanticCommand::ToggleCheck {
+                    name,
+                    checked,
+                    app,
+                    window_name_contains,
+                    max_nodes,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::ToggleCheck(ToggleCheckRequest {
+                name,
+                checked,
                 app,
                 window_name_contains,
                 max_nodes,

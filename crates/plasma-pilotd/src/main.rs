@@ -24,9 +24,9 @@ use libplasma_pilot::{
     PointerMonitorCalibration, PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus,
     SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
     ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
-    ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult,
-    WindowGeometry, WindowInfo, current_egid, current_euid, default_journal_path,
-    default_panic_stop_path, default_socket_path,
+    ToggleCheckRequest, ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest,
+    WaitForChangeResult, WindowGeometry, WindowInfo, current_egid, current_euid,
+    default_journal_path, default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -721,6 +721,12 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
             },
         },
         DaemonRequest::ActivateTab(request) => match activate_tab(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
+        DaemonRequest::ToggleCheck(request) => match toggle_check(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
             Err(err) => DaemonResponse::Error {
                 message: format_error_chain(&err),
@@ -1447,6 +1453,7 @@ fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWin
         DaemonRequest::ClickButton(request) => request.guard.as_ref(),
         DaemonRequest::SetTextField(request) => request.guard.as_ref(),
         DaemonRequest::ActivateTab(request) => request.guard.as_ref(),
+        DaemonRequest::ToggleCheck(request) => request.guard.as_ref(),
         DaemonRequest::SelectMenu(request) => request.guard.as_ref(),
         _ => None,
     }
@@ -1526,7 +1533,9 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
                 SafetyClass::ControlSemantic
             }
         }
-        DaemonRequest::ActivateTab(_) => SafetyClass::ControlSemantic,
+        DaemonRequest::ActivateTab(_) | DaemonRequest::ToggleCheck(_) => {
+            SafetyClass::ControlSemantic
+        }
     }
 }
 
@@ -2655,6 +2664,62 @@ fn activate_tab(request: ActivateTabRequest) -> Result<ActionResult> {
     })
 }
 
+fn toggle_check(request: ToggleCheckRequest) -> Result<ActionResult> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        bail!("check name must be non-empty");
+    }
+    if request.max_nodes == 0 {
+        bail!("max_nodes must be greater than zero");
+    }
+
+    let matches = accessibility_find(AccessibilityFindRequest {
+        role: None,
+        name_contains: Some(name.to_string()),
+        app: request.app.clone(),
+        window_name_contains: request.window_name_contains.clone(),
+        depth: 0,
+        max_results: 10,
+        max_nodes: request.max_nodes,
+    })?;
+    let (target, action) = resolve_check_match(name, matches)?;
+    let was_checked = node_checked_state(&target);
+    if request
+        .checked
+        .is_some_and(|desired| desired == was_checked)
+    {
+        return Ok(ActionResult {
+            id: Uuid::new_v4(),
+            ok: true,
+            observation: None,
+            message: Some(format!(
+                "check state already name={} checked={} node={}",
+                target.name.as_deref().unwrap_or(name),
+                was_checked,
+                target.id
+            )),
+        });
+    }
+
+    plasma_pilot_atspi::invoke(&target.id, action.clone()).map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "toggled check name={} action={} previous_checked={} requested_checked={} node={}",
+            target.name.as_deref().unwrap_or(name),
+            action.as_str(),
+            was_checked,
+            request
+                .checked
+                .map(|checked| checked.to_string())
+                .unwrap_or_else(|| "toggle".to_string()),
+            target.id
+        )),
+    })
+}
+
 fn select_menu(request: SelectMenuRequest) -> Result<ActionResult> {
     let path = normalize_semantic_path(&request.path);
     if path.is_empty() {
@@ -2802,6 +2867,49 @@ fn resolve_tab_match(
     let choices = semantic_choice_summary(&viable);
     bail!(
         "ambiguous tab match for name={name}: {} candidates; choices=[{choices}]",
+        viable.len()
+    );
+}
+
+fn resolve_check_match(
+    name: &str,
+    matches: Vec<libplasma_pilot::AccessibilityNode>,
+) -> Result<(
+    libplasma_pilot::AccessibilityNode,
+    libplasma_pilot::AccessibilityAction,
+)> {
+    let mut viable = matches
+        .into_iter()
+        .filter(|node| !node.sensitive)
+        .filter(is_check_candidate)
+        .collect::<Vec<_>>();
+    if viable.is_empty() {
+        bail!("no non-sensitive activatable check matched name={name}");
+    }
+
+    let exact = viable
+        .iter()
+        .filter(|node| {
+            node.name
+                .as_deref()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !exact.is_empty() {
+        viable = exact;
+    }
+
+    if viable.len() == 1 {
+        let node = viable.remove(0);
+        let action = check_activation_action(&node)
+            .ok_or_else(|| anyhow::anyhow!("check has no press or select action"))?;
+        return Ok((node, action));
+    }
+
+    let choices = semantic_choice_summary(&viable);
+    bail!(
+        "ambiguous check match for name={name}: {} candidates; choices=[{choices}]",
         viable.len()
     );
 }
@@ -2957,6 +3065,38 @@ fn is_menu_item_candidate(node: &libplasma_pilot::AccessibilityNode) -> bool {
         node.role.to_ascii_lowercase().as_str(),
         "menu item" | "check menu item" | "radio menu item"
     )
+}
+
+fn is_check_candidate(node: &libplasma_pilot::AccessibilityNode) -> bool {
+    matches!(
+        node.role.to_ascii_lowercase().as_str(),
+        "check box" | "checkbox" | "check menu item" | "radio button" | "radio menu item"
+    ) && check_activation_action(node).is_some()
+}
+
+fn check_activation_action(
+    node: &libplasma_pilot::AccessibilityNode,
+) -> Option<libplasma_pilot::AccessibilityAction> {
+    if node
+        .actions
+        .contains(&libplasma_pilot::AccessibilityAction::Press)
+    {
+        Some(libplasma_pilot::AccessibilityAction::Press)
+    } else if node
+        .actions
+        .contains(&libplasma_pilot::AccessibilityAction::Select)
+    {
+        Some(libplasma_pilot::AccessibilityAction::Select)
+    } else {
+        None
+    }
+}
+
+fn node_checked_state(node: &libplasma_pilot::AccessibilityNode) -> bool {
+    node.states.iter().any(|state| {
+        let state = state.to_ascii_lowercase();
+        matches!(state.as_str(), "checked" | "selected")
+    })
 }
 
 fn is_tab_candidate(node: &libplasma_pilot::AccessibilityNode) -> bool {
@@ -4900,6 +5040,24 @@ height = 40
     }
 
     #[test]
+    fn toggle_check_is_control_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::ToggleCheck(ToggleCheckRequest {
+                name: "Enable feature".to_string(),
+                checked: Some(true),
+                app: Some("settings".to_string()),
+                window_name_contains: Some("preferences".to_string()),
+                max_nodes: 256,
+                guard: None,
+            }),
+        )
+        .expect_err("toggle check requires control approval by default");
+        assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
     fn select_menu_is_control_policy() {
         let policy = PolicyEngine::new(PolicyConfig::default());
         let err = enforce_policy(
@@ -5084,6 +5242,46 @@ height = 40
         sensitive.sensitive = true;
         let err = resolve_tab_match("Security", vec![sensitive])
             .expect_err("sensitive tabs are not viable");
+        assert!(err.to_string().contains("no non-sensitive"));
+    }
+
+    #[test]
+    fn check_resolver_prefers_exact_match_and_press_action() {
+        let (target, action) = resolve_check_match(
+            "Enable feature",
+            vec![
+                check_node("1", "Enable feature later", false),
+                check_node("2", "Enable feature", true),
+            ],
+        )
+        .expect("exact check resolves");
+        assert_eq!(target.id, "2");
+        assert_eq!(action, libplasma_pilot::AccessibilityAction::Press);
+        assert!(node_checked_state(&target));
+    }
+
+    #[test]
+    fn check_resolver_refuses_ambiguous_matches() {
+        let err = resolve_check_match(
+            "Enable feature",
+            vec![
+                check_node("1", "Enable feature", false),
+                check_node("2", "Enable feature", false),
+            ],
+        )
+        .expect_err("multiple exact checks are ambiguous");
+        let err = err.to_string();
+        assert!(err.contains("ambiguous"));
+        assert!(err.contains("choices=[id=1 role=check box name=Enable feature actions=press"));
+        assert!(err.contains("id=2 role=check box name=Enable feature actions=press"));
+    }
+
+    #[test]
+    fn check_resolver_requires_non_sensitive_activatable_match() {
+        let mut sensitive = check_node("1", "Enable feature", false);
+        sensitive.sensitive = true;
+        let err = resolve_check_match("Enable feature", vec![sensitive])
+            .expect_err("sensitive checks are not viable");
         assert!(err.to_string().contains("no non-sensitive"));
     }
 
@@ -5342,6 +5540,26 @@ height = 40
             value_truncated: false,
             sensitive: false,
             states: Vec::new(),
+            bounds: None,
+            available_actions: vec!["press".to_string()],
+            actions: vec![libplasma_pilot::AccessibilityAction::Press],
+            children: Vec::new(),
+        }
+    }
+
+    fn check_node(id: &str, name: &str, checked: bool) -> libplasma_pilot::AccessibilityNode {
+        let mut states = Vec::new();
+        if checked {
+            states.push("checked".to_string());
+        }
+        libplasma_pilot::AccessibilityNode {
+            id: id.to_string(),
+            role: "check box".to_string(),
+            name: Some(name.to_string()),
+            value: None,
+            value_truncated: false,
+            sensitive: false,
+            states,
             bounds: None,
             available_actions: vec!["press".to_string()],
             actions: vec![libplasma_pilot::AccessibilityAction::Press],

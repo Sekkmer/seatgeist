@@ -15,7 +15,8 @@ use libplasma_pilot::{
     DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
     KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton, ScreenshotRequest,
     ScreenshotTileRequest, ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest,
-    SetTextFieldRequest, TypeTextRequest, WaitForChangeRequest, default_socket_path,
+    SetTextFieldRequest, ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest,
+    default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -412,6 +413,17 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         })),
         "plasma.activate_tab" => Ok(DaemonRequest::ActivateTab(ActivateTabRequest {
             name: required_string(arguments, "name")?,
+            app: optional_string(arguments, "app")?,
+            window_name_contains: optional_string(arguments, "window_name_contains")?,
+            max_nodes: optional_u64(arguments, "max_nodes")?
+                .map(u64_to_usize)
+                .transpose()?
+                .unwrap_or(1024),
+            guard: active_window_guard(arguments)?,
+        })),
+        "plasma.toggle_check" => Ok(DaemonRequest::ToggleCheck(ToggleCheckRequest {
+            name: required_string(arguments, "name")?,
+            checked: optional_bool(arguments, "checked")?,
             app: optional_string(arguments, "app")?,
             window_name_contains: optional_string(arguments, "window_name_contains")?,
             max_nodes: optional_u64(arguments, "max_nodes")?
@@ -953,6 +965,36 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "plasma.toggle_check",
+            "Toggle Check",
+            "Find a named non-sensitive AT-SPI checkbox, radio button, or checkable menu item and press/select it only when exactly one viable match is found. Pass checked=true or checked=false to request a desired state and avoid an unnecessary toggle when AT-SPI state already matches. This is policy-gated semantic control.",
+            object_schema(
+                with_guard_properties(vec![
+                    (
+                        "name",
+                        json!({"type": "string", "description": "Accessible checkbox, radio button, or checkable menu item name to match."}),
+                    ),
+                    (
+                        "checked",
+                        json!({"type": "boolean", "description": "Optional desired checked state. When omitted, the matched control is toggled."}),
+                    ),
+                    (
+                        "app",
+                        json!({"type": "string", "description": "Optional application accessible-name guard."}),
+                    ),
+                    (
+                        "window_name_contains",
+                        json!({"type": "string", "description": "Optional containing frame/dialog/window accessible-name guard."}),
+                    ),
+                    (
+                        "max_nodes",
+                        json!({"type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum accessibility nodes to scan. Defaults to 1024."}),
+                    ),
+                ]),
+                vec!["name"],
+            ),
+        ),
+        tool(
             "plasma.select_menu",
             "Select Menu",
             "Select a visible AT-SPI menu path only when exactly one non-sensitive activatable item matches. This is policy-gated semantic control.",
@@ -1432,6 +1474,11 @@ mod tests {
         assert!(
             tools
                 .iter()
+                .any(|tool| tool["name"] == "plasma.toggle_check")
+        );
+        assert!(
+            tools
+                .iter()
                 .any(|tool| tool["name"] == "plasma.select_menu")
         );
         assert!(
@@ -1766,6 +1813,32 @@ mod tests {
             request,
             DaemonRequest::ActivateTab(ActivateTabRequest {
                 name: "General".to_string(),
+                app: Some("settings".to_string()),
+                window_name_contains: Some("preferences".to_string()),
+                max_nodes: 256,
+                guard: None,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_toggle_check_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.toggle_check",
+            &json!({
+                "name": "Enable feature",
+                "checked": true,
+                "app": "settings",
+                "window_name_contains": "preferences",
+                "max_nodes": 256
+            }),
+        )
+        .expect("toggle check args map");
+        assert_eq!(
+            request,
+            DaemonRequest::ToggleCheck(ToggleCheckRequest {
+                name: "Enable feature".to_string(),
+                checked: Some(true),
                 app: Some("settings".to_string()),
                 window_name_contains: Some("preferences".to_string()),
                 max_nodes: 256,

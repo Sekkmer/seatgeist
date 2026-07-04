@@ -385,6 +385,18 @@ pub struct ActivateTabRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToggleCheckRequest {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked: Option<bool>,
+    pub app: Option<String>,
+    pub window_name_contains: Option<String>,
+    pub max_nodes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectMenuRequest {
     pub path: Vec<String>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -448,6 +460,7 @@ pub enum DaemonRequest {
     ClickButton(ClickButtonRequest),
     SetTextField(SetTextFieldRequest),
     ActivateTab(ActivateTabRequest),
+    ToggleCheck(ToggleCheckRequest),
     SelectMenu(SelectMenuRequest),
     JournalTail(JournalTailRequest),
     FocusWindow(FocusWindowRequest),
@@ -486,6 +499,7 @@ impl DaemonRequest {
             Self::ClickButton(_) => "click_button",
             Self::SetTextField(_) => "set_text_field",
             Self::ActivateTab(_) => "activate_tab",
+            Self::ToggleCheck(_) => "toggle_check",
             Self::SelectMenu(_) => "select_menu",
             Self::JournalTail(_) => "journal_tail",
             Self::FocusWindow(_) => "focus_window",
@@ -1152,6 +1166,23 @@ mod tests {
         assert!(encoded.contains(r#""name":"General""#));
         assert!(encoded.contains(r#""app":"settings""#));
         assert!(encoded.contains(r#""window_name_contains":"preferences""#));
+    }
+
+    #[test]
+    fn serializes_toggle_check_request() {
+        let request = DaemonRequest::ToggleCheck(ToggleCheckRequest {
+            name: "Enable feature".to_string(),
+            checked: Some(true),
+            app: Some("settings".to_string()),
+            window_name_contains: Some("preferences".to_string()),
+            max_nodes: 512,
+            guard: None,
+        });
+        let encoded = serde_json::to_string(&request).expect("toggle check request serializes");
+        assert!(encoded.contains(r#""method":"toggle_check""#));
+        assert!(encoded.contains(r#""name":"Enable feature""#));
+        assert!(encoded.contains(r#""checked":true"#));
+        assert!(encoded.contains(r#""app":"settings""#));
     }
 
     #[test]

@@ -950,8 +950,9 @@ Tasks:
   - [x] `pilot.set_text_field(name, text, app/window guard)`
   - [x] `pilot.select_menu(path, app/window guard)` for visible AT-SPI menu paths.
   - [x] `pilot.activate_tab(name, app/window guard)`
-- [x] Use AT-SPI first for `click_button`, `set_text_field`, `select_menu`, and `activate_tab`; screenshot+coordinate fallback remains future work and must only happen when safe.
-- [x] Add ambiguity refusal for `click_button`, `set_text_field`, `select_menu`, and `activate_tab`. Current status: ambiguous semantic matches fail closed and return bounded candidate choices with node id, role, name, and action metadata so the caller can disambiguate; broader confidence scoring remains future work.
+  - [x] `pilot.toggle_check(name, checked?, app/window guard)` for checkboxes, radio buttons, and checkable menu items.
+- [x] Use AT-SPI first for `click_button`, `set_text_field`, `select_menu`, `activate_tab`, and `toggle_check`; screenshot+coordinate fallback remains future work and must only happen when safe.
+- [x] Add ambiguity refusal for `click_button`, `set_text_field`, `select_menu`, `activate_tab`, and `toggle_check`. Current status: ambiguous semantic matches fail closed and return bounded candidate choices with node id, role, name, and action metadata so the caller can disambiguate; broader confidence scoring remains future work.
 
 Acceptance criteria:
 
