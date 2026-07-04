@@ -15,5 +15,6 @@ Workflow:
 6. Use `plasma.wait_for_change` after actions that should visibly update the UI.
 7. Save repro artifacts under the repo test/evidence path when the task calls for evidence.
 8. Convert the reproduction into a deterministic unit, integration, Playwright, or smoke test once the behavior is understood.
+9. Mark destructive UI actions with `destructive=true`; default destructive policy fails closed unless the daemon is explicitly configured to allow them.
 
 Do not use PlasmaPilot control tools against unrelated windows. Stop on ambiguous targets, sensitive fields, policy denial, or unexpected active-window changes.

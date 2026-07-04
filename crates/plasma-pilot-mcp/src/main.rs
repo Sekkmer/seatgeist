@@ -343,6 +343,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
             AccessibilityInvokeRequest {
                 node_id: required_string(arguments, "node_id")?,
                 action: required_accessibility_action(arguments, "action")?,
+                destructive: optional_bool(arguments, "destructive")?.unwrap_or(false),
                 guard: active_window_guard(arguments)?,
             },
         )),
@@ -389,6 +390,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         })),
         "plasma.click_button" => Ok(DaemonRequest::ClickButton(ClickButtonRequest {
             name: required_string(arguments, "name")?,
+            destructive: optional_bool(arguments, "destructive")?.unwrap_or(false),
             app: optional_string(arguments, "app")?,
             window_name_contains: optional_string(arguments, "window_name_contains")?,
             max_nodes: optional_u64(arguments, "max_nodes")?
@@ -420,6 +422,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         })),
         "plasma.select_menu" => Ok(DaemonRequest::SelectMenu(SelectMenuRequest {
             path: required_string_array(arguments, "path")?,
+            destructive: optional_bool(arguments, "destructive")?.unwrap_or(false),
             app: optional_string(arguments, "app")?,
             window_name_contains: optional_string(arguments, "window_name_contains")?,
             max_nodes: optional_u64(arguments, "max_nodes")?
@@ -467,9 +470,10 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             format!("{} capabilities", capabilities.capabilities.len())
         }
         DaemonResponse::PolicyStatus(status) => format!(
-            "observe={:?} control={:?} full_resolution_screenshot={:?} clipboard_read={:?} clipboard_write={:?}",
+            "observe={:?} control={:?} destructive_actions={:?} full_resolution_screenshot={:?} clipboard_read={:?} clipboard_write={:?}",
             status.default_observe,
             status.default_control,
+            status.default_destructive_actions,
             status.default_full_resolution_screenshot,
             status.default_clipboard_read,
             status.default_clipboard_write
@@ -872,6 +876,10 @@ fn tool_definitions() -> Vec<Value> {
                         json!({"type": "string", "description": "Accessible button name to match."}),
                     ),
                     (
+                        "destructive",
+                        json!({"type": "boolean", "description": "Set true when pressing this button may delete, discard, close, quit, overwrite, or otherwise lose state; routes through destructive-action policy."}),
+                    ),
+                    (
                         "app",
                         json!({"type": "string", "description": "Optional application accessible-name guard."}),
                     ),
@@ -952,6 +960,10 @@ fn tool_definitions() -> Vec<Value> {
                     (
                         "path",
                         json!({"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Visible menu path segments, such as [\"File\", \"Open\"]."}),
+                    ),
+                    (
+                        "destructive",
+                        json!({"type": "boolean", "description": "Set true when selecting this menu item may delete, discard, close, quit, overwrite, or otherwise lose state; routes through destructive-action policy."}),
                     ),
                     (
                         "app",
@@ -1068,6 +1080,10 @@ fn tool_definitions() -> Vec<Value> {
                     (
                         "action",
                         json!({"type": "string", "enum": ["press", "focus", "select"], "description": "Normalized action to invoke."}),
+                    ),
+                    (
+                        "destructive",
+                        json!({"type": "boolean", "description": "Set true when invoking this node may delete, discard, close, quit, overwrite, or otherwise lose state; routes through destructive-action policy."}),
                     ),
                 ]),
                 vec!["node_id", "action"],
@@ -1698,6 +1714,7 @@ mod tests {
             request,
             DaemonRequest::ClickButton(ClickButtonRequest {
                 name: "OK".to_string(),
+                destructive: false,
                 app: Some("kate".to_string()),
                 window_name_contains: Some("settings".to_string()),
                 max_nodes: 256,
@@ -1772,6 +1789,7 @@ mod tests {
             request,
             DaemonRequest::SelectMenu(SelectMenuRequest {
                 path: vec!["File".to_string(), "Open".to_string()],
+                destructive: false,
                 app: Some("kate".to_string()),
                 window_name_contains: Some("editor".to_string()),
                 max_nodes: 256,
@@ -1896,6 +1914,7 @@ mod tests {
             DaemonRequest::AccessibilityInvoke(AccessibilityInvokeRequest {
                 node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
                 action: AccessibilityAction::Press,
+                destructive: false,
                 guard: None,
             })
         );

@@ -260,6 +260,7 @@ struct DaemonFileConfig {
 struct PolicyFileConfig {
     default_observe: Option<ToolApprovalLevel>,
     default_control: Option<ToolApprovalLevel>,
+    destructive_actions: Option<ToolApprovalLevel>,
     default_clipboard_read: Option<ToolApprovalLevel>,
     default_clipboard_write: Option<ToolApprovalLevel>,
     #[serde(alias = "full_resolution_screenshot")]
@@ -755,6 +756,7 @@ fn policy_status_from_config(config: &PolicyConfig) -> PolicyStatus {
     PolicyStatus {
         default_observe: config.default_observe.clone(),
         default_control: config.default_control.clone(),
+        default_destructive_actions: config.default_destructive_actions.clone(),
         default_full_resolution_screenshot: config.default_full_resolution_screenshot.clone(),
         default_clipboard_read: config.default_clipboard_read.clone(),
         default_clipboard_write: config.default_clipboard_write.clone(),
@@ -827,6 +829,9 @@ fn policy_config(
         }
         if let Some(level) = &file_policy.default_control {
             config.default_control = level.clone();
+        }
+        if let Some(level) = &file_policy.destructive_actions {
+            config.default_destructive_actions = level.clone();
         }
         if let Some(level) = &file_policy.default_clipboard_read {
             config.default_clipboard_read = level.clone();
@@ -1217,6 +1222,7 @@ fn enforce_panic_stop(panic_stop: &PanicStopState, request: &DaemonRequest) -> R
             SafetyClass::ControlPointer
                 | SafetyClass::ControlKeyboard
                 | SafetyClass::ControlSemantic
+                | SafetyClass::DestructiveAction
         )
     {
         bail!(
@@ -1234,7 +1240,10 @@ fn enforce_required_focus_guard(settings: &SafetySettings, request: &DaemonReque
     }
     if !matches!(
         safety_class_for_request(request),
-        SafetyClass::ControlPointer | SafetyClass::ControlKeyboard | SafetyClass::ControlSemantic
+        SafetyClass::ControlPointer
+            | SafetyClass::ControlKeyboard
+            | SafetyClass::ControlSemantic
+            | SafetyClass::DestructiveAction
     ) {
         return Ok(());
     }
@@ -1257,7 +1266,10 @@ fn enforce_app_policy(
     }
     if !matches!(
         safety_class_for_request(request),
-        SafetyClass::ControlPointer | SafetyClass::ControlKeyboard | SafetyClass::ControlSemantic
+        SafetyClass::ControlPointer
+            | SafetyClass::ControlKeyboard
+            | SafetyClass::ControlSemantic
+            | SafetyClass::DestructiveAction
     ) {
         return Ok(());
     }
@@ -1418,14 +1430,67 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::ClickPointer(_)
         | DaemonRequest::ScrollPointer(_) => SafetyClass::ControlPointer,
         DaemonRequest::TypeText(_) | DaemonRequest::KeyCombo(_) => SafetyClass::ControlKeyboard,
-        DaemonRequest::FocusWindow(_)
-        | DaemonRequest::AccessibilityInvoke(_)
-        | DaemonRequest::AccessibilitySetText(_)
-        | DaemonRequest::ClickButton(_)
-        | DaemonRequest::SetTextField(_)
-        | DaemonRequest::ActivateTab(_)
-        | DaemonRequest::SelectMenu(_) => SafetyClass::ControlSemantic,
+        DaemonRequest::FocusWindow(_) | DaemonRequest::AccessibilitySetText(_) => {
+            SafetyClass::ControlSemantic
+        }
+        DaemonRequest::AccessibilityInvoke(request) => {
+            if request.destructive {
+                SafetyClass::DestructiveAction
+            } else {
+                SafetyClass::ControlSemantic
+            }
+        }
+        DaemonRequest::ClickButton(request) => {
+            if request.destructive || destructive_label(&request.name) {
+                SafetyClass::DestructiveAction
+            } else {
+                SafetyClass::ControlSemantic
+            }
+        }
+        DaemonRequest::SelectMenu(request) => {
+            if request.destructive || request.path.iter().any(|label| destructive_label(label)) {
+                SafetyClass::DestructiveAction
+            } else {
+                SafetyClass::ControlSemantic
+            }
+        }
+        DaemonRequest::SetTextField(_) | DaemonRequest::ActivateTab(_) => {
+            SafetyClass::ControlSemantic
+        }
     }
+}
+
+fn destructive_label(label: &str) -> bool {
+    let normalized = label.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "delete"
+            | "delete..."
+            | "delete permanently"
+            | "remove"
+            | "remove..."
+            | "discard"
+            | "discard changes"
+            | "clear"
+            | "empty trash"
+            | "trash"
+            | "uninstall"
+            | "format"
+            | "erase"
+            | "reset"
+            | "factory reset"
+            | "close"
+            | "close without saving"
+            | "quit"
+            | "exit"
+            | "shutdown"
+            | "shut down"
+            | "restart"
+            | "reboot"
+    ) || normalized.starts_with("delete ")
+        || normalized.starts_with("remove ")
+        || normalized.starts_with("discard ")
+        || normalized.starts_with("erase ")
 }
 
 fn set_panic_stop(
@@ -3551,6 +3616,7 @@ mod tests {
         let file_policy = PolicyFileConfig {
             default_observe: Some(ToolApprovalLevel::Deny),
             default_control: Some(ToolApprovalLevel::Deny),
+            destructive_actions: Some(ToolApprovalLevel::Allow),
             default_clipboard_read: Some(ToolApprovalLevel::Allow),
             default_clipboard_write: Some(ToolApprovalLevel::Prompt),
             default_full_resolution_screenshot: Some(ToolApprovalLevel::Deny),
@@ -3560,6 +3626,7 @@ mod tests {
 
         assert_eq!(config.default_observe, ToolApprovalLevel::Deny);
         assert_eq!(config.default_control, ToolApprovalLevel::Deny);
+        assert_eq!(config.default_destructive_actions, ToolApprovalLevel::Allow);
         assert_eq!(config.default_clipboard_read, ToolApprovalLevel::Allow);
         assert_eq!(config.default_clipboard_write, ToolApprovalLevel::Prompt);
         assert_eq!(
@@ -3573,6 +3640,7 @@ mod tests {
         let file_policy = PolicyFileConfig {
             default_observe: None,
             default_control: Some(ToolApprovalLevel::Deny),
+            destructive_actions: Some(ToolApprovalLevel::Allow),
             default_clipboard_read: Some(ToolApprovalLevel::Deny),
             default_clipboard_write: None,
             default_full_resolution_screenshot: Some(ToolApprovalLevel::Deny),
@@ -3897,6 +3965,7 @@ panic_stop_file = "$XDG_RUNTIME_DIR/plasma-pilot/configured-panic-stop"
 [policy]
 default_observe = "allow"
 default_control = "deny"
+destructive_actions = "deny"
 default_clipboard_read = "allow"
 default_clipboard_write = "prompt"
 full_resolution_screenshot = "deny"
@@ -3926,6 +3995,7 @@ height = 40
 
         let policy = config.policy.expect("policy section is present");
         assert_eq!(policy.default_control, Some(ToolApprovalLevel::Deny));
+        assert_eq!(policy.destructive_actions, Some(ToolApprovalLevel::Deny));
         assert_eq!(
             policy.default_full_resolution_screenshot,
             Some(ToolApprovalLevel::Deny)
@@ -4488,6 +4558,7 @@ height = 40
             &DaemonRequest::AccessibilityInvoke(AccessibilityInvokeRequest {
                 node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
                 action: libplasma_pilot::AccessibilityAction::Press,
+                destructive: false,
                 guard: None,
             }),
         )
@@ -4517,6 +4588,7 @@ height = 40
             &policy,
             &DaemonRequest::ClickButton(ClickButtonRequest {
                 name: "OK".to_string(),
+                destructive: false,
                 app: Some("kate".to_string()),
                 window_name_contains: Some("settings".to_string()),
                 max_nodes: 256,
@@ -4569,6 +4641,7 @@ height = 40
             &policy,
             &DaemonRequest::SelectMenu(SelectMenuRequest {
                 path: vec!["File".to_string(), "Open".to_string()],
+                destructive: false,
                 app: Some("kate".to_string()),
                 window_name_contains: Some("editor".to_string()),
                 max_nodes: 256,
@@ -4577,6 +4650,56 @@ height = 40
         )
         .expect_err("select menu requires control approval by default");
         assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
+    fn destructive_semantic_actions_use_destructive_policy() {
+        let policy = PolicyEngine::new(PolicyConfig {
+            default_control: ToolApprovalLevel::Allow,
+            default_destructive_actions: ToolApprovalLevel::Deny,
+            ..PolicyConfig::default()
+        });
+
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::ClickButton(ClickButtonRequest {
+                name: "OK".to_string(),
+                destructive: true,
+                app: Some("kate".to_string()),
+                window_name_contains: Some("confirm".to_string()),
+                max_nodes: 256,
+                guard: None,
+            }),
+        )
+        .expect_err("explicit destructive button uses destructive policy");
+        assert!(err.to_string().contains("DestructiveAction"));
+
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::SelectMenu(SelectMenuRequest {
+                path: vec!["File".to_string(), "Delete".to_string()],
+                destructive: false,
+                app: Some("kate".to_string()),
+                window_name_contains: Some("editor".to_string()),
+                max_nodes: 256,
+                guard: None,
+            }),
+        )
+        .expect_err("destructive menu label uses destructive policy");
+        assert!(err.to_string().contains("DestructiveAction"));
+
+        enforce_policy(
+            &policy,
+            &DaemonRequest::ClickButton(ClickButtonRequest {
+                name: "Open".to_string(),
+                destructive: false,
+                app: Some("kate".to_string()),
+                window_name_contains: Some("dialog".to_string()),
+                max_nodes: 256,
+                guard: None,
+            }),
+        )
+        .expect("non-destructive semantic control still uses default control policy");
     }
 
     #[test]

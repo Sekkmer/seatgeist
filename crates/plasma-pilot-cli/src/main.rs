@@ -235,6 +235,8 @@ enum AtspiCommand {
         #[arg(long)]
         action: AccessibilityAction,
         #[arg(long)]
+        destructive: bool,
+        #[arg(long)]
         expected_active_window: Option<String>,
         #[arg(long)]
         expected_active_app: Option<String>,
@@ -260,6 +262,8 @@ enum SemanticCommand {
     ClickButton {
         #[arg(long)]
         name: String,
+        #[arg(long)]
+        destructive: bool,
         #[arg(long)]
         app: Option<String>,
         #[arg(long)]
@@ -310,6 +314,8 @@ enum SemanticCommand {
     SelectMenu {
         #[arg(long)]
         path: String,
+        #[arg(long)]
+        destructive: bool,
         #[arg(long)]
         app: Option<String>,
         #[arg(long)]
@@ -640,6 +646,7 @@ fn main() -> Result<()> {
                 AtspiCommand::Invoke {
                     node,
                     action,
+                    destructive,
                     expected_active_window,
                     expected_active_app,
                     active_title_contains,
@@ -649,6 +656,7 @@ fn main() -> Result<()> {
             DaemonRequest::AccessibilityInvoke(AccessibilityInvokeRequest {
                 node_id: node,
                 action,
+                destructive,
                 guard: active_window_guard(
                     expected_active_window,
                     expected_active_app,
@@ -681,6 +689,7 @@ fn main() -> Result<()> {
             command:
                 SemanticCommand::ClickButton {
                     name,
+                    destructive,
                     app,
                     window_name_contains,
                     max_nodes,
@@ -692,6 +701,7 @@ fn main() -> Result<()> {
             &socket,
             DaemonRequest::ClickButton(ClickButtonRequest {
                 name,
+                destructive,
                 app,
                 window_name_contains,
                 max_nodes,
@@ -758,6 +768,7 @@ fn main() -> Result<()> {
             command:
                 SemanticCommand::SelectMenu {
                     path,
+                    destructive,
                     app,
                     window_name_contains,
                     max_nodes,
@@ -769,6 +780,7 @@ fn main() -> Result<()> {
             &socket,
             DaemonRequest::SelectMenu(SelectMenuRequest {
                 path: parse_menu_path_argument(&path),
+                destructive,
                 app,
                 window_name_contains,
                 max_nodes,

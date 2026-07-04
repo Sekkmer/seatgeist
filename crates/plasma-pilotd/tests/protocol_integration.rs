@@ -111,6 +111,7 @@ panic_stop_file = "__PANIC_STOP__"
 [policy]
 default_observe = "allow"
 default_control = "deny"
+destructive_actions = "deny"
 default_clipboard_read = "allow"
 default_clipboard_write = "prompt"
 full_resolution_screenshot = "deny"
@@ -123,6 +124,7 @@ full_resolution_screenshot = "deny"
         DaemonResponse::PolicyStatus(PolicyStatus {
             default_observe: ToolApprovalLevel::Allow,
             default_control: ToolApprovalLevel::Deny,
+            default_destructive_actions: ToolApprovalLevel::Deny,
             default_full_resolution_screenshot: ToolApprovalLevel::Deny,
             default_clipboard_read: ToolApprovalLevel::Allow,
             default_clipboard_write: ToolApprovalLevel::Prompt,
@@ -151,6 +153,7 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
         DaemonResponse::PolicyStatus(PolicyStatus {
             default_observe: ToolApprovalLevel::Allow,
             default_control: ToolApprovalLevel::Prompt,
+            default_destructive_actions: ToolApprovalLevel::Prompt,
             default_full_resolution_screenshot: ToolApprovalLevel::Prompt,
             default_clipboard_read: ToolApprovalLevel::Prompt,
             default_clipboard_write: ToolApprovalLevel::Allow,

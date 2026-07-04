@@ -102,6 +102,7 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
         DaemonResponse::PolicyStatus(PolicyStatus {
             default_observe: ToolApprovalLevel::Allow,
             default_control: ToolApprovalLevel::Prompt,
+            default_destructive_actions: ToolApprovalLevel::Prompt,
             default_full_resolution_screenshot: ToolApprovalLevel::Prompt,
             default_clipboard_read: ToolApprovalLevel::Prompt,
             default_clipboard_write: ToolApprovalLevel::Allow,

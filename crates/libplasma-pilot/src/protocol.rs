@@ -29,6 +29,7 @@ pub struct CapabilitySet {
 pub struct PolicyStatus {
     pub default_observe: ToolApprovalLevel,
     pub default_control: ToolApprovalLevel,
+    pub default_destructive_actions: ToolApprovalLevel,
     pub default_full_resolution_screenshot: ToolApprovalLevel,
     pub default_clipboard_read: ToolApprovalLevel,
     pub default_clipboard_write: ToolApprovalLevel,
@@ -287,6 +288,8 @@ pub struct AccessibilityFindRequest {
 pub struct AccessibilityInvokeRequest {
     pub node_id: String,
     pub action: AccessibilityAction,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub destructive: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
 }
@@ -350,6 +353,8 @@ pub struct ScrollPointerRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClickButtonRequest {
     pub name: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub destructive: bool,
     pub app: Option<String>,
     pub window_name_contains: Option<String>,
     pub max_nodes: usize,
@@ -381,11 +386,17 @@ pub struct ActivateTabRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectMenuRequest {
     pub path: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub destructive: bool,
     pub app: Option<String>,
     pub window_name_contains: Option<String>,
     pub max_nodes: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1068,6 +1079,7 @@ mod tests {
         let request = DaemonRequest::AccessibilityInvoke(AccessibilityInvokeRequest {
             node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
             action: AccessibilityAction::Press,
+            destructive: false,
             guard: None,
         });
         let encoded = serde_json::to_string(&request).expect("a11y invoke request serializes");
@@ -1095,6 +1107,7 @@ mod tests {
     fn serializes_click_button_request() {
         let request = DaemonRequest::ClickButton(ClickButtonRequest {
             name: "OK".to_string(),
+            destructive: false,
             app: Some("kate".to_string()),
             window_name_contains: Some("settings".to_string()),
             max_nodes: 512,
@@ -1144,6 +1157,7 @@ mod tests {
     fn serializes_select_menu_request() {
         let request = DaemonRequest::SelectMenu(SelectMenuRequest {
             path: vec!["File".to_string(), "Open".to_string()],
+            destructive: false,
             app: Some("kate".to_string()),
             window_name_contains: Some("editor".to_string()),
             max_nodes: 512,

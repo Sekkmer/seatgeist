@@ -181,6 +181,7 @@ pub enum SafetyClass {
     ControlPointer,
     ControlKeyboard,
     ControlSemantic,
+    DestructiveAction,
     Policy,
 }
 

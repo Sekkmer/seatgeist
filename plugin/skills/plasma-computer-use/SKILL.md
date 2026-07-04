@@ -16,6 +16,7 @@ When GUI state matters, use PlasmaPilot tools through MCP:
 7. Stop if `plasma.active_window` or `plasma.observe` reports a different target than expected.
 8. Check `plasma.panic_stop_status` if control actions are unexpectedly denied or the desktop appears unsafe.
 9. Do not interact with password fields, payment flows, account-security settings, or destructive dialogs without explicit user approval.
+10. Set `destructive=true` on `plasma.click_button`, `plasma.select_menu`, or `plasma.a11y_invoke` when the action may delete, discard, close, quit, overwrite, or otherwise lose state.
 
 Useful control tools:
 
