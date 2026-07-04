@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use libplasma_pilot::{
-    DaemonRequest, DaemonResponse, ScreenshotRequest, ScreenshotTileRequest, default_socket_path,
+    DaemonRequest, DaemonResponse, JournalTailRequest, ScreenshotRequest, ScreenshotTileRequest,
+    default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -56,7 +57,10 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum JournalCommand {
-    Tail,
+    Tail {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
 }
 
 fn main() -> Result<()> {
@@ -112,8 +116,11 @@ fn main() -> Result<()> {
         Command::Windows => print_daemon_response(&socket, DaemonRequest::ListWindows)?,
         Command::ActiveWindow => print_daemon_response(&socket, DaemonRequest::ActiveWindow)?,
         Command::Journal {
-            command: JournalCommand::Tail,
-        } => println!("journal backend is not implemented yet"),
+            command: JournalCommand::Tail { limit },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::JournalTail(JournalTailRequest { limit }),
+        )?,
     }
 
     Ok(())

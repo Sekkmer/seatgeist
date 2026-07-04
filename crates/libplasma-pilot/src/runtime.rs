@@ -22,6 +22,23 @@ pub fn default_socket_path() -> io::Result<PathBuf> {
     Ok(runtime_dir.join("plasma-pilot").join("plasma-pilotd.sock"))
 }
 
+pub fn default_journal_path() -> io::Result<PathBuf> {
+    let state_dir = match env::var_os("XDG_STATE_HOME") {
+        Some(value) => PathBuf::from(value),
+        None => {
+            let home = env::var_os("HOME").ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "HOME is required when XDG_STATE_HOME is not set",
+                )
+            })?;
+            PathBuf::from(home).join(".local").join("state")
+        }
+    };
+
+    Ok(state_dir.join("plasma-pilot").join("journal.jsonl"))
+}
+
 pub fn parent_dir(path: &Path) -> io::Result<&Path> {
     path.parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "socket path has no parent"))

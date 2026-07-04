@@ -4,9 +4,10 @@ pub mod types;
 
 pub use protocol::{
     ActionRequest, ActionResult, CapabilitySet, DaemonRequest, DaemonResponse, HealthStatus,
-    PolicyStatus, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
+    JournalEntry, JournalTailRequest, PolicyStatus, ScreenshotInfo, ScreenshotRequest,
+    ScreenshotTileRequest, ScreenshotTransform,
 };
-pub use runtime::{current_euid, default_socket_path};
+pub use runtime::{current_euid, default_journal_path, default_socket_path};
 pub use types::{
     AccessibilityAction, AccessibilityNode, BackendCapability, CoordinateSpace, MonitorInfo,
     Observation, PilotError, Point, PolicyDecision, SafetyClass, ScreenshotTarget,

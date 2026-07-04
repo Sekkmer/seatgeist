@@ -1,11 +1,13 @@
 use std::{
     fs,
+    fs::OpenOptions,
+    io::Write,
     os::unix::fs::{FileTypeExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex, OnceLock},
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Error, Result, bail};
@@ -13,8 +15,9 @@ use clap::Parser;
 use image::{GenericImageView, imageops::FilterType};
 use libplasma_pilot::{
     BackendCapability, CapabilitySet, CoordinateSpace, DaemonRequest, DaemonResponse, HealthStatus,
-    PolicyStatus, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
-    ToolApprovalLevel, WindowGeometry, WindowInfo, current_euid, default_socket_path,
+    JournalEntry, PolicyStatus, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest,
+    ScreenshotTransform, ToolApprovalLevel, WindowGeometry, WindowInfo, current_euid,
+    default_journal_path, default_socket_path,
 };
 use serde::Deserialize;
 use tokio::{
@@ -24,6 +27,45 @@ use tokio::{
 use tracing::{error, info, warn};
 
 static SCREENSHOT_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[derive(Debug, Clone)]
+struct ActionJournal {
+    path: PathBuf,
+    sequence: Arc<Mutex<u64>>,
+}
+
+impl ActionJournal {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            sequence: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    fn record(&self, method: &str, response: &DaemonResponse) -> Result<()> {
+        let entry = JournalEntry {
+            sequence: self.next_sequence()?,
+            unix_time_ms: unix_time_ms()?,
+            method: method.to_string(),
+            ok: !matches!(response, DaemonResponse::Error { .. }),
+            summary: summarize_response(response),
+        };
+        append_journal_entry(&self.path, &entry)
+    }
+
+    fn tail(&self, limit: usize) -> Result<Vec<JournalEntry>> {
+        tail_journal_entries(&self.path, limit)
+    }
+
+    fn next_sequence(&self) -> Result<u64> {
+        let mut sequence = self
+            .sequence
+            .lock()
+            .map_err(|_| anyhow::anyhow!("journal sequence lock is poisoned"))?;
+        *sequence += 1;
+        Ok(*sequence)
+    }
+}
 
 const KWIN_BRIDGE_SERVICE: &str = "org.plasmapilot.KWinBridge";
 const KWIN_BRIDGE_PATH: &str = "/org/plasmapilot/KWinBridge1";
@@ -138,6 +180,9 @@ struct Args {
     #[arg(long, env = "PLASMA_PILOT_SOCKET")]
     socket: Option<PathBuf>,
 
+    #[arg(long, env = "PLASMA_PILOT_JOURNAL")]
+    journal: Option<PathBuf>,
+
     #[arg(long)]
     print_capabilities: bool,
 }
@@ -156,11 +201,16 @@ async fn main() -> Result<()> {
         Some(path) => path,
         None => default_socket_path().context("resolve default socket path")?,
     };
+    let journal = match args.journal {
+        Some(path) => path,
+        None => default_journal_path().context("resolve default journal path")?,
+    };
 
-    run(socket).await
+    run(socket, journal).await
 }
 
-async fn run(socket: PathBuf) -> Result<()> {
+async fn run(socket: PathBuf, journal_path: PathBuf) -> Result<()> {
+    let journal = ActionJournal::new(journal_path);
     let active_window_state = ActiveWindowState::default();
     let _kwin_bridge_connection = match start_kwin_bridge(active_window_state.clone()).await {
         Ok(connection) => Some(connection),
@@ -182,8 +232,9 @@ async fn run(socket: PathBuf) -> Result<()> {
     loop {
         let (stream, _addr) = listener.accept().await.context("accept client")?;
         let active_window_state = active_window_state.clone();
+        let journal = journal.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_client(stream, active_window_state).await {
+            if let Err(err) = handle_client(stream, active_window_state, journal).await {
                 warn!(error = %err, "client request failed");
             }
         });
@@ -214,7 +265,11 @@ async fn start_kwin_bridge(active_window_state: ActiveWindowState) -> Result<zbu
     Ok(connection)
 }
 
-async fn handle_client(stream: UnixStream, active_window_state: ActiveWindowState) -> Result<()> {
+async fn handle_client(
+    stream: UnixStream,
+    active_window_state: ActiveWindowState,
+    journal: ActionJournal,
+) -> Result<()> {
     validate_peer_uid(&stream)?;
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
@@ -227,7 +282,11 @@ async fn handle_client(stream: UnixStream, active_window_state: ActiveWindowStat
     }
 
     let request = serde_json::from_str::<DaemonRequest>(&line).context("parse daemon request")?;
-    let response = handle_request(request, &active_window_state);
+    let method = request.method_name();
+    let response = handle_request(request, &active_window_state, &journal);
+    journal
+        .record(method, &response)
+        .context("record request in action journal")?;
     let mut stream = reader.into_inner();
     let response_line = serde_json::to_string(&response).context("serialize daemon response")?;
     stream
@@ -241,6 +300,7 @@ async fn handle_client(stream: UnixStream, active_window_state: ActiveWindowStat
 fn handle_request(
     request: DaemonRequest,
     active_window_state: &ActiveWindowState,
+    journal: &ActionJournal,
 ) -> DaemonResponse {
     match request {
         DaemonRequest::Health => DaemonResponse::Health(health()),
@@ -272,6 +332,12 @@ fn handle_request(
         },
         DaemonRequest::ScreenshotTile(request) => match capture_screenshot_tile(request) {
             Ok(info) => DaemonResponse::Screenshot(info),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
+        DaemonRequest::JournalTail(request) => match journal.tail(request.limit) {
+            Ok(entries) => DaemonResponse::Journal(entries),
             Err(err) => DaemonResponse::Error {
                 message: format_error_chain(&err),
             },
@@ -589,6 +655,85 @@ fn format_error_chain(err: &Error) -> String {
         .join(": ")
 }
 
+fn append_journal_entry(path: &Path, entry: &JournalEntry) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("journal path has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create journal dir {}", parent.display()))?;
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("set journal dir permissions {}", parent.display()))?;
+    validate_dir_permissions(parent)?;
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("open journal {}", path.display()))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("set journal permissions {}", path.display()))?;
+    serde_json::to_writer(&mut file, entry).context("serialize journal entry")?;
+    file.write_all(b"\n").context("write journal newline")?;
+    file.flush().context("flush journal")?;
+    Ok(())
+}
+
+fn tail_journal_entries(path: &Path, limit: usize) -> Result<Vec<JournalEntry>> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).with_context(|| format!("read journal {}", path.display())),
+    };
+
+    let mut entries = Vec::new();
+    for line in content.lines().rev().filter(|line| !line.trim().is_empty()) {
+        if entries.len() >= limit {
+            break;
+        }
+        let entry = serde_json::from_str::<JournalEntry>(line)
+            .with_context(|| format!("parse journal line in {}", path.display()))?;
+        entries.push(entry);
+    }
+    entries.reverse();
+    Ok(entries)
+}
+
+fn summarize_response(response: &DaemonResponse) -> String {
+    match response {
+        DaemonResponse::Health(status) => format!("{} {}", status.service, status.status),
+        DaemonResponse::Capabilities(capabilities) => {
+            format!("{} capabilities", capabilities.capabilities.len())
+        }
+        DaemonResponse::PolicyStatus(_) => "policy status".to_string(),
+        DaemonResponse::Monitors(monitors) => format!("{} monitors", monitors.len()),
+        DaemonResponse::Windows(windows) => format!("{} windows", windows.len()),
+        DaemonResponse::ActiveWindow(Some(window)) => {
+            format!(
+                "active window app={}",
+                window.app_id.as_deref().unwrap_or("")
+            )
+        }
+        DaemonResponse::ActiveWindow(None) => "no active window".to_string(),
+        DaemonResponse::Screenshot(info) => format!(
+            "screenshot {}x{} from {}x{} path={}",
+            info.output_width,
+            info.output_height,
+            info.source_width,
+            info.source_height,
+            info.path.display()
+        ),
+        DaemonResponse::Journal(entries) => format!("{} journal entries", entries.len()),
+        DaemonResponse::Error { message } => format!("error: {message}"),
+    }
+}
+
+fn unix_time_ms() -> Result<u64> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system time is before Unix epoch")?;
+    Ok(duration.as_millis().try_into().unwrap_or(u64::MAX))
+}
+
 fn prepare_screenshot_output(output: &Path) -> Result<()> {
     if output.extension().and_then(|ext| ext.to_str()) != Some("png") {
         bail!(
@@ -758,5 +903,42 @@ mod tests {
             state.snapshot().expect("state snapshot succeeds"),
             Some(None)
         );
+    }
+
+    #[test]
+    fn journal_appends_and_tails_entries() {
+        let path = std::env::temp_dir().join(format!(
+            "plasma-pilot-journal-test-{}-{}.jsonl",
+            std::process::id(),
+            unix_time_ms().expect("time is available")
+        ));
+        let journal = ActionJournal::new(path.clone());
+
+        journal
+            .record(
+                "health",
+                &DaemonResponse::Health(HealthStatus {
+                    service: "plasma-pilotd".to_string(),
+                    version: "0.1.0".to_string(),
+                    status: "ok".to_string(),
+                }),
+            )
+            .expect("health record appends");
+        journal
+            .record(
+                "capabilities",
+                &DaemonResponse::Capabilities(CapabilitySet {
+                    capabilities: vec![BackendCapability::DaemonHealth],
+                }),
+            )
+            .expect("capabilities record appends");
+
+        let entries = journal.tail(1).expect("journal tail succeeds");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].sequence, 2);
+        assert_eq!(entries[0].method, "capabilities");
+        assert!(entries[0].ok);
+
+        fs::remove_file(&path).ok();
     }
 }

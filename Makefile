@@ -22,9 +22,10 @@ smoke:
 	set -euo pipefail
 	socket="target/plasma-pilot-smoke/plasma-pilotd.sock"
 	log="target/plasma-pilot-smoke-daemon.log"
-	rm -rf target/plasma-pilot-smoke "$$log"
+	journal="target/plasma-pilot-smoke-journal.jsonl"
+	rm -rf target/plasma-pilot-smoke "$$log" "$$journal"
 	mkdir -p target
-	cargo run -p plasma-pilotd -- --socket "$$socket" >"$$log" 2>&1 &
+	cargo run -p plasma-pilotd -- --socket "$$socket" --journal "$$journal" >"$$log" 2>&1 &
 	pid=$$!
 	cleanup() {
 		kill "$$pid" 2>/dev/null || true
@@ -44,16 +45,19 @@ smoke:
 	cargo run -p plasma-pilot-cli -- --socket "$$socket" doctor
 	cargo run -p plasma-pilot-cli -- --socket "$$socket" capabilities
 	cargo run -p plasma-pilot-cli -- --socket "$$socket" policy-status
+	cargo run -p plasma-pilot-cli -- --socket "$$socket" journal tail --limit 10
 	test "$$(stat -c '%a' target/plasma-pilot-smoke)" = "700"
 	test "$$(stat -c '%a' "$$socket")" = "600"
+	test "$$(stat -c '%a' "$$journal")" = "600"
 
 smoke-monitors:
 	set -euo pipefail
 	socket="/tmp/plasma-pilot-monitor-smoke/plasma-pilotd.sock"
 	log="target/plasma-pilot-monitor-smoke-daemon.log"
-	rm -rf /tmp/plasma-pilot-monitor-smoke "$$log"
+	journal="target/plasma-pilot-monitor-smoke-journal.jsonl"
+	rm -rf /tmp/plasma-pilot-monitor-smoke "$$log" "$$journal"
 	cargo build -p plasma-pilotd -p plasma-pilot-cli
-	target/debug/plasma-pilotd --socket "$$socket" >"$$log" 2>&1 &
+	target/debug/plasma-pilotd --socket "$$socket" --journal "$$journal" >"$$log" 2>&1 &
 	pid=$$!
 	cleanup() {
 		kill "$$pid" 2>/dev/null || true
@@ -77,9 +81,10 @@ smoke-windows:
 	socket="/tmp/plasma-pilot-window-smoke/plasma-pilotd.sock"
 	log="target/plasma-pilot-window-smoke-daemon.log"
 	active_log="target/plasma-pilot-window-active.log"
-	rm -rf /tmp/plasma-pilot-window-smoke "$$log" "$$active_log"
+	journal="target/plasma-pilot-window-smoke-journal.jsonl"
+	rm -rf /tmp/plasma-pilot-window-smoke "$$log" "$$active_log" "$$journal"
 	cargo build -p plasma-pilotd -p plasma-pilot-cli
-	target/debug/plasma-pilotd --socket "$$socket" >"$$log" 2>&1 &
+	target/debug/plasma-pilotd --socket "$$socket" --journal "$$journal" >"$$log" 2>&1 &
 	pid=$$!
 	cleanup() {
 		kill "$$pid" 2>/dev/null || true

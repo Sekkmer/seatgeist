@@ -27,4 +27,5 @@ Phase 1 first slice is implemented:
 - `make smoke-windows` validates window listing in a host KDE session and accepts either a real active-window bridge response or the documented bridge-not-yet-reporting failure.
 - `make install-kwin-script` is available as an explicit, opt-in KWin configuration mutation for installing/enabling the script.
 - The KWin script was installed on this workstation and a host smoke observed a real active window with app id and logical geometry through the daemon bridge.
-- Input, focus control, AT-SPI, real MCP tools, portal/KWin-native capture backends, persistent active-window bridge installation checks, and journaling remain future work.
+- The daemon writes compact JSONL journal entries for every handled request. `plasma-pilot-cli journal tail --limit N` reads recent entries through the daemon, and smoke tests verify restrictive journal file permissions.
+- Input, focus control, AT-SPI, real MCP tools, portal/KWin-native capture backends, persistent active-window bridge installation checks, and richer journal filtering remain future work.

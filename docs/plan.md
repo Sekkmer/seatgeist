@@ -703,6 +703,10 @@ Write JSONL records to:
 ~/.local/state/plasma-pilot/journal.jsonl
 ```
 
+Current implementation: `plasma-pilotd` appends compact request records containing `sequence`, `unix_time_ms`, `method`, `ok`, and `summary`. `plasma-pilot-cli journal tail --limit N` returns recent records through the daemon. Smoke tests pass target-local journal paths and verify `0600` file permissions.
+
+Future journal expansion should preserve the compact tail format while adding the richer action context below for control operations:
+
 Each record:
 
 ```json

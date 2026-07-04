@@ -28,6 +28,15 @@ pub struct PolicyStatus {
     pub default_clipboard_write: ToolApprovalLevel,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalEntry {
+    pub sequence: u64,
+    pub unix_time_ms: u64,
+    pub method: String,
+    pub ok: bool,
+    pub summary: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScreenshotInfo {
     pub path: PathBuf,
@@ -69,6 +78,11 @@ pub struct ScreenshotTileRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalTailRequest {
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum DaemonRequest {
     Health,
@@ -79,6 +93,23 @@ pub enum DaemonRequest {
     ActiveWindow,
     Screenshot(ScreenshotRequest),
     ScreenshotTile(ScreenshotTileRequest),
+    JournalTail(JournalTailRequest),
+}
+
+impl DaemonRequest {
+    pub fn method_name(&self) -> &'static str {
+        match self {
+            Self::Health => "health",
+            Self::Capabilities => "capabilities",
+            Self::PolicyStatus => "policy_status",
+            Self::ListMonitors => "list_monitors",
+            Self::ListWindows => "list_windows",
+            Self::ActiveWindow => "active_window",
+            Self::Screenshot(_) => "screenshot",
+            Self::ScreenshotTile(_) => "screenshot_tile",
+            Self::JournalTail(_) => "journal_tail",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -91,6 +122,7 @@ pub enum DaemonResponse {
     Windows(Vec<WindowInfo>),
     ActiveWindow(Option<WindowInfo>),
     Screenshot(ScreenshotInfo),
+    Journal(Vec<JournalEntry>),
     Error { message: String },
 }
 
@@ -175,5 +207,12 @@ mod tests {
         assert!(encoded.contains(r#""method":"screenshot_tile""#));
         assert!(encoded.contains(r#""x":100"#));
         assert!(encoded.contains(r#""max_edge":400"#));
+    }
+
+    #[test]
+    fn serializes_journal_tail_request() {
+        let request = DaemonRequest::JournalTail(JournalTailRequest { limit: 10 });
+        let encoded = serde_json::to_string(&request).expect("journal request serializes");
+        assert_eq!(encoded, r#"{"method":"journal_tail","limit":10}"#);
     }
 }
