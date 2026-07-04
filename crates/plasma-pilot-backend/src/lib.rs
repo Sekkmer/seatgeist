@@ -37,6 +37,7 @@ pub trait InputBackend: Send + Sync {
         button: PointerButton,
         duration_ms: u64,
     ) -> Result<()>;
+    async fn scroll(&self, vertical: i32, horizontal: i32) -> Result<()>;
     async fn type_text(&self, text: &str) -> Result<()>;
     async fn key_combo(&self, combo: &str) -> Result<()>;
 }

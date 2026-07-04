@@ -162,6 +162,10 @@ pub enum MockInputEvent {
         button: PointerButton,
         duration_ms: u64,
     },
+    Scroll {
+        vertical: i32,
+        horizontal: i32,
+    },
     TypeText(String),
     KeyCombo(String),
 }
@@ -201,6 +205,14 @@ impl InputBackend for MockInputBackend {
             to,
             button,
             duration_ms,
+        });
+        Ok(())
+    }
+
+    async fn scroll(&self, vertical: i32, horizontal: i32) -> Result<()> {
+        lock(&self.events)?.push(MockInputEvent::Scroll {
+            vertical,
+            horizontal,
         });
         Ok(())
     }
@@ -490,6 +502,7 @@ mod tests {
         backend.move_pointer(point).await?;
         backend.click(point).await?;
         backend.drag(point, point, PointerButton::Left, 250).await?;
+        backend.scroll(-3, 1).await?;
         backend.type_text("hello").await?;
         backend.key_combo("Ctrl+L").await?;
 
@@ -503,6 +516,10 @@ mod tests {
                     to: point,
                     button: PointerButton::Left,
                     duration_ms: 250,
+                },
+                MockInputEvent::Scroll {
+                    vertical: -3,
+                    horizontal: 1,
                 },
                 MockInputEvent::TypeText("hello".to_string()),
                 MockInputEvent::KeyCombo("Ctrl+L".to_string()),
