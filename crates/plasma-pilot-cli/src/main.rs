@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use libplasma_pilot::{
-    DaemonRequest, DaemonResponse, JournalTailRequest, ScreenshotRequest, ScreenshotTileRequest,
-    default_socket_path,
+    DaemonRequest, DaemonResponse, FocusWindowRequest, JournalTailRequest, ScreenshotRequest,
+    ScreenshotTileRequest, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -49,6 +49,10 @@ enum Command {
     },
     Windows,
     ActiveWindow,
+    Focus {
+        #[arg(long)]
+        window: String,
+    },
     Journal {
         #[command(subcommand)]
         command: JournalCommand,
@@ -115,6 +119,10 @@ fn main() -> Result<()> {
         }
         Command::Windows => print_daemon_response(&socket, DaemonRequest::ListWindows)?,
         Command::ActiveWindow => print_daemon_response(&socket, DaemonRequest::ActiveWindow)?,
+        Command::Focus { window } => print_daemon_response(
+            &socket,
+            DaemonRequest::FocusWindow(FocusWindowRequest { window_id: window }),
+        )?,
         Command::Journal {
             command: JournalCommand::Tail { limit },
         } => print_daemon_response(

@@ -29,4 +29,6 @@ Phase 1 first slice is implemented:
 - The KWin script was installed on this workstation and a host smoke observed a real active window with app id and logical geometry through the daemon bridge.
 - The daemon writes compact JSONL journal entries for every handled request. `plasma-pilot-cli journal tail --limit N` reads recent entries through the daemon, and smoke tests verify restrictive journal file permissions.
 - Daemon requests now pass through the policy engine before execution. Current observe/status requests are allowed by default; any future prompt-level request fails closed until an approval channel exists.
-- Input, focus control, AT-SPI, real MCP tools, portal/KWin-native capture backends, persistent active-window bridge installation checks, and richer journal filtering remain future work.
+- `plasma-pilot-cli focus --window <id>` focuses a listed KWin window through `WindowsRunner.Run`. It is a control action: default policy rejects it until a trusted approval channel exists, while `plasma-pilotd --allow-control` enables explicit local smoke/manual use.
+- `make smoke-focus` validates the focus path in a host KDE session with `--allow-control` and confirms the focus request is journaled.
+- Pointer/keyboard input, AT-SPI, real MCP tools, portal/KWin-native capture backends, persistent active-window bridge installation checks, and richer journal filtering remain future work.

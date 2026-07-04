@@ -83,6 +83,11 @@ pub struct JournalTailRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FocusWindowRequest {
+    pub window_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum DaemonRequest {
     Health,
@@ -94,6 +99,7 @@ pub enum DaemonRequest {
     Screenshot(ScreenshotRequest),
     ScreenshotTile(ScreenshotTileRequest),
     JournalTail(JournalTailRequest),
+    FocusWindow(FocusWindowRequest),
 }
 
 impl DaemonRequest {
@@ -108,6 +114,7 @@ impl DaemonRequest {
             Self::Screenshot(_) => "screenshot",
             Self::ScreenshotTile(_) => "screenshot_tile",
             Self::JournalTail(_) => "journal_tail",
+            Self::FocusWindow(_) => "focus_window",
         }
     }
 }
@@ -123,6 +130,7 @@ pub enum DaemonResponse {
     ActiveWindow(Option<WindowInfo>),
     Screenshot(ScreenshotInfo),
     Journal(Vec<JournalEntry>),
+    Action(Box<ActionResult>),
     Error { message: String },
 }
 
@@ -214,5 +222,15 @@ mod tests {
         let request = DaemonRequest::JournalTail(JournalTailRequest { limit: 10 });
         let encoded = serde_json::to_string(&request).expect("journal request serializes");
         assert_eq!(encoded, r#"{"method":"journal_tail","limit":10}"#);
+    }
+
+    #[test]
+    fn serializes_focus_window_request() {
+        let request = DaemonRequest::FocusWindow(FocusWindowRequest {
+            window_id: "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}".to_string(),
+        });
+        let encoded = serde_json::to_string(&request).expect("focus request serializes");
+        assert!(encoded.contains(r#""method":"focus_window""#));
+        assert!(encoded.contains(r#""window_id":"{96d3c5da-75ec-4a2a-b75f-05c4c077153b}""#));
     }
 }

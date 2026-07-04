@@ -14,10 +14,10 @@ use anyhow::{Context, Error, Result, bail};
 use clap::Parser;
 use image::{GenericImageView, imageops::FilterType};
 use libplasma_pilot::{
-    BackendCapability, CapabilitySet, CoordinateSpace, DaemonRequest, DaemonResponse, HealthStatus,
-    JournalEntry, PolicyStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest,
-    ScreenshotTileRequest, ScreenshotTransform, ToolApprovalLevel, WindowGeometry, WindowInfo,
-    current_euid, default_journal_path, default_socket_path,
+    ActionResult, BackendCapability, CapabilitySet, CoordinateSpace, DaemonRequest, DaemonResponse,
+    FocusWindowRequest, HealthStatus, JournalEntry, PolicyStatus, SafetyClass, ScreenshotInfo,
+    ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform, ToolApprovalLevel,
+    WindowGeometry, WindowInfo, current_euid, default_journal_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -26,6 +26,7 @@ use tokio::{
     net::{UnixListener, UnixStream},
 };
 use tracing::{error, info, warn};
+use uuid::Uuid;
 
 static SCREENSHOT_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -184,6 +185,9 @@ struct Args {
     #[arg(long, env = "PLASMA_PILOT_JOURNAL")]
     journal: Option<PathBuf>,
 
+    #[arg(long, env = "PLASMA_PILOT_ALLOW_CONTROL")]
+    allow_control: bool,
+
     #[arg(long)]
     print_capabilities: bool,
 }
@@ -207,12 +211,14 @@ async fn main() -> Result<()> {
         None => default_journal_path().context("resolve default journal path")?,
     };
 
-    run(socket, journal).await
+    let policy_config = policy_config(args.allow_control);
+
+    run(socket, journal, policy_config).await
 }
 
-async fn run(socket: PathBuf, journal_path: PathBuf) -> Result<()> {
+async fn run(socket: PathBuf, journal_path: PathBuf, policy_config: PolicyConfig) -> Result<()> {
     let journal = ActionJournal::new(journal_path);
-    let policy = PolicyEngine::new(PolicyConfig::default());
+    let policy = PolicyEngine::new(policy_config);
     let active_window_state = ActiveWindowState::default();
     let _kwin_bridge_connection = match start_kwin_bridge(active_window_state.clone()).await {
         Ok(connection) => Some(connection),
@@ -316,7 +322,9 @@ fn handle_request(
     match request {
         DaemonRequest::Health => DaemonResponse::Health(health()),
         DaemonRequest::Capabilities => DaemonResponse::Capabilities(capabilities()),
-        DaemonRequest::PolicyStatus => DaemonResponse::PolicyStatus(policy_status()),
+        DaemonRequest::PolicyStatus => {
+            DaemonResponse::PolicyStatus(policy_status_from_config(policy.config()))
+        }
         DaemonRequest::ListMonitors => match list_monitors() {
             Ok(monitors) => DaemonResponse::Monitors(monitors),
             Err(err) => DaemonResponse::Error {
@@ -353,6 +361,12 @@ fn handle_request(
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::FocusWindow(request) => match focus_window(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
     }
 }
 
@@ -370,14 +384,21 @@ fn capabilities() -> CapabilitySet {
     }
 }
 
-fn policy_status() -> PolicyStatus {
-    let config = PolicyConfig::default();
+fn policy_status_from_config(config: &PolicyConfig) -> PolicyStatus {
     PolicyStatus {
-        default_observe: config.default_observe,
-        default_control: config.default_control,
-        default_clipboard_read: config.default_clipboard_read,
-        default_clipboard_write: config.default_clipboard_write,
+        default_observe: config.default_observe.clone(),
+        default_control: config.default_control.clone(),
+        default_clipboard_read: config.default_clipboard_read.clone(),
+        default_clipboard_write: config.default_clipboard_write.clone(),
     }
+}
+
+fn policy_config(allow_control: bool) -> PolicyConfig {
+    let mut config = PolicyConfig::default();
+    if allow_control {
+        config.default_control = ToolApprovalLevel::Allow;
+    }
+    config
 }
 
 fn enforce_policy(policy: &PolicyEngine, request: &DaemonRequest) -> Result<()> {
@@ -403,6 +424,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::ActiveWindow
         | DaemonRequest::Screenshot(_)
         | DaemonRequest::ScreenshotTile(_) => SafetyClass::Observe,
+        DaemonRequest::FocusWindow(_) => SafetyClass::ControlSemantic,
     }
 }
 
@@ -417,6 +439,7 @@ fn current_capabilities() -> Vec<BackendCapability> {
     if command_exists("qdbus6") {
         capabilities.push(BackendCapability::MonitorMetadata);
         capabilities.push(BackendCapability::WindowList);
+        capabilities.push(BackendCapability::WindowFocus);
     }
     capabilities
 }
@@ -575,6 +598,19 @@ fn active_window(active_window_state: &ActiveWindowState) -> Result<Option<Windo
         return Ok(window);
     }
     plasma_pilot_kwin::active_window().map_err(|err| anyhow::anyhow!(err))
+}
+
+fn focus_window(request: FocusWindowRequest) -> Result<ActionResult> {
+    if request.window_id.trim().is_empty() {
+        bail!("window id must not be empty");
+    }
+    plasma_pilot_kwin::focus_window(&request.window_id).map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!("focused window {}", request.window_id)),
+    })
 }
 
 fn temporary_capture_path(output: &Path) -> PathBuf {
@@ -761,6 +797,10 @@ fn summarize_response(response: &DaemonResponse) -> String {
             info.path.display()
         ),
         DaemonResponse::Journal(entries) => format!("{} journal entries", entries.len()),
+        DaemonResponse::Action(result) => result
+            .message
+            .clone()
+            .unwrap_or_else(|| format!("action {}", result.id)),
         DaemonResponse::Error { message } => format!("error: {message}"),
     }
 }
@@ -996,5 +1036,34 @@ mod tests {
         let err = enforce_policy(&policy, &DaemonRequest::ListWindows)
             .expect_err("prompt requires approval channel");
         assert!(err.to_string().contains("no approval channel is available"));
+    }
+
+    #[test]
+    fn focus_window_is_control_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::FocusWindow(FocusWindowRequest {
+                window_id: "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}".to_string(),
+            }),
+        )
+        .expect_err("focus requires control approval by default");
+        assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
+    fn allow_control_config_allows_focus_policy() {
+        let policy = PolicyEngine::new(policy_config(true));
+        enforce_policy(
+            &policy,
+            &DaemonRequest::FocusWindow(FocusWindowRequest {
+                window_id: "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}".to_string(),
+            }),
+        )
+        .expect("explicit control override allows focus policy");
+        assert_eq!(
+            policy_status_from_config(policy.config()).default_control,
+            ToolApprovalLevel::Allow
+        );
     }
 }

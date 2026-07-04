@@ -62,6 +62,30 @@ pub fn active_window() -> Result<Option<WindowInfo>> {
     ))
 }
 
+pub fn focus_window(window_id: &str) -> Result<()> {
+    let match_id = runner_match_id(window_id)?;
+    let output = Command::new("qdbus6")
+        .args([
+            "org.kde.KWin",
+            "/WindowsRunner",
+            "org.kde.krunner1.Run",
+            &match_id,
+            "",
+        ])
+        .output()
+        .map_err(|err| PilotError::BackendUnavailable(format!("run qdbus6: {err}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(PilotError::BackendUnavailable(format!(
+            "qdbus6 KWin WindowsRunner Run exited with status {}: {stderr}",
+            output.status
+        )));
+    }
+
+    Ok(())
+}
+
 fn enrich_window(match_entry: RunnerWindowMatch) -> WindowInfo {
     let info = get_window_info(&match_entry.kwin_uuid).unwrap_or_default();
     WindowInfo {
@@ -166,6 +190,22 @@ fn normalize_runner_window_id(runner_id: &str) -> String {
         .strip_prefix("0_")
         .unwrap_or(runner_id)
         .to_string()
+}
+
+fn runner_match_id(window_id: &str) -> Result<String> {
+    let trimmed = window_id.trim();
+    if trimmed.is_empty() {
+        return Err(PilotError::InvalidRequest(
+            "window id must not be empty".to_string(),
+        ));
+    }
+    if trimmed.starts_with("0_") {
+        return Ok(trimmed.to_string());
+    }
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        return Ok(format!("0_{trimmed}"));
+    }
+    Ok(format!("0_{{{trimmed}}}"))
 }
 
 pub fn parse_get_window_info(literal: &str) -> KwinWindowInfo {
@@ -426,5 +466,22 @@ Compositing
         assert_eq!(geometry.width, 2087);
         assert_eq!(geometry.height, 2173);
         assert_eq!(geometry.space, CoordinateSpace::LogicalPixel);
+    }
+
+    #[test]
+    fn formats_runner_match_id_for_focus() {
+        assert_eq!(
+            runner_match_id("{96d3c5da-75ec-4a2a-b75f-05c4c077153b}").expect("braced id formats"),
+            "0_{96d3c5da-75ec-4a2a-b75f-05c4c077153b}"
+        );
+        assert_eq!(
+            runner_match_id("96d3c5da-75ec-4a2a-b75f-05c4c077153b").expect("bare id formats"),
+            "0_{96d3c5da-75ec-4a2a-b75f-05c4c077153b}"
+        );
+        assert_eq!(
+            runner_match_id("0_{96d3c5da-75ec-4a2a-b75f-05c4c077153b}")
+                .expect("runner id stays stable"),
+            "0_{96d3c5da-75ec-4a2a-b75f-05c4c077153b}"
+        );
     }
 }

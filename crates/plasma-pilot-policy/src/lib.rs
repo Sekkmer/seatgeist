@@ -30,6 +30,10 @@ impl PolicyEngine {
         Self { config }
     }
 
+    pub fn config(&self) -> &PolicyConfig {
+        &self.config
+    }
+
     pub fn decide(&self, safety_class: &SafetyClass) -> PolicyDecision {
         let level = match safety_class {
             SafetyClass::Observe | SafetyClass::Policy => self.config.default_observe.clone(),

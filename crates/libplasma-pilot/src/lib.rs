@@ -3,9 +3,9 @@ pub mod runtime;
 pub mod types;
 
 pub use protocol::{
-    ActionRequest, ActionResult, CapabilitySet, DaemonRequest, DaemonResponse, HealthStatus,
-    JournalEntry, JournalTailRequest, PolicyStatus, ScreenshotInfo, ScreenshotRequest,
-    ScreenshotTileRequest, ScreenshotTransform,
+    ActionRequest, ActionResult, CapabilitySet, DaemonRequest, DaemonResponse, FocusWindowRequest,
+    HealthStatus, JournalEntry, JournalTailRequest, PolicyStatus, ScreenshotInfo,
+    ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
 };
 pub use runtime::{current_euid, default_journal_path, default_socket_path};
 pub use types::{

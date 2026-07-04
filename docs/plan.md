@@ -825,14 +825,14 @@ Tasks:
 - [x] Implement active window query bridge. Current status: daemon DBus receiver and packaged KWin script exist; installation is explicit through `make install-kwin-script`.
 - [x] Implement initial window list with stable KWin id, title, app id, and logical geometry through `WindowsRunner` plus `org.kde.KWin.getWindowInfo`.
 - [ ] Add pid and monitor association if a supported KWin, portal, or script path exposes them.
-- Implement focus window.
+- [x] Implement focus window. Current status: `plasma-pilot-cli focus --window <id>` uses KWin `WindowsRunner.Run` and is policy-gated as `ControlSemantic`; default policy fails closed without an approval channel, while `plasma-pilotd --allow-control` enables explicit local use.
 - [x] Create a KWin script exposing active-window metadata through DBus.
 
 Acceptance criteria:
 
 - CLI lists open windows with stable ids. Initial implementation is present through `plasma-pilot-cli windows`.
 - CLI reports active window after the KWin script bridge is installed and has published its first update.
-- CLI can focus Kate/Firefox/Konsole by id.
+- CLI can focus a listed KWin window by id when control policy is explicitly allowed.
 - Tool output is compact enough for model context.
 
 ### Phase 5: MCP server MVP

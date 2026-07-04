@@ -11,6 +11,8 @@ Preferred KDE Plasma 6 Wayland order:
 
 Every backend must report capabilities and provenance. The daemon should refuse ambiguous fallback behavior.
 
+Current KWin focus implementation uses `org.kde.krunner1.Run` on KWin's `WindowsRunner` service with a window id previously discovered from `WindowsRunner.Match`. This is kept behind the window backend boundary and policy-gated as a control action. A future KWin script/plugin focus path remains a fallback if `WindowsRunner` proves unstable across Plasma versions.
+
 ## KWin Script Bridge
 
 The repository includes `kwin/plasma-pilot-bridge`, a packaged KWin script that publishes active-window metadata to the user-session daemon over the session bus:

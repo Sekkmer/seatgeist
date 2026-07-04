@@ -1,7 +1,7 @@
 SHELL := /usr/bin/bash
 .ONESHELL:
 
-.PHONY: fmt check test clippy verify smoke smoke-monitors smoke-windows install-kwin-script
+.PHONY: fmt check test clippy verify smoke smoke-monitors smoke-windows smoke-focus install-kwin-script
 
 fmt:
 	cargo fmt --all
@@ -107,6 +107,43 @@ smoke-windows:
 	else
 		grep -q "KWin script bridge" "$$active_log"
 	fi
+
+smoke-focus:
+	set -euo pipefail
+	socket="/tmp/plasma-pilot-focus-smoke/plasma-pilotd.sock"
+	log="target/plasma-pilot-focus-smoke-daemon.log"
+	journal="target/plasma-pilot-focus-smoke-journal.jsonl"
+	windows="target/plasma-pilot-focus-smoke-windows.json"
+	focus="target/plasma-pilot-focus-smoke-action.json"
+	rm -rf /tmp/plasma-pilot-focus-smoke "$$log" "$$journal" "$$windows" "$$focus"
+	cargo build -p plasma-pilotd -p plasma-pilot-cli
+	target/debug/plasma-pilotd --socket "$$socket" --journal "$$journal" --allow-control >"$$log" 2>&1 &
+	pid=$$!
+	cleanup() {
+		kill "$$pid" 2>/dev/null || true
+		wait "$$pid" 2>/dev/null || true
+	}
+	trap cleanup EXIT
+	for _ in {1..50}; do
+		if [[ -S "$$socket" ]]; then
+			break
+		fi
+		sleep 0.1
+	done
+	if [[ ! -S "$$socket" ]]; then
+		cat "$$log"
+		exit 1
+	fi
+	target/debug/plasma-pilot-cli --socket "$$socket" windows >"$$windows"
+	match_id=$$(qdbus6 --literal org.kde.KWin /WindowsRunner org.kde.krunner1.Match "" | sed -n 's/.*(sssida{sv}) "\(0_{[^"]*}\)".*/\1/p' | head -n 1)
+	if [[ -z "$$match_id" ]]; then
+		echo "no KWin runner window id found"
+		exit 1
+	fi
+	target/debug/plasma-pilot-cli --socket "$$socket" focus --window "$${match_id#0_}" >"$$focus"
+	grep -q '"type": "action"' "$$focus"
+	grep -q "focused window" "$$focus"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "focus_window"
 
 install-kwin-script:
 	set -euo pipefail

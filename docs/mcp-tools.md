@@ -10,4 +10,4 @@ Initial tool groups:
 
 All coordinate-bearing tools must require an explicit coordinate space. Full-resolution screenshots and clipboard reads are policy-gated.
 
-Current daemon protocol exposes `screenshot`, `screenshot-tile`, window listing, active-window bridge reads, and `journal_tail` through the CLI. Tile coordinates are physical screenshot pixels. Screenshot responses include full source dimensions, output dimensions, source origin, scale factors, and monitor metadata when KWin responds. Journal responses return compact structured records rather than raw log text.
+Current daemon protocol exposes `screenshot`, `screenshot-tile`, window listing, active-window bridge reads, `focus_window`, and `journal_tail` through the CLI. Tile coordinates are physical screenshot pixels. Screenshot responses include full source dimensions, output dimensions, source origin, scale factors, and monitor metadata when KWin responds. Focus is policy-gated control. Journal responses return compact structured records rather than raw log text.
