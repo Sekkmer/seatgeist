@@ -238,6 +238,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         "plasma.kwin_bridge_status" => Ok(DaemonRequest::KwinBridgeStatus),
         "plasma.uinput_status" => Ok(DaemonRequest::UinputStatus),
         "plasma.input_backend_status" => Ok(DaemonRequest::InputBackendStatus),
+        "plasma.pointer_calibration" => Ok(DaemonRequest::PointerCalibration),
         "plasma.list_monitors" => Ok(DaemonRequest::ListMonitors),
         "plasma.list_windows" => Ok(DaemonRequest::ListWindows),
         "plasma.active_window" => Ok(DaemonRequest::ActiveWindow),
@@ -509,6 +510,15 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status.libei.client_library_available || status.libei.socket_env_present,
             status.uinput_available
         ),
+        DaemonResponse::PointerCalibration(status) => format!(
+            "pointer calibration bounds={},{} {}x{} monitors={} coordinate_space={:?}",
+            status.bounds.min_x,
+            status.bounds.min_y,
+            status.bounds.width,
+            status.bounds.height,
+            status.monitors.len(),
+            status.coordinate_space
+        ),
         DaemonResponse::Monitors(monitors) => format!("{} monitors", monitors.len()),
         DaemonResponse::Windows(windows) => format!("{} windows", windows.len()),
         DaemonResponse::Observation(observation) => format!(
@@ -621,6 +631,12 @@ fn tool_definitions() -> Vec<Value> {
             "plasma.input_backend_status",
             "Input Backend Status",
             "Probe read-only input backend availability in priority order: xdg-desktop-portal RemoteDesktop, libei, then uinput fallback.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.pointer_calibration",
+            "Pointer Calibration",
+            "Report monitor-derived physical pointer bounds, per-monitor physical origins, and representative test points without moving the pointer.",
             object_schema(vec![], vec![]),
         ),
         tool(
@@ -1355,6 +1371,11 @@ mod tests {
         assert!(
             tools
                 .iter()
+                .any(|tool| tool["name"] == "plasma.pointer_calibration")
+        );
+        assert!(
+            tools
+                .iter()
                 .any(|tool| tool["name"] == "plasma.wait_for_change")
         );
         assert!(tools.iter().any(|tool| tool["name"] == "plasma.type_text"));
@@ -1647,6 +1668,15 @@ mod tests {
             daemon_request_for_tool("plasma.input_backend_status", &json!({}))
                 .expect("input backend status maps"),
             DaemonRequest::InputBackendStatus
+        );
+    }
+
+    #[test]
+    fn maps_pointer_calibration_tool() {
+        assert_eq!(
+            daemon_request_for_tool("plasma.pointer_calibration", &json!({}))
+                .expect("pointer calibration maps"),
+            DaemonRequest::PointerCalibration
         );
     }
 

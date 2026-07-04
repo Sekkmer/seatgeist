@@ -809,12 +809,13 @@ Tasks:
 - [x] Implement focus guard checks before actions. Current status: current daemon control requests accept optional active-window guards (`expected_active_window`, `expected_active_app`, and `active_title_contains`) and reject stale guards before execution.
 - [x] Add panic-stop flag. Current status: `plasma-pilotd` has a file-backed panic-stop state, `plasma-pilot-cli panic-stop status|enable|disable` journals state changes, and active panic-stop blocks control-class daemon requests before execution.
 - [x] Probe whether xdg-desktop-portal RemoteDesktop or libei can satisfy input needs before requiring uinput on the local machine. Current status: `plasma-pilot-cli input backends` and MCP `plasma.input_backend_status` probe the user bus for `org.freedesktop.portal.RemoteDesktop`, KDE portal service visibility, libei client metadata/socket hints, and uinput fallback availability without starting a portal session.
-- Add pointer calibration diagnostics and host GUI smoke for a known test window before treating pixel-click use as production-ready.
+- [x] Add pointer calibration diagnostics. Current status: `plasma-pilot-cli input pointer-calibration`, MCP `plasma.pointer_calibration`, and `make smoke-pointer-calibration` report monitor-derived physical pointer bounds, per-monitor physical origins, and representative physical-pixel sample points without moving the pointer.
+- Add host GUI smoke for a known test window before treating pixel-click use as production-ready.
 
 Acceptance criteria:
 
 - CLI can type into Kate/KWrite. Current implementation provides the daemon-backed command path; host GUI smoke remains to be added once `/dev/uinput` access is configured.
-- CLI can click a known point in a test window. Current implementation provides the daemon-backed command path and physical bounds validation; host GUI smoke remains to be added once `/dev/uinput` access is configured.
+- CLI can click a known point in a test window. Current implementation provides the daemon-backed command path, physical bounds validation, and pointer calibration diagnostics; host GUI smoke remains to be added once `/dev/uinput` access is configured.
 - Panic-stop prevents further input actions.
 - Focus guard rejects action if active window changed. Current implementation covers current daemon control requests when a guard is supplied.
 
@@ -1039,7 +1040,7 @@ cargo check --workspace
 - [x] Add backend notes doc.
 - [x] Implement Phase 1.
 - [x] Implement Phase 2.
-- [ ] Implement Phase 3. Current status: keyboard and pointer command paths, uinput setup diagnostics/docs, and portal/libei input backend probes exist; pointer calibration diagnostics and host GUI smoke remain.
+- [ ] Implement Phase 3. Current status: keyboard and pointer command paths, uinput setup diagnostics/docs, portal/libei input backend probes, and pointer calibration diagnostics exist; host GUI smoke remains.
 
 ## 20. Definition of done for v0.1
 

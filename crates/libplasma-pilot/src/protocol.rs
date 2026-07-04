@@ -90,6 +90,48 @@ pub struct LibeiStatus {
     pub setup_hint: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PointerCalibrationStatus {
+    pub coordinate_space: CoordinateSpace,
+    pub bounds: PointerPhysicalBounds,
+    pub monitors: Vec<PointerMonitorCalibration>,
+    pub sample_points: Vec<PointerCalibrationPoint>,
+    pub setup_hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PointerPhysicalBounds {
+    pub min_x: i32,
+    pub min_y: i32,
+    pub max_x: i32,
+    pub max_y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PointerMonitorCalibration {
+    pub id: String,
+    pub name: Option<String>,
+    pub logical_origin_x: i32,
+    pub logical_origin_y: i32,
+    pub logical_width: u32,
+    pub logical_height: u32,
+    pub physical_origin_x: i32,
+    pub physical_origin_y: i32,
+    pub physical_width: u32,
+    pub physical_height: u32,
+    pub scale_factor: f64,
+    pub transform: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PointerCalibrationPoint {
+    pub label: String,
+    pub x: i32,
+    pub y: i32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetPanicStopRequest {
     pub enabled: bool,
@@ -370,6 +412,7 @@ pub enum DaemonRequest {
     KwinBridgeStatus,
     UinputStatus,
     InputBackendStatus,
+    PointerCalibration,
     ListMonitors,
     ListWindows,
     ActiveWindow,
@@ -407,6 +450,7 @@ impl DaemonRequest {
             Self::KwinBridgeStatus => "kwin_bridge_status",
             Self::UinputStatus => "uinput_status",
             Self::InputBackendStatus => "input_backend_status",
+            Self::PointerCalibration => "pointer_calibration",
             Self::ListMonitors => "list_monitors",
             Self::ListWindows => "list_windows",
             Self::ActiveWindow => "active_window",
@@ -445,6 +489,7 @@ pub enum DaemonResponse {
     KwinBridgeStatus(KwinBridgeStatus),
     UinputStatus(UinputStatus),
     InputBackendStatus(InputBackendStatus),
+    PointerCalibration(PointerCalibrationStatus),
     Monitors(Vec<MonitorInfo>),
     Windows(Vec<WindowInfo>),
     ActiveWindow(Option<WindowInfo>),
@@ -469,6 +514,7 @@ impl DaemonResponse {
             Self::KwinBridgeStatus(_) => "kwin_bridge_status",
             Self::UinputStatus(_) => "uinput_status",
             Self::InputBackendStatus(_) => "input_backend_status",
+            Self::PointerCalibration(_) => "pointer_calibration",
             Self::Monitors(_) => "monitors",
             Self::Windows(_) => "windows",
             Self::ActiveWindow(_) => "active_window",
@@ -839,6 +885,53 @@ mod tests {
         assert!(encoded.contains(r#""type":"input_backend_status""#));
         assert!(encoded.contains(r#""preferred_available_backend":"portal_remote_desktop""#));
         assert_eq!(response.response_type(), "input_backend_status");
+    }
+
+    #[test]
+    fn serializes_pointer_calibration() {
+        let request = DaemonRequest::PointerCalibration;
+        assert_eq!(
+            serde_json::to_string(&request).expect("pointer calibration request serializes"),
+            r#"{"method":"pointer_calibration"}"#
+        );
+
+        let response = DaemonResponse::PointerCalibration(PointerCalibrationStatus {
+            coordinate_space: CoordinateSpace::PhysicalPixel,
+            bounds: PointerPhysicalBounds {
+                min_x: 0,
+                min_y: 0,
+                max_x: 7679,
+                max_y: 4319,
+                width: 7680,
+                height: 4320,
+            },
+            monitors: vec![PointerMonitorCalibration {
+                id: "HDMI-A-2".to_string(),
+                name: Some("HDMI-A-2".to_string()),
+                logical_origin_x: 0,
+                logical_origin_y: 0,
+                logical_width: 5120,
+                logical_height: 2880,
+                physical_origin_x: 0,
+                physical_origin_y: 0,
+                physical_width: 7680,
+                physical_height: 4320,
+                scale_factor: 1.5,
+                transform: None,
+            }],
+            sample_points: vec![PointerCalibrationPoint {
+                label: "center".to_string(),
+                x: 3840,
+                y: 2160,
+            }],
+            setup_hint:
+                "physical_pixel pointer coordinates are calibrated from KWin monitor metadata"
+                    .to_string(),
+        });
+        let encoded = serde_json::to_string(&response).expect("pointer calibration serializes");
+        assert!(encoded.contains(r#""type":"pointer_calibration""#));
+        assert!(encoded.contains(r#""coordinate_space":"physical_pixel""#));
+        assert_eq!(response.response_type(), "pointer_calibration");
     }
 
     #[test]

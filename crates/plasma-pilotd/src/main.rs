@@ -20,8 +20,9 @@ use libplasma_pilot::{
     DaemonRequest, DaemonResponse, DesktopObservation, FocusWindowRequest,
     FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus, JournalEntry,
     KeyComboRequest, KwinBridgeStatus, LibeiStatus, MovePointerRequest, ObserveRequest,
-    PanicStopStatus, Point, PointerButton, PolicyStatus, RemoteDesktopPortalStatus, SafetyClass,
-    ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
+    PanicStopStatus, Point, PointerButton, PointerCalibrationPoint, PointerCalibrationStatus,
+    PointerMonitorCalibration, PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus,
+    SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
     ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
     ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult,
     WindowGeometry, WindowInfo, current_egid, current_euid, default_journal_path,
@@ -460,6 +461,12 @@ fn handle_request(
         },
         DaemonRequest::InputBackendStatus => match input_backend_status() {
             Ok(status) => DaemonResponse::InputBackendStatus(status),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
+        DaemonRequest::PointerCalibration => match pointer_calibration_status() {
+            Ok(status) => DaemonResponse::PointerCalibration(status),
             Err(err) => DaemonResponse::Error {
                 message: format_error_chain(&err),
             },
@@ -1050,6 +1057,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::SetPanicStop(_)
         | DaemonRequest::UinputStatus
         | DaemonRequest::InputBackendStatus
+        | DaemonRequest::PointerCalibration
         | DaemonRequest::JournalTail(_) => SafetyClass::Policy,
         DaemonRequest::ListMonitors
         | DaemonRequest::ListWindows
@@ -1594,6 +1602,81 @@ fn key_combo(request: KeyComboRequest) -> Result<ActionResult> {
         observation: None,
         message: Some(format!("sent key combo keys={key_count}")),
     })
+}
+
+fn pointer_calibration_status() -> Result<PointerCalibrationStatus> {
+    let monitors = list_monitors()?;
+    pointer_calibration_status_from_monitors(&monitors)
+}
+
+fn pointer_calibration_status_from_monitors(
+    monitors: &[libplasma_pilot::MonitorInfo],
+) -> Result<PointerCalibrationStatus> {
+    let bounds = physical_pointer_bounds_from_monitors(monitors)?;
+    let monitors = pointer_monitor_calibrations(monitors)?;
+    let physical_bounds = PointerPhysicalBounds {
+        min_x: bounds.min_x,
+        min_y: bounds.min_y,
+        max_x: bounds.min_x + i32::try_from(bounds.width)? - 1,
+        max_y: bounds.min_y + i32::try_from(bounds.height)? - 1,
+        width: bounds.width,
+        height: bounds.height,
+    };
+    let center_x = bounds.min_x + i32::try_from(bounds.width / 2)?;
+    let center_y = bounds.min_y + i32::try_from(bounds.height / 2)?;
+    Ok(PointerCalibrationStatus {
+        coordinate_space: CoordinateSpace::PhysicalPixel,
+        bounds: physical_bounds,
+        monitors,
+        sample_points: vec![
+            PointerCalibrationPoint {
+                label: "top_left".to_string(),
+                x: bounds.min_x,
+                y: bounds.min_y,
+            },
+            PointerCalibrationPoint {
+                label: "center".to_string(),
+                x: center_x,
+                y: center_y,
+            },
+            PointerCalibrationPoint {
+                label: "bottom_right".to_string(),
+                x: bounds.min_x + i32::try_from(bounds.width)? - 1,
+                y: bounds.min_y + i32::try_from(bounds.height)? - 1,
+            },
+        ],
+        setup_hint: "physical_pixel pointer coordinates are derived from KWin monitor logical origins, scale factors, and physical sizes; verify with a guarded disposable test window before production click use".to_string(),
+    })
+}
+
+fn pointer_monitor_calibrations(
+    monitors: &[libplasma_pilot::MonitorInfo],
+) -> Result<Vec<PointerMonitorCalibration>> {
+    monitors
+        .iter()
+        .map(|monitor| {
+            Ok(PointerMonitorCalibration {
+                id: monitor.id.clone(),
+                name: monitor.name.clone(),
+                logical_origin_x: monitor.logical_origin_x,
+                logical_origin_y: monitor.logical_origin_y,
+                logical_width: monitor.logical_width,
+                logical_height: monitor.logical_height,
+                physical_origin_x: scaled_physical_origin(
+                    monitor.logical_origin_x,
+                    monitor.scale_factor,
+                )?,
+                physical_origin_y: scaled_physical_origin(
+                    monitor.logical_origin_y,
+                    monitor.scale_factor,
+                )?,
+                physical_width: monitor.physical_width,
+                physical_height: monitor.physical_height,
+                scale_factor: monitor.scale_factor,
+                transform: monitor.transform.clone(),
+            })
+        })
+        .collect()
 }
 
 fn move_pointer(request: MovePointerRequest) -> Result<ActionResult> {
@@ -2404,6 +2487,15 @@ fn summarize_response(response: &DaemonResponse) -> String {
             status.libei.client_library_available || status.libei.socket_env_present,
             status.uinput_available
         ),
+        DaemonResponse::PointerCalibration(status) => format!(
+            "pointer calibration bounds={},{} {}x{} monitors={} coordinate_space={:?}",
+            status.bounds.min_x,
+            status.bounds.min_y,
+            status.bounds.width,
+            status.bounds.height,
+            status.monitors.len(),
+            status.coordinate_space
+        ),
         DaemonResponse::Monitors(monitors) => format!("{} monitors", monitors.len()),
         DaemonResponse::Windows(windows) => format!("{} windows", windows.len()),
         DaemonResponse::Observation(observation) => format!(
@@ -2913,6 +3005,8 @@ mod tests {
             .expect("uinput status is allowed as policy diagnostics");
         enforce_policy(&policy, &DaemonRequest::InputBackendStatus)
             .expect("input backend status is allowed as policy diagnostics");
+        enforce_policy(&policy, &DaemonRequest::PointerCalibration)
+            .expect("pointer calibration is allowed as policy diagnostics");
     }
 
     #[test]
@@ -3128,6 +3222,51 @@ mod tests {
         let err = validate_pointer_point(physical_point(7680.0, 4319.0), bounds)
             .expect_err("out-of-bounds coordinate is rejected");
         assert!(err.to_string().contains("outside physical desktop bounds"));
+    }
+
+    #[test]
+    fn pointer_calibration_reports_monitor_physical_mapping() {
+        let status = pointer_calibration_status_from_monitors(&[
+            monitor("left", -1920, 0, 1920, 1080, 1920, 1080, 1.0),
+            monitor("main-8k", 0, 0, 7680, 4320, 5120, 2880, 1.5),
+        ])
+        .expect("calibration maps monitors");
+
+        assert_eq!(status.coordinate_space, CoordinateSpace::PhysicalPixel);
+        assert_eq!(
+            status.bounds,
+            PointerPhysicalBounds {
+                min_x: -1920,
+                min_y: 0,
+                max_x: 7679,
+                max_y: 4319,
+                width: 9600,
+                height: 4320,
+            }
+        );
+        assert_eq!(status.monitors.len(), 2);
+        assert_eq!(status.monitors[0].physical_origin_x, -1920);
+        assert_eq!(status.monitors[1].physical_origin_x, 0);
+        assert_eq!(
+            status.sample_points,
+            vec![
+                PointerCalibrationPoint {
+                    label: "top_left".to_string(),
+                    x: -1920,
+                    y: 0,
+                },
+                PointerCalibrationPoint {
+                    label: "center".to_string(),
+                    x: 2880,
+                    y: 2160,
+                },
+                PointerCalibrationPoint {
+                    label: "bottom_right".to_string(),
+                    x: 7679,
+                    y: 4319,
+                },
+            ]
+        );
     }
 
     #[test]

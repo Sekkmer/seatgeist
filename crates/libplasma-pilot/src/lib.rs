@@ -11,10 +11,11 @@ pub use protocol::{
     DaemonResponse, DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest,
     HealthStatus, InputBackendStatus, JournalEntry, JournalTailRequest, KeyComboRequest,
     KwinBridgeStatus, LibeiStatus, MovePointerRequest, ObserveRequest, PanicStopStatus,
-    PolicyStatus, RemoteDesktopPortalStatus, ReplayTrace, ScreenshotInfo, ScreenshotRequest,
-    ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest, SelectMenuRequest,
-    SetPanicStopRequest, SetTextFieldRequest, TraceStep, TypeTextRequest, UinputStatus,
-    WaitForChangeRequest, WaitForChangeResult,
+    PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
+    PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus, ReplayTrace, ScreenshotInfo,
+    ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest,
+    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, TraceStep, TypeTextRequest,
+    UinputStatus, WaitForChangeRequest, WaitForChangeResult,
 };
 pub use runtime::{
     current_egid, current_euid, default_journal_path, default_panic_stop_path, default_socket_path,

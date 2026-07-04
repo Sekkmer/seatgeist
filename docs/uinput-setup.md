@@ -20,6 +20,14 @@ plasma-pilot-cli input backends
 
 The same aggregate probe is available to MCP as `plasma.input_backend_status`. It checks xdg-desktop-portal RemoteDesktop interface visibility, KDE portal service visibility, libei client metadata/socket hints, and uinput fallback availability without starting a portal consent flow or sending input.
 
+Before any real pointer action, check monitor-derived physical pointer bounds:
+
+```bash
+plasma-pilot-cli input pointer-calibration
+```
+
+The same diagnostic is available to MCP as `plasma.pointer_calibration`. It reports the physical-pixel desktop bounds, per-monitor physical origins, and representative top-left, center, and bottom-right sample points. This is a preflight diagnostic only; it does not move the pointer.
+
 ## Optional Udev Rule
 
 The repository includes `udev/99-plasma-pilot-uinput.rules`:
@@ -64,6 +72,12 @@ The safe smoke target checks status only and does not move the pointer or type:
 
 ```bash
 make smoke-uinput-status
+```
+
+On a KDE session with monitor metadata available, the pointer calibration smoke checks coordinate metadata without moving the pointer:
+
+```bash
+make smoke-pointer-calibration
 ```
 
 Actual click/type GUI smoke should be run only in a disposable test window with explicit `--allow-control` and a known active-window guard.

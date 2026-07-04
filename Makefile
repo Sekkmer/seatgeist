@@ -1,7 +1,7 @@
 SHELL := /usr/bin/bash
 .ONESHELL:
 
-.PHONY: fmt check test clippy verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-mcp gui-eval install-kwin-script
+.PHONY: fmt check test clippy verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-pointer-calibration smoke-mcp gui-eval install-kwin-script
 
 fmt:
 	cargo fmt --all
@@ -271,6 +271,35 @@ smoke-uinput-status:
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "uinput_status"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "input_backend_status"
 
+smoke-pointer-calibration:
+	set -euo pipefail
+	socket="/tmp/plasma-pilot-pointer-calibration-smoke/plasma-pilotd.sock"
+	log="target/plasma-pilot-pointer-calibration-smoke-daemon.log"
+	journal="target/plasma-pilot-pointer-calibration-smoke-journal.jsonl"
+	out="target/plasma-pilot-pointer-calibration-smoke.json"
+	rm -rf /tmp/plasma-pilot-pointer-calibration-smoke "$$log" "$$journal" "$$out"
+	cargo build -p plasma-pilotd -p plasma-pilot-cli
+	target/debug/plasma-pilotd --socket "$$socket" --journal "$$journal" >"$$log" 2>&1 &
+	pid=$$!
+	cleanup() {
+		kill "$$pid" 2>/dev/null || true
+		wait "$$pid" 2>/dev/null || true
+	}
+	trap cleanup EXIT
+	for _ in {1..50}; do
+		if [[ -S "$$socket" ]]; then
+			break
+		fi
+		sleep 0.1
+	done
+	if [[ ! -S "$$socket" ]]; then
+		cat "$$log"
+		exit 1
+	fi
+	target/debug/plasma-pilot-cli --socket "$$socket" input pointer-calibration >"$$out"
+	jq -e '.type == "pointer_calibration" and .data.coordinate_space == "physical_pixel" and (.data.monitors | length) >= 1 and (.data.sample_points | length) >= 3' "$$out" >/dev/null
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "pointer_calibration"
+
 smoke-mcp:
 	set -euo pipefail
 	socket="/tmp/plasma-pilot-mcp-smoke/plasma-pilotd.sock"
@@ -314,6 +343,7 @@ smoke-mcp:
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.kwin_bridge_status")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.uinput_status")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.input_backend_status")' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.pointer_calibration")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.type_text")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.key_combo")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.move_pointer")' "$$out" >/dev/null
