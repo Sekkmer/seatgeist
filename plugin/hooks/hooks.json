@@ -1,4 +1,16 @@
 {
-  "hooks": {},
-  "disabled_reason": "Hooks are intentionally disabled until the Codex hook schema and trust flow are validated for PlasmaPilot."
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/plugin/hooks/plasma_audit_summary.py\"",
+            "timeout": 10,
+            "statusMessage": "Writing PlasmaPilot audit summary"
+          }
+        ]
+      }
+    ]
+  }
 }

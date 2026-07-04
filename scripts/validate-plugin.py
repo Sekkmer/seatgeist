@@ -129,8 +129,26 @@ def validate_mcp(path: Path) -> None:
 def validate_hooks(path: Path) -> None:
     hooks = require_object(load_json(path), "hooks/hooks.json")
     active_hooks = hooks.get("hooks")
-    if active_hooks != {}:
-        fail("hooks/hooks.json must keep hooks disabled until schema validation is implemented")
+    active_hooks = require_object(active_hooks, "hooks/hooks.json.hooks")
+    stop_groups = active_hooks.get("Stop")
+    if not isinstance(stop_groups, list) or len(stop_groups) != 1:
+        fail("hooks/hooks.json must define exactly one Stop hook group")
+    group = require_object(stop_groups[0], "hooks/hooks.json.hooks.Stop[0]")
+    handlers = group.get("hooks")
+    if not isinstance(handlers, list) or len(handlers) != 1:
+        fail("hooks/hooks.json Stop group must define exactly one command hook")
+    handler = require_object(handlers[0], "hooks/hooks.json.hooks.Stop[0].hooks[0]")
+    if handler.get("type") != "command":
+        fail("PlasmaPilot hook must use type=command")
+    command = require_string(handler, "command", "PlasmaPilot hook")
+    expected = 'python3 "$(git rev-parse --show-toplevel)/plugin/hooks/plasma_audit_summary.py"'
+    if command != expected:
+        fail("PlasmaPilot hook command must run plugin/hooks/plasma_audit_summary.py from git root")
+    if handler.get("timeout") != 10:
+        fail("PlasmaPilot hook timeout must be 10 seconds")
+    require_string(handler, "statusMessage", "PlasmaPilot hook")
+    if not (path.parent / "plasma_audit_summary.py").is_file():
+        fail("PlasmaPilot hook script is missing")
 
 
 def validate_skills(skills_root: Path) -> None:

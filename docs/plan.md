@@ -885,7 +885,7 @@ Tasks:
 - [x] Finalize `plugin/.codex-plugin/plugin.json`. Current status: manifest has real author, license, keyword, interface, skills, and MCP metadata with relative paths.
 - [x] Finalize `plugin/.mcp.json`. Current status: bundled MCP config points at `plasma-pilot-mcp --stdio`, with daemon socket resolution handled by the MCP/daemon defaults or `PLASMA_PILOT_SOCKET`.
 - [x] Write the four skills. Current status: the skills describe current `plasma.*` MCP tools, safety guards, observation flow, browser debugging, GUI testing, and desktop triage.
-- [x] Create hook skeleton. Current status: `plugin/hooks/hooks.json` exists with no active hooks and a disabled reason until hook schema and trust flow are validated locally.
+- [x] Create hook skeleton. Current status: `plugin/hooks/hooks.json` now enables one Codex `Stop` command hook that writes a fail-open local audit summary under `target/plasma-pilot-hook-audit/latest.json`; Codex still requires the normal `/hooks` trust review before non-managed plugin hooks run.
 - [x] Add plugin install instructions. Current status: `docs/plugin.md` documents bundle contents, preconditions, validation, and local-use examples.
 - [x] Add examples:
   - “Open Kate and type hello.”
@@ -898,7 +898,7 @@ Acceptance criteria:
 - Codex can select the generic Plasma computer-use skill implicitly from a GUI task.
 - Codex can use the bundled MCP server.
 - Hooks either run safely or are disabled with a clear TODO if schema verification is pending.
-  Current status: `make validate-plugin` checks the plugin manifest, MCP config, skill frontmatter, required skill set, and disabled hook skeleton; `make verify` runs the plugin validator.
+  Current status: `make validate-plugin` checks the plugin manifest, MCP config, skill frontmatter, required skill set, and the bundled Stop audit hook; `make verify` runs the plugin validator.
 
 ### Phase 7: Clipboard backend
 

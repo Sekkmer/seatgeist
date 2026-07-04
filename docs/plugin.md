@@ -7,7 +7,8 @@ The repository ships a local Codex plugin bundle under `plugin/`.
 - `plugin/.codex-plugin/plugin.json`: plugin metadata, skill path, and MCP config path.
 - `plugin/.mcp.json`: stdio MCP server entry for `plasma-pilot-mcp --stdio`.
 - `plugin/skills/`: PlasmaPilot operating workflows for computer use, GUI testing, browser debugging, and desktop triage.
-- `plugin/hooks/hooks.json`: intentionally disabled hook skeleton until hook schema and trust behavior are validated locally.
+- `plugin/hooks/hooks.json`: Codex `Stop` hook config for writing a compact local audit summary.
+- `plugin/hooks/plasma_audit_summary.py`: fail-open audit hook that writes `target/plasma-pilot-hook-audit/latest.json` with git status and recent PlasmaPilot journal metadata.
 
 ## Preconditions
 
@@ -35,7 +36,11 @@ The normal project gate also runs this validator:
 make verify
 ```
 
-The validator checks manifest metadata, relative plugin paths, MCP server config, skill frontmatter, the required four skill names, and the disabled hook skeleton.
+The validator checks manifest metadata, relative plugin paths, MCP server config, skill frontmatter, the required four skill names, and the bundled Stop audit hook.
+
+## Hook Trust
+
+Codex loads plugin-bundled hooks through the normal hook trust flow. Review and trust the PlasmaPilot hook with `/hooks` before expecting it to run. The hook does not consume prompt text or hook stdin; it writes only repo status, HEAD, and compact PlasmaPilot journal metadata under `target/plasma-pilot-hook-audit/latest.json`.
 
 ## Local Use Examples
 
