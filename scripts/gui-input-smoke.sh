@@ -6,7 +6,8 @@ usage() {
 Usage: scripts/gui-input-smoke.sh [text-editor]
 
 Runs an opt-in local GUI smoke that sends real pointer and keyboard input to a
-disposable KWrite/Kate document through plasma-pilotd with --allow-control.
+disposable KWrite/Kate document through plasma-pilotd with short-lived
+approval-file grants.
 USAGE
 }
 
@@ -59,6 +60,7 @@ click_json="$run_dir/click.json"
 type_json="$run_dir/type.json"
 save_json="$run_dir/save.json"
 journal_tail_json="$run_dir/journal-tail.json"
+approval_file="$run_dir/approvals.jsonl"
 stamp="$(date +%s)"
 test_file="$run_dir/plasma-pilot-input-smoke-$stamp.txt"
 sentinel="plasma-pilot-input-smoke-$stamp"
@@ -68,11 +70,12 @@ app_id=""
 
 rm -rf "$run_dir" "$socket_dir"
 mkdir -p "$run_dir"
+chmod 700 "$run_dir"
 printf '' >"$test_file"
 
 cargo build -p plasma-pilotd -p plasma-pilot-cli
 
-target/debug/plasma-pilotd --socket "$socket" --journal "$journal" --allow-control >"$log" 2>&1 &
+target/debug/plasma-pilotd --socket "$socket" --journal "$journal" --approval-file "$approval_file" >"$log" 2>&1 &
 daemon_pid=$!
 
 cli() {
@@ -108,6 +111,24 @@ if [[ ! -S "$socket" ]]; then
 	cat "$log" >&2
 	exit 1
 fi
+
+grant_approval() {
+	local safety_class="$1"
+	local method="$2"
+	cli approve \
+		--approval-file "$approval_file" \
+		--safety-class "$safety_class" \
+		--method "$method" \
+		--ttl-ms 300000 \
+		--reason "gui-input-smoke $method" >"$run_dir/approval-$method.json"
+	jq -e --arg method "$method" '.method == $method' "$run_dir/approval-$method.json" >/dev/null
+}
+
+grant_approval control-semantic focus_window
+grant_approval control-pointer click_pointer
+grant_approval control-keyboard type_text
+grant_approval control-keyboard key_combo
+test "$(stat -c '%a' "$approval_file")" = "600"
 
 cli input status >"$uinput_json"
 jq -e '.type == "uinput_status" and .data.available == true' "$uinput_json" >/dev/null
