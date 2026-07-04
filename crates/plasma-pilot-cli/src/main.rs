@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use libplasma_pilot::{
-    ClipboardGetRequest, ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest,
-    DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
-    ObserveRequest, ScreenshotRequest, ScreenshotTileRequest, default_socket_path,
+    AccessibilityFindRequest, ClipboardGetRequest, ClipboardSetRequest,
+    DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse, FocusWindowRequest,
+    FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest, ScreenshotRequest,
+    ScreenshotTileRequest, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -98,6 +99,22 @@ enum AtspiCommand {
         #[arg(long, default_value_t = 2)]
         depth: usize,
         #[arg(long, default_value_t = 256)]
+        max_nodes: usize,
+    },
+    Find {
+        #[arg(long)]
+        role: Option<String>,
+        #[arg(long)]
+        name_contains: Option<String>,
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long)]
+        window_name_contains: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        depth: usize,
+        #[arg(long, default_value_t = 10)]
+        max_results: usize,
+        #[arg(long, default_value_t = 512)]
         max_nodes: usize,
     },
 }
@@ -217,6 +234,29 @@ fn main() -> Result<()> {
                 }),
             )?;
         }
+        Command::Atspi {
+            command:
+                AtspiCommand::Find {
+                    role,
+                    name_contains,
+                    app,
+                    window_name_contains,
+                    depth,
+                    max_results,
+                    max_nodes,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::AccessibilityFind(AccessibilityFindRequest {
+                role,
+                name_contains,
+                app,
+                window_name_contains,
+                depth,
+                max_results,
+                max_nodes,
+            }),
+        )?,
         Command::Journal {
             command: JournalCommand::Tail { limit },
         } => print_daemon_response(

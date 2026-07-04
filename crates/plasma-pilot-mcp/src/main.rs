@@ -7,9 +7,10 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use libplasma_pilot::{
-    ClipboardGetRequest, ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest,
-    DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
-    ObserveRequest, ScreenshotRequest, ScreenshotTileRequest, default_socket_path,
+    AccessibilityFindRequest, ClipboardGetRequest, ClipboardSetRequest,
+    DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse, FocusWindowRequest,
+    FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest, ScreenshotRequest,
+    ScreenshotTileRequest, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -289,6 +290,24 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                     .unwrap_or(256),
             },
         )),
+        "plasma.a11y_find" => Ok(DaemonRequest::AccessibilityFind(AccessibilityFindRequest {
+            role: optional_string(arguments, "role")?,
+            name_contains: optional_string(arguments, "name_contains")?,
+            app: optional_string(arguments, "app")?,
+            window_name_contains: optional_string(arguments, "window_name_contains")?,
+            depth: optional_u64(arguments, "depth")?
+                .map(u64_to_usize)
+                .transpose()?
+                .unwrap_or(0),
+            max_results: optional_u64(arguments, "max_results")?
+                .map(u64_to_usize)
+                .transpose()?
+                .unwrap_or(10),
+            max_nodes: optional_u64(arguments, "max_nodes")?
+                .map(u64_to_usize)
+                .transpose()?
+                .unwrap_or(512),
+        })),
         "plasma.focus_window" => Ok(DaemonRequest::FocusWindow(FocusWindowRequest {
             window_id: required_string(arguments, "window_id")?,
         })),
@@ -371,6 +390,9 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             node.children.len()
         ),
         DaemonResponse::AccessibilityTree(None) => "no focused accessibility node".to_string(),
+        DaemonResponse::AccessibilityMatches(matches) => {
+            format!("{} accessibility matches", matches.len())
+        }
         DaemonResponse::Journal(entries) => format!("{} journal entries", entries.len()),
         DaemonResponse::Action(result) => result
             .message
@@ -545,6 +567,44 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "plasma.a11y_find",
+            "Find Accessibility Nodes",
+            "Find compact AT-SPI nodes by role, name substring, application name, or containing window name.",
+            object_schema(
+                vec![
+                    (
+                        "role",
+                        json!({"type": "string", "description": "Exact AT-SPI role name, such as button, frame, menu item, or text."}),
+                    ),
+                    (
+                        "name_contains",
+                        json!({"type": "string", "description": "Case-insensitive accessible-name substring."}),
+                    ),
+                    (
+                        "app",
+                        json!({"type": "string", "description": "Case-insensitive application accessible-name substring."}),
+                    ),
+                    (
+                        "window_name_contains",
+                        json!({"type": "string", "description": "Case-insensitive containing frame/dialog/window name substring."}),
+                    ),
+                    (
+                        "depth",
+                        json!({"type": "integer", "minimum": 0, "description": "Child depth to include for each match. Defaults to 0."}),
+                    ),
+                    (
+                        "max_results",
+                        json!({"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum matched nodes to return. Defaults to 10."}),
+                    ),
+                    (
+                        "max_nodes",
+                        json!({"type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum nodes to scan. Defaults to 512."}),
+                    ),
+                ],
+                vec![],
+            ),
+        ),
+        tool(
             "plasma.journal_tail",
             "Journal Tail",
             "Read recent compact daemon journal entries.",
@@ -677,6 +737,7 @@ mod tests {
                 .iter()
                 .any(|tool| tool["name"] == "plasma.a11y_focused_tree")
         );
+        assert!(tools.iter().any(|tool| tool["name"] == "plasma.a11y_find"));
     }
 
     #[test]
@@ -768,6 +829,35 @@ mod tests {
             DaemonRequest::FocusedAccessibilityTree(FocusedAccessibilityTreeRequest {
                 depth: 3,
                 max_nodes: 128,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_accessibility_find_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.a11y_find",
+            &json!({
+                "role": "button",
+                "name_contains": "ok",
+                "app": "kate",
+                "window_name_contains": "settings",
+                "depth": 1,
+                "max_results": 3,
+                "max_nodes": 200
+            }),
+        )
+        .expect("a11y find args map");
+        assert_eq!(
+            request,
+            DaemonRequest::AccessibilityFind(AccessibilityFindRequest {
+                role: Some("button".to_string()),
+                name_contains: Some("ok".to_string()),
+                app: Some("kate".to_string()),
+                window_name_contains: Some("settings".to_string()),
+                depth: 1,
+                max_results: 3,
+                max_nodes: 200,
             })
         );
     }

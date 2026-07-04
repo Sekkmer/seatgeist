@@ -1,7 +1,8 @@
 use std::process::Command;
 
 use libplasma_pilot::{
-    AccessibilityAction, AccessibilityBounds, AccessibilityNode, CoordinateSpace, PilotError,
+    AccessibilityAction, AccessibilityBounds, AccessibilityFindRequest, AccessibilityNode,
+    CoordinateSpace, PilotError,
 };
 
 pub const BACKEND_NAME: &str = "atspi";
@@ -73,6 +74,40 @@ pub fn focused_tree(depth: usize, max_nodes: usize) -> Result<Option<Accessibili
     }
 
     Ok(None)
+}
+
+pub fn find(request: AccessibilityFindRequest) -> Result<Vec<AccessibilityNode>> {
+    validate_find_request(&request)?;
+    let bus = AtspiBus::connect()?;
+    let roots = bus.children(&AtspiRef {
+        service: ATSPI_ROOT_SERVICE.to_string(),
+        path: ATSPI_ROOT_PATH.to_string(),
+    })?;
+    let mut budget = NodeBudget::new(request.max_nodes);
+    let mut matches = Vec::new();
+
+    for root in roots {
+        if matches.len() >= request.max_results {
+            break;
+        }
+        let app_name = bus.name(&root).unwrap_or_default();
+        if let Some(app) = request.app.as_deref()
+            && !contains_case_insensitive(&app_name, app)
+        {
+            continue;
+        }
+        bus.find_matches(
+            &root,
+            &request,
+            &app_name,
+            None,
+            DEFAULT_SEARCH_DEPTH,
+            &mut budget,
+            &mut matches,
+        )?;
+    }
+
+    Ok(matches)
 }
 
 impl AtspiBus {
@@ -159,6 +194,92 @@ impl AtspiBus {
             actions: normalize_actions(&available_actions),
             children,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn find_matches(
+        &self,
+        node: &AtspiRef,
+        request: &AccessibilityFindRequest,
+        app_name: &str,
+        window_name: Option<&str>,
+        remaining_depth: usize,
+        budget: &mut NodeBudget,
+        matches: &mut Vec<AccessibilityNode>,
+    ) -> Result<()> {
+        if matches.len() >= request.max_results || !budget.take() {
+            return Ok(());
+        }
+
+        let role = self
+            .role_name(node)
+            .unwrap_or_else(|_| "unknown".to_string());
+        let name = self.name(node).unwrap_or_default();
+        let effective_window = if is_window_role(&role) {
+            non_empty_ref(&name).or(window_name)
+        } else {
+            window_name
+        };
+
+        if self.node_matches(&role, &name, app_name, effective_window, request) {
+            let mut build_budget = NodeBudget::new(request.max_nodes);
+            if let Ok(node) = self.node_tree(node, request.depth, &mut build_budget) {
+                matches.push(node);
+            }
+        }
+
+        if remaining_depth == 0 || matches.len() >= request.max_results {
+            return Ok(());
+        }
+
+        for child in self.children(node).unwrap_or_default() {
+            if matches.len() >= request.max_results || budget.remaining == 0 {
+                break;
+            }
+            self.find_matches(
+                &child,
+                request,
+                app_name,
+                effective_window,
+                remaining_depth - 1,
+                budget,
+                matches,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn node_matches(
+        &self,
+        role: &str,
+        name: &str,
+        app_name: &str,
+        window_name: Option<&str>,
+        request: &AccessibilityFindRequest,
+    ) -> bool {
+        if let Some(query) = request.role.as_deref()
+            && !role.eq_ignore_ascii_case(query)
+        {
+            return false;
+        }
+        if let Some(query) = request.name_contains.as_deref()
+            && !contains_case_insensitive(name, query)
+        {
+            return false;
+        }
+        if let Some(query) = request.app.as_deref()
+            && !contains_case_insensitive(app_name, query)
+        {
+            return false;
+        }
+        if let Some(query) = request.window_name_contains.as_deref()
+            && !window_name
+                .map(|name| contains_case_insensitive(name, query))
+                .unwrap_or(false)
+        {
+            return false;
+        }
+        true
     }
 
     fn call(&self, service: &str, path: &str, interface: &str, method: &str) -> Result<String> {
@@ -285,6 +406,29 @@ fn accessibility_bus_address() -> Result<String> {
         .output()
         .map_err(|err| PilotError::BackendUnavailable(format!("run busctl: {err}")))?;
     parse_single_string(&command_output(output, "busctl org.a11y.Bus GetAddress")?)
+}
+
+fn validate_find_request(request: &AccessibilityFindRequest) -> Result<()> {
+    if request.max_results == 0 {
+        return Err(PilotError::InvalidRequest(
+            "max_results must be greater than zero".to_string(),
+        ));
+    }
+    if request.max_nodes == 0 {
+        return Err(PilotError::InvalidRequest(
+            "max_nodes must be greater than zero".to_string(),
+        ));
+    }
+    if request.role.is_none()
+        && request.name_contains.is_none()
+        && request.app.is_none()
+        && request.window_name_contains.is_none()
+    {
+        return Err(PilotError::InvalidRequest(
+            "at least one accessibility find filter is required".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn command_output(output: std::process::Output, context: &str) -> Result<String> {
@@ -458,7 +602,28 @@ fn is_sensitive_role(role: &str) -> bool {
     role.eq_ignore_ascii_case("password text") || role.eq_ignore_ascii_case("password")
 }
 
+fn is_window_role(role: &str) -> bool {
+    matches!(
+        role.to_ascii_lowercase().as_str(),
+        "frame" | "dialog" | "window" | "alert"
+    )
+}
+
+fn contains_case_insensitive(value: &str, query: &str) -> bool {
+    value
+        .to_ascii_lowercase()
+        .contains(&query.to_ascii_lowercase())
+}
+
 fn non_empty(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn non_empty_ref(value: &str) -> Option<&str> {
     if value.trim().is_empty() {
         None
     } else {
@@ -565,5 +730,26 @@ mod tests {
             normalize_actions(&actions),
             vec![AccessibilityAction::Press]
         );
+    }
+
+    #[test]
+    fn validates_find_requires_a_filter() {
+        let err = validate_find_request(&AccessibilityFindRequest {
+            role: None,
+            name_contains: None,
+            app: None,
+            window_name_contains: None,
+            depth: 0,
+            max_results: 1,
+            max_nodes: 1,
+        })
+        .expect_err("empty query is invalid");
+        assert!(err.to_string().contains("at least one"));
+    }
+
+    #[test]
+    fn matches_case_insensitive_substrings() {
+        assert!(contains_case_insensitive("System Settings", "settings"));
+        assert!(!contains_case_insensitive("Kate", "firefox"));
     }
 }

@@ -214,7 +214,10 @@ smoke-atspi:
 	fi
 	target/debug/plasma-pilot-cli --socket "$$socket" atspi tree --focused --depth 1 --max-nodes 256 >"$$out"
 	jq -e '.type == "accessibility_tree"' "$$out" >/dev/null
+	target/debug/plasma-pilot-cli --socket "$$socket" atspi find --role application --max-results 1 --max-nodes 128 >"$$out"
+	jq -e '.type == "accessibility_matches" and (.data | length) >= 1' "$$out" >/dev/null
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "focused_accessibility_tree"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "accessibility_find"
 
 smoke-mcp:
 	set -euo pipefail
@@ -254,6 +257,7 @@ smoke-mcp:
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.clipboard_get_text")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.clipboard_set_text")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_focused_tree")' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_find")' "$$out" >/dev/null
 	jq -e 'select(.id == 3) | .result.isError == false and .result.structuredContent.type == "health"' "$$out" >/dev/null
 	jq -e 'select(.id == 4) | .result.isError == false and .result.structuredContent.type == "observation"' "$$out" >/dev/null
 

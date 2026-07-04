@@ -14,12 +14,12 @@ use anyhow::{Context, Error, Result, bail};
 use clap::Parser;
 use image::{GenericImageView, imageops::FilterType};
 use libplasma_pilot::{
-    ActionResult, BackendCapability, CapabilitySet, ClipboardGetRequest, ClipboardText,
-    CoordinateSpace, DaemonRequest, DaemonResponse, DesktopObservation, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, HealthStatus, JournalEntry, ObserveRequest, PolicyStatus,
-    SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
-    ToolApprovalLevel, WindowGeometry, WindowInfo, current_euid, default_journal_path,
-    default_socket_path,
+    AccessibilityFindRequest, ActionResult, BackendCapability, CapabilitySet, ClipboardGetRequest,
+    ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse, DesktopObservation,
+    FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus, JournalEntry,
+    ObserveRequest, PolicyStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest,
+    ScreenshotTileRequest, ScreenshotTransform, ToolApprovalLevel, WindowGeometry, WindowInfo,
+    current_euid, default_journal_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -386,6 +386,12 @@ fn handle_request(
                 },
             }
         }
+        DaemonRequest::AccessibilityFind(request) => match accessibility_find(request) {
+            Ok(matches) => DaemonResponse::AccessibilityMatches(matches),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::JournalTail(request) => match journal.tail(request.limit) {
             Ok(entries) => DaemonResponse::Journal(entries),
             Err(err) => DaemonResponse::Error {
@@ -459,7 +465,8 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::Observe(_)
         | DaemonRequest::Screenshot(_)
         | DaemonRequest::ScreenshotTile(_)
-        | DaemonRequest::FocusedAccessibilityTree(_) => SafetyClass::Observe,
+        | DaemonRequest::FocusedAccessibilityTree(_)
+        | DaemonRequest::AccessibilityFind(_) => SafetyClass::Observe,
         DaemonRequest::ClipboardGet(_) => SafetyClass::ClipboardRead,
         DaemonRequest::ClipboardSet(_) => SafetyClass::ClipboardWrite,
         DaemonRequest::FocusWindow(_) => SafetyClass::ControlSemantic,
@@ -772,6 +779,12 @@ fn focused_accessibility_tree(
         .map_err(|err| anyhow::anyhow!(err))
 }
 
+fn accessibility_find(
+    request: AccessibilityFindRequest,
+) -> Result<Vec<libplasma_pilot::AccessibilityNode>> {
+    plasma_pilot_atspi::find(request).map_err(|err| anyhow::anyhow!(err))
+}
+
 fn temporary_capture_path(output: &Path) -> PathBuf {
     let file_name = output
         .file_name()
@@ -975,6 +988,9 @@ fn summarize_response(response: &DaemonResponse) -> String {
             node.children.len()
         ),
         DaemonResponse::AccessibilityTree(None) => "no focused accessibility node".to_string(),
+        DaemonResponse::AccessibilityMatches(matches) => {
+            format!("{} accessibility matches", matches.len())
+        }
         DaemonResponse::Journal(entries) => format!("{} journal entries", entries.len()),
         DaemonResponse::Action(result) => result
             .message
@@ -1314,5 +1330,23 @@ mod tests {
             }),
         )
         .expect("accessibility tree reads are observe policy");
+    }
+
+    #[test]
+    fn accessibility_find_is_observe_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        enforce_policy(
+            &policy,
+            &DaemonRequest::AccessibilityFind(AccessibilityFindRequest {
+                role: Some("button".to_string()),
+                name_contains: None,
+                app: None,
+                window_name_contains: None,
+                depth: 0,
+                max_results: 4,
+                max_nodes: 128,
+            }),
+        )
+        .expect("accessibility find is observe policy");
     }
 }

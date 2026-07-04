@@ -112,6 +112,17 @@ pub struct FocusedAccessibilityTreeRequest {
     pub max_nodes: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessibilityFindRequest {
+    pub role: Option<String>,
+    pub name_contains: Option<String>,
+    pub app: Option<String>,
+    pub window_name_contains: Option<String>,
+    pub depth: usize,
+    pub max_results: usize,
+    pub max_nodes: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DesktopObservation {
     pub active_window: Option<WindowInfo>,
@@ -140,6 +151,7 @@ pub enum DaemonRequest {
     ClipboardGet(ClipboardGetRequest),
     ClipboardSet(ClipboardSetRequest),
     FocusedAccessibilityTree(FocusedAccessibilityTreeRequest),
+    AccessibilityFind(AccessibilityFindRequest),
     JournalTail(JournalTailRequest),
     FocusWindow(FocusWindowRequest),
 }
@@ -159,6 +171,7 @@ impl DaemonRequest {
             Self::ClipboardGet(_) => "clipboard_get",
             Self::ClipboardSet(_) => "clipboard_set",
             Self::FocusedAccessibilityTree(_) => "focused_accessibility_tree",
+            Self::AccessibilityFind(_) => "accessibility_find",
             Self::JournalTail(_) => "journal_tail",
             Self::FocusWindow(_) => "focus_window",
         }
@@ -178,6 +191,7 @@ pub enum DaemonResponse {
     Screenshot(ScreenshotInfo),
     ClipboardText(ClipboardText),
     AccessibilityTree(Option<AccessibilityNode>),
+    AccessibilityMatches(Vec<AccessibilityNode>),
     Journal(Vec<JournalEntry>),
     Action(Box<ActionResult>),
     Error { message: String },
@@ -324,5 +338,22 @@ mod tests {
             encoded,
             r#"{"method":"focused_accessibility_tree","depth":2,"max_nodes":100}"#
         );
+    }
+
+    #[test]
+    fn serializes_accessibility_find_request() {
+        let request = DaemonRequest::AccessibilityFind(AccessibilityFindRequest {
+            role: Some("button".to_string()),
+            name_contains: Some("ok".to_string()),
+            app: None,
+            window_name_contains: None,
+            depth: 1,
+            max_results: 8,
+            max_nodes: 256,
+        });
+        let encoded = serde_json::to_string(&request).expect("a11y find request serializes");
+        assert!(encoded.contains(r#""method":"accessibility_find""#));
+        assert!(encoded.contains(r#""role":"button""#));
+        assert!(encoded.contains(r#""name_contains":"ok""#));
     }
 }
