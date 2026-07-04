@@ -16,6 +16,9 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+libplasma-pilot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

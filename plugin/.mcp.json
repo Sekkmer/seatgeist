@@ -2,10 +2,7 @@
   "mcp_servers": {
     "plasmapilot": {
       "command": "plasma-pilot-mcp",
-      "args": ["--stdio"],
-      "env": {
-        "PLASMA_PILOT_SOCKET": "${XDG_RUNTIME_DIR}/plasma-pilot/plasma-pilotd.sock"
-      }
+      "args": ["--stdio"]
     }
   }
 }

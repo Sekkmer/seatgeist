@@ -1,7 +1,7 @@
 SHELL := /usr/bin/bash
 .ONESHELL:
 
-.PHONY: fmt check test clippy verify smoke smoke-monitors smoke-windows smoke-focus install-kwin-script
+.PHONY: fmt check test clippy verify smoke smoke-monitors smoke-windows smoke-focus smoke-mcp install-kwin-script
 
 fmt:
 	cargo fmt --all
@@ -144,6 +144,42 @@ smoke-focus:
 	grep -q '"type": "action"' "$$focus"
 	grep -q "focused window" "$$focus"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "focus_window"
+
+smoke-mcp:
+	set -euo pipefail
+	socket="/tmp/plasma-pilot-mcp-smoke/plasma-pilotd.sock"
+	log="target/plasma-pilot-mcp-smoke-daemon.log"
+	journal="target/plasma-pilot-mcp-smoke-journal.jsonl"
+	out="target/plasma-pilot-mcp-smoke.jsonl"
+	rm -rf /tmp/plasma-pilot-mcp-smoke "$$log" "$$journal" "$$out"
+	cargo build -p plasma-pilotd -p plasma-pilot-mcp
+	target/debug/plasma-pilotd --socket "$$socket" --journal "$$journal" >"$$log" 2>&1 &
+	pid=$$!
+	cleanup() {
+		kill "$$pid" 2>/dev/null || true
+		wait "$$pid" 2>/dev/null || true
+	}
+	trap cleanup EXIT
+	for _ in {1..50}; do
+		if [[ -S "$$socket" ]]; then
+			break
+		fi
+		sleep 0.1
+	done
+	if [[ ! -S "$$socket" ]]; then
+		cat "$$log"
+		exit 1
+	fi
+	{
+		printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"make-smoke","version":"0"}}}'
+		printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
+		printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+		printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"plasma.health","arguments":{}}}'
+	} | PLASMA_PILOT_SOCKET="$$socket" target/debug/plasma-pilot-mcp --stdio >"$$out"
+	test "$$(wc -l <"$$out")" = "3"
+	jq -e 'select(.id == 1) | .result.capabilities.tools.listChanged == false' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.list_windows")' "$$out" >/dev/null
+	jq -e 'select(.id == 3) | .result.isError == false and .result.structuredContent.type == "health"' "$$out" >/dev/null
 
 install-kwin-script:
 	set -euo pipefail

@@ -608,6 +608,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "libplasma-pilot",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

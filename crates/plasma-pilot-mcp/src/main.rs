@@ -1,17 +1,574 @@
-use anyhow::Result;
+use std::{
+    io::{self, BufRead, BufReader, Write},
+    os::unix::net::UnixStream,
+    path::PathBuf,
+};
+
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
+use libplasma_pilot::{
+    DaemonRequest, DaemonResponse, FocusWindowRequest, JournalTailRequest, ScreenshotRequest,
+    ScreenshotTileRequest, default_socket_path,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+const PROTOCOL_VERSION: &str = "2025-06-18";
+const SERVER_NAME: &str = "plasmapilot";
+const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+const SERVER_INSTRUCTIONS: &str = "PlasmaPilot exposes local KDE Plasma observation and carefully policy-gated control tools. Prefer observe/list/screenshot tools first, keep outputs compact, and expect control tools such as focus_window to fail unless the daemon is started with an explicit approval/control policy.";
 
 #[derive(Debug, Parser)]
 #[command(version, about = "PlasmaPilot MCP stdio server")]
 struct Args {
     #[arg(long)]
     stdio: bool,
+
+    #[arg(long, env = "PLASMA_PILOT_SOCKET")]
+    socket: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonRpcRequest {
+    jsonrpc: Option<String>,
+    id: Option<Value>,
+    method: String,
+    #[serde(default)]
+    params: Value,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonRpcResponse {
+    jsonrpc: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<JsonRpcError>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonRpcError {
+    code: i64,
+    message: String,
+}
+
+#[derive(Debug, Clone)]
+struct McpServer {
+    socket: PathBuf,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    if args.stdio {
-        eprintln!("plasma-pilot-mcp stdio protocol is not implemented yet");
+    if !args.stdio {
+        bail!("plasma-pilot-mcp currently supports only --stdio");
     }
-    Ok(())
+    let socket = match args.socket {
+        Some(path) => path,
+        None => default_socket_path().context("resolve default daemon socket path")?,
+    };
+    McpServer { socket }.run_stdio()
+}
+
+impl McpServer {
+    fn run_stdio(&self) -> Result<()> {
+        let stdin = io::stdin();
+        let mut stdout = io::stdout().lock();
+        for line in stdin.lock().lines() {
+            let line = line.context("read MCP request line")?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            match self.handle_line(&line) {
+                Ok(Some(response)) => {
+                    serde_json::to_writer(&mut stdout, &response).context("write MCP response")?;
+                    stdout.write_all(b"\n").context("write response newline")?;
+                    stdout.flush().context("flush MCP response")?;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    let response = JsonRpcResponse::error(None, -32603, err.to_string());
+                    serde_json::to_writer(&mut stdout, &response)
+                        .context("write MCP error response")?;
+                    stdout.write_all(b"\n").context("write error newline")?;
+                    stdout.flush().context("flush MCP error response")?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_line(&self, line: &str) -> Result<Option<JsonRpcResponse>> {
+        let request = serde_json::from_str::<JsonRpcRequest>(line).context("parse JSON-RPC")?;
+        if request.jsonrpc.as_deref() != Some("2.0") {
+            return Ok(Some(JsonRpcResponse::error(
+                request.id,
+                -32600,
+                "jsonrpc must be \"2.0\"",
+            )));
+        }
+        if request.id.is_none() {
+            return self.handle_notification(request);
+        }
+        Ok(Some(self.handle_request(request)))
+    }
+
+    fn handle_notification(&self, request: JsonRpcRequest) -> Result<Option<JsonRpcResponse>> {
+        match request.method.as_str() {
+            "notifications/initialized" | "notifications/cancelled" => Ok(None),
+            _ => Ok(None),
+        }
+    }
+
+    fn handle_request(&self, request: JsonRpcRequest) -> JsonRpcResponse {
+        let id = request.id.clone();
+        let result = match request.method.as_str() {
+            "initialize" => Ok(initialize_result()),
+            "ping" => Ok(json!({})),
+            "tools/list" => Ok(json!({ "tools": tool_definitions() })),
+            "tools/call" => self.handle_tool_call(&request.params),
+            _ => {
+                return JsonRpcResponse::error(
+                    id,
+                    -32601,
+                    format!("method not found: {}", request.method),
+                );
+            }
+        };
+
+        match result {
+            Ok(result) => JsonRpcResponse::result(id, result),
+            Err(err) => JsonRpcResponse::error(id, -32602, err.to_string()),
+        }
+    }
+
+    fn handle_tool_call(&self, params: &Value) -> Result<Value> {
+        let name = params
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("tools/call params.name is required"))?;
+        let arguments = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let request = daemon_request_for_tool(name, &arguments)?;
+        let response = self.send_daemon_request(request)?;
+        Ok(tool_result_from_daemon(name, &response))
+    }
+
+    fn send_daemon_request(&self, request: DaemonRequest) -> Result<DaemonResponse> {
+        let mut stream = UnixStream::connect(&self.socket)
+            .with_context(|| format!("connect to daemon socket {}", self.socket.display()))?;
+        let request_line = serde_json::to_string(&request).context("serialize daemon request")?;
+        stream
+            .write_all(request_line.as_bytes())
+            .context("write daemon request")?;
+        stream
+            .write_all(b"\n")
+            .context("write daemon request newline")?;
+
+        let mut reader = BufReader::new(stream);
+        let mut response_line = String::new();
+        reader
+            .read_line(&mut response_line)
+            .context("read daemon response")?;
+        serde_json::from_str(&response_line).context("parse daemon response")
+    }
+}
+
+impl JsonRpcResponse {
+    fn result(id: Option<Value>, result: Value) -> Self {
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    fn error(id: Option<Value>, code: i64, message: impl Into<String>) -> Self {
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result: None,
+            error: Some(JsonRpcError {
+                code,
+                message: message.into(),
+            }),
+        }
+    }
+}
+
+fn initialize_result() -> Value {
+    json!({
+        "protocolVersion": PROTOCOL_VERSION,
+        "capabilities": {
+            "tools": {
+                "listChanged": false
+            }
+        },
+        "serverInfo": {
+            "name": SERVER_NAME,
+            "version": SERVER_VERSION
+        },
+        "instructions": SERVER_INSTRUCTIONS
+    })
+}
+
+fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonRequest> {
+    match name {
+        "plasma.health" => Ok(DaemonRequest::Health),
+        "plasma.capabilities" => Ok(DaemonRequest::Capabilities),
+        "plasma.policy_status" => Ok(DaemonRequest::PolicyStatus),
+        "plasma.list_monitors" => Ok(DaemonRequest::ListMonitors),
+        "plasma.list_windows" => Ok(DaemonRequest::ListWindows),
+        "plasma.active_window" => Ok(DaemonRequest::ActiveWindow),
+        "plasma.journal_tail" => Ok(DaemonRequest::JournalTail(JournalTailRequest {
+            limit: optional_u64(arguments, "limit")?.unwrap_or(20) as usize,
+        })),
+        "plasma.screenshot" => Ok(DaemonRequest::Screenshot(ScreenshotRequest {
+            output: required_string(arguments, "output")?.into(),
+            max_edge: optional_u64(arguments, "max_edge")?
+                .map(u64_to_u32)
+                .transpose()?,
+            full_resolution: optional_bool(arguments, "full_resolution")?.unwrap_or(false),
+        })),
+        "plasma.screenshot_tile" => Ok(DaemonRequest::ScreenshotTile(ScreenshotTileRequest {
+            output: required_string(arguments, "output")?.into(),
+            x: required_u32(arguments, "x")?,
+            y: required_u32(arguments, "y")?,
+            width: required_u32(arguments, "width")?,
+            height: required_u32(arguments, "height")?,
+            max_edge: optional_u64(arguments, "max_edge")?
+                .map(u64_to_u32)
+                .transpose()?
+                .or(Some(1600)),
+        })),
+        "plasma.focus_window" => Ok(DaemonRequest::FocusWindow(FocusWindowRequest {
+            window_id: required_string(arguments, "window_id")?,
+        })),
+        _ => bail!("unknown tool: {name}"),
+    }
+}
+
+fn tool_result_from_daemon(tool_name: &str, response: &DaemonResponse) -> Value {
+    let structured = serde_json::to_value(response).unwrap_or_else(|err| {
+        json!({
+            "type": "error",
+            "data": {
+                "message": format!("serialize daemon response: {err}")
+            }
+        })
+    });
+    let is_error = matches!(response, DaemonResponse::Error { .. });
+    json!({
+        "content": [
+            {
+                "type": "text",
+                "text": compact_tool_text(tool_name, response)
+            }
+        ],
+        "structuredContent": structured,
+        "isError": is_error
+    })
+}
+
+fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
+    match response {
+        DaemonResponse::Health(status) => {
+            format!("{} {} ({})", status.service, status.status, status.version)
+        }
+        DaemonResponse::Capabilities(capabilities) => {
+            format!("{} capabilities", capabilities.capabilities.len())
+        }
+        DaemonResponse::PolicyStatus(status) => format!(
+            "observe={:?} control={:?} clipboard_read={:?} clipboard_write={:?}",
+            status.default_observe,
+            status.default_control,
+            status.default_clipboard_read,
+            status.default_clipboard_write
+        ),
+        DaemonResponse::Monitors(monitors) => format!("{} monitors", monitors.len()),
+        DaemonResponse::Windows(windows) => format!("{} windows", windows.len()),
+        DaemonResponse::ActiveWindow(Some(window)) => format!(
+            "active window id={} app={} title={}",
+            window.id,
+            window.app_id.as_deref().unwrap_or(""),
+            window.title
+        ),
+        DaemonResponse::ActiveWindow(None) => "no active window".to_string(),
+        DaemonResponse::Screenshot(info) => format!(
+            "{} wrote {}x{} image from {}x{} source to {}",
+            tool_name,
+            info.output_width,
+            info.output_height,
+            info.source_width,
+            info.source_height,
+            info.path.display()
+        ),
+        DaemonResponse::Journal(entries) => format!("{} journal entries", entries.len()),
+        DaemonResponse::Action(result) => result
+            .message
+            .clone()
+            .unwrap_or_else(|| format!("action {} ok={}", result.id, result.ok)),
+        DaemonResponse::Error { message } => message.clone(),
+    }
+}
+
+fn tool_definitions() -> Vec<Value> {
+    vec![
+        tool(
+            "plasma.health",
+            "Daemon Health",
+            "Check the PlasmaPilot daemon health.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.capabilities",
+            "Capabilities",
+            "List daemon backend capabilities.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.policy_status",
+            "Policy Status",
+            "Read current daemon policy defaults.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.list_monitors",
+            "List Monitors",
+            "List monitor geometry and scale metadata.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.list_windows",
+            "List Windows",
+            "List compact KWin window metadata.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.active_window",
+            "Active Window",
+            "Read the latest active-window bridge update.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.screenshot",
+            "Screenshot",
+            "Capture a screenshot to a PNG path. Defaults to a bounded preview unless full_resolution is true.",
+            object_schema(
+                vec![
+                    (
+                        "output",
+                        json!({"type": "string", "description": "PNG output path on the local filesystem."}),
+                    ),
+                    (
+                        "max_edge",
+                        json!({"type": "integer", "minimum": 1, "description": "Preview max edge in pixels."}),
+                    ),
+                    (
+                        "full_resolution",
+                        json!({"type": "boolean", "description": "Capture the source image without downscaling."}),
+                    ),
+                ],
+                vec!["output"],
+            ),
+        ),
+        tool(
+            "plasma.screenshot_tile",
+            "Screenshot Tile",
+            "Capture and optionally downscale a physical-pixel screenshot tile.",
+            object_schema(
+                vec![
+                    (
+                        "output",
+                        json!({"type": "string", "description": "PNG output path on the local filesystem."}),
+                    ),
+                    ("x", json!({"type": "integer", "minimum": 0})),
+                    ("y", json!({"type": "integer", "minimum": 0})),
+                    ("width", json!({"type": "integer", "minimum": 1})),
+                    ("height", json!({"type": "integer", "minimum": 1})),
+                    (
+                        "max_edge",
+                        json!({"type": "integer", "minimum": 1, "description": "Output max edge in pixels."}),
+                    ),
+                ],
+                vec!["output", "x", "y", "width", "height"],
+            ),
+        ),
+        tool(
+            "plasma.focus_window",
+            "Focus Window",
+            "Focus a listed KWin window by id. This is policy-gated control and usually requires explicit daemon approval mode.",
+            object_schema(
+                vec![(
+                    "window_id",
+                    json!({"type": "string", "description": "KWin window id from plasma.list_windows."}),
+                )],
+                vec!["window_id"],
+            ),
+        ),
+        tool(
+            "plasma.journal_tail",
+            "Journal Tail",
+            "Read recent compact daemon journal entries.",
+            object_schema(
+                vec![(
+                    "limit",
+                    json!({"type": "integer", "minimum": 1, "maximum": 200}),
+                )],
+                vec![],
+            ),
+        ),
+    ]
+}
+
+fn tool(name: &str, title: &str, description: &str, input_schema: Value) -> Value {
+    json!({
+        "name": name,
+        "title": title,
+        "description": description,
+        "inputSchema": input_schema,
+    })
+}
+
+fn object_schema(properties: Vec<(&str, Value)>, required: Vec<&str>) -> Value {
+    let mut property_map = serde_json::Map::new();
+    for (name, schema) in properties {
+        property_map.insert(name.to_string(), schema);
+    }
+    json!({
+        "type": "object",
+        "properties": property_map,
+        "required": required,
+        "additionalProperties": false
+    })
+}
+
+fn required_string(arguments: &Value, key: &str) -> Result<String> {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow!("argument '{key}' is required and must be a non-empty string"))
+}
+
+fn required_u32(arguments: &Value, key: &str) -> Result<u32> {
+    let value = arguments
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("argument '{key}' is required and must be an unsigned integer"))?;
+    u64_to_u32(value)
+}
+
+fn optional_u64(arguments: &Value, key: &str) -> Result<Option<u64>> {
+    match arguments.get(key) {
+        Some(Value::Null) | None => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| anyhow!("argument '{key}' must be an unsigned integer")),
+    }
+}
+
+fn optional_bool(arguments: &Value, key: &str) -> Result<Option<bool>> {
+    match arguments.get(key) {
+        Some(Value::Null) | None => Ok(None),
+        Some(value) => value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| anyhow!("argument '{key}' must be a boolean")),
+    }
+}
+
+fn u64_to_u32(value: u64) -> Result<u32> {
+    u32::try_from(value).map_err(|_| anyhow!("integer argument {value} exceeds u32"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initialize_advertises_tools_capability() {
+        let result = initialize_result();
+        assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(result["capabilities"]["tools"]["listChanged"], false);
+        assert!(
+            result["instructions"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("policy-gated")
+        );
+    }
+
+    #[test]
+    fn lists_compact_tool_definitions() {
+        let tools = tool_definitions();
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.list_windows")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.focus_window")
+        );
+    }
+
+    #[test]
+    fn maps_screenshot_tile_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.screenshot_tile",
+            &json!({
+                "output": "/tmp/tile.png",
+                "x": 10,
+                "y": 20,
+                "width": 640,
+                "height": 480,
+                "max_edge": 320
+            }),
+        )
+        .expect("tile args map");
+        assert_eq!(
+            request,
+            DaemonRequest::ScreenshotTile(ScreenshotTileRequest {
+                output: "/tmp/tile.png".into(),
+                x: 10,
+                y: 20,
+                width: 640,
+                height: 480,
+                max_edge: Some(320),
+            })
+        );
+    }
+
+    #[test]
+    fn maps_focus_window_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.focus_window",
+            &json!({"window_id": "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}"}),
+        )
+        .expect("focus args map");
+        assert_eq!(
+            request,
+            DaemonRequest::FocusWindow(FocusWindowRequest {
+                window_id: "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn daemon_errors_become_tool_errors() {
+        let response = DaemonResponse::Error {
+            message: "policy denied".to_string(),
+        };
+        let result = tool_result_from_daemon("plasma.focus_window", &response);
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["content"][0]["text"], "policy denied");
+    }
 }

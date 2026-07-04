@@ -31,4 +31,6 @@ Phase 1 first slice is implemented:
 - Daemon requests now pass through the policy engine before execution. Current observe/status requests are allowed by default; any future prompt-level request fails closed until an approval channel exists.
 - `plasma-pilot-cli focus --window <id>` focuses a listed KWin window through `WindowsRunner.Run`. It is a control action: default policy rejects it until a trusted approval channel exists, while `plasma-pilotd --allow-control` enables explicit local smoke/manual use.
 - `make smoke-focus` validates the focus path in a host KDE session with `--allow-control` and confirms the focus request is journaled.
-- Pointer/keyboard input, AT-SPI, real MCP tools, portal/KWin-native capture backends, persistent active-window bridge installation checks, and richer journal filtering remain future work.
+- `plasma-pilot-mcp --stdio` now implements the first MCP server slice: `initialize`, `ping`, `tools/list`, and `tools/call` for current daemon-backed observe/window/screenshot/focus/journal tools.
+- `make smoke-mcp` validates MCP initialize, tool discovery, and a daemon-backed `plasma.health` tool call over stdio.
+- Pointer/keyboard input, AT-SPI, higher-level MCP observe/wait tools, portal/KWin-native capture backends, persistent active-window bridge installation checks, and richer journal filtering remain future work.

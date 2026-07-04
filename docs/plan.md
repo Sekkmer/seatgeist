@@ -841,15 +841,16 @@ Goal: Codex CLI can use PlasmaPilot tools.
 
 Tasks:
 
-- Implement MCP stdio server.
-- Expose health, capabilities, observe, screenshot, list_windows, active_window, focus_window, click, key, type_text, clipboard_set/get.
-- Add argument validation.
+- [x] Implement MCP stdio server. Current status: line-delimited JSON-RPC over stdio with `initialize`, `ping`, `tools/list`, and `tools/call`.
+- [x] Expose current daemon tools: health, capabilities, policy status, monitor/window listing, active-window, screenshot, screenshot tile, focus window, and journal tail.
+- [ ] Expose observe, wait_for_change, click, key, type_text, clipboard_set/get after the backing daemon capabilities exist.
+- [x] Add MCP-side argument validation for exposed tools.
 - Add docs for installing MCP manually and through plugin.
-- Ensure outputs are model-friendly.
+- [x] Ensure outputs are model-friendly for exposed tools: tool results include compact text plus structured JSON.
 
 Acceptance criteria:
 
-- `plasma-pilot-mcp --stdio` starts and responds to tool calls.
+- `plasma-pilot-mcp --stdio` starts and responds to tool calls. `make smoke-mcp` validates initialize, tools/list, and a daemon-backed health tool call.
 - Codex can call the MCP server from config.
 - Codex can observe screen, focus window, and type into a test app.
 

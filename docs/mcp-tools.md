@@ -10,4 +10,18 @@ Initial tool groups:
 
 All coordinate-bearing tools must require an explicit coordinate space. Full-resolution screenshots and clipboard reads are policy-gated.
 
-Current daemon protocol exposes `screenshot`, `screenshot-tile`, window listing, active-window bridge reads, `focus_window`, and `journal_tail` through the CLI. Tile coordinates are physical screenshot pixels. Screenshot responses include full source dimensions, output dimensions, source origin, scale factors, and monitor metadata when KWin responds. Focus is policy-gated control. Journal responses return compact structured records rather than raw log text.
+Current daemon protocol exposes `screenshot`, `screenshot-tile`, window listing, active-window bridge reads, `focus_window`, and `journal_tail` through the CLI. The MCP stdio server exposes these current daemon-backed tools as `plasma.health`, `plasma.capabilities`, `plasma.policy_status`, `plasma.list_monitors`, `plasma.list_windows`, `plasma.active_window`, `plasma.screenshot`, `plasma.screenshot_tile`, `plasma.focus_window`, and `plasma.journal_tail`.
+
+Tile coordinates are physical screenshot pixels. Screenshot responses include full source dimensions, output dimensions, source origin, scale factors, and monitor metadata when KWin responds. Focus is policy-gated control. MCP tool responses return compact text plus structured JSON from the daemon.
+
+## Installation
+
+Manual Codex config uses a stdio MCP server entry:
+
+```toml
+[mcp_servers.plasmapilot]
+command = "plasma-pilot-mcp"
+args = ["--stdio"]
+```
+
+The plugin bundle points at `plugin/.mcp.json` through `.codex-plugin/plugin.json`, so an installed plugin can provide the same MCP server config. The `plasma-pilot-mcp` binary must be on `PATH` for the current initial config.
