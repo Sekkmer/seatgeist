@@ -134,6 +134,7 @@ enum ClipboardCommand {
 
 #[derive(Debug, Subcommand)]
 enum InputCommand {
+    Status,
     MovePointer {
         #[arg(long)]
         x: f64,
@@ -468,6 +469,9 @@ fn main() -> Result<()> {
             &socket,
             DaemonRequest::ClipboardSet(ClipboardSetRequest { text }),
         )?,
+        Command::Input {
+            command: InputCommand::Status,
+        } => print_daemon_response(&socket, DaemonRequest::UinputStatus)?,
         Command::Input {
             command:
                 InputCommand::MovePointer {

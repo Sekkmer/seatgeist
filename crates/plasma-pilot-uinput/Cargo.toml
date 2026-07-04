@@ -7,7 +7,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Linux uinput keyboard backend for PlasmaPilot."
+description = "Linux uinput keyboard and pointer backend for PlasmaPilot."
 
 [dependencies]
 anyhow.workspace = true

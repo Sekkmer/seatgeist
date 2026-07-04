@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use libplasma_pilot::{
     BackendCapability, CapabilitySet, DaemonRequest, DaemonResponse, HealthStatus, JournalEntry,
-    PanicStopStatus, PolicyStatus, ReplayTrace, ToolApprovalLevel, TraceStep,
+    PanicStopStatus, PolicyStatus, ReplayTrace, ToolApprovalLevel, TraceStep, UinputStatus,
 };
 
 struct DaemonFixture {
@@ -107,11 +107,24 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
         })
     );
 
+    let uinput = daemon.cli_json(&["input", "status"])?;
+    let DaemonResponse::UinputStatus(UinputStatus {
+        path, setup_hint, ..
+    }) = uinput
+    else {
+        bail!("expected uinput status response, got {uinput:?}");
+    };
+    assert_eq!(path, PathBuf::from("/dev/uinput"));
+    assert!(!setup_hint.is_empty());
+
     let journal = daemon.cli_json(&["journal", "tail", "--limit", "10"])?;
     let DaemonResponse::Journal(entries) = journal else {
         bail!("expected journal response, got {journal:?}");
     };
-    assert_methods(&entries, &["health", "capabilities", "policy_status"]);
+    assert_methods(
+        &entries,
+        &["health", "capabilities", "policy_status", "uinput_status"],
+    );
     assert!(entries.iter().all(|entry| entry.ok));
     Ok(())
 }

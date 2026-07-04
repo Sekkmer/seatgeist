@@ -163,6 +163,7 @@ Create this initial layout:
 │   ├── threat-model.md
 │   ├── mcp-tools.md
 │   ├── backends.md
+│   ├── uinput-setup.md
 │   ├── kde-wayland-notes.md
 │   └── safety.md
 └── tests/
@@ -802,10 +803,10 @@ Tasks:
 
 - [x] Implement initial keyboard input backend using uinput. Current status: `plasma-pilot-uinput` creates a short-lived `/dev/uinput` virtual keyboard with `UI_DEV_SETUP`; daemon/CLI/MCP expose `type_text` and `key_combo` as policy-gated `ControlKeyboard`.
 - [x] Create virtual pointer device and absolute/relative pointer mapping. Current status: `plasma-pilot-uinput` creates a short-lived `/dev/uinput` virtual pointer with absolute X/Y axes and relative wheel axes; the daemon maps physical desktop coordinates into the absolute input range.
-- Add udev/polkit/systemd instructions. Current status: skeleton files exist; uinput access currently relies on `/dev/uinput` being readable/writable by the daemon process.
+- [x] Add udev/polkit/systemd instructions. Current status: skeleton files exist, `docs/uinput-setup.md` documents the optional udev rule, user service setup, current polkit placeholder state, and `input status` diagnostics. Uinput access still relies on `/dev/uinput` being readable/writable by the daemon process.
 - [x] Implement move, click, double-click, and scroll. Current status: daemon/CLI/MCP expose `move_pointer`, `click_pointer`, and `scroll_pointer` as policy-gated `ControlPointer`; click supports one or two left/middle/right clicks, and scroll supports vertical/horizontal deltas.
 - [x] Implement key combo and type text. Current status: US evdev ASCII text plus newline/tab and named key combos such as `Ctrl+L` are supported; non-US text is rejected instead of guessed.
-- Implement focus guard checks before actions. Current status: current daemon control requests accept optional active-window guards (`expected_active_window`, `expected_active_app`, and `active_title_contains`) and reject stale guards before execution.
+- [x] Implement focus guard checks before actions. Current status: current daemon control requests accept optional active-window guards (`expected_active_window`, `expected_active_app`, and `active_title_contains`) and reject stale guards before execution.
 - [x] Add panic-stop flag. Current status: `plasma-pilotd` has a file-backed panic-stop state, `plasma-pilot-cli panic-stop status|enable|disable` journals state changes, and active panic-stop blocks control-class daemon requests before execution.
 - Probe whether xdg-desktop-portal RemoteDesktop or libei can satisfy input needs before requiring uinput on the local machine.
 - Add pointer calibration diagnostics and host GUI smoke for a known test window before treating pixel-click use as production-ready.
@@ -1038,7 +1039,7 @@ cargo check --workspace
 - [x] Add backend notes doc.
 - [x] Implement Phase 1.
 - [x] Implement Phase 2.
-- [ ] Implement Phase 3. Current status: keyboard and pointer command paths exist; udev/polkit access docs and host GUI smoke remain.
+- [ ] Implement Phase 3. Current status: keyboard and pointer command paths and uinput setup diagnostics/docs exist; portal/libei probing and host GUI smoke remain.
 
 ## 20. Definition of done for v0.1
 

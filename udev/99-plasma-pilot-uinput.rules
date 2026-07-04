@@ -1,3 +1,3 @@
 # Optional uinput access rule for the privileged local input fallback.
 # Prefer portal/libei/user-session mediation when available and keep group membership narrow.
-KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"
+KERNEL=="uinput", GROUP="uinput", MODE="0660", OPTIONS+="static_node=uinput"

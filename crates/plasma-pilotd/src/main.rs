@@ -2,7 +2,7 @@ use std::{
     env, fs,
     fs::OpenOptions,
     io::Write,
-    os::unix::fs::{FileTypeExt, PermissionsExt},
+    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex, OnceLock},
@@ -22,8 +22,9 @@ use libplasma_pilot::{
     MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton, PolicyStatus,
     SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
     ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
-    ToolApprovalLevel, TypeTextRequest, WaitForChangeRequest, WaitForChangeResult, WindowGeometry,
-    WindowInfo, current_euid, default_journal_path, default_panic_stop_path, default_socket_path,
+    ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult,
+    WindowGeometry, WindowInfo, current_egid, current_euid, default_journal_path,
+    default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -450,6 +451,12 @@ fn handle_request(
                 },
             }
         }
+        DaemonRequest::UinputStatus => match uinput_status() {
+            Ok(status) => DaemonResponse::UinputStatus(status),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::ListMonitors => match list_monitors() {
             Ok(monitors) => DaemonResponse::Monitors(monitors),
             Err(err) => DaemonResponse::Error {
@@ -708,6 +715,54 @@ fn parse_kwin_bridge_enabled(content: &str) -> Option<bool> {
     None
 }
 
+fn uinput_status() -> Result<UinputStatus> {
+    let path = plasma_pilot_uinput::uinput_path().to_path_buf();
+    let metadata = match fs::metadata(&path) {
+        Ok(metadata) => Some(metadata),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(err).with_context(|| format!("stat {}", path.display())),
+    };
+    let available = plasma_pilot_uinput::available();
+    let exists = metadata.is_some();
+    let is_char_device = metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.file_type().is_char_device());
+    let mode = metadata
+        .as_ref()
+        .map(|metadata| metadata.permissions().mode() & 0o7777);
+    let owner_uid = metadata.as_ref().map(MetadataExt::uid);
+    let owner_gid = metadata.as_ref().map(MetadataExt::gid);
+    let process_uid = current_euid().context("read daemon effective uid")?;
+    let process_gid = current_egid().context("read daemon effective gid")?;
+
+    Ok(UinputStatus {
+        path,
+        available,
+        exists,
+        is_char_device,
+        mode,
+        owner_uid,
+        owner_gid,
+        process_uid,
+        process_gid,
+        setup_hint: uinput_setup_hint(available, exists, is_char_device),
+    })
+}
+
+fn uinput_setup_hint(available: bool, exists: bool, is_char_device: bool) -> String {
+    if available {
+        return "uinput available to daemon process".to_string();
+    }
+    if !exists {
+        return "load the uinput kernel module and install the udev rule before starting plasma-pilotd"
+            .to_string();
+    }
+    if !is_char_device {
+        return "refusing /dev/uinput because it is not a character device".to_string();
+    }
+    "grant the daemon read/write access to /dev/uinput with the packaged udev rule, reload udev, add the user to the configured group, then restart the user session or service".to_string()
+}
+
 fn parse_bool_config_value(value: &str) -> Option<bool> {
     match value.to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" | "on" => Some(true),
@@ -816,6 +871,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::PolicyStatus
         | DaemonRequest::PanicStopStatus
         | DaemonRequest::SetPanicStop(_)
+        | DaemonRequest::UinputStatus
         | DaemonRequest::JournalTail(_) => SafetyClass::Policy,
         DaemonRequest::ListMonitors
         | DaemonRequest::ListWindows
@@ -2130,6 +2186,16 @@ fn summarize_response(response: &DaemonResponse) -> String {
                 .map(|enabled| enabled.to_string())
                 .unwrap_or_else(|| "unknown".to_string())
         ),
+        DaemonResponse::UinputStatus(status) => format!(
+            "uinput available={} exists={} char_device={} mode={}",
+            status.available,
+            status.exists,
+            status.is_char_device,
+            status
+                .mode
+                .map(|mode| format!("{mode:o}"))
+                .unwrap_or_else(|| "unknown".to_string())
+        ),
         DaemonResponse::Monitors(monitors) => format!("{} monitors", monitors.len()),
         DaemonResponse::Windows(windows) => format!("{} windows", windows.len()),
         DaemonResponse::Observation(observation) => format!(
@@ -2630,6 +2696,26 @@ mod tests {
         let policy = PolicyEngine::new(PolicyConfig::default());
         enforce_policy(&policy, &DaemonRequest::KwinBridgeStatus)
             .expect("kwin bridge status is observe policy");
+    }
+
+    #[test]
+    fn uinput_status_is_policy_class() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        enforce_policy(&policy, &DaemonRequest::UinputStatus)
+            .expect("uinput status is allowed as policy diagnostics");
+    }
+
+    #[test]
+    fn uinput_setup_hint_reports_access_state() {
+        assert_eq!(
+            uinput_setup_hint(true, true, true),
+            "uinput available to daemon process"
+        );
+        assert!(uinput_setup_hint(false, false, false).contains("load the uinput kernel module"));
+        assert!(uinput_setup_hint(false, true, false).contains("not a character device"));
+        assert!(
+            uinput_setup_hint(false, true, true).contains("grant the daemon read/write access")
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use libplasma_pilot::{
     CapabilitySet, DaemonRequest, DaemonResponse, HealthStatus, JournalEntry, JournalTailRequest,
-    PanicStopStatus, PolicyStatus, SetPanicStopRequest, ToolApprovalLevel,
+    PanicStopStatus, PolicyStatus, SetPanicStopRequest, ToolApprovalLevel, UinputStatus,
 };
 
 struct DaemonFixture {
@@ -107,6 +107,16 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
     assert!(!enabled);
     assert!(path.starts_with(&daemon.root));
 
+    let uinput = daemon.request(&DaemonRequest::UinputStatus)?;
+    let DaemonResponse::UinputStatus(UinputStatus {
+        path, setup_hint, ..
+    }) = uinput
+    else {
+        bail!("expected uinput status response, got {uinput:?}");
+    };
+    assert_eq!(path, plasma_pilot_uinput::uinput_path());
+    assert!(!setup_hint.is_empty());
+
     let panic_stop = daemon.request(&DaemonRequest::SetPanicStop(SetPanicStopRequest {
         enabled: true,
     }))?;
@@ -140,6 +150,7 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
             "policy_status",
             "capabilities",
             "panic_stop_status",
+            "uinput_status",
             "set_panic_stop",
         ],
     );

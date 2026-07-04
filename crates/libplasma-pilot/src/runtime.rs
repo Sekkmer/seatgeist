@@ -13,6 +13,16 @@ pub fn current_euid() -> io::Result<u32> {
     })
 }
 
+pub fn current_egid() -> io::Result<u32> {
+    let status = fs::read_to_string("/proc/self/status")?;
+    parse_egid_from_proc_status(&status).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "could not parse effective gid from /proc/self/status",
+        )
+    })
+}
+
 pub fn default_socket_path() -> io::Result<PathBuf> {
     let runtime_dir = match env::var_os("XDG_RUNTIME_DIR") {
         Some(value) => PathBuf::from(value),
@@ -61,6 +71,14 @@ fn parse_euid_from_proc_status(status: &str) -> Option<u32> {
     effective_uid.parse().ok()
 }
 
+fn parse_egid_from_proc_status(status: &str) -> Option<u32> {
+    let gid_line = status.lines().find(|line| line.starts_with("Gid:"))?;
+    let mut fields = gid_line.split_whitespace().skip(1);
+    let _real_gid = fields.next()?;
+    let effective_gid = fields.next()?;
+    effective_gid.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,5 +87,11 @@ mod tests {
     fn parses_effective_uid() {
         let status = "Name:\tplasma-pilotd\nUid:\t1000\t1001\t1000\t1000\n";
         assert_eq!(parse_euid_from_proc_status(status), Some(1001));
+    }
+
+    #[test]
+    fn parses_effective_gid() {
+        let status = "Name:\tplasma-pilotd\nGid:\t1000\t1002\t1000\t1000\n";
+        assert_eq!(parse_egid_from_proc_status(status), Some(1002));
     }
 }

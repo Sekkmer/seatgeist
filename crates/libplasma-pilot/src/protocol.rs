@@ -51,6 +51,20 @@ pub struct KwinBridgeStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UinputStatus {
+    pub path: PathBuf,
+    pub available: bool,
+    pub exists: bool,
+    pub is_char_device: bool,
+    pub mode: Option<u32>,
+    pub owner_uid: Option<u32>,
+    pub owner_gid: Option<u32>,
+    pub process_uid: u32,
+    pub process_gid: u32,
+    pub setup_hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetPanicStopRequest {
     pub enabled: bool,
 }
@@ -328,6 +342,7 @@ pub enum DaemonRequest {
     PanicStopStatus,
     SetPanicStop(SetPanicStopRequest),
     KwinBridgeStatus,
+    UinputStatus,
     ListMonitors,
     ListWindows,
     ActiveWindow,
@@ -363,6 +378,7 @@ impl DaemonRequest {
             Self::PanicStopStatus => "panic_stop_status",
             Self::SetPanicStop(_) => "set_panic_stop",
             Self::KwinBridgeStatus => "kwin_bridge_status",
+            Self::UinputStatus => "uinput_status",
             Self::ListMonitors => "list_monitors",
             Self::ListWindows => "list_windows",
             Self::ActiveWindow => "active_window",
@@ -399,6 +415,7 @@ pub enum DaemonResponse {
     PolicyStatus(PolicyStatus),
     PanicStop(PanicStopStatus),
     KwinBridgeStatus(KwinBridgeStatus),
+    UinputStatus(UinputStatus),
     Monitors(Vec<MonitorInfo>),
     Windows(Vec<WindowInfo>),
     ActiveWindow(Option<WindowInfo>),
@@ -421,6 +438,7 @@ impl DaemonResponse {
             Self::PolicyStatus(_) => "policy_status",
             Self::PanicStop(_) => "panic_stop",
             Self::KwinBridgeStatus(_) => "kwin_bridge_status",
+            Self::UinputStatus(_) => "uinput_status",
             Self::Monitors(_) => "monitors",
             Self::Windows(_) => "windows",
             Self::ActiveWindow(_) => "active_window",
@@ -733,6 +751,32 @@ mod tests {
         assert!(encoded.contains(r#""type":"kwin_bridge_status""#));
         assert!(encoded.contains(r#""dbus_service_registered":true"#));
         assert_eq!(response.response_type(), "kwin_bridge_status");
+    }
+
+    #[test]
+    fn serializes_uinput_status() {
+        let request = DaemonRequest::UinputStatus;
+        assert_eq!(
+            serde_json::to_string(&request).expect("uinput status request serializes"),
+            r#"{"method":"uinput_status"}"#
+        );
+
+        let response = DaemonResponse::UinputStatus(UinputStatus {
+            path: PathBuf::from("/dev/uinput"),
+            available: true,
+            exists: true,
+            is_char_device: true,
+            mode: Some(0o660),
+            owner_uid: Some(0),
+            owner_gid: Some(985),
+            process_uid: 1000,
+            process_gid: 1000,
+            setup_hint: "uinput available to daemon process".to_string(),
+        });
+        let encoded = serde_json::to_string(&response).expect("uinput status serializes");
+        assert!(encoded.contains(r#""type":"uinput_status""#));
+        assert!(encoded.contains(r#""available":true"#));
+        assert_eq!(response.response_type(), "uinput_status");
     }
 
     #[test]
