@@ -10,11 +10,11 @@ use std::{
 
 use anyhow::{Context, Error, Result, bail};
 use clap::Parser;
-use image::imageops::FilterType;
+use image::{GenericImageView, imageops::FilterType};
 use libplasma_pilot::{
     BackendCapability, CapabilitySet, CoordinateSpace, DaemonRequest, DaemonResponse, HealthStatus,
-    PolicyStatus, ScreenshotInfo, ScreenshotRequest, ScreenshotTransform, ToolApprovalLevel,
-    current_euid, default_socket_path,
+    PolicyStatus, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
+    ToolApprovalLevel, current_euid, default_socket_path,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -108,6 +108,12 @@ fn handle_request(request: DaemonRequest) -> DaemonResponse {
             },
         },
         DaemonRequest::Screenshot(request) => match capture_screenshot(request) {
+            Ok(info) => DaemonResponse::Screenshot(info),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
+        DaemonRequest::ScreenshotTile(request) => match capture_screenshot_tile(request) {
             Ok(info) => DaemonResponse::Screenshot(info),
             Err(err) => DaemonResponse::Error {
                 message: format_error_chain(&err),
@@ -238,6 +244,62 @@ fn capture_screenshot(request: ScreenshotRequest) -> Result<ScreenshotInfo> {
     })
 }
 
+fn capture_screenshot_tile(request: ScreenshotTileRequest) -> Result<ScreenshotInfo> {
+    let _guard = SCREENSHOT_CAPTURE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| anyhow::anyhow!("screenshot capture lock is poisoned"))?;
+    validate_tile_request(&request)?;
+    prepare_screenshot_output(&request.output)?;
+    if !command_exists("spectacle") {
+        bail!("spectacle command is not available for KDE screenshot capture");
+    }
+
+    let capture_output = temporary_capture_path(&request.output);
+    prepare_screenshot_output(&capture_output)?;
+    let status = Command::new("spectacle")
+        .args(["-b", "-f", "-n", "-o"])
+        .arg(&capture_output)
+        .status()
+        .context("run spectacle screenshot backend")?;
+    if !status.success() {
+        bail!("spectacle screenshot backend exited with status {status}");
+    }
+
+    let (source_width, source_height) = read_png_dimensions_with_retry(&capture_output)
+        .with_context(|| {
+            format!(
+                "read screenshot dimensions from {}",
+                capture_output.display()
+            )
+        })?;
+    validate_tile_bounds(&request, source_width, source_height)?;
+    let (output_width, output_height) =
+        write_tile_preview(&capture_output, &request, request.max_edge.unwrap_or(1600))?;
+
+    fs::remove_file(&capture_output).ok();
+    let monitors = list_monitors().unwrap_or_default();
+
+    Ok(ScreenshotInfo {
+        path: request.output,
+        backend: "spectacle".to_string(),
+        source_width,
+        source_height,
+        output_width,
+        output_height,
+        transform: ScreenshotTransform {
+            source_coordinate_space: CoordinateSpace::PhysicalPixel,
+            output_coordinate_space: CoordinateSpace::PhysicalPixel,
+            source_origin_x: request.x,
+            source_origin_y: request.y,
+            scale_x: f64::from(output_width) / f64::from(request.width),
+            scale_y: f64::from(output_height) / f64::from(request.height),
+        },
+        coordinate_space: CoordinateSpace::PhysicalPixel,
+        monitors,
+    })
+}
+
 fn list_monitors() -> Result<Vec<libplasma_pilot::MonitorInfo>> {
     plasma_pilot_kwin::list_monitors().map_err(|err| anyhow::anyhow!(err))
 }
@@ -281,8 +343,74 @@ fn write_preview_or_copy(
     Ok((output_width, output_height))
 }
 
+fn write_tile_preview(
+    source: &Path,
+    request: &ScreenshotTileRequest,
+    max_edge: u32,
+) -> Result<(u32, u32)> {
+    if max_edge == 0 {
+        bail!("max_edge must be greater than zero");
+    }
+
+    let image =
+        image::open(source).with_context(|| format!("open screenshot {}", source.display()))?;
+    let cropped = image.crop_imm(request.x, request.y, request.width, request.height);
+    let largest_edge = request.width.max(request.height);
+    let output_image = if largest_edge > max_edge {
+        let scale = f64::from(max_edge) / f64::from(largest_edge);
+        let output_width = scaled_dimension(request.width, scale);
+        let output_height = scaled_dimension(request.height, scale);
+        cropped.resize(output_width, output_height, FilterType::Lanczos3)
+    } else {
+        cropped
+    };
+
+    let (output_width, output_height) = output_image.dimensions();
+    output_image
+        .save(&request.output)
+        .with_context(|| format!("write screenshot tile {}", request.output.display()))?;
+    Ok((output_width, output_height))
+}
+
 fn scaled_dimension(value: u32, scale: f64) -> u32 {
     (f64::from(value) * scale).round().max(1.0) as u32
+}
+
+fn validate_tile_request(request: &ScreenshotTileRequest) -> Result<()> {
+    if request.width == 0 || request.height == 0 {
+        bail!("tile width and height must be greater than zero");
+    }
+    if request.max_edge == Some(0) {
+        bail!("max_edge must be greater than zero");
+    }
+    Ok(())
+}
+
+fn validate_tile_bounds(
+    request: &ScreenshotTileRequest,
+    source_width: u32,
+    source_height: u32,
+) -> Result<()> {
+    let Some(end_x) = request.x.checked_add(request.width) else {
+        bail!("tile x + width overflows u32");
+    };
+    let Some(end_y) = request.y.checked_add(request.height) else {
+        bail!("tile y + height overflows u32");
+    };
+
+    if end_x > source_width || end_y > source_height {
+        bail!(
+            "tile {}x{} at {},{} is outside source screenshot {}x{}",
+            request.width,
+            request.height,
+            request.x,
+            request.y,
+            source_width,
+            source_height
+        );
+    }
+
+    Ok(())
 }
 
 fn format_error_chain(err: &Error) -> String {

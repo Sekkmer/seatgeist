@@ -4,7 +4,7 @@ pub mod types;
 
 pub use protocol::{
     ActionRequest, ActionResult, CapabilitySet, DaemonRequest, DaemonResponse, HealthStatus,
-    PolicyStatus, ScreenshotInfo, ScreenshotRequest, ScreenshotTransform,
+    PolicyStatus, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
 };
 pub use runtime::{current_euid, default_socket_path};
 pub use types::{

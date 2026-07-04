@@ -58,6 +58,16 @@ pub struct ScreenshotRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenshotTileRequest {
+    pub output: PathBuf,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub max_edge: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum DaemonRequest {
     Health,
@@ -65,6 +75,7 @@ pub enum DaemonRequest {
     PolicyStatus,
     ListMonitors,
     Screenshot(ScreenshotRequest),
+    ScreenshotTile(ScreenshotTileRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -136,5 +147,21 @@ mod tests {
         let response = DaemonResponse::Monitors(Vec::new());
         let encoded = serde_json::to_string(&response).expect("monitor response serializes");
         assert_eq!(encoded, r#"{"type":"monitors","data":[]}"#);
+    }
+
+    #[test]
+    fn serializes_screenshot_tile_request() {
+        let request = DaemonRequest::ScreenshotTile(ScreenshotTileRequest {
+            output: PathBuf::from("/tmp/plasma-pilot-tile.png"),
+            x: 100,
+            y: 200,
+            width: 800,
+            height: 600,
+            max_edge: Some(400),
+        });
+        let encoded = serde_json::to_string(&request).expect("tile request serializes");
+        assert!(encoded.contains(r#""method":"screenshot_tile""#));
+        assert!(encoded.contains(r#""x":100"#));
+        assert!(encoded.contains(r#""max_edge":400"#));
     }
 }

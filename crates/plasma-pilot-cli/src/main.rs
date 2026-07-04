@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use libplasma_pilot::{DaemonRequest, DaemonResponse, ScreenshotRequest, default_socket_path};
+use libplasma_pilot::{
+    DaemonRequest, DaemonResponse, ScreenshotRequest, ScreenshotTileRequest, default_socket_path,
+};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
@@ -29,6 +31,20 @@ enum Command {
         max_edge: u32,
         #[arg(long)]
         full_resolution: bool,
+    },
+    ScreenshotTile {
+        #[arg(long)]
+        output: String,
+        #[arg(long)]
+        x: u32,
+        #[arg(long)]
+        y: u32,
+        #[arg(long)]
+        width: u32,
+        #[arg(long)]
+        height: u32,
+        #[arg(long, default_value_t = 1600)]
+        max_edge: u32,
     },
     Windows,
     ActiveWindow,
@@ -70,6 +86,26 @@ fn main() -> Result<()> {
                         Some(max_edge)
                     },
                     full_resolution,
+                }),
+            )?;
+        }
+        Command::ScreenshotTile {
+            output,
+            x,
+            y,
+            width,
+            height,
+            max_edge,
+        } => {
+            print_daemon_response(
+                &socket,
+                DaemonRequest::ScreenshotTile(ScreenshotTileRequest {
+                    output: output.into(),
+                    x,
+                    y,
+                    width,
+                    height,
+                    max_edge: Some(max_edge),
                 }),
             )?;
         }

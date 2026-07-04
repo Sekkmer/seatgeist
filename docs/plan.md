@@ -778,13 +778,13 @@ Tasks:
 - Save screenshots to `$XDG_RUNTIME_DIR/plasma-pilot/screenshots/`.
 - Add `plasma-pilot-cli screenshot`.
 - Add default downscaled previews and explicit full-resolution capture.
-- Add tiled screenshots for 8K and multi-monitor workflows.
+- Add tiled screenshots for 8K and multi-monitor workflows. Initial implementation supports physical-pixel tile crops with max-edge downscaling.
 - Add coordinate transform metadata for preview/crop/full-size mapping. Initial preview/full-size mapping is implemented with scale factors and source/output dimensions.
 
 Acceptance criteria:
 
 - CLI can capture current screen to PNG.
-- Screenshot response includes coordinate metadata, source dimensions, output dimensions, and preview scale factors.
+- Screenshot response includes coordinate metadata, source dimensions, output dimensions, source origin, and preview/tile scale factors.
 - Multi-monitor metadata is correct or explicitly marked unsupported. Initial implementation reports KWin logical geometry, physical pixel dimensions derived from scale, origin, and scale factor.
 
 ### Phase 3: uinput keyboard and pointer control

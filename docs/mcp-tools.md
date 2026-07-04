@@ -9,3 +9,5 @@ Initial tool groups:
 - Safety: `pilot.policy_status`, `pilot.set_panic_stop`, `pilot.journal_recent`.
 
 All coordinate-bearing tools must require an explicit coordinate space. Full-resolution screenshots and clipboard reads are policy-gated.
+
+Current daemon protocol exposes `screenshot` and `screenshot-tile` through the CLI. Tile coordinates are physical screenshot pixels. Responses include full source dimensions, output dimensions, source origin, scale factors, and monitor metadata when KWin responds.
