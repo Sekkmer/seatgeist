@@ -40,6 +40,17 @@ pub struct PanicStopStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KwinBridgeStatus {
+    pub dbus_service_registered: bool,
+    pub active_window_update_seen: bool,
+    pub active_window: Option<WindowInfo>,
+    pub package_dir: PathBuf,
+    pub package_installed: bool,
+    pub config_path: PathBuf,
+    pub script_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetPanicStopRequest {
     pub enabled: bool,
 }
@@ -278,6 +289,7 @@ pub enum DaemonRequest {
     PolicyStatus,
     PanicStopStatus,
     SetPanicStop(SetPanicStopRequest),
+    KwinBridgeStatus,
     ListMonitors,
     ListWindows,
     ActiveWindow,
@@ -307,6 +319,7 @@ impl DaemonRequest {
             Self::PolicyStatus => "policy_status",
             Self::PanicStopStatus => "panic_stop_status",
             Self::SetPanicStop(_) => "set_panic_stop",
+            Self::KwinBridgeStatus => "kwin_bridge_status",
             Self::ListMonitors => "list_monitors",
             Self::ListWindows => "list_windows",
             Self::ActiveWindow => "active_window",
@@ -337,6 +350,7 @@ pub enum DaemonResponse {
     Capabilities(CapabilitySet),
     PolicyStatus(PolicyStatus),
     PanicStop(PanicStopStatus),
+    KwinBridgeStatus(KwinBridgeStatus),
     Monitors(Vec<MonitorInfo>),
     Windows(Vec<WindowInfo>),
     ActiveWindow(Option<WindowInfo>),
@@ -358,6 +372,7 @@ impl DaemonResponse {
             Self::Capabilities(_) => "capabilities",
             Self::PolicyStatus(_) => "policy_status",
             Self::PanicStop(_) => "panic_stop",
+            Self::KwinBridgeStatus(_) => "kwin_bridge_status",
             Self::Monitors(_) => "monitors",
             Self::Windows(_) => "windows",
             Self::ActiveWindow(_) => "active_window",
@@ -600,6 +615,29 @@ mod tests {
             serde_json::to_string(&set).expect("panic set serializes"),
             r#"{"method":"set_panic_stop","enabled":true}"#
         );
+    }
+
+    #[test]
+    fn serializes_kwin_bridge_status() {
+        let request = DaemonRequest::KwinBridgeStatus;
+        assert_eq!(
+            serde_json::to_string(&request).expect("bridge status request serializes"),
+            r#"{"method":"kwin_bridge_status"}"#
+        );
+
+        let response = DaemonResponse::KwinBridgeStatus(KwinBridgeStatus {
+            dbus_service_registered: true,
+            active_window_update_seen: false,
+            active_window: None,
+            package_dir: PathBuf::from("/home/user/.local/share/kwin/scripts/plasma-pilot-bridge"),
+            package_installed: true,
+            config_path: PathBuf::from("/home/user/.config/kwinrc"),
+            script_enabled: Some(true),
+        });
+        let encoded = serde_json::to_string(&response).expect("bridge status response serializes");
+        assert!(encoded.contains(r#""type":"kwin_bridge_status""#));
+        assert!(encoded.contains(r#""dbus_service_registered":true"#));
+        assert_eq!(response.response_type(), "kwin_bridge_status");
     }
 
     #[test]

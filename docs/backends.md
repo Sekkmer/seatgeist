@@ -28,6 +28,8 @@ The repository includes `kwin/plasma-pilot-bridge`, a packaged KWin script that 
 
 The payload is compact JSON containing active state, stable KWin window id, title, app id, pid, and logical window geometry. The daemon keeps the latest update in memory and serves it through `plasma-pilot-cli active-window`.
 
+`plasma-pilot-cli kwin-bridge-status` and MCP `plasma.kwin_bridge_status` report the daemon DBus receiver state, whether the script has published an update, and the user-local package/config paths checked for persistent installation.
+
 Install or update the script explicitly with:
 
 ```bash

@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    env, fs,
     fs::OpenOptions,
     io::Write,
     os::unix::fs::{FileTypeExt, PermissionsExt},
@@ -18,8 +18,8 @@ use libplasma_pilot::{
     ActionResult, ActivateTabRequest, ActiveWindowGuard, BackendCapability, CapabilitySet,
     ClickButtonRequest, ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest,
     DaemonResponse, DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest,
-    HealthStatus, JournalEntry, ObserveRequest, PanicStopStatus, PolicyStatus, SafetyClass,
-    ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
+    HealthStatus, JournalEntry, KwinBridgeStatus, ObserveRequest, PanicStopStatus, PolicyStatus,
+    SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
     SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, ToolApprovalLevel,
     WaitForChangeRequest, WaitForChangeResult, WindowGeometry, WindowInfo, current_euid,
     default_journal_path, default_panic_stop_path, default_socket_path,
@@ -304,6 +304,7 @@ async fn run(
             None
         }
     };
+    let kwin_bridge_registered = _kwin_bridge_connection.is_some();
 
     prepare_socket_path(&socket)?;
     let listener = UnixListener::bind(&socket)
@@ -321,8 +322,15 @@ async fn run(
         let panic_stop = panic_stop.clone();
         let policy = policy.clone();
         tokio::spawn(async move {
-            if let Err(err) =
-                handle_client(stream, active_window_state, journal, panic_stop, policy).await
+            if let Err(err) = handle_client(
+                stream,
+                active_window_state,
+                kwin_bridge_registered,
+                journal,
+                panic_stop,
+                policy,
+            )
+            .await
             {
                 warn!(error = %err, "client request failed");
             }
@@ -357,6 +365,7 @@ async fn start_kwin_bridge(active_window_state: ActiveWindowState) -> Result<zbu
 async fn handle_client(
     stream: UnixStream,
     active_window_state: ActiveWindowState,
+    kwin_bridge_registered: bool,
     journal: ActionJournal,
     panic_stop: PanicStopState,
     policy: PolicyEngine,
@@ -377,6 +386,7 @@ async fn handle_client(
     let response = handle_request(
         request,
         &active_window_state,
+        kwin_bridge_registered,
         &journal,
         &panic_stop,
         &policy,
@@ -397,6 +407,7 @@ async fn handle_client(
 fn handle_request(
     request: DaemonRequest,
     active_window_state: &ActiveWindowState,
+    kwin_bridge_registered: bool,
     journal: &ActionJournal,
     panic_stop: &PanicStopState,
     policy: &PolicyEngine,
@@ -430,6 +441,14 @@ fn handle_request(
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::KwinBridgeStatus => {
+            match kwin_bridge_status(active_window_state, kwin_bridge_registered) {
+                Ok(status) => DaemonResponse::KwinBridgeStatus(status),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
         DaemonRequest::ListMonitors => match list_monitors() {
             Ok(monitors) => DaemonResponse::Monitors(monitors),
             Err(err) => DaemonResponse::Error {
@@ -586,6 +605,86 @@ fn policy_config(allow_control: bool, allow_clipboard_read: bool) -> PolicyConfi
     config
 }
 
+fn kwin_bridge_status(
+    active_window_state: &ActiveWindowState,
+    dbus_service_registered: bool,
+) -> Result<KwinBridgeStatus> {
+    let active_window_snapshot = active_window_state.snapshot()?;
+    let active_window_update_seen = active_window_snapshot.is_some();
+    let active_window = active_window_snapshot.flatten();
+    let package_dir = xdg_data_home().join("kwin/scripts/plasma-pilot-bridge");
+    let config_path = xdg_config_home().join("kwinrc");
+    let script_enabled = read_kwin_bridge_enabled(&config_path)?;
+
+    Ok(KwinBridgeStatus {
+        dbus_service_registered,
+        active_window_update_seen,
+        active_window,
+        package_installed: package_dir.join("metadata.json").is_file(),
+        package_dir,
+        config_path,
+        script_enabled,
+    })
+}
+
+fn xdg_data_home() -> PathBuf {
+    env::var_os("XDG_DATA_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from(".local/share"))
+}
+
+fn xdg_config_home() -> PathBuf {
+    env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .unwrap_or_else(|| PathBuf::from(".config"))
+}
+
+fn read_kwin_bridge_enabled(config_path: &Path) -> Result<Option<bool>> {
+    let content = match fs::read_to_string(config_path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("read {}", config_path.display())),
+    };
+    Ok(parse_kwin_bridge_enabled(&content))
+}
+
+fn parse_kwin_bridge_enabled(content: &str) -> Option<bool> {
+    let mut in_plugins = false;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_plugins = line == "[Plugins]";
+            continue;
+        }
+        if !in_plugins {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "plasma-pilot-bridgeEnabled" {
+            continue;
+        }
+        return parse_bool_config_value(value.trim());
+    }
+    None
+}
+
+fn parse_bool_config_value(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 fn enforce_policy(policy: &PolicyEngine, request: &DaemonRequest) -> Result<()> {
     let safety_class = safety_class_for_request(request);
     let decision = policy.decide(&safety_class);
@@ -684,6 +783,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::JournalTail(_) => SafetyClass::Policy,
         DaemonRequest::ListMonitors
         | DaemonRequest::ListWindows
+        | DaemonRequest::KwinBridgeStatus
         | DaemonRequest::ActiveWindow
         | DaemonRequest::Observe(_)
         | DaemonRequest::Screenshot(_)
@@ -1789,6 +1889,16 @@ fn summarize_response(response: &DaemonResponse) -> String {
             status.enabled,
             status.path.display()
         ),
+        DaemonResponse::KwinBridgeStatus(status) => format!(
+            "kwin bridge dbus={} update_seen={} installed={} enabled={}",
+            status.dbus_service_registered,
+            status.active_window_update_seen,
+            status.package_installed,
+            status
+                .script_enabled
+                .map(|enabled| enabled.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ),
         DaemonResponse::Monitors(monitors) => format!("{} monitors", monitors.len()),
         DaemonResponse::Windows(windows) => format!("{} windows", windows.len()),
         DaemonResponse::Observation(observation) => format!(
@@ -2261,6 +2371,34 @@ mod tests {
             }),
         )
         .expect("wait_for_change is observe policy");
+    }
+
+    #[test]
+    fn parses_kwin_bridge_enabled_from_plugins_group() {
+        let config = r#"
+            [Other]
+            plasma-pilot-bridgeEnabled=false
+
+            [Plugins]
+            unrelated=true
+            plasma-pilot-bridgeEnabled=true
+        "#;
+        assert_eq!(parse_kwin_bridge_enabled(config), Some(true));
+        assert_eq!(
+            parse_kwin_bridge_enabled("[Plugins]\nplasma-pilot-bridgeEnabled=off\n"),
+            Some(false)
+        );
+        assert_eq!(
+            parse_kwin_bridge_enabled("[Plugins]\nunrelated=true\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn kwin_bridge_status_is_observe_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        enforce_policy(&policy, &DaemonRequest::KwinBridgeStatus)
+            .expect("kwin bridge status is observe policy");
     }
 
     #[test]

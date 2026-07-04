@@ -234,6 +234,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         "plasma.panic_stop_disable" => Ok(DaemonRequest::SetPanicStop(SetPanicStopRequest {
             enabled: false,
         })),
+        "plasma.kwin_bridge_status" => Ok(DaemonRequest::KwinBridgeStatus),
         "plasma.list_monitors" => Ok(DaemonRequest::ListMonitors),
         "plasma.list_windows" => Ok(DaemonRequest::ListWindows),
         "plasma.active_window" => Ok(DaemonRequest::ActiveWindow),
@@ -439,6 +440,16 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status.enabled,
             status.path.display()
         ),
+        DaemonResponse::KwinBridgeStatus(status) => format!(
+            "kwin bridge dbus={} update_seen={} installed={} enabled={}",
+            status.dbus_service_registered,
+            status.active_window_update_seen,
+            status.package_installed,
+            status
+                .script_enabled
+                .map(|enabled| enabled.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ),
         DaemonResponse::Monitors(monitors) => format!("{} monitors", monitors.len()),
         DaemonResponse::Windows(windows) => format!("{} windows", windows.len()),
         DaemonResponse::Observation(observation) => format!(
@@ -533,6 +544,12 @@ fn tool_definitions() -> Vec<Value> {
             "plasma.panic_stop_disable",
             "Disable Panic Stop",
             "Disable the daemon panic-stop flag after explicit local operator intent.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.kwin_bridge_status",
+            "KWin Bridge Status",
+            "Report daemon DBus receiver state, latest active-window bridge update state, and user-local KWin script install/config status.",
             object_schema(vec![], vec![]),
         ),
         tool(
@@ -1115,6 +1132,11 @@ mod tests {
         assert!(
             tools
                 .iter()
+                .any(|tool| tool["name"] == "plasma.kwin_bridge_status")
+        );
+        assert!(
+            tools
+                .iter()
                 .any(|tool| tool["name"] == "plasma.wait_for_change")
         );
         assert!(
@@ -1269,6 +1291,15 @@ mod tests {
             daemon_request_for_tool("plasma.panic_stop_disable", &json!({}))
                 .expect("panic-stop disable maps"),
             DaemonRequest::SetPanicStop(SetPanicStopRequest { enabled: false })
+        );
+    }
+
+    #[test]
+    fn maps_kwin_bridge_status_tool() {
+        assert_eq!(
+            daemon_request_for_tool("plasma.kwin_bridge_status", &json!({}))
+                .expect("bridge status maps"),
+            DaemonRequest::KwinBridgeStatus
         );
     }
 
