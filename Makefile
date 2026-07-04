@@ -403,8 +403,9 @@ smoke-mcp:
 		printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 		printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"plasma.health","arguments":{}}}'
 		printf '%s\n' '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"plasma.observe","arguments":{}}}'
+		printf '%s\n' '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"plasma.a11y_text_attributes","arguments":{"node_id":"invalid-atspi-node","offset":0}}}'
 	} | PLASMA_PILOT_SOCKET="$$socket" target/debug/plasma-pilot-mcp --stdio >"$$out"
-	test "$$(wc -l <"$$out")" = "4"
+	test "$$(wc -l <"$$out")" = "5"
 	jq -e 'select(.id == 1) | .result.capabilities.tools.listChanged == false' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.list_windows")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.clipboard_get_text")' "$$out" >/dev/null
@@ -440,6 +441,7 @@ smoke-mcp:
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_paste_text")' "$$out" >/dev/null
 	jq -e 'select(.id == 3) | .result.isError == false and .result.structuredContent.type == "health"' "$$out" >/dev/null
 	jq -e 'select(.id == 4) | .result.isError == false and .result.structuredContent.type == "observation"' "$$out" >/dev/null
+	jq -e 'select(.id == 5) | .result.isError == true and .result.structuredContent.type == "error" and (.result.structuredContent.data.message | contains("invalid AT-SPI node id")) and (.result.content[0].text | contains("invalid AT-SPI node id"))' "$$out" >/dev/null
 
 gui-eval:
 	scripts/gui-eval.sh all
