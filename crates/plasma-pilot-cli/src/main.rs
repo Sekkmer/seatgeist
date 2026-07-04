@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -7,7 +7,7 @@ use libplasma_pilot::{
     AccessibilitySetTextRequest, ActivateTabRequest, ClickButtonRequest, ClipboardGetRequest,
     ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse,
     FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest,
-    ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest, SetTextFieldRequest,
+    ReplayTrace, ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest, SetTextFieldRequest,
     default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
@@ -80,6 +80,10 @@ enum Command {
     Journal {
         #[command(subcommand)]
         command: JournalCommand,
+    },
+    Trace {
+        #[command(subcommand)]
+        command: TraceCommand,
     },
 }
 
@@ -188,6 +192,14 @@ enum JournalCommand {
     Tail {
         #[arg(long, default_value_t = 50)]
         limit: usize,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TraceCommand {
+    Replay {
+        #[arg(long)]
+        file: PathBuf,
     },
 }
 
@@ -415,6 +427,9 @@ fn main() -> Result<()> {
             &socket,
             DaemonRequest::JournalTail(JournalTailRequest { limit }),
         )?,
+        Command::Trace {
+            command: TraceCommand::Replay { file },
+        } => replay_trace(&socket, file)?,
     }
 
     Ok(())
@@ -434,6 +449,54 @@ fn print_daemon_response(socket: &PathBuf, request: DaemonRequest) -> Result<()>
         DaemonResponse::Error { message } => bail!("daemon returned error: {message}"),
         response => println!("{}", serde_json::to_string_pretty(&response)?),
     }
+    Ok(())
+}
+
+fn replay_trace(socket: &PathBuf, file: PathBuf) -> Result<()> {
+    let contents =
+        fs::read_to_string(&file).with_context(|| format!("read trace {}", file.display()))?;
+    let trace: ReplayTrace = serde_json::from_str(&contents)
+        .with_context(|| format!("parse trace {}", file.display()))?;
+    if trace.version != 1 {
+        bail!("unsupported trace version {}", trace.version);
+    }
+
+    let mut results = Vec::with_capacity(trace.steps.len());
+    for (index, step) in trace.steps.iter().enumerate() {
+        let response = send_request(socket, step.request.clone())
+            .with_context(|| format!("replay trace step {index}"))?;
+        let response_type = response.response_type();
+        let ok = response.ok();
+
+        if let Some(expected) = &step.expect_response_type
+            && expected != response_type
+        {
+            bail!("trace step {index} expected response type {expected}, got {response_type}");
+        }
+        if let Some(expected_ok) = step.expect_ok
+            && expected_ok != ok
+        {
+            bail!("trace step {index} expected ok={expected_ok}, got ok={ok}");
+        }
+
+        results.push(serde_json::json!({
+            "index": index,
+            "label": step.label,
+            "method": step.request.method_name(),
+            "response_type": response_type,
+            "ok": ok,
+        }));
+    }
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "type": "trace_replay",
+            "trace_version": trace.version,
+            "description": trace.description,
+            "steps": results,
+        }))?
+    );
     Ok(())
 }
 

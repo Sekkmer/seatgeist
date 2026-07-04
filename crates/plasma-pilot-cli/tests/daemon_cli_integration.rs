@@ -8,8 +8,8 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use libplasma_pilot::{
-    BackendCapability, CapabilitySet, DaemonResponse, HealthStatus, JournalEntry, PolicyStatus,
-    ToolApprovalLevel,
+    BackendCapability, CapabilitySet, DaemonRequest, DaemonResponse, HealthStatus, JournalEntry,
+    PolicyStatus, ReplayTrace, ToolApprovalLevel, TraceStep,
 };
 
 struct DaemonFixture {
@@ -50,6 +50,17 @@ impl DaemonFixture {
             .with_context(|| format!("run plasma-pilot-cli {}", args.join(" ")))?;
         require_success(args, &output)?;
         serde_json::from_slice(&output.stdout).context("parse CLI JSON response")
+    }
+
+    fn cli_value(&self, args: &[&str]) -> Result<serde_json::Value> {
+        let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+            .arg("--socket")
+            .arg(&self.socket)
+            .args(args)
+            .output()
+            .with_context(|| format!("run plasma-pilot-cli {}", args.join(" ")))?;
+        require_success(args, &output)?;
+        serde_json::from_slice(&output.stdout).context("parse CLI JSON value")
     }
 }
 
@@ -92,6 +103,64 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
             default_clipboard_write: ToolApprovalLevel::Allow,
         })
     );
+
+    let journal = daemon.cli_json(&["journal", "tail", "--limit", "10"])?;
+    let DaemonResponse::Journal(entries) = journal else {
+        bail!("expected journal response, got {journal:?}");
+    };
+    assert_methods(&entries, &["health", "capabilities", "policy_status"]);
+    assert!(entries.iter().all(|entry| entry.ok));
+    Ok(())
+}
+
+#[test]
+fn cli_replays_trace_against_real_daemon() -> Result<()> {
+    let daemon = DaemonFixture::start()?;
+    let trace_path = daemon.root.join("status-trace.json");
+    let trace = ReplayTrace {
+        version: 1,
+        description: Some("status trace".to_string()),
+        steps: vec![
+            TraceStep {
+                label: Some("health".to_string()),
+                request: DaemonRequest::Health,
+                expect_response_type: Some("health".to_string()),
+                expect_ok: Some(true),
+            },
+            TraceStep {
+                label: Some("capabilities".to_string()),
+                request: DaemonRequest::Capabilities,
+                expect_response_type: Some("capabilities".to_string()),
+                expect_ok: Some(true),
+            },
+            TraceStep {
+                label: Some("policy".to_string()),
+                request: DaemonRequest::PolicyStatus,
+                expect_response_type: Some("policy_status".to_string()),
+                expect_ok: Some(true),
+            },
+        ],
+    };
+    fs::write(
+        &trace_path,
+        serde_json::to_string_pretty(&trace).context("serialize trace")?,
+    )
+    .context("write trace file")?;
+
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let report = daemon.cli_value(&["trace", "replay", "--file", &trace_arg])?;
+    assert_eq!(report["type"], "trace_replay");
+    assert_eq!(report["trace_version"], 1);
+    assert_eq!(
+        report["steps"]
+            .as_array()
+            .context("trace report steps are an array")?
+            .len(),
+        3
+    );
+    assert_eq!(report["steps"][0]["method"], "health");
+    assert_eq!(report["steps"][2]["response_type"], "policy_status");
+    assert_eq!(report["steps"][2]["ok"], true);
 
     let journal = daemon.cli_json(&["journal", "tail", "--limit", "10"])?;
     let DaemonResponse::Journal(entries) = journal else {

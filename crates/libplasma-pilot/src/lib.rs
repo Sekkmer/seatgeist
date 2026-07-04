@@ -8,8 +8,8 @@ pub use protocol::{
     ClipboardGetRequest, ClipboardSetRequest, ClipboardText, DEFAULT_CLIPBOARD_MAX_BYTES,
     DaemonRequest, DaemonResponse, DesktopObservation, FocusWindowRequest,
     FocusedAccessibilityTreeRequest, HealthStatus, JournalEntry, JournalTailRequest,
-    ObserveRequest, PolicyStatus, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest,
-    ScreenshotTransform, SelectMenuRequest, SetTextFieldRequest,
+    ObserveRequest, PolicyStatus, ReplayTrace, ScreenshotInfo, ScreenshotRequest,
+    ScreenshotTileRequest, ScreenshotTransform, SelectMenuRequest, SetTextFieldRequest, TraceStep,
 };
 pub use runtime::{current_euid, default_journal_path, default_socket_path};
 pub use types::{

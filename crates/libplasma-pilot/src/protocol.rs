@@ -39,6 +39,21 @@ pub struct JournalEntry {
     pub summary: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayTrace {
+    pub version: u32,
+    pub description: Option<String>,
+    pub steps: Vec<TraceStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceStep {
+    pub label: Option<String>,
+    pub request: DaemonRequest,
+    pub expect_response_type: Option<String>,
+    pub expect_ok: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScreenshotInfo {
     pub path: PathBuf,
@@ -267,6 +282,31 @@ pub enum DaemonResponse {
     Error { message: String },
 }
 
+impl DaemonResponse {
+    pub fn response_type(&self) -> &'static str {
+        match self {
+            Self::Health(_) => "health",
+            Self::Capabilities(_) => "capabilities",
+            Self::PolicyStatus(_) => "policy_status",
+            Self::Monitors(_) => "monitors",
+            Self::Windows(_) => "windows",
+            Self::ActiveWindow(_) => "active_window",
+            Self::Observation(_) => "observation",
+            Self::Screenshot(_) => "screenshot",
+            Self::ClipboardText(_) => "clipboard_text",
+            Self::AccessibilityTree(_) => "accessibility_tree",
+            Self::AccessibilityMatches(_) => "accessibility_matches",
+            Self::Journal(_) => "journal",
+            Self::Action(_) => "action",
+            Self::Error { .. } => "error",
+        }
+    }
+
+    pub fn ok(&self) -> bool {
+        !matches!(self, Self::Error { .. })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionRequest {
     pub id: Uuid,
@@ -407,6 +447,51 @@ mod tests {
         let request = DaemonRequest::JournalTail(JournalTailRequest { limit: 10 });
         let encoded = serde_json::to_string(&request).expect("journal request serializes");
         assert_eq!(encoded, r#"{"method":"journal_tail","limit":10}"#);
+    }
+
+    #[test]
+    fn serializes_replay_trace_with_daemon_requests() {
+        let trace = ReplayTrace {
+            version: 1,
+            description: Some("status smoke".to_string()),
+            steps: vec![
+                TraceStep {
+                    label: Some("health".to_string()),
+                    request: DaemonRequest::Health,
+                    expect_response_type: Some("health".to_string()),
+                    expect_ok: Some(true),
+                },
+                TraceStep {
+                    label: Some("policy".to_string()),
+                    request: DaemonRequest::PolicyStatus,
+                    expect_response_type: Some("policy_status".to_string()),
+                    expect_ok: Some(true),
+                },
+            ],
+        };
+
+        let encoded = serde_json::to_string(&trace).expect("trace serializes");
+        assert!(encoded.contains(r#""version":1"#));
+        assert!(encoded.contains(r#""method":"health""#));
+        let decoded: ReplayTrace = serde_json::from_str(&encoded).expect("trace deserializes");
+        assert_eq!(decoded, trace);
+    }
+
+    #[test]
+    fn daemon_response_reports_stable_type_and_ok_state() {
+        let health = DaemonResponse::Health(HealthStatus {
+            service: "plasma-pilotd".to_string(),
+            version: "0.1.0".to_string(),
+            status: "ok".to_string(),
+        });
+        assert_eq!(health.response_type(), "health");
+        assert!(health.ok());
+
+        let error = DaemonResponse::Error {
+            message: "denied".to_string(),
+        };
+        assert_eq!(error.response_type(), "error");
+        assert!(!error.ok());
     }
 
     #[test]
