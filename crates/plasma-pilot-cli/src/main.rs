@@ -1,4 +1,9 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    fs::OpenOptions,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -12,11 +17,13 @@ use libplasma_pilot::{
     DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
     DaemonResponse, DragPointerRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest,
     JournalTailRequest, KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton,
-    ReplayTrace, ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest,
-    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest,
-    ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest, default_socket_path,
+    ReplayTrace, SafetyClass, ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest,
+    SelectItemRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
+    SetValueRequest, ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest,
+    default_approval_file_path, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 
 #[derive(Debug, Parser)]
@@ -113,6 +120,18 @@ enum Command {
     PanicStop {
         #[command(subcommand)]
         command: PanicStopCommand,
+    },
+    Approve {
+        #[arg(long)]
+        approval_file: Option<PathBuf>,
+        #[arg(long)]
+        safety_class: SafetyClass,
+        #[arg(long)]
+        method: String,
+        #[arg(long, default_value_t = 60_000)]
+        ttl_ms: u64,
+        #[arg(long)]
+        reason: Option<String>,
     },
     Trace {
         #[command(subcommand)]
@@ -1229,12 +1248,90 @@ fn main() -> Result<()> {
             &socket,
             DaemonRequest::SetPanicStop(SetPanicStopRequest { enabled: false }),
         )?,
+        Command::Approve {
+            approval_file,
+            safety_class,
+            method,
+            ttl_ms,
+            reason,
+        } => {
+            let approval_file = match approval_file {
+                Some(path) => path,
+                None => default_approval_file_path().context("resolve default approval file")?,
+            };
+            write_approval_grant(&approval_file, safety_class, &method, ttl_ms, reason)?;
+        }
         Command::Trace {
             command: TraceCommand::Replay { file },
         } => replay_trace(&socket, file)?,
     }
 
     Ok(())
+}
+
+fn write_approval_grant(
+    path: &Path,
+    safety_class: SafetyClass,
+    method: &str,
+    ttl_ms: u64,
+    reason: Option<String>,
+) -> Result<()> {
+    if method.trim().is_empty() {
+        bail!("approval method must not be empty");
+    }
+    if ttl_ms == 0 {
+        bail!("approval ttl-ms must be greater than zero");
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("approval file has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create approval dir {}", parent.display()))?;
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("set approval dir permissions {}", parent.display()))?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            bail!("approval file must be a regular file: {}", path.display());
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err).with_context(|| format!("stat {}", path.display())),
+    }
+
+    let expires_unix_ms = unix_time_ms()?.saturating_add(ttl_ms);
+    let grant = serde_json::json!({
+        "safety_class": safety_class.clone(),
+        "method": method.trim(),
+        "expires_unix_ms": expires_unix_ms,
+        "reason": reason,
+    });
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("open approval file {}", path.display()))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("set approval file permissions {}", path.display()))?;
+    writeln!(file, "{}", serde_json::to_string(&grant)?)
+        .with_context(|| format!("write approval file {}", path.display()))?;
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "approval_file": path.display().to_string(),
+            "safety_class": safety_class,
+            "method": method.trim(),
+            "expires_unix_ms": expires_unix_ms,
+        }))?
+    );
+    Ok(())
+}
+
+fn unix_time_ms() -> Result<u64> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system time is before unix epoch")?;
+    u64::try_from(duration.as_millis()).context("unix time milliseconds overflowed u64")
 }
 
 fn parse_menu_path_argument(path: &str) -> Vec<String> {

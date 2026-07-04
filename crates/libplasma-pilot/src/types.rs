@@ -186,6 +186,28 @@ pub enum SafetyClass {
     Policy,
 }
 
+impl FromStr for SafetyClass {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "observe" => Ok(Self::Observe),
+            "full_resolution_screenshot" | "full_resolution" | "screenshot_full" => {
+                Ok(Self::FullResolutionScreenshot)
+            }
+            "clipboard_read" => Ok(Self::ClipboardRead),
+            "clipboard_write" => Ok(Self::ClipboardWrite),
+            "control_pointer" | "pointer" => Ok(Self::ControlPointer),
+            "control_keyboard" | "keyboard" => Ok(Self::ControlKeyboard),
+            "control_semantic" | "semantic" | "control" => Ok(Self::ControlSemantic),
+            "destructive_action" | "destructive" => Ok(Self::DestructiveAction),
+            "secret_field" | "secret" => Ok(Self::SecretField),
+            "policy" => Ok(Self::Policy),
+            other => Err(format!("unsupported safety class: {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendCapability {

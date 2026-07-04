@@ -15,6 +15,7 @@ Implemented fields:
 socket = "$XDG_RUNTIME_DIR/plasma-pilot/plasma-pilotd.sock"
 journal = "$XDG_STATE_HOME/plasma-pilot/journal.jsonl"
 panic_stop_file = "$XDG_RUNTIME_DIR/plasma-pilot/panic-stop"
+approval_file = "$XDG_RUNTIME_DIR/plasma-pilot/approvals.jsonl"
 
 [policy]
 default_observe = "allow"
@@ -50,9 +51,19 @@ Precedence is:
 2. Config file values.
 3. Built-in defaults.
 
-Explicit local approval flags such as `--allow-control`, `--allow-clipboard-read`, and `--allow-full-resolution-screenshot` override file policy defaults for that daemon run.
+Prompt-level policy decisions fail closed unless the daemon is started with `--approval-file <path>` / `PLASMA_PILOT_APPROVAL_FILE=<path>` or `[daemon].approval_file`, and that file contains a matching unexpired grant. The approval file is JSONL, must be owned by the daemon uid, must be a regular file, and must not be readable, writable, or executable by group/other. Its parent directory must also be owned by the daemon uid and not group/other writable. Missing approval files mean no approval is present. Malformed or insecure approval files fail closed.
 
-`[policy].destructive_actions` applies after ordinary control policy for requests marked destructive and for obvious destructive labels in high-level semantic controls, such as delete, remove, discard, quit, shutdown, and restart. The default is `prompt`, which fails closed until a trusted approval channel exists; set it to `allow` only for an intentional local session.
+Create a short-lived method-scoped grant with:
+
+```bash
+plasma-pilot-cli approve --safety-class control-semantic --method focus_window --ttl-ms 60000
+```
+
+The default CLI approval-file path is `$XDG_RUNTIME_DIR/plasma-pilot/approvals.jsonl`; the daemon only reads it when explicitly configured to do so. Grant records include `safety_class`, `method`, `expires_unix_ms`, and optional `reason`; `method = "*"` is supported for deliberate class-wide local grants. A matching grant only satisfies a prompt decision. Explicit `deny`, app policy, panic-stop, human-input pause, active-window guard checks, and backend validation still run.
+
+Explicit local approval flags such as `--allow-control`, `--allow-clipboard-read`, and `--allow-full-resolution-screenshot` still override file policy defaults for that daemon run. Prefer short-lived approval-file grants for narrow local use.
+
+`[policy].destructive_actions` applies after ordinary control policy for requests marked destructive and for obvious destructive labels in high-level semantic controls, such as delete, remove, discard, quit, shutdown, and restart. The default is `prompt`, which requires a matching approval-file grant or explicit local allow policy.
 
 `[policy].secret_fields` applies to high-level text-field requests whose target name looks secret-related, such as password, passcode, token, API key, private key, seed phrase, card number, or CVV. The default is `deny`. AT-SPI nodes already marked sensitive remain non-viable for semantic actions regardless of text-field name matching.
 
@@ -64,4 +75,4 @@ When `[safety].pause_on_human_input = true`, the daemon checks `human_input_acti
 
 `[[safety.redact_regions]]` entries define physical-pixel source screenshot rectangles. The daemon maps each rectangle through the screenshot transform and black-fills the matching output pixels before returning screenshot, screenshot-tile, observe screenshot, or wait-for-change outputs. Zero-size regions are ignored.
 
-Prompt-level policy decisions still fail closed until a trusted approval channel is implemented.
+Prompt-level policy decisions fail closed when no matching unexpired approval-file grant is available.

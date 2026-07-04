@@ -11,6 +11,7 @@ use libplasma_pilot::{
     BackendCapability, CapabilitySet, DaemonRequest, DaemonResponse, HealthStatus, JournalEntry,
     PanicStopStatus, PolicyStatus, ReplayTrace, ToolApprovalLevel, TraceStep, UinputStatus,
 };
+use std::os::unix::fs::PermissionsExt;
 
 struct DaemonFixture {
     child: Child,
@@ -255,6 +256,48 @@ fn cli_replays_trace_against_real_daemon() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn cli_writes_expiring_approval_grant() -> Result<()> {
+    let root = unique_temp_dir();
+    fs::create_dir_all(&root).context("create integration temp dir")?;
+    let approval_file = root.join("approvals.jsonl");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+        .arg("--socket")
+        .arg(root.join("unused.sock"))
+        .arg("approve")
+        .arg("--approval-file")
+        .arg(&approval_file)
+        .arg("--safety-class")
+        .arg("control-semantic")
+        .arg("--method")
+        .arg("focus_window")
+        .arg("--ttl-ms")
+        .arg("60000")
+        .output()
+        .context("run plasma-pilot-cli approve")?;
+    require_success(&["approve"], &output)?;
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("parse approve report")?;
+    assert_eq!(report["method"], "focus_window");
+    assert_eq!(report["safety_class"], "control_semantic");
+    assert_eq!(
+        fs::metadata(&approval_file)?.permissions().mode() & 0o777,
+        0o600
+    );
+
+    let contents = fs::read_to_string(&approval_file).context("read approval file")?;
+    let grant: serde_json::Value =
+        serde_json::from_str(contents.trim()).context("parse approval grant")?;
+    assert_eq!(grant["method"], "focus_window");
+    assert_eq!(grant["safety_class"], "control_semantic");
+    assert!(grant["expires_unix_ms"].as_u64().unwrap_or_default() > unix_time_ms()?);
+
+    fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
 fn require_success(args: &[&str], output: &Output) -> Result<()> {
     if output.status.success() {
         return Ok(());
@@ -331,4 +374,11 @@ fn unique_temp_dir() -> PathBuf {
         "plasma-pilot-cli-integration-{}-{now}",
         std::process::id()
     ))
+}
+
+fn unix_time_ms() -> Result<u64> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system time is before unix epoch")?;
+    u64::try_from(duration.as_millis()).context("unix time milliseconds overflowed u64")
 }

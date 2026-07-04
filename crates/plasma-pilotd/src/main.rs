@@ -196,6 +196,127 @@ impl PanicStopState {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct ApprovalStore {
+    path: Option<PathBuf>,
+}
+
+impl ApprovalStore {
+    fn new(path: Option<PathBuf>) -> Self {
+        Self { path }
+    }
+
+    fn matching_prompt_approval(
+        &self,
+        safety_class: &SafetyClass,
+        method: &str,
+    ) -> Result<Option<String>> {
+        let Some(path) = &self.path else {
+            return Ok(None);
+        };
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => validate_approval_file_metadata(path, &metadata)?,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err).with_context(|| format!("stat {}", path.display())),
+        }
+
+        let now = unix_time_ms()?;
+        let contents = fs::read_to_string(path)
+            .with_context(|| format!("read approval file {}", path.display()))?;
+        for (index, line) in contents.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let grant: ApprovalGrant = serde_json::from_str(line).with_context(|| {
+                format!(
+                    "parse approval grant line {} in {}",
+                    index + 1,
+                    path.display()
+                )
+            })?;
+            if grant.expires_unix_ms < now {
+                continue;
+            }
+            if &grant.safety_class != safety_class {
+                continue;
+            }
+            if grant.method != method && grant.method != "*" {
+                continue;
+            }
+            return Ok(Some(grant.reason.unwrap_or_else(|| {
+                format!("approval file grant for {safety_class:?}/{method}")
+            })));
+        }
+        Ok(None)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ApprovalGrant {
+    safety_class: SafetyClass,
+    method: String,
+    expires_unix_ms: u64,
+    reason: Option<String>,
+}
+
+fn validate_approval_file_metadata(path: &Path, metadata: &fs::Metadata) -> Result<()> {
+    validate_approval_file_parent(path)?;
+    if !metadata.file_type().is_file() {
+        bail!("approval file must be a regular file: {}", path.display());
+    }
+    let uid = current_euid().context("read effective uid for approval file check")?;
+    if metadata.uid() != uid {
+        bail!(
+            "approval file {} is owned by uid {}, expected {}",
+            path.display(),
+            metadata.uid(),
+            uid
+        );
+    }
+    let mode = metadata.mode() & 0o777;
+    if mode & 0o077 != 0 {
+        bail!(
+            "approval file {} must not be readable, writable, or executable by group/other; mode is {:o}",
+            path.display(),
+            mode
+        );
+    }
+    Ok(())
+}
+
+fn validate_approval_file_parent(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("approval file has no parent: {}", path.display()))?;
+    let metadata = fs::symlink_metadata(parent)
+        .with_context(|| format!("stat approval file parent {}", parent.display()))?;
+    if !metadata.file_type().is_dir() {
+        bail!(
+            "approval file parent must be a directory: {}",
+            parent.display()
+        );
+    }
+    let uid = current_euid().context("read effective uid for approval parent check")?;
+    if metadata.uid() != uid {
+        bail!(
+            "approval file parent {} is owned by uid {}, expected {}",
+            parent.display(),
+            metadata.uid(),
+            uid
+        );
+    }
+    let mode = metadata.mode() & 0o777;
+    if mode & 0o022 != 0 {
+        bail!(
+            "approval file parent {} must not be writable by group/other; mode is {:o}",
+            parent.display(),
+            mode
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 struct KwinBridge {
     active_window_state: ActiveWindowState,
@@ -274,6 +395,7 @@ struct DaemonFileConfig {
     socket: Option<String>,
     journal: Option<String>,
     panic_stop_file: Option<String>,
+    approval_file: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -349,6 +471,9 @@ struct Args {
     #[arg(long, env = "PLASMA_PILOT_PANIC_STOP_FILE")]
     panic_stop_file: Option<PathBuf>,
 
+    #[arg(long, env = "PLASMA_PILOT_APPROVAL_FILE")]
+    approval_file: Option<PathBuf>,
+
     #[arg(long, env = "PLASMA_PILOT_ALLOW_CONTROL")]
     allow_control: bool,
 
@@ -393,6 +518,11 @@ async fn main() -> Result<()> {
         default_panic_stop_path,
     )
     .context("resolve daemon panic-stop path")?;
+    let approval_file = configured_optional_path(
+        args.approval_file,
+        daemon_file_config.and_then(|config| config.approval_file.as_deref()),
+    )
+    .context("resolve daemon approval file path")?;
 
     let policy_config = policy_config(
         file_config.policy.as_ref(),
@@ -408,6 +538,7 @@ async fn main() -> Result<()> {
         socket,
         journal,
         panic_stop_file,
+        approval_file,
         policy_config,
         app_policy,
         safety_settings,
@@ -419,12 +550,14 @@ async fn run(
     socket: PathBuf,
     journal_path: PathBuf,
     panic_stop_path: PathBuf,
+    approval_file_path: Option<PathBuf>,
     policy_config: PolicyConfig,
     app_policy: AppPolicy,
     safety_settings: SafetySettings,
 ) -> Result<()> {
     let journal = ActionJournal::new(journal_path);
     let panic_stop = PanicStopState::new(panic_stop_path);
+    let approval_store = ApprovalStore::new(approval_file_path);
     let policy = PolicyEngine::new(policy_config);
     let active_window_state = ActiveWindowState::default();
     let _kwin_bridge_connection = match start_kwin_bridge(active_window_state.clone()).await {
@@ -440,6 +573,7 @@ async fn run(
         kwin_bridge_registered,
         journal,
         panic_stop,
+        approval_store,
         policy,
         app_policy,
         safety_settings,
@@ -495,6 +629,7 @@ struct DaemonRuntime {
     kwin_bridge_registered: bool,
     journal: ActionJournal,
     panic_stop: PanicStopState,
+    approval_store: ApprovalStore,
     policy: PolicyEngine,
     app_policy: AppPolicy,
     safety_settings: SafetySettings,
@@ -574,7 +709,9 @@ fn compact_journal_title(mut title: String) -> String {
 }
 
 fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResponse {
-    if let Err(err) = enforce_policy(&runtime.policy, &request) {
+    if let Err(err) =
+        enforce_policy_with_approvals(&runtime.policy, &runtime.approval_store, &request)
+    {
         return DaemonResponse::Error {
             message: format_error_chain(&err),
         };
@@ -944,6 +1081,16 @@ fn configured_path(
         return expand_config_path(path);
     }
     default_path().map_err(Into::into)
+}
+
+fn configured_optional_path(
+    cli_path: Option<PathBuf>,
+    config_path: Option<&str>,
+) -> Result<Option<PathBuf>> {
+    if let Some(path) = cli_path {
+        return Ok(Some(path));
+    }
+    config_path.map(expand_config_path).transpose()
 }
 
 fn expand_config_path(value: &str) -> Result<PathBuf> {
@@ -1374,14 +1521,36 @@ fn parse_bool_config_value(value: &str) -> Option<bool> {
     }
 }
 
+#[cfg(test)]
 fn enforce_policy(policy: &PolicyEngine, request: &DaemonRequest) -> Result<()> {
+    enforce_policy_with_approvals(policy, &ApprovalStore::default(), request)
+}
+
+fn enforce_policy_with_approvals(
+    policy: &PolicyEngine,
+    approval_store: &ApprovalStore,
+    request: &DaemonRequest,
+) -> Result<()> {
     let safety_class = safety_class_for_request(request);
     let decision = policy.decide(&safety_class);
     match decision.level {
         ToolApprovalLevel::Allow => Ok(()),
-        ToolApprovalLevel::Prompt => bail!(
-            "policy prompt required for {safety_class:?}, but no approval channel is available"
-        ),
+        ToolApprovalLevel::Prompt => {
+            if let Some(reason) =
+                approval_store.matching_prompt_approval(&safety_class, request.method_name())?
+            {
+                info!(
+                    method = request.method_name(),
+                    safety_class = ?safety_class,
+                    reason = %reason,
+                    "prompt policy satisfied by approval file"
+                );
+                return Ok(());
+            }
+            bail!(
+                "policy prompt required for {safety_class:?}, but no matching approval grant is available"
+            )
+        }
         ToolApprovalLevel::Deny => bail!("policy denied {safety_class:?}: {}", decision.reason),
     }
 }
@@ -5105,6 +5274,7 @@ mod tests {
 socket = "$XDG_RUNTIME_DIR/plasma-pilot/configured.sock"
 journal = "$XDG_STATE_HOME/plasma-pilot/configured.jsonl"
 panic_stop_file = "$XDG_RUNTIME_DIR/plasma-pilot/configured-panic-stop"
+approval_file = "$XDG_RUNTIME_DIR/plasma-pilot/approvals.jsonl"
 
 [policy]
 default_observe = "allow"
@@ -5139,6 +5309,10 @@ height = 40
         assert_eq!(
             daemon.socket.as_deref(),
             Some("$XDG_RUNTIME_DIR/plasma-pilot/configured.sock")
+        );
+        assert_eq!(
+            daemon.approval_file.as_deref(),
+            Some("$XDG_RUNTIME_DIR/plasma-pilot/approvals.jsonl")
         );
 
         let policy = config.policy.expect("policy section is present");
@@ -5197,7 +5371,64 @@ height = 40
         });
         let err = enforce_policy(&policy, &DaemonRequest::ListWindows)
             .expect_err("prompt requires approval channel");
-        assert!(err.to_string().contains("no approval channel is available"));
+        assert!(
+            err.to_string()
+                .contains("no matching approval grant is available")
+        );
+    }
+
+    #[test]
+    fn approval_file_grant_allows_matching_prompt_policy() {
+        let root = temp_test_private_dir("approval-grant");
+        let path = root.join("approvals.jsonl");
+        write_test_approval_grant(
+            &path,
+            SafetyClass::ControlSemantic,
+            "focus_window",
+            unix_time_ms().expect("time is available") + 60_000,
+        );
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let approval_store = ApprovalStore::new(Some(path.clone()));
+
+        enforce_policy_with_approvals(
+            &policy,
+            &approval_store,
+            &DaemonRequest::FocusWindow(FocusWindowRequest {
+                window_id: "window-1".to_string(),
+                guard: None,
+            }),
+        )
+        .expect("matching approval grant allows prompt policy");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn approval_file_rejects_insecure_permissions() {
+        let root = temp_test_private_dir("approval-insecure");
+        let path = root.join("approvals.jsonl");
+        write_test_approval_grant(
+            &path,
+            SafetyClass::ControlSemantic,
+            "focus_window",
+            unix_time_ms().expect("time is available") + 60_000,
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("permissions update");
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let approval_store = ApprovalStore::new(Some(path.clone()));
+
+        let err = enforce_policy_with_approvals(
+            &policy,
+            &approval_store,
+            &DaemonRequest::FocusWindow(FocusWindowRequest {
+                window_id: "window-1".to_string(),
+                guard: None,
+            }),
+        )
+        .expect_err("insecure approval file is rejected");
+        assert!(err.to_string().contains("must not be readable"));
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -6880,5 +7111,37 @@ height = 40
             std::process::id(),
             unix_time_ms().expect("time is available")
         ))
+    }
+
+    fn temp_test_private_dir(name: &str) -> PathBuf {
+        let path = temp_test_path(name);
+        fs::create_dir_all(&path).expect("private test dir is created");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+            .expect("private test dir permissions are strict");
+        path
+    }
+
+    fn write_test_approval_grant(
+        path: &Path,
+        safety_class: SafetyClass,
+        method: &str,
+        expires_unix_ms: u64,
+    ) {
+        let grant = serde_json::json!({
+            "safety_class": safety_class,
+            "method": method,
+            "expires_unix_ms": expires_unix_ms,
+            "reason": "test approval",
+        });
+        fs::write(
+            path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&grant).expect("approval grant serializes")
+            ),
+        )
+        .expect("approval grant is written");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .expect("approval file permissions are strict");
     }
 }

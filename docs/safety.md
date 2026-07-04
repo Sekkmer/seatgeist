@@ -3,16 +3,17 @@
 Default rules:
 
 - Observe is allowed; control defaults to prompt.
-- Destructive semantic actions default to prompt and fail closed until a trusted approval channel or explicit local allow policy exists.
+- Destructive semantic actions default to prompt and require a matching approval-file grant or explicit local allow policy.
 - Clipboard reads default to prompt.
 - Clipboard writes default to allow, but still flow through policy and the action journal.
 - Secret/password fields default to deny.
-- Full-resolution screenshots default to prompt and require an explicit daemon approval mode before the backend capture path runs.
+- Full-resolution screenshots default to prompt and require a matching approval-file grant or explicit daemon approval mode before the backend capture path runs.
 - Privileged input backends default to prompt.
 - Focus guards should be supplied for pointer, keyboard, and semantic control actions whenever the caller has active-window context.
 - Daemon requests are journaled as compact JSONL records with restrictive file permissions. Journal entries include safety class and guard/context metadata, but must not store raw request payload text or screenshot contents.
-- Daemon requests pass through the policy engine before execution; prompt-level decisions fail closed until a trusted approval channel is implemented.
+- Daemon requests pass through the policy engine before execution; prompt-level decisions fail closed unless a configured approval file contains a matching unexpired method/safety-class grant.
 - The daemon reads optional path and policy defaults from `~/.config/plasma-pilot/config.toml` or `--config` / `PLASMA_PILOT_CONFIG`. Explicit CLI/env approval flags override file policy defaults for intentional local sessions.
+- Approval files are opt-in through `--approval-file`, `PLASMA_PILOT_APPROVAL_FILE`, or `[daemon].approval_file`; the daemon rejects approval files that are not regular files, not owned by the daemon uid, readable/writable/executable by group or other, or located in a parent directory writable by group or other.
 - Configured app deny rules block control-class actions before backend execution. If an app allow list is configured, control-class actions require a matching app id; deny rules take precedence.
 - `[policy].destructive_actions` applies to requests explicitly marked `destructive` and to high-level button/menu labels that obviously imply delete, remove, discard, quit, shutdown, restart, or similar state loss.
 - `[policy].secret_fields` applies to high-level text-field targets whose names look secret-related, and defaults to deny.
@@ -28,7 +29,7 @@ Default rules:
 - Clipboard journal entries and compact MCP status text must not echo clipboard contents; they should report metadata such as text length.
 - Clipboard read tools should be bounded by default and require an explicit full-read option for unbounded content.
 - AT-SPI password-text nodes are marked sensitive and excluded from current semantic action candidates.
-- AT-SPI invoke is semantic control: it may only run through the policy engine and action journal, and defaults to prompt/deny when no approval channel is available.
+- AT-SPI invoke is semantic control: it may only run through the policy engine and action journal, and defaults to prompt/deny when no matching approval grant is available.
 - AT-SPI set-text is semantic control: it must reject sensitive nodes by default and journal replacement length rather than replacement contents.
 - AT-SPI insert-text is semantic control: it must reject sensitive nodes by default and journal inserted-text length plus offset rather than inserted contents.
 - AT-SPI delete-text is semantic control: it must reject sensitive nodes by default and journal only the deleted offset range, not deleted contents.

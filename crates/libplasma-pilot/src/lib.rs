@@ -22,7 +22,8 @@ pub use protocol::{
     WaitForChangeResult,
 };
 pub use runtime::{
-    current_egid, current_euid, default_journal_path, default_panic_stop_path, default_socket_path,
+    current_egid, current_euid, default_approval_file_path, default_journal_path,
+    default_panic_stop_path, default_socket_path,
 };
 pub use types::{
     AccessibilityAction, AccessibilityBounds, AccessibilityNode, BackendCapability,
