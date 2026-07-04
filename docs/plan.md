@@ -899,7 +899,7 @@ Tasks:
 - [x] Finalize `plugin/.codex-plugin/plugin.json`. Current status: manifest has real author, license, keyword, interface, skills, and MCP metadata with relative paths.
 - [x] Finalize `plugin/.mcp.json`. Current status: bundled MCP config points at `plasma-pilot-mcp --stdio`, with daemon socket resolution handled by the MCP/daemon defaults or `PLASMA_PILOT_SOCKET`.
 - [x] Write the four skills. Current status: the skills describe current `plasma.*` MCP tools, safety guards, observation flow, browser debugging, GUI testing, and desktop triage.
-- [x] Create hook skeleton. Current status: `plugin/hooks/hooks.json` now enables one Codex `Stop` command hook that writes a fail-open local audit summary under `target/plasma-pilot-hook-audit/latest.json`; Codex still requires the normal `/hooks` trust review before non-managed plugin hooks run.
+- [x] Create hook skeleton. Current status: `plugin/hooks/hooks.json` now enables one Codex `Stop` command hook that writes a fail-open local audit summary under `target/plasma-pilot-hook-audit/latest.json`; the summary includes repo status, recent compact journal entries, method/safety-class counts, failure examples, unguarded-control examples, and last active-window context. Codex still requires the normal `/hooks` trust review before non-managed plugin hooks run.
 - [x] Add plugin install instructions. Current status: `docs/plugin.md` documents bundle contents, preconditions, validation, and local-use examples.
 - [x] Add examples:
   - “Open Kate and type hello.”
@@ -1103,7 +1103,7 @@ v0.2 is complete when:
 - Semantic button/text/menu actions work for common KDE apps.
 - Coordinate mapping is reliable with scaling and multiple monitors.
 - Window guards are used by default. Current status: `[safety].require_focus_guard` defaults to true, so every control-class request must include an active-window guard before backend execution unless a scoped local development config explicitly opts out.
-- Plugin hooks provide useful audit summaries.
+- Plugin hooks provide useful audit summaries. Current status: the Stop hook writes compact repo/journal metadata plus aggregate counts for failures, control actions, unguarded control actions, methods, safety classes, and last active-window context; `make validate-plugin` verifies the aggregation behavior.
 - Docs explain installation on Arch Linux/KDE Plasma 6. Current status: `docs/arch-kde-install.md` covers package prerequisites, binary install, config, user service, KWin bridge, safe diagnostics, optional uinput, Codex plugin validation, approval flow, and troubleshooting.
 
 ## 22. Development priority

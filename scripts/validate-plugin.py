@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import re
 import sys
 from pathlib import Path
@@ -147,8 +148,85 @@ def validate_hooks(path: Path) -> None:
     if handler.get("timeout") != 10:
         fail("PlasmaPilot hook timeout must be 10 seconds")
     require_string(handler, "statusMessage", "PlasmaPilot hook")
-    if not (path.parent / "plasma_audit_summary.py").is_file():
+    hook_script = path.parent / "plasma_audit_summary.py"
+    if not hook_script.is_file():
         fail("PlasmaPilot hook script is missing")
+    validate_hook_summary_script(hook_script)
+
+
+def validate_hook_summary_script(path: Path) -> None:
+    spec = importlib.util.spec_from_file_location("plasma_audit_summary", path)
+    if spec is None or spec.loader is None:
+        fail("PlasmaPilot hook script cannot be imported")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    summarize_journal = getattr(module, "summarize_journal", None)
+    if not callable(summarize_journal):
+        fail("PlasmaPilot hook script must expose summarize_journal")
+
+    audit = summarize_journal(
+        [
+            {
+                "journal": "target/plasma-pilot-smoke-journal.jsonl",
+                "sequence": 1,
+                "method": "observe",
+                "ok": True,
+                "safety_class": "observe",
+                "guard_present": False,
+                "summary": "observe 1 monitors 1 windows",
+            },
+            {
+                "journal": "target/plasma-pilot-smoke-journal.jsonl",
+                "sequence": 2,
+                "method": "type_text",
+                "ok": False,
+                "safety_class": "control_keyboard",
+                "guard_present": False,
+                "active_window_before": {
+                    "id": "window-1",
+                    "app_id": "org.kde.kate",
+                    "title": "scratch.txt",
+                },
+                "summary": "focus guard is required",
+            },
+            {
+                "journal": "target/plasma-pilot-smoke-journal.jsonl",
+                "sequence": 3,
+                "method": "click_button",
+                "ok": True,
+                "safety_class": "control_semantic",
+                "guard_present": True,
+                "active_window_after": {
+                    "id": "window-1",
+                    "app_id": "org.kde.kate",
+                    "title": "scratch.txt",
+                },
+                "summary": "clicked button name=OK",
+            },
+        ]
+    )
+
+    expected = {
+        "entry_count": 3,
+        "ok_count": 2,
+        "failure_count": 1,
+        "control_count": 2,
+        "unguarded_control_count": 1,
+    }
+    for key, value in expected.items():
+        if audit.get(key) != value:
+            fail(f"PlasmaPilot hook audit {key} expected {value}, got {audit.get(key)}")
+    if audit.get("methods", {}).get("type_text") != 1:
+        fail("PlasmaPilot hook audit must count methods")
+    if audit.get("safety_classes", {}).get("control_keyboard") != 1:
+        fail("PlasmaPilot hook audit must count safety classes")
+    if not audit.get("recent_failures"):
+        fail("PlasmaPilot hook audit must include recent failures")
+    if not audit.get("unguarded_control_examples"):
+        fail("PlasmaPilot hook audit must include unguarded control examples")
+    last_window = audit.get("last_active_window")
+    if not isinstance(last_window, dict) or last_window.get("app_id") != "org.kde.kate":
+        fail("PlasmaPilot hook audit must include last active window context")
 
 
 def validate_skills(skills_root: Path) -> None:
