@@ -4595,19 +4595,21 @@ fn summarize_response(response: &DaemonResponse) -> String {
         }
         DaemonResponse::ActiveWindow(None) => "no active window".to_string(),
         DaemonResponse::Screenshot(info) => format!(
-            "screenshot {}x{} from {}x{} path={}",
+            "screenshot {}x{} from {}x{} backend={} path={}",
             info.output_width,
             info.output_height,
             info.source_width,
             info.source_height,
+            info.backend,
             info.path.display()
         ),
         DaemonResponse::WaitForChange(result) => format!(
-            "wait_for_change changed={} captures={} score={:.6} threshold={:.6} path={}",
+            "wait_for_change changed={} captures={} score={:.6} threshold={:.6} backend={} path={}",
             result.changed,
             result.captures,
             result.score,
             result.threshold,
+            result.screenshot.backend,
             result.screenshot.path.display()
         ),
         DaemonResponse::ClipboardText(text) => format!(
@@ -4998,6 +5000,25 @@ mod tests {
             }),
         )
         .expect("bounded screenshot requests are allowed by default");
+    }
+
+    #[test]
+    fn screenshot_summaries_include_backend_provenance() {
+        let screenshot = sample_screenshot_info("spectacle");
+        let summary = summarize_response(&DaemonResponse::Screenshot(screenshot.clone()));
+        assert!(summary.contains("backend=spectacle"));
+
+        let summary = summarize_response(&DaemonResponse::WaitForChange(Box::new(
+            WaitForChangeResult {
+                changed: true,
+                captures: 2,
+                elapsed_ms: 250,
+                score: 0.25,
+                threshold: 0.01,
+                screenshot,
+            },
+        )));
+        assert!(summary.contains("backend=spectacle"));
     }
 
     #[test]
@@ -7444,6 +7465,27 @@ height = 40
             client_library_available,
             socket_env_present,
             setup_hint: String::new(),
+        }
+    }
+
+    fn sample_screenshot_info(backend: &str) -> ScreenshotInfo {
+        ScreenshotInfo {
+            path: PathBuf::from("/tmp/plasma-pilot-summary.png"),
+            backend: backend.to_string(),
+            source_width: 7680,
+            source_height: 4320,
+            output_width: 1600,
+            output_height: 900,
+            transform: ScreenshotTransform {
+                source_coordinate_space: CoordinateSpace::PhysicalPixel,
+                output_coordinate_space: CoordinateSpace::PhysicalPixel,
+                source_origin_x: 0,
+                source_origin_y: 0,
+                scale_x: 1600.0 / 7680.0,
+                scale_y: 900.0 / 4320.0,
+            },
+            coordinate_space: CoordinateSpace::PhysicalPixel,
+            monitors: Vec::new(),
         }
     }
 
