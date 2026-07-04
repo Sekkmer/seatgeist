@@ -21,6 +21,7 @@ enum Command {
     Doctor,
     Capabilities,
     PolicyStatus,
+    Monitors,
     Screenshot {
         #[arg(long)]
         output: String,
@@ -53,6 +54,7 @@ fn main() -> Result<()> {
         Command::Doctor => print_daemon_response(&socket, DaemonRequest::Health)?,
         Command::Capabilities => print_daemon_response(&socket, DaemonRequest::Capabilities)?,
         Command::PolicyStatus => print_daemon_response(&socket, DaemonRequest::PolicyStatus)?,
+        Command::Monitors => print_daemon_response(&socket, DaemonRequest::ListMonitors)?,
         Command::Screenshot {
             output,
             max_edge,

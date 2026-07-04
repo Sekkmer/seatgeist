@@ -429,6 +429,7 @@ version = "0.1.0"
 dependencies = [
  "libplasma-pilot",
  "plasma-pilot-backend",
+ "serde_json",
 ]
 
 [[package]]
@@ -462,6 +463,7 @@ dependencies = [
  "clap",
  "image",
  "libplasma-pilot",
+ "plasma-pilot-kwin",
  "plasma-pilot-policy",
  "serde_json",
  "tokio",

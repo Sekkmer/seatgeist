@@ -63,6 +63,7 @@ pub enum DaemonRequest {
     Health,
     Capabilities,
     PolicyStatus,
+    ListMonitors,
     Screenshot(ScreenshotRequest),
 }
 
@@ -72,6 +73,7 @@ pub enum DaemonResponse {
     Health(HealthStatus),
     Capabilities(CapabilitySet),
     PolicyStatus(PolicyStatus),
+    Monitors(Vec<MonitorInfo>),
     Screenshot(ScreenshotInfo),
     Error { message: String },
 }
@@ -127,5 +129,12 @@ mod tests {
         assert!(encoded.contains(r#""method":"screenshot""#));
         assert!(encoded.contains(r#"/tmp/plasma-pilot.png"#));
         assert!(encoded.contains(r#""max_edge":1600"#));
+    }
+
+    #[test]
+    fn serializes_monitor_response_with_type_tag() {
+        let response = DaemonResponse::Monitors(Vec::new());
+        let encoded = serde_json::to_string(&response).expect("monitor response serializes");
+        assert_eq!(encoded, r#"{"type":"monitors","data":[]}"#);
     }
 }

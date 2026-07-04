@@ -101,6 +101,12 @@ fn handle_request(request: DaemonRequest) -> DaemonResponse {
         DaemonRequest::Health => DaemonResponse::Health(health()),
         DaemonRequest::Capabilities => DaemonResponse::Capabilities(capabilities()),
         DaemonRequest::PolicyStatus => DaemonResponse::PolicyStatus(policy_status()),
+        DaemonRequest::ListMonitors => match list_monitors() {
+            Ok(monitors) => DaemonResponse::Monitors(monitors),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::Screenshot(request) => match capture_screenshot(request) {
             Ok(info) => DaemonResponse::Screenshot(info),
             Err(err) => DaemonResponse::Error {
@@ -140,6 +146,9 @@ fn current_capabilities() -> Vec<BackendCapability> {
     ];
     if command_exists("spectacle") {
         capabilities.push(BackendCapability::Screenshot);
+    }
+    if command_exists("qdbus6") {
+        capabilities.push(BackendCapability::MonitorMetadata);
     }
     capabilities
 }
@@ -207,6 +216,7 @@ fn capture_screenshot(request: ScreenshotRequest) -> Result<ScreenshotInfo> {
     if capture_output != request.output {
         fs::remove_file(&capture_output).ok();
     }
+    let monitors = list_monitors().unwrap_or_default();
 
     Ok(ScreenshotInfo {
         path: request.output,
@@ -224,8 +234,12 @@ fn capture_screenshot(request: ScreenshotRequest) -> Result<ScreenshotInfo> {
             scale_y: f64::from(output_height) / f64::from(source_height),
         },
         coordinate_space: CoordinateSpace::PhysicalPixel,
-        monitors: Vec::new(),
+        monitors,
     })
+}
+
+fn list_monitors() -> Result<Vec<libplasma_pilot::MonitorInfo>> {
+    plasma_pilot_kwin::list_monitors().map_err(|err| anyhow::anyhow!(err))
 }
 
 fn temporary_capture_path(output: &Path) -> PathBuf {

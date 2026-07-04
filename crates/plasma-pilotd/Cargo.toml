@@ -19,6 +19,7 @@ clap.workspace = true
 image.workspace = true
 libplasma-pilot.workspace = true
 plasma-pilot-policy.workspace = true
+plasma-pilot-kwin.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true

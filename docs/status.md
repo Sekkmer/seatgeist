@@ -18,4 +18,6 @@ Phase 1 first slice is implemented:
 - The daemon and CLI can capture a full-screen PNG through Spectacle when run in the host KDE session. The smoke capture on this workstation returned a 7680x4320 source image.
 - Screenshot output now defaults to a bounded preview. On the 8K workstation, the default CLI screenshot produced a 1600x900 PNG with source/output dimensions and scale metadata; `--full-resolution` produced a 7680x4320 PNG with scale `1.0`.
 - Spectacle captures are serialized inside the daemon because concurrent Spectacle captures can race.
-- Input, KWin metadata, AT-SPI, real MCP tools, screenshot tiling, and journaling remain future work.
+- `plasma-pilot-cli monitors` now reports KWin monitor metadata from `org.kde.KWin.supportInformation`; on this workstation it reports `HDMI-A-2` as 5120x2880 logical at scale 1.5, matching the 7680x4320 screenshot source.
+- Screenshot responses include the same monitor metadata when KWin responds.
+- Input, AT-SPI, real MCP tools, screenshot tiling, and journaling remain future work.

@@ -1,7 +1,7 @@
 SHELL := /usr/bin/bash
 .ONESHELL:
 
-.PHONY: fmt check test clippy verify smoke
+.PHONY: fmt check test clippy verify smoke smoke-monitors
 
 fmt:
 	cargo fmt --all
@@ -46,3 +46,28 @@ smoke:
 	cargo run -p plasma-pilot-cli -- --socket "$$socket" policy-status
 	test "$$(stat -c '%a' target/plasma-pilot-smoke)" = "700"
 	test "$$(stat -c '%a' "$$socket")" = "600"
+
+smoke-monitors:
+	set -euo pipefail
+	socket="/tmp/plasma-pilot-monitor-smoke/plasma-pilotd.sock"
+	log="target/plasma-pilot-monitor-smoke-daemon.log"
+	rm -rf /tmp/plasma-pilot-monitor-smoke "$$log"
+	cargo build -p plasma-pilotd -p plasma-pilot-cli
+	target/debug/plasma-pilotd --socket "$$socket" >"$$log" 2>&1 &
+	pid=$$!
+	cleanup() {
+		kill "$$pid" 2>/dev/null || true
+		wait "$$pid" 2>/dev/null || true
+	}
+	trap cleanup EXIT
+	for _ in {1..50}; do
+		if [[ -S "$$socket" ]]; then
+			break
+		fi
+		sleep 0.1
+	done
+	if [[ ! -S "$$socket" ]]; then
+		cat "$$log"
+		exit 1
+	fi
+	target/debug/plasma-pilot-cli --socket "$$socket" monitors

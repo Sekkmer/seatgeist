@@ -13,5 +13,8 @@ description = "KWin integration backend for PlasmaPilot."
 libplasma-pilot.workspace = true
 plasma-pilot-backend.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [lints]
 workspace = true

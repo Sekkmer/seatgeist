@@ -774,7 +774,7 @@ Tasks:
 - Implement a KDE/Wayland screenshot backend. Initial implementation uses Spectacle as a command backend.
 - Prefer a backend that works on Plasma 6 without manual prompts once trusted/configured.
 - Add fallback backend using command-line tools if needed.
-- Return monitor geometry and scale info.
+- Return monitor geometry and scale info. Initial implementation parses KWin support information.
 - Save screenshots to `$XDG_RUNTIME_DIR/plasma-pilot/screenshots/`.
 - Add `plasma-pilot-cli screenshot`.
 - Add default downscaled previews and explicit full-resolution capture.
@@ -785,7 +785,7 @@ Acceptance criteria:
 
 - CLI can capture current screen to PNG.
 - Screenshot response includes coordinate metadata, source dimensions, output dimensions, and preview scale factors.
-- Multi-monitor metadata is correct or explicitly marked unsupported. Initial Spectacle backend returns an empty monitor list until KWin/portal metadata is wired.
+- Multi-monitor metadata is correct or explicitly marked unsupported. Initial implementation reports KWin logical geometry, physical pixel dimensions derived from scale, origin, and scale factor.
 
 ### Phase 3: uinput keyboard and pointer control
 
