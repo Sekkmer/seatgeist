@@ -942,7 +942,7 @@ Goal: prevent regressions and measure usefulness.
 
 Tasks:
 
-- Add mock backends for unit tests.
+- Add mock backends for unit tests. Current status: `plasma-pilot-testkit` provides deterministic screen, window, input, clipboard, and accessibility mocks with call recording.
 - Add integration tests for CLI and daemon protocol. Current status: daemon core protocol and low-risk CLI status commands have Rust integration tests; GUI/desktop CLI coverage remains in smoke targets.
 - Add optional local GUI eval scripts.
 - Add replayable action traces.

@@ -625,7 +625,10 @@ dependencies = [
 name = "plasma-pilot-testkit"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "libplasma-pilot",
+ "plasma-pilot-backend",
+ "tokio",
 ]
 
 [[package]]

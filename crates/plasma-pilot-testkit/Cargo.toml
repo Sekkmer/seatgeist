@@ -10,7 +10,12 @@ homepage.workspace = true
 description = "Mock backends and fixtures for PlasmaPilot tests."
 
 [dependencies]
+async-trait.workspace = true
 libplasma-pilot.workspace = true
+plasma-pilot-backend.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
 
 [lints]
 workspace = true
