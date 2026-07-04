@@ -19,8 +19,8 @@ use libplasma_pilot::{
     ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse, DesktopObservation,
     FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus, JournalEntry,
     ObserveRequest, PolicyStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest,
-    ScreenshotTileRequest, ScreenshotTransform, ToolApprovalLevel, WindowGeometry, WindowInfo,
-    current_euid, default_journal_path, default_socket_path,
+    ScreenshotTileRequest, ScreenshotTransform, SetTextFieldRequest, ToolApprovalLevel,
+    WindowGeometry, WindowInfo, current_euid, default_journal_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -411,6 +411,12 @@ fn handle_request(
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::SetTextField(request) => match set_text_field(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::JournalTail(request) => match journal.tail(request.limit) {
             Ok(entries) => DaemonResponse::Journal(entries),
             Err(err) => DaemonResponse::Error {
@@ -491,7 +497,8 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         DaemonRequest::FocusWindow(_)
         | DaemonRequest::AccessibilityInvoke(_)
         | DaemonRequest::AccessibilitySetText(_)
-        | DaemonRequest::ClickButton(_) => SafetyClass::ControlSemantic,
+        | DaemonRequest::ClickButton(_)
+        | DaemonRequest::SetTextField(_) => SafetyClass::ControlSemantic,
     }
 }
 
@@ -877,6 +884,39 @@ fn click_button(request: ClickButtonRequest) -> Result<ActionResult> {
     })
 }
 
+fn set_text_field(request: SetTextFieldRequest) -> Result<ActionResult> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        bail!("text field name must be non-empty");
+    }
+    if request.max_nodes == 0 {
+        bail!("max_nodes must be greater than zero");
+    }
+
+    let matches = accessibility_find(AccessibilityFindRequest {
+        role: None,
+        name_contains: Some(name.to_string()),
+        app: request.app.clone(),
+        window_name_contains: request.window_name_contains.clone(),
+        depth: 0,
+        max_results: 10,
+        max_nodes: request.max_nodes,
+    })?;
+    let target = resolve_text_field_match(name, matches)?;
+    plasma_pilot_atspi::set_text(&target.id, &request.text).map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "set text field name={} length={} node={}",
+            target.name.as_deref().unwrap_or(name),
+            request.text.chars().count(),
+            target.id
+        )),
+    })
+}
+
 fn resolve_click_button_match(
     name: &str,
     matches: Vec<libplasma_pilot::AccessibilityNode>,
@@ -926,6 +966,65 @@ fn resolve_click_button_match(
         "ambiguous button match for name={name}: {} candidates: {choices}",
         viable.len()
     );
+}
+
+fn resolve_text_field_match(
+    name: &str,
+    matches: Vec<libplasma_pilot::AccessibilityNode>,
+) -> Result<libplasma_pilot::AccessibilityNode> {
+    let mut viable = matches
+        .into_iter()
+        .filter(|node| !node.sensitive)
+        .filter(is_text_field_candidate)
+        .collect::<Vec<_>>();
+    if viable.is_empty() {
+        bail!("no non-sensitive text field matched name={name}");
+    }
+
+    let exact = viable
+        .iter()
+        .filter(|node| {
+            node.name
+                .as_deref()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !exact.is_empty() {
+        viable = exact;
+    }
+
+    if viable.len() == 1 {
+        return Ok(viable.remove(0));
+    }
+
+    let choices = viable
+        .iter()
+        .take(5)
+        .map(|node| {
+            format!(
+                "{}:{}",
+                node.id,
+                node.name.as_deref().unwrap_or("<unnamed>")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    bail!(
+        "ambiguous text field match for name={name}: {} candidates: {choices}",
+        viable.len()
+    );
+}
+
+fn is_text_field_candidate(node: &libplasma_pilot::AccessibilityNode) -> bool {
+    let role = node.role.to_ascii_lowercase();
+    role == "text"
+        || role == "entry"
+        || role == "text input"
+        || role == "editable text"
+        || node
+            .actions
+            .contains(&libplasma_pilot::AccessibilityAction::SetText)
 }
 
 fn temporary_capture_path(output: &Path) -> PathBuf {
@@ -1434,6 +1533,23 @@ mod tests {
     }
 
     #[test]
+    fn set_text_field_is_control_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::SetTextField(SetTextFieldRequest {
+                name: "Search".to_string(),
+                text: "query".to_string(),
+                app: Some("kate".to_string()),
+                window_name_contains: Some("settings".to_string()),
+                max_nodes: 256,
+            }),
+        )
+        .expect_err("set text field requires control approval by default");
+        assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
     fn click_button_resolver_prefers_exact_match() {
         let target = resolve_click_button_match(
             "OK",
@@ -1459,6 +1575,38 @@ mod tests {
         sensitive.sensitive = true;
         let err = resolve_click_button_match("Delete", vec![sensitive])
             .expect_err("sensitive buttons are not viable");
+        assert!(err.to_string().contains("no non-sensitive"));
+    }
+
+    #[test]
+    fn text_field_resolver_prefers_exact_match() {
+        let target = resolve_text_field_match(
+            "Search",
+            vec![
+                text_node("1", "Search everywhere"),
+                text_node("2", "Search"),
+            ],
+        )
+        .expect("exact text field resolves");
+        assert_eq!(target.id, "2");
+    }
+
+    #[test]
+    fn text_field_resolver_refuses_ambiguous_matches() {
+        let err = resolve_text_field_match(
+            "Search",
+            vec![text_node("1", "Search"), text_node("2", "Search")],
+        )
+        .expect_err("multiple exact text fields are ambiguous");
+        assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn text_field_resolver_requires_non_sensitive_text_field() {
+        let mut sensitive = text_node("1", "Password");
+        sensitive.sensitive = true;
+        let err = resolve_text_field_match("Password", vec![sensitive])
+            .expect_err("sensitive text fields are not viable");
         assert!(err.to_string().contains("no non-sensitive"));
     }
 
@@ -1578,6 +1726,22 @@ mod tests {
             bounds: None,
             available_actions: vec!["click".to_string()],
             actions: vec![libplasma_pilot::AccessibilityAction::Press],
+            children: Vec::new(),
+        }
+    }
+
+    fn text_node(id: &str, name: &str) -> libplasma_pilot::AccessibilityNode {
+        libplasma_pilot::AccessibilityNode {
+            id: id.to_string(),
+            role: "text".to_string(),
+            name: Some(name.to_string()),
+            value: None,
+            value_truncated: false,
+            sensitive: false,
+            states: Vec::new(),
+            bounds: None,
+            available_actions: Vec::new(),
+            actions: vec![libplasma_pilot::AccessibilityAction::SetText],
             children: Vec::new(),
         }
     }

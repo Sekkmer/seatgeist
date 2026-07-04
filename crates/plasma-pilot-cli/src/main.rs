@@ -7,7 +7,7 @@ use libplasma_pilot::{
     AccessibilitySetTextRequest, ClickButtonRequest, ClipboardGetRequest, ClipboardSetRequest,
     DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse, FocusWindowRequest,
     FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest, ScreenshotRequest,
-    ScreenshotTileRequest, default_socket_path,
+    ScreenshotTileRequest, SetTextFieldRequest, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -141,6 +141,18 @@ enum SemanticCommand {
     ClickButton {
         #[arg(long)]
         name: String,
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long)]
+        window_name_contains: Option<String>,
+        #[arg(long, default_value_t = 1024)]
+        max_nodes: usize,
+    },
+    SetTextField {
+        #[arg(long)]
+        name: String,
+        #[arg(value_name = "TEXT")]
+        text: String,
         #[arg(long)]
         app: Option<String>,
         #[arg(long)]
@@ -318,6 +330,25 @@ fn main() -> Result<()> {
             &socket,
             DaemonRequest::ClickButton(ClickButtonRequest {
                 name,
+                app,
+                window_name_contains,
+                max_nodes,
+            }),
+        )?,
+        Command::Semantic {
+            command:
+                SemanticCommand::SetTextField {
+                    name,
+                    text,
+                    app,
+                    window_name_contains,
+                    max_nodes,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::SetTextField(SetTextFieldRequest {
+                name,
+                text,
                 app,
                 window_name_contains,
                 max_nodes,

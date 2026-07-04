@@ -11,7 +11,7 @@ use libplasma_pilot::{
     AccessibilitySetTextRequest, ClickButtonRequest, ClipboardGetRequest, ClipboardSetRequest,
     DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse, FocusWindowRequest,
     FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest, ScreenshotRequest,
-    ScreenshotTileRequest, default_socket_path,
+    ScreenshotTileRequest, SetTextFieldRequest, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -330,6 +330,16 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 .transpose()?
                 .unwrap_or(1024),
         })),
+        "plasma.set_text_field" => Ok(DaemonRequest::SetTextField(SetTextFieldRequest {
+            name: required_string(arguments, "name")?,
+            text: required_string(arguments, "text")?,
+            app: optional_string(arguments, "app")?,
+            window_name_contains: optional_string(arguments, "window_name_contains")?,
+            max_nodes: optional_u64(arguments, "max_nodes")?
+                .map(u64_to_usize)
+                .transpose()?
+                .unwrap_or(1024),
+        })),
         "plasma.focus_window" => Ok(DaemonRequest::FocusWindow(FocusWindowRequest {
             window_id: required_string(arguments, "window_id")?,
         })),
@@ -564,6 +574,36 @@ fn tool_definitions() -> Vec<Value> {
                     ),
                 ],
                 vec!["name"],
+            ),
+        ),
+        tool(
+            "plasma.set_text_field",
+            "Set Text Field",
+            "Find a named non-sensitive AT-SPI text field and replace its contents only when exactly one viable match is found. This is policy-gated semantic control and summaries report text length only.",
+            object_schema(
+                vec![
+                    (
+                        "name",
+                        json!({"type": "string", "description": "Accessible text field name to match."}),
+                    ),
+                    (
+                        "text",
+                        json!({"type": "string", "description": "Replacement text for the matched field."}),
+                    ),
+                    (
+                        "app",
+                        json!({"type": "string", "description": "Optional application accessible-name guard."}),
+                    ),
+                    (
+                        "window_name_contains",
+                        json!({"type": "string", "description": "Optional containing frame/dialog/window accessible-name guard."}),
+                    ),
+                    (
+                        "max_nodes",
+                        json!({"type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum accessibility nodes to scan. Defaults to 1024."}),
+                    ),
+                ],
+                vec!["name", "text"],
             ),
         ),
         tool(
@@ -825,6 +865,11 @@ mod tests {
         assert!(
             tools
                 .iter()
+                .any(|tool| tool["name"] == "plasma.set_text_field")
+        );
+        assert!(
+            tools
+                .iter()
                 .any(|tool| tool["name"] == "plasma.clipboard_get_text")
         );
         assert!(
@@ -903,6 +948,31 @@ mod tests {
             request,
             DaemonRequest::ClickButton(ClickButtonRequest {
                 name: "OK".to_string(),
+                app: Some("kate".to_string()),
+                window_name_contains: Some("settings".to_string()),
+                max_nodes: 256,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_set_text_field_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.set_text_field",
+            &json!({
+                "name": "Search",
+                "text": "query",
+                "app": "kate",
+                "window_name_contains": "settings",
+                "max_nodes": 256
+            }),
+        )
+        .expect("set text field args map");
+        assert_eq!(
+            request,
+            DaemonRequest::SetTextField(SetTextFieldRequest {
+                name: "Search".to_string(),
+                text: "query".to_string(),
                 app: Some("kate".to_string()),
                 window_name_contains: Some("settings".to_string()),
                 max_nodes: 256,

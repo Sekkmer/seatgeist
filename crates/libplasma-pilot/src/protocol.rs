@@ -143,6 +143,15 @@ pub struct ClickButtonRequest {
     pub max_nodes: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetTextFieldRequest {
+    pub name: String,
+    pub text: String,
+    pub app: Option<String>,
+    pub window_name_contains: Option<String>,
+    pub max_nodes: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DesktopObservation {
     pub active_window: Option<WindowInfo>,
@@ -175,6 +184,7 @@ pub enum DaemonRequest {
     AccessibilityInvoke(AccessibilityInvokeRequest),
     AccessibilitySetText(AccessibilitySetTextRequest),
     ClickButton(ClickButtonRequest),
+    SetTextField(SetTextFieldRequest),
     JournalTail(JournalTailRequest),
     FocusWindow(FocusWindowRequest),
 }
@@ -198,6 +208,7 @@ impl DaemonRequest {
             Self::AccessibilityInvoke(_) => "accessibility_invoke",
             Self::AccessibilitySetText(_) => "accessibility_set_text",
             Self::ClickButton(_) => "click_button",
+            Self::SetTextField(_) => "set_text_field",
             Self::JournalTail(_) => "journal_tail",
             Self::FocusWindow(_) => "focus_window",
         }
@@ -422,6 +433,22 @@ mod tests {
         assert!(encoded.contains(r#""name":"OK""#));
         assert!(encoded.contains(r#""app":"kate""#));
         assert!(encoded.contains(r#""window_name_contains":"settings""#));
+    }
+
+    #[test]
+    fn serializes_set_text_field_request() {
+        let request = DaemonRequest::SetTextField(SetTextFieldRequest {
+            name: "Search".to_string(),
+            text: "query".to_string(),
+            app: Some("kate".to_string()),
+            window_name_contains: Some("settings".to_string()),
+            max_nodes: 512,
+        });
+        let encoded = serde_json::to_string(&request).expect("set text field request serializes");
+        assert!(encoded.contains(r#""method":"set_text_field""#));
+        assert!(encoded.contains(r#""name":"Search""#));
+        assert!(encoded.contains(r#""text":"query""#));
+        assert!(encoded.contains(r#""app":"kate""#));
     }
 
     #[test]
