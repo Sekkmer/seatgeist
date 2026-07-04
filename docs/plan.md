@@ -164,8 +164,9 @@ Create this initial layout:
 │   ├── mcp-tools.md
 │   ├── backends.md
 │   ├── plugin.md
+│   ├── arch-kde-install.md
+│   ├── config.md
 │   ├── uinput-setup.md
-│   ├── kde-wayland-notes.md
 │   └── safety.md
 └── tests/
     ├── fixtures/
@@ -1103,7 +1104,7 @@ v0.2 is complete when:
 - Coordinate mapping is reliable with scaling and multiple monitors.
 - Window guards are used by default.
 - Plugin hooks provide useful audit summaries.
-- Docs explain installation on Arch Linux/KDE Plasma 6.
+- Docs explain installation on Arch Linux/KDE Plasma 6. Current status: `docs/arch-kde-install.md` covers package prerequisites, binary install, config, user service, KWin bridge, safe diagnostics, optional uinput, Codex plugin validation, approval flow, and troubleshooting.
 
 ## 22. Development priority
 

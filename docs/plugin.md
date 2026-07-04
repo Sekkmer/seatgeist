@@ -22,6 +22,8 @@ Start `plasma-pilotd` through the user service or a private socket before using 
 
 For development, a direct plugin source install should point at the repository's `plugin/` directory. The plugin expects `plasma-pilot-mcp` to be on `PATH` for the Codex process.
 
+For the full Arch Linux + KDE Plasma setup path, including packages, user service, KWin bridge, safe diagnostics, optional uinput, and plugin validation, see `docs/arch-kde-install.md`.
+
 ## Validation
 
 Run the repo-local plugin validator:
