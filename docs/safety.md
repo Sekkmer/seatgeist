@@ -34,6 +34,6 @@ Default rules:
 - AT-SPI delete-text is semantic control: it must reject sensitive nodes by default and journal only the deleted offset range, not deleted contents.
 - AT-SPI copy-text and cut-text are semantic control: they must reject sensitive nodes by default, must not read clipboard contents after writing the selected range to the system clipboard, and must journal only offset ranges.
 - AT-SPI paste-text is semantic control: it must reject sensitive nodes by default, must not read clipboard contents for the paste operation, and must journal only the paste offset.
-- High-level semantic actions must refuse ambiguous matches instead of choosing one candidate implicitly; ambiguity errors should include bounded non-sensitive candidate choices so the caller can disambiguate.
+- High-level semantic actions, including list/item selection, must refuse ambiguous matches instead of choosing one candidate implicitly; ambiguity errors should include bounded non-sensitive candidate choices so the caller can disambiguate.
 
 The current human-input pause uses a file-backed activity signal so a future KDE/libinput watcher can touch the file when the user takes over.

@@ -16,9 +16,9 @@ use libplasma_pilot::{
     DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
     DaemonResponse, DragPointerRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest,
     JournalTailRequest, KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton,
-    ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectMenuRequest,
-    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
-    WaitForChangeRequest, default_socket_path,
+    ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest,
+    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest,
+    ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -505,6 +505,16 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         "plasma.set_value" => Ok(DaemonRequest::SetValue(SetValueRequest {
             name: required_string(arguments, "name")?,
             value: required_f64(arguments, "value")?,
+            app: optional_string(arguments, "app")?,
+            window_name_contains: optional_string(arguments, "window_name_contains")?,
+            max_nodes: optional_u64(arguments, "max_nodes")?
+                .map(u64_to_usize)
+                .transpose()?
+                .unwrap_or(1024),
+            guard: active_window_guard(arguments)?,
+        })),
+        "plasma.select_item" => Ok(DaemonRequest::SelectItem(SelectItemRequest {
+            name: required_string(arguments, "name")?,
             app: optional_string(arguments, "app")?,
             window_name_contains: optional_string(arguments, "window_name_contains")?,
             max_nodes: optional_u64(arguments, "max_nodes")?
@@ -1170,6 +1180,32 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "plasma.select_item",
+            "Select Item",
+            "Find a named non-sensitive AT-SPI list, tree, table-row, combo-box, or option item and select/press it only when exactly one viable match is found. This is policy-gated semantic control.",
+            object_schema(
+                with_guard_properties(vec![
+                    (
+                        "name",
+                        json!({"type": "string", "description": "Accessible item or option name to match."}),
+                    ),
+                    (
+                        "app",
+                        json!({"type": "string", "description": "Optional application accessible-name guard."}),
+                    ),
+                    (
+                        "window_name_contains",
+                        json!({"type": "string", "description": "Optional containing frame/dialog/window accessible-name guard."}),
+                    ),
+                    (
+                        "max_nodes",
+                        json!({"type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum accessibility nodes to scan. Defaults to 1024."}),
+                    ),
+                ]),
+                vec!["name"],
+            ),
+        ),
+        tool(
             "plasma.select_menu",
             "Select Menu",
             "Select a visible AT-SPI menu path only when exactly one non-sensitive activatable item matches. This is policy-gated semantic control.",
@@ -1785,6 +1821,11 @@ mod tests {
         assert!(
             tools
                 .iter()
+                .any(|tool| tool["name"] == "plasma.select_item")
+        );
+        assert!(
+            tools
+                .iter()
                 .any(|tool| tool["name"] == "plasma.select_menu")
         );
         assert!(
@@ -2249,6 +2290,30 @@ mod tests {
                 value: 0.75,
                 app: Some("settings".to_string()),
                 window_name_contains: Some("sound".to_string()),
+                max_nodes: 256,
+                guard: None,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_select_item_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.select_item",
+            &json!({
+                "name": "Printer",
+                "app": "systemsettings",
+                "window_name_contains": "devices",
+                "max_nodes": 256
+            }),
+        )
+        .expect("select item args map");
+        assert_eq!(
+            request,
+            DaemonRequest::SelectItem(SelectItemRequest {
+                name: "Printer".to_string(),
+                app: Some("systemsettings".to_string()),
+                window_name_contains: Some("devices".to_string()),
                 max_nodes: 256,
                 guard: None,
             })

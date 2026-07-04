@@ -488,6 +488,16 @@ pub struct SetValueRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelectItemRequest {
+    pub name: String,
+    pub app: Option<String>,
+    pub window_name_contains: Option<String>,
+    pub max_nodes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectMenuRequest {
     pub path: Vec<String>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -560,6 +570,7 @@ pub enum DaemonRequest {
     ActivateLink(ActivateLinkRequest),
     ToggleCheck(ToggleCheckRequest),
     SetValue(SetValueRequest),
+    SelectItem(SelectItemRequest),
     SelectMenu(SelectMenuRequest),
     JournalTail(JournalTailRequest),
     FocusWindow(FocusWindowRequest),
@@ -607,6 +618,7 @@ impl DaemonRequest {
             Self::ActivateLink(_) => "activate_link",
             Self::ToggleCheck(_) => "toggle_check",
             Self::SetValue(_) => "set_value",
+            Self::SelectItem(_) => "select_item",
             Self::SelectMenu(_) => "select_menu",
             Self::JournalTail(_) => "journal_tail",
             Self::FocusWindow(_) => "focus_window",
@@ -1438,6 +1450,22 @@ mod tests {
         assert!(encoded.contains(r#""name":"Volume""#));
         assert!(encoded.contains(r#""value":0.75"#));
         assert!(encoded.contains(r#""app":"settings""#));
+    }
+
+    #[test]
+    fn serializes_select_item_request() {
+        let request = DaemonRequest::SelectItem(SelectItemRequest {
+            name: "Printer".to_string(),
+            app: Some("systemsettings".to_string()),
+            window_name_contains: Some("devices".to_string()),
+            max_nodes: 512,
+            guard: None,
+        });
+        let encoded = serde_json::to_string(&request).expect("select item request serializes");
+        assert!(encoded.contains(r#""method":"select_item""#));
+        assert!(encoded.contains(r#""name":"Printer""#));
+        assert!(encoded.contains(r#""app":"systemsettings""#));
+        assert!(encoded.contains(r#""window_name_contains":"devices""#));
     }
 
     #[test]

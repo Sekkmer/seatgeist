@@ -970,8 +970,9 @@ Tasks:
   - [x] `pilot.activate_link(name, app/window guard)` for AT-SPI links.
   - [x] `pilot.toggle_check(name, checked?, app/window guard)` for checkboxes, radio buttons, and checkable menu items.
   - [x] `pilot.set_value(name, value, app/window guard)` for sliders, spin buttons, scrollbars, and dials exposing AT-SPI Value.
-- [x] Use AT-SPI first for `click_button`, `set_text_field`, `select_menu`, `activate_tab`, `activate_link`, `toggle_check`, and `set_value`; screenshot+coordinate fallback remains future work and must only happen when safe.
-- [x] Add ambiguity refusal for `click_button`, `set_text_field`, `select_menu`, `activate_tab`, `activate_link`, `toggle_check`, and `set_value`. Current status: ambiguous semantic matches fail closed and return bounded candidate choices with node id, role, name, and action metadata so the caller can disambiguate; broader confidence scoring remains future work.
+  - [x] `pilot.select_item(name, app/window guard)` for list items, tree items, table rows, combo boxes, options, and menu-item-like choices exposing select or press.
+- [x] Use AT-SPI first for `click_button`, `set_text_field`, `select_menu`, `activate_tab`, `activate_link`, `toggle_check`, `set_value`, and `select_item`; screenshot+coordinate fallback remains future work and must only happen when safe.
+- [x] Add ambiguity refusal for `click_button`, `set_text_field`, `select_menu`, `activate_tab`, `activate_link`, `toggle_check`, `set_value`, and `select_item`. Current status: ambiguous semantic matches fail closed and return bounded candidate choices with node id, role, name, and action metadata so the caller can disambiguate; broader confidence scoring remains future work.
 
 Acceptance criteria:
 

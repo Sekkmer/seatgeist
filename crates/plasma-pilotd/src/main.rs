@@ -25,11 +25,11 @@ use libplasma_pilot::{
     ObserveRequest, PanicStopStatus, Point, PointerButton, PointerCalibrationPoint,
     PointerCalibrationStatus, PointerMonitorCalibration, PointerPhysicalBounds, PolicyStatus,
     RemoteDesktopPortalStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest,
-    ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest, SelectMenuRequest,
-    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, ToggleCheckRequest,
-    ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult,
-    WindowGeometry, WindowInfo, current_egid, current_euid, default_journal_path,
-    default_panic_stop_path, default_socket_path,
+    ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest, SelectItemRequest,
+    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest,
+    ToggleCheckRequest, ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest,
+    WaitForChangeResult, WindowGeometry, WindowInfo, current_egid, current_euid,
+    default_journal_path, default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -846,6 +846,12 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::SelectItem(request) => match select_item(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::SelectMenu(request) => match select_menu(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
             Err(err) => DaemonResponse::Error {
@@ -1576,6 +1582,7 @@ fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWin
         DaemonRequest::ActivateLink(request) => request.guard.as_ref(),
         DaemonRequest::ToggleCheck(request) => request.guard.as_ref(),
         DaemonRequest::SetValue(request) => request.guard.as_ref(),
+        DaemonRequest::SelectItem(request) => request.guard.as_ref(),
         DaemonRequest::SelectMenu(request) => request.guard.as_ref(),
         _ => None,
     }
@@ -1663,7 +1670,8 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         DaemonRequest::ActivateTab(_)
         | DaemonRequest::ActivateLink(_)
         | DaemonRequest::ToggleCheck(_)
-        | DaemonRequest::SetValue(_) => SafetyClass::ControlSemantic,
+        | DaemonRequest::SetValue(_)
+        | DaemonRequest::SelectItem(_) => SafetyClass::ControlSemantic,
     }
 }
 
@@ -3064,6 +3072,39 @@ fn set_value(request: SetValueRequest) -> Result<ActionResult> {
     })
 }
 
+fn select_item(request: SelectItemRequest) -> Result<ActionResult> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        bail!("item name must be non-empty");
+    }
+    if request.max_nodes == 0 {
+        bail!("max_nodes must be greater than zero");
+    }
+
+    let matches = accessibility_find(AccessibilityFindRequest {
+        role: None,
+        name_contains: Some(name.to_string()),
+        app: request.app.clone(),
+        window_name_contains: request.window_name_contains.clone(),
+        depth: 0,
+        max_results: 10,
+        max_nodes: request.max_nodes,
+    })?;
+    let (target, action) = resolve_select_item_match(name, matches)?;
+    plasma_pilot_atspi::invoke(&target.id, action.clone()).map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "selected item name={} action={} node={}",
+            target.name.as_deref().unwrap_or(name),
+            action.as_str(),
+            target.id
+        )),
+    })
+}
+
 fn select_menu(request: SelectMenuRequest) -> Result<ActionResult> {
     let path = normalize_semantic_path(&request.path);
     if path.is_empty() {
@@ -3338,6 +3379,49 @@ fn resolve_value_match(
     );
 }
 
+fn resolve_select_item_match(
+    name: &str,
+    matches: Vec<libplasma_pilot::AccessibilityNode>,
+) -> Result<(
+    libplasma_pilot::AccessibilityNode,
+    libplasma_pilot::AccessibilityAction,
+)> {
+    let mut viable = matches
+        .into_iter()
+        .filter(|node| !node.sensitive)
+        .filter(is_select_item_candidate)
+        .collect::<Vec<_>>();
+    if viable.is_empty() {
+        bail!("no non-sensitive selectable item matched name={name}");
+    }
+
+    let exact = viable
+        .iter()
+        .filter(|node| {
+            node.name
+                .as_deref()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !exact.is_empty() {
+        viable = exact;
+    }
+
+    if viable.len() == 1 {
+        let node = viable.remove(0);
+        let action = select_item_activation_action(&node)
+            .ok_or_else(|| anyhow::anyhow!("item has no select or press action"))?;
+        return Ok((node, action));
+    }
+
+    let choices = semantic_choice_summary(&viable);
+    bail!(
+        "ambiguous item match for name={name}: {} candidates; choices=[{choices}]",
+        viable.len()
+    );
+}
+
 fn collect_menu_path_candidates(
     node: &libplasma_pilot::AccessibilityNode,
     path: &[String],
@@ -3489,6 +3573,39 @@ fn is_menu_item_candidate(node: &libplasma_pilot::AccessibilityNode) -> bool {
         node.role.to_ascii_lowercase().as_str(),
         "menu item" | "check menu item" | "radio menu item"
     )
+}
+
+fn is_select_item_candidate(node: &libplasma_pilot::AccessibilityNode) -> bool {
+    matches!(
+        node.role.to_ascii_lowercase().as_str(),
+        "list item"
+            | "tree item"
+            | "table row"
+            | "row"
+            | "combo box"
+            | "option"
+            | "menu item"
+            | "check menu item"
+            | "radio menu item"
+    ) && select_item_activation_action(node).is_some()
+}
+
+fn select_item_activation_action(
+    node: &libplasma_pilot::AccessibilityNode,
+) -> Option<libplasma_pilot::AccessibilityAction> {
+    if node
+        .actions
+        .contains(&libplasma_pilot::AccessibilityAction::Select)
+    {
+        Some(libplasma_pilot::AccessibilityAction::Select)
+    } else if node
+        .actions
+        .contains(&libplasma_pilot::AccessibilityAction::Press)
+    {
+        Some(libplasma_pilot::AccessibilityAction::Press)
+    } else {
+        None
+    }
 }
 
 fn is_check_candidate(node: &libplasma_pilot::AccessibilityNode) -> bool {
@@ -5671,6 +5788,23 @@ height = 40
     }
 
     #[test]
+    fn select_item_is_control_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::SelectItem(SelectItemRequest {
+                name: "Printer".to_string(),
+                app: Some("settings".to_string()),
+                window_name_contains: Some("devices".to_string()),
+                max_nodes: 256,
+                guard: None,
+            }),
+        )
+        .expect_err("select item requires control approval by default");
+        assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
     fn select_menu_is_control_policy() {
         let policy = PolicyEngine::new(PolicyConfig::default());
         let err = enforce_policy(
@@ -5975,6 +6109,59 @@ height = 40
         let non_numeric = value_node("2", "Volume", "loud");
         let err = resolve_value_match("Volume", vec![sensitive, non_numeric])
             .expect_err("sensitive and non-numeric value controls are not viable");
+        assert!(err.to_string().contains("no non-sensitive"));
+    }
+
+    #[test]
+    fn select_item_resolver_prefers_exact_match_and_select_action() {
+        let (target, action) = resolve_select_item_match(
+            "Printer",
+            vec![
+                list_item_node("1", "Printer settings"),
+                list_item_node("2", "Printer"),
+            ],
+        )
+        .expect("exact item resolves");
+        assert_eq!(target.id, "2");
+        assert_eq!(action, libplasma_pilot::AccessibilityAction::Select);
+    }
+
+    #[test]
+    fn select_item_resolver_uses_press_when_select_is_unavailable() {
+        let mut item = list_item_node("1", "Printer");
+        item.actions = vec![libplasma_pilot::AccessibilityAction::Press];
+        item.available_actions = vec!["press".to_string()];
+        let (target, action) =
+            resolve_select_item_match("Printer", vec![item]).expect("pressable item resolves");
+        assert_eq!(target.id, "1");
+        assert_eq!(action, libplasma_pilot::AccessibilityAction::Press);
+    }
+
+    #[test]
+    fn select_item_resolver_refuses_ambiguous_matches() {
+        let err = resolve_select_item_match(
+            "Printer",
+            vec![
+                list_item_node("1", "Printer"),
+                list_item_node("2", "Printer"),
+            ],
+        )
+        .expect_err("multiple exact items are ambiguous");
+        let err = err.to_string();
+        assert!(err.contains("ambiguous"));
+        assert!(err.contains("choices=[id=1 role=list item name=Printer actions=select"));
+        assert!(err.contains("id=2 role=list item name=Printer actions=select"));
+    }
+
+    #[test]
+    fn select_item_resolver_requires_non_sensitive_selectable_match() {
+        let mut sensitive = list_item_node("1", "Secret network");
+        sensitive.sensitive = true;
+        let mut inert = list_item_node("2", "Secret network");
+        inert.actions.clear();
+        inert.available_actions.clear();
+        let err = resolve_select_item_match("Secret network", vec![sensitive, inert])
+            .expect_err("sensitive and inert items are not viable");
         assert!(err.to_string().contains("no non-sensitive"));
     }
 
@@ -6295,6 +6482,22 @@ height = 40
             bounds: None,
             available_actions: Vec::new(),
             actions: Vec::new(),
+            children: Vec::new(),
+        }
+    }
+
+    fn list_item_node(id: &str, name: &str) -> libplasma_pilot::AccessibilityNode {
+        libplasma_pilot::AccessibilityNode {
+            id: id.to_string(),
+            role: "list item".to_string(),
+            name: Some(name.to_string()),
+            value: None,
+            value_truncated: false,
+            sensitive: false,
+            states: Vec::new(),
+            bounds: None,
+            available_actions: vec!["select".to_string()],
+            actions: vec![libplasma_pilot::AccessibilityAction::Select],
             children: Vec::new(),
         }
     }
