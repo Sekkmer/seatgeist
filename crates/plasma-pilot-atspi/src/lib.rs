@@ -12,11 +12,13 @@ const ATSPI_ROOT_PATH: &str = "/org/a11y/atspi/accessible/root";
 const ATSPI_ACCESSIBLE: &str = "org.a11y.atspi.Accessible";
 const ATSPI_COMPONENT: &str = "org.a11y.atspi.Component";
 const ATSPI_ACTION: &str = "org.a11y.atspi.Action";
+const ATSPI_EDITABLE_TEXT: &str = "org.a11y.atspi.EditableText";
 const ATSPI_TEXT: &str = "org.a11y.atspi.Text";
 const ATSPI_VALUE: &str = "org.a11y.atspi.Value";
 const STATE_FOCUSED: usize = 12;
 const DEFAULT_SEARCH_DEPTH: usize = 12;
 const DEFAULT_VALUE_MAX_CHARS: i32 = 512;
+const DEFAULT_SET_TEXT_MAX_CHARS: usize = 8192;
 
 pub type Result<T> = std::result::Result<T, PilotError>;
 
@@ -117,6 +119,13 @@ pub fn invoke(node_id: &str, action: AccessibilityAction) -> Result<()> {
     let node = parse_node_id(node_id)?;
     let bus = AtspiBus::connect()?;
     bus.invoke(&node, action)
+}
+
+pub fn set_text(node_id: &str, text: &str) -> Result<()> {
+    validate_set_text(text)?;
+    let node = parse_node_id(node_id)?;
+    let bus = AtspiBus::connect()?;
+    bus.set_text(&node, text)
 }
 
 impl AtspiBus {
@@ -436,6 +445,40 @@ impl AtspiBus {
         }
     }
 
+    fn set_text(&self, node: &AtspiRef, text: &str) -> Result<()> {
+        let role = self
+            .role_name(node)
+            .unwrap_or_else(|_| "unknown".to_string());
+        if is_sensitive_role(&role) {
+            return Err(PilotError::PolicyDenied(
+                "refusing to set text on sensitive accessibility node".to_string(),
+            ));
+        }
+        let interfaces = self.interfaces(node)?;
+        if !interfaces
+            .iter()
+            .any(|interface| interface == ATSPI_EDITABLE_TEXT)
+        {
+            return Err(PilotError::InvalidRequest(
+                "node does not expose org.a11y.atspi.EditableText".to_string(),
+            ));
+        }
+        let output = self.call_with_args(
+            &node.service,
+            &node.path,
+            ATSPI_EDITABLE_TEXT,
+            "SetTextContents",
+            &["s", text],
+        )?;
+        if parse_bool_value(&output)? {
+            Ok(())
+        } else {
+            Err(PilotError::BackendUnavailable(
+                "AT-SPI SetTextContents returned false".to_string(),
+            ))
+        }
+    }
+
     fn node_value(&self, node: &AtspiRef, interfaces: &[String]) -> Result<(Option<String>, bool)> {
         if interfaces.iter().any(|interface| interface == ATSPI_TEXT) {
             return self.text_value(node);
@@ -504,6 +547,16 @@ fn validate_find_request(request: &AccessibilityFindRequest) -> Result<()> {
         return Err(PilotError::InvalidRequest(
             "at least one accessibility find filter is required".to_string(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_set_text(text: &str) -> Result<()> {
+    let char_count = text.chars().count();
+    if char_count > DEFAULT_SET_TEXT_MAX_CHARS {
+        return Err(PilotError::InvalidRequest(format!(
+            "text exceeds {DEFAULT_SET_TEXT_MAX_CHARS} character limit"
+        )));
     }
     Ok(())
 }
@@ -902,6 +955,14 @@ mod tests {
             &AccessibilityAction::Focus
         ));
         assert!(action_name_matches("select", &AccessibilityAction::Select));
+    }
+
+    #[test]
+    fn validates_set_text_limit() {
+        validate_set_text("").expect("empty text can clear a field");
+        let long = "x".repeat(DEFAULT_SET_TEXT_MAX_CHARS + 1);
+        let err = validate_set_text(&long).expect_err("long text is rejected");
+        assert!(err.to_string().contains("character limit"));
     }
 
     #[test]

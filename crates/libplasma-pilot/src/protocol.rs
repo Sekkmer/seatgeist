@@ -129,6 +129,12 @@ pub struct AccessibilityInvokeRequest {
     pub action: AccessibilityAction,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessibilitySetTextRequest {
+    pub node_id: String,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DesktopObservation {
     pub active_window: Option<WindowInfo>,
@@ -159,6 +165,7 @@ pub enum DaemonRequest {
     FocusedAccessibilityTree(FocusedAccessibilityTreeRequest),
     AccessibilityFind(AccessibilityFindRequest),
     AccessibilityInvoke(AccessibilityInvokeRequest),
+    AccessibilitySetText(AccessibilitySetTextRequest),
     JournalTail(JournalTailRequest),
     FocusWindow(FocusWindowRequest),
 }
@@ -180,6 +187,7 @@ impl DaemonRequest {
             Self::FocusedAccessibilityTree(_) => "focused_accessibility_tree",
             Self::AccessibilityFind(_) => "accessibility_find",
             Self::AccessibilityInvoke(_) => "accessibility_invoke",
+            Self::AccessibilitySetText(_) => "accessibility_set_text",
             Self::JournalTail(_) => "journal_tail",
             Self::FocusWindow(_) => "focus_window",
         }
@@ -375,6 +383,19 @@ mod tests {
         assert_eq!(
             encoded,
             r#"{"method":"accessibility_invoke","node_id":"atspi://:1.42/org/a11y/atspi/accessible/7","action":"press"}"#
+        );
+    }
+
+    #[test]
+    fn serializes_accessibility_set_text_request() {
+        let request = DaemonRequest::AccessibilitySetText(AccessibilitySetTextRequest {
+            node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+            text: "hello".to_string(),
+        });
+        let encoded = serde_json::to_string(&request).expect("a11y set-text request serializes");
+        assert_eq!(
+            encoded,
+            r#"{"method":"accessibility_set_text","node_id":"atspi://:1.42/org/a11y/atspi/accessible/7","text":"hello"}"#
         );
     }
 

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use libplasma_pilot::AccessibilitySetTextRequest;
 use libplasma_pilot::{
     AccessibilityAction, AccessibilityFindRequest, AccessibilityInvokeRequest, ClipboardGetRequest,
     ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse,
@@ -122,6 +123,12 @@ enum AtspiCommand {
         node: String,
         #[arg(long)]
         action: AccessibilityAction,
+    },
+    SetText {
+        #[arg(long)]
+        node: String,
+        #[arg(value_name = "TEXT")]
+        text: String,
     },
 }
 
@@ -270,6 +277,15 @@ fn main() -> Result<()> {
             DaemonRequest::AccessibilityInvoke(AccessibilityInvokeRequest {
                 node_id: node,
                 action,
+            }),
+        )?,
+        Command::Atspi {
+            command: AtspiCommand::SetText { node, text },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::AccessibilitySetText(AccessibilitySetTextRequest {
+                node_id: node,
+                text,
             }),
         )?,
         Command::Journal {

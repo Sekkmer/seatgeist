@@ -7,10 +7,11 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use libplasma_pilot::{
-    AccessibilityAction, AccessibilityFindRequest, AccessibilityInvokeRequest, ClipboardGetRequest,
-    ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse,
-    FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest,
-    ScreenshotRequest, ScreenshotTileRequest, default_socket_path,
+    AccessibilityAction, AccessibilityFindRequest, AccessibilityInvokeRequest,
+    AccessibilitySetTextRequest, ClipboardGetRequest, ClipboardSetRequest,
+    DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse, FocusWindowRequest,
+    FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest, ScreenshotRequest,
+    ScreenshotTileRequest, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -312,6 +313,12 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
             AccessibilityInvokeRequest {
                 node_id: required_string(arguments, "node_id")?,
                 action: required_accessibility_action(arguments, "action")?,
+            },
+        )),
+        "plasma.a11y_set_text" => Ok(DaemonRequest::AccessibilitySetText(
+            AccessibilitySetTextRequest {
+                node_id: required_string(arguments, "node_id")?,
+                text: required_string(arguments, "text")?,
             },
         )),
         "plasma.focus_window" => Ok(DaemonRequest::FocusWindow(FocusWindowRequest {
@@ -629,6 +636,24 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "plasma.a11y_set_text",
+            "Set Accessibility Text",
+            "Replace text on a non-sensitive AT-SPI EditableText node. This is policy-gated semantic control and summaries report text length only.",
+            object_schema(
+                vec![
+                    (
+                        "node_id",
+                        json!({"type": "string", "description": "AT-SPI node id from a previous accessibility result."}),
+                    ),
+                    (
+                        "text",
+                        json!({"type": "string", "description": "Replacement text for the editable node."}),
+                    ),
+                ],
+                vec!["node_id", "text"],
+            ),
+        ),
+        tool(
             "plasma.journal_tail",
             "Journal Tail",
             "Read recent compact daemon journal entries.",
@@ -773,6 +798,11 @@ mod tests {
                 .iter()
                 .any(|tool| tool["name"] == "plasma.a11y_invoke")
         );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.a11y_set_text")
+        );
     }
 
     #[test]
@@ -912,6 +942,25 @@ mod tests {
             DaemonRequest::AccessibilityInvoke(AccessibilityInvokeRequest {
                 node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
                 action: AccessibilityAction::Press,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_accessibility_set_text_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.a11y_set_text",
+            &json!({
+                "node_id": "atspi://:1.42/org/a11y/atspi/accessible/7",
+                "text": "hello"
+            }),
+        )
+        .expect("a11y set-text args map");
+        assert_eq!(
+            request,
+            DaemonRequest::AccessibilitySetText(AccessibilitySetTextRequest {
+                node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                text: "hello".to_string(),
             })
         );
     }

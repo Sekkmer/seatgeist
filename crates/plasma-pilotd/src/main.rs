@@ -14,12 +14,13 @@ use anyhow::{Context, Error, Result, bail};
 use clap::Parser;
 use image::{GenericImageView, imageops::FilterType};
 use libplasma_pilot::{
-    AccessibilityFindRequest, AccessibilityInvokeRequest, ActionResult, BackendCapability,
-    CapabilitySet, ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest,
-    DaemonResponse, DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest,
-    HealthStatus, JournalEntry, ObserveRequest, PolicyStatus, SafetyClass, ScreenshotInfo,
-    ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform, ToolApprovalLevel,
-    WindowGeometry, WindowInfo, current_euid, default_journal_path, default_socket_path,
+    AccessibilityFindRequest, AccessibilityInvokeRequest, AccessibilitySetTextRequest,
+    ActionResult, BackendCapability, CapabilitySet, ClipboardGetRequest, ClipboardText,
+    CoordinateSpace, DaemonRequest, DaemonResponse, DesktopObservation, FocusWindowRequest,
+    FocusedAccessibilityTreeRequest, HealthStatus, JournalEntry, ObserveRequest, PolicyStatus,
+    SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
+    ToolApprovalLevel, WindowGeometry, WindowInfo, current_euid, default_journal_path,
+    default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -398,6 +399,12 @@ fn handle_request(
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::AccessibilitySetText(request) => match accessibility_set_text(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::JournalTail(request) => match journal.tail(request.limit) {
             Ok(entries) => DaemonResponse::Journal(entries),
             Err(err) => DaemonResponse::Error {
@@ -475,9 +482,9 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::AccessibilityFind(_) => SafetyClass::Observe,
         DaemonRequest::ClipboardGet(_) => SafetyClass::ClipboardRead,
         DaemonRequest::ClipboardSet(_) => SafetyClass::ClipboardWrite,
-        DaemonRequest::FocusWindow(_) | DaemonRequest::AccessibilityInvoke(_) => {
-            SafetyClass::ControlSemantic
-        }
+        DaemonRequest::FocusWindow(_)
+        | DaemonRequest::AccessibilityInvoke(_)
+        | DaemonRequest::AccessibilitySetText(_) => SafetyClass::ControlSemantic,
     }
 }
 
@@ -807,6 +814,24 @@ fn accessibility_invoke(request: AccessibilityInvokeRequest) -> Result<ActionRes
         message: Some(format!(
             "invoked accessibility action={} node={}",
             request.action.as_str(),
+            request.node_id
+        )),
+    })
+}
+
+fn accessibility_set_text(request: AccessibilitySetTextRequest) -> Result<ActionResult> {
+    if request.node_id.trim().is_empty() {
+        bail!("node_id must be non-empty");
+    }
+    plasma_pilot_atspi::set_text(&request.node_id, &request.text)
+        .map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "set accessibility text length={} node={}",
+            request.text.chars().count(),
             request.node_id
         )),
     })
@@ -1284,6 +1309,20 @@ mod tests {
             }),
         )
         .expect_err("accessibility invoke requires control approval by default");
+        assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
+    fn accessibility_set_text_is_control_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::AccessibilitySetText(AccessibilitySetTextRequest {
+                node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                text: "hello".to_string(),
+            }),
+        )
+        .expect_err("accessibility set-text requires control approval by default");
         assert!(err.to_string().contains("ControlSemantic"));
     }
 

@@ -908,7 +908,7 @@ Tasks:
 - [x] Return text/value summaries for supported nodes.
 - [x] Implement find by role/name/app/window.
 - [x] Implement policy-gated invoke action where `org.a11y.atspi.Action` is supported.
-- [ ] Implement set text where `org.a11y.atspi.EditableText` is supported.
+- [x] Implement set text where `org.a11y.atspi.EditableText` is supported.
 - [x] Add secret/password-field detection.
 
 Acceptance criteria:
