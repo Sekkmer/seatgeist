@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use libplasma_pilot::{
-    ClipboardSetRequest, DaemonRequest, DaemonResponse, FocusWindowRequest, JournalTailRequest,
-    ObserveRequest, ScreenshotRequest, ScreenshotTileRequest, default_socket_path,
+    ClipboardGetRequest, ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest,
+    DaemonResponse, FocusWindowRequest, JournalTailRequest, ObserveRequest, ScreenshotRequest,
+    ScreenshotTileRequest, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -73,7 +74,12 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum ClipboardCommand {
-    Get,
+    Get {
+        #[arg(long, default_value_t = DEFAULT_CLIPBOARD_MAX_BYTES)]
+        max_bytes: usize,
+        #[arg(long)]
+        full: bool,
+    },
     Set {
         #[arg(value_name = "TEXT")]
         text: String,
@@ -163,8 +169,13 @@ fn main() -> Result<()> {
             DaemonRequest::FocusWindow(FocusWindowRequest { window_id: window }),
         )?,
         Command::Clipboard {
-            command: ClipboardCommand::Get,
-        } => print_daemon_response(&socket, DaemonRequest::ClipboardGet)?,
+            command: ClipboardCommand::Get { max_bytes, full },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::ClipboardGet(ClipboardGetRequest {
+                max_bytes: if full { None } else { Some(max_bytes) },
+            }),
+        )?,
         Command::Clipboard {
             command: ClipboardCommand::Set { text },
         } => print_daemon_response(

@@ -888,7 +888,7 @@ Tasks:
 - [x] Use `wl-copy`/`wl-paste` as the first Wayland backend when available.
 - [x] Enforce clipboard read policy.
 - [ ] Add KDE/portal-native fallback and explicit provenance selection if `wl-copy`/`wl-paste` is unavailable.
-- [ ] Truncate large clipboard reads by default.
+- [x] Truncate large clipboard reads by default.
 
 Acceptance criteria:
 

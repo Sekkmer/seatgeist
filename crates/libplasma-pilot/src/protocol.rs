@@ -8,6 +8,8 @@ use crate::types::{
     WindowInfo,
 };
 
+pub const DEFAULT_CLIPBOARD_MAX_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthStatus {
     pub service: String,
@@ -90,6 +92,13 @@ pub struct ObserveRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClipboardText {
     pub text: String,
+    pub truncated: bool,
+    pub original_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipboardGetRequest {
+    pub max_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,7 +131,7 @@ pub enum DaemonRequest {
     Observe(ObserveRequest),
     Screenshot(ScreenshotRequest),
     ScreenshotTile(ScreenshotTileRequest),
-    ClipboardGet,
+    ClipboardGet(ClipboardGetRequest),
     ClipboardSet(ClipboardSetRequest),
     JournalTail(JournalTailRequest),
     FocusWindow(FocusWindowRequest),
@@ -140,7 +149,7 @@ impl DaemonRequest {
             Self::Observe(_) => "observe",
             Self::Screenshot(_) => "screenshot",
             Self::ScreenshotTile(_) => "screenshot_tile",
-            Self::ClipboardGet => "clipboard_get",
+            Self::ClipboardGet(_) => "clipboard_get",
             Self::ClipboardSet(_) => "clipboard_set",
             Self::JournalTail(_) => "journal_tail",
             Self::FocusWindow(_) => "focus_window",
@@ -282,9 +291,11 @@ mod tests {
 
     #[test]
     fn serializes_clipboard_requests() {
-        let get = serde_json::to_string(&DaemonRequest::ClipboardGet)
-            .expect("clipboard get request serializes");
-        assert_eq!(get, r#"{"method":"clipboard_get"}"#);
+        let get = DaemonRequest::ClipboardGet(ClipboardGetRequest {
+            max_bytes: Some(DEFAULT_CLIPBOARD_MAX_BYTES),
+        });
+        let encoded = serde_json::to_string(&get).expect("clipboard get request serializes");
+        assert_eq!(encoded, r#"{"method":"clipboard_get","max_bytes":65536}"#);
 
         let set = DaemonRequest::ClipboardSet(ClipboardSetRequest {
             text: "hello".to_string(),

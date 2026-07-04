@@ -14,11 +14,11 @@ use anyhow::{Context, Error, Result, bail};
 use clap::Parser;
 use image::{GenericImageView, imageops::FilterType};
 use libplasma_pilot::{
-    ActionResult, BackendCapability, CapabilitySet, ClipboardText, CoordinateSpace, DaemonRequest,
-    DaemonResponse, DesktopObservation, FocusWindowRequest, HealthStatus, JournalEntry,
-    ObserveRequest, PolicyStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest,
-    ScreenshotTileRequest, ScreenshotTransform, ToolApprovalLevel, WindowGeometry, WindowInfo,
-    current_euid, default_journal_path, default_socket_path,
+    ActionResult, BackendCapability, CapabilitySet, ClipboardGetRequest, ClipboardText,
+    CoordinateSpace, DaemonRequest, DaemonResponse, DesktopObservation, FocusWindowRequest,
+    HealthStatus, JournalEntry, ObserveRequest, PolicyStatus, SafetyClass, ScreenshotInfo,
+    ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform, ToolApprovalLevel,
+    WindowGeometry, WindowInfo, current_euid, default_journal_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -365,7 +365,7 @@ fn handle_request(
                 message: format_error_chain(&err),
             },
         },
-        DaemonRequest::ClipboardGet => match clipboard_get_text() {
+        DaemonRequest::ClipboardGet(request) => match clipboard_get_text(request) {
             Ok(text) => DaemonResponse::ClipboardText(text),
             Err(err) => DaemonResponse::Error {
                 message: format_error_chain(&err),
@@ -450,7 +450,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::Observe(_)
         | DaemonRequest::Screenshot(_)
         | DaemonRequest::ScreenshotTile(_) => SafetyClass::Observe,
-        DaemonRequest::ClipboardGet => SafetyClass::ClipboardRead,
+        DaemonRequest::ClipboardGet(_) => SafetyClass::ClipboardRead,
         DaemonRequest::ClipboardSet(_) => SafetyClass::ClipboardWrite,
         DaemonRequest::FocusWindow(_) => SafetyClass::ControlSemantic,
     }
@@ -664,7 +664,10 @@ fn focus_window(request: FocusWindowRequest) -> Result<ActionResult> {
     })
 }
 
-fn clipboard_get_text() -> Result<ClipboardText> {
+fn clipboard_get_text(request: ClipboardGetRequest) -> Result<ClipboardText> {
+    if request.max_bytes == Some(0) {
+        bail!("clipboard max_bytes must be greater than zero");
+    }
     if !command_exists("wl-paste") {
         bail!("wl-paste command is not available for Wayland clipboard reads");
     }
@@ -680,9 +683,37 @@ fn clipboard_get_text() -> Result<ClipboardText> {
         );
     }
 
-    Ok(ClipboardText {
-        text: String::from_utf8(output.stdout).context("clipboard text is not valid UTF-8")?,
-    })
+    let text = String::from_utf8(output.stdout).context("clipboard text is not valid UTF-8")?;
+    Ok(bound_clipboard_text(text, request.max_bytes))
+}
+
+fn bound_clipboard_text(mut text: String, max_bytes: Option<usize>) -> ClipboardText {
+    let original_bytes = text.len();
+    let Some(max_bytes) = max_bytes else {
+        return ClipboardText {
+            text,
+            truncated: false,
+            original_bytes,
+        };
+    };
+    if original_bytes <= max_bytes {
+        return ClipboardText {
+            text,
+            truncated: false,
+            original_bytes,
+        };
+    }
+
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    ClipboardText {
+        text,
+        truncated: true,
+        original_bytes,
+    }
 }
 
 fn clipboard_set_text(text: &str) -> Result<ActionResult> {
@@ -908,9 +939,12 @@ fn summarize_response(response: &DaemonResponse) -> String {
             info.source_height,
             info.path.display()
         ),
-        DaemonResponse::ClipboardText(text) => {
-            format!("clipboard text length={}", text.text.len())
-        }
+        DaemonResponse::ClipboardText(text) => format!(
+            "clipboard text length={} truncated={} original_bytes={}",
+            text.text.len(),
+            text.truncated,
+            text.original_bytes
+        ),
         DaemonResponse::Journal(entries) => format!("{} journal entries", entries.len()),
         DaemonResponse::Action(result) => result
             .message
@@ -1185,20 +1219,46 @@ mod tests {
     #[test]
     fn clipboard_read_fails_closed_by_default() {
         let policy = PolicyEngine::new(PolicyConfig::default());
-        let err = enforce_policy(&policy, &DaemonRequest::ClipboardGet)
-            .expect_err("clipboard reads require approval by default");
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::ClipboardGet(ClipboardGetRequest {
+                max_bytes: Some(1024),
+            }),
+        )
+        .expect_err("clipboard reads require approval by default");
         assert!(err.to_string().contains("ClipboardRead"));
     }
 
     #[test]
     fn allow_clipboard_read_config_allows_clipboard_get_policy() {
         let policy = PolicyEngine::new(policy_config(false, true));
-        enforce_policy(&policy, &DaemonRequest::ClipboardGet)
-            .expect("explicit clipboard-read override allows clipboard get");
+        enforce_policy(
+            &policy,
+            &DaemonRequest::ClipboardGet(ClipboardGetRequest {
+                max_bytes: Some(1024),
+            }),
+        )
+        .expect("explicit clipboard-read override allows clipboard get");
         assert_eq!(
             policy_status_from_config(policy.config()).default_clipboard_read,
             ToolApprovalLevel::Allow
         );
+    }
+
+    #[test]
+    fn clipboard_text_is_bounded_on_utf8_boundary() {
+        let bounded = bound_clipboard_text("abécd".to_string(), Some(4));
+        assert_eq!(bounded.text, "abé");
+        assert!(bounded.truncated);
+        assert_eq!(bounded.original_bytes, 6);
+    }
+
+    #[test]
+    fn clipboard_text_can_be_unbounded() {
+        let bounded = bound_clipboard_text("hello".to_string(), None);
+        assert_eq!(bounded.text, "hello");
+        assert!(!bounded.truncated);
+        assert_eq!(bounded.original_bytes, 5);
     }
 
     #[test]

@@ -3,10 +3,10 @@ pub mod runtime;
 pub mod types;
 
 pub use protocol::{
-    ActionRequest, ActionResult, CapabilitySet, ClipboardSetRequest, ClipboardText, DaemonRequest,
-    DaemonResponse, DesktopObservation, FocusWindowRequest, HealthStatus, JournalEntry,
-    JournalTailRequest, ObserveRequest, PolicyStatus, ScreenshotInfo, ScreenshotRequest,
-    ScreenshotTileRequest, ScreenshotTransform,
+    ActionRequest, ActionResult, CapabilitySet, ClipboardGetRequest, ClipboardSetRequest,
+    ClipboardText, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse, DesktopObservation,
+    FocusWindowRequest, HealthStatus, JournalEntry, JournalTailRequest, ObserveRequest,
+    PolicyStatus, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
 };
 pub use runtime::{current_euid, default_journal_path, default_socket_path};
 pub use types::{

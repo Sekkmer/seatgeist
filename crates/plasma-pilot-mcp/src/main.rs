@@ -7,8 +7,9 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use libplasma_pilot::{
-    ClipboardSetRequest, DaemonRequest, DaemonResponse, FocusWindowRequest, JournalTailRequest,
-    ObserveRequest, ScreenshotRequest, ScreenshotTileRequest, default_socket_path,
+    ClipboardGetRequest, ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest,
+    DaemonResponse, FocusWindowRequest, JournalTailRequest, ObserveRequest, ScreenshotRequest,
+    ScreenshotTileRequest, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -258,7 +259,21 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 .transpose()?
                 .or(Some(1600)),
         })),
-        "plasma.clipboard_get_text" => Ok(DaemonRequest::ClipboardGet),
+        "plasma.clipboard_get_text" => {
+            let full = optional_bool(arguments, "full")?.unwrap_or(false);
+            Ok(DaemonRequest::ClipboardGet(ClipboardGetRequest {
+                max_bytes: if full {
+                    None
+                } else {
+                    Some(
+                        optional_u64(arguments, "max_bytes")?
+                            .map(u64_to_usize)
+                            .transpose()?
+                            .unwrap_or(DEFAULT_CLIPBOARD_MAX_BYTES),
+                    )
+                },
+            }))
+        }
         "plasma.clipboard_set_text" => Ok(DaemonRequest::ClipboardSet(ClipboardSetRequest {
             text: required_string(arguments, "text")?,
         })),
@@ -331,9 +346,12 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             info.source_height,
             info.path.display()
         ),
-        DaemonResponse::ClipboardText(text) => {
-            format!("clipboard text length={}", text.text.len())
-        }
+        DaemonResponse::ClipboardText(text) => format!(
+            "clipboard text length={} truncated={} original_bytes={}",
+            text.text.len(),
+            text.truncated,
+            text.original_bytes
+        ),
         DaemonResponse::Journal(entries) => format!("{} journal entries", entries.len()),
         DaemonResponse::Action(result) => result
             .message
@@ -462,8 +480,20 @@ fn tool_definitions() -> Vec<Value> {
         tool(
             "plasma.clipboard_get_text",
             "Clipboard Get Text",
-            "Read UTF-8 text from the Wayland clipboard. This is policy-gated and usually requires explicit daemon clipboard-read approval mode.",
-            object_schema(vec![], vec![]),
+            "Read UTF-8 text from the Wayland clipboard. This is policy-gated and bounded by default.",
+            object_schema(
+                vec![
+                    (
+                        "max_bytes",
+                        json!({"type": "integer", "minimum": 1, "description": "Maximum UTF-8 bytes to return before truncating. Defaults to 65536."}),
+                    ),
+                    (
+                        "full",
+                        json!({"type": "boolean", "description": "Return the full clipboard text without a byte cap."}),
+                    ),
+                ],
+                vec![],
+            ),
         ),
         tool(
             "plasma.clipboard_set_text",
@@ -566,6 +596,10 @@ fn u64_to_u32(value: u64) -> Result<u32> {
     u32::try_from(value).map_err(|_| anyhow!("integer argument {value} exceeds u32"))
 }
 
+fn u64_to_usize(value: u64) -> Result<usize> {
+    usize::try_from(value).map_err(|_| anyhow!("integer argument {value} exceeds usize"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,7 +696,22 @@ mod tests {
     fn maps_clipboard_get_arguments() {
         let request =
             daemon_request_for_tool("plasma.clipboard_get_text", &json!({})).expect("get maps");
-        assert_eq!(request, DaemonRequest::ClipboardGet);
+        assert_eq!(
+            request,
+            DaemonRequest::ClipboardGet(ClipboardGetRequest {
+                max_bytes: Some(DEFAULT_CLIPBOARD_MAX_BYTES),
+            })
+        );
+    }
+
+    #[test]
+    fn maps_unbounded_clipboard_get_arguments() {
+        let request = daemon_request_for_tool("plasma.clipboard_get_text", &json!({"full": true}))
+            .expect("full get maps");
+        assert_eq!(
+            request,
+            DaemonRequest::ClipboardGet(ClipboardGetRequest { max_bytes: None })
+        );
     }
 
     #[test]
