@@ -152,6 +152,14 @@ pub struct SetTextFieldRequest {
     pub max_nodes: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivateTabRequest {
+    pub name: String,
+    pub app: Option<String>,
+    pub window_name_contains: Option<String>,
+    pub max_nodes: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DesktopObservation {
     pub active_window: Option<WindowInfo>,
@@ -185,6 +193,7 @@ pub enum DaemonRequest {
     AccessibilitySetText(AccessibilitySetTextRequest),
     ClickButton(ClickButtonRequest),
     SetTextField(SetTextFieldRequest),
+    ActivateTab(ActivateTabRequest),
     JournalTail(JournalTailRequest),
     FocusWindow(FocusWindowRequest),
 }
@@ -209,6 +218,7 @@ impl DaemonRequest {
             Self::AccessibilitySetText(_) => "accessibility_set_text",
             Self::ClickButton(_) => "click_button",
             Self::SetTextField(_) => "set_text_field",
+            Self::ActivateTab(_) => "activate_tab",
             Self::JournalTail(_) => "journal_tail",
             Self::FocusWindow(_) => "focus_window",
         }
@@ -449,6 +459,21 @@ mod tests {
         assert!(encoded.contains(r#""name":"Search""#));
         assert!(encoded.contains(r#""text":"query""#));
         assert!(encoded.contains(r#""app":"kate""#));
+    }
+
+    #[test]
+    fn serializes_activate_tab_request() {
+        let request = DaemonRequest::ActivateTab(ActivateTabRequest {
+            name: "General".to_string(),
+            app: Some("settings".to_string()),
+            window_name_contains: Some("preferences".to_string()),
+            max_nodes: 512,
+        });
+        let encoded = serde_json::to_string(&request).expect("activate tab request serializes");
+        assert!(encoded.contains(r#""method":"activate_tab""#));
+        assert!(encoded.contains(r#""name":"General""#));
+        assert!(encoded.contains(r#""app":"settings""#));
+        assert!(encoded.contains(r#""window_name_contains":"preferences""#));
     }
 
     #[test]

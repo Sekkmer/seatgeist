@@ -15,10 +15,10 @@ use clap::Parser;
 use image::{GenericImageView, imageops::FilterType};
 use libplasma_pilot::{
     AccessibilityFindRequest, AccessibilityInvokeRequest, AccessibilitySetTextRequest,
-    ActionResult, BackendCapability, CapabilitySet, ClickButtonRequest, ClipboardGetRequest,
-    ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse, DesktopObservation,
-    FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus, JournalEntry,
-    ObserveRequest, PolicyStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest,
+    ActionResult, ActivateTabRequest, BackendCapability, CapabilitySet, ClickButtonRequest,
+    ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse,
+    DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus,
+    JournalEntry, ObserveRequest, PolicyStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest,
     ScreenshotTileRequest, ScreenshotTransform, SetTextFieldRequest, ToolApprovalLevel,
     WindowGeometry, WindowInfo, current_euid, default_journal_path, default_socket_path,
 };
@@ -417,6 +417,12 @@ fn handle_request(
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::ActivateTab(request) => match activate_tab(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::JournalTail(request) => match journal.tail(request.limit) {
             Ok(entries) => DaemonResponse::Journal(entries),
             Err(err) => DaemonResponse::Error {
@@ -498,7 +504,8 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::AccessibilityInvoke(_)
         | DaemonRequest::AccessibilitySetText(_)
         | DaemonRequest::ClickButton(_)
-        | DaemonRequest::SetTextField(_) => SafetyClass::ControlSemantic,
+        | DaemonRequest::SetTextField(_)
+        | DaemonRequest::ActivateTab(_) => SafetyClass::ControlSemantic,
     }
 }
 
@@ -917,6 +924,39 @@ fn set_text_field(request: SetTextFieldRequest) -> Result<ActionResult> {
     })
 }
 
+fn activate_tab(request: ActivateTabRequest) -> Result<ActionResult> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        bail!("tab name must be non-empty");
+    }
+    if request.max_nodes == 0 {
+        bail!("max_nodes must be greater than zero");
+    }
+
+    let matches = accessibility_find(AccessibilityFindRequest {
+        role: None,
+        name_contains: Some(name.to_string()),
+        app: request.app.clone(),
+        window_name_contains: request.window_name_contains.clone(),
+        depth: 0,
+        max_results: 10,
+        max_nodes: request.max_nodes,
+    })?;
+    let (target, action) = resolve_tab_match(name, matches)?;
+    plasma_pilot_atspi::invoke(&target.id, action.clone()).map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "activated tab name={} action={} node={}",
+            target.name.as_deref().unwrap_or(name),
+            action.as_str(),
+            target.id
+        )),
+    })
+}
+
 fn resolve_click_button_match(
     name: &str,
     matches: Vec<libplasma_pilot::AccessibilityNode>,
@@ -968,6 +1008,60 @@ fn resolve_click_button_match(
     );
 }
 
+fn resolve_tab_match(
+    name: &str,
+    matches: Vec<libplasma_pilot::AccessibilityNode>,
+) -> Result<(
+    libplasma_pilot::AccessibilityNode,
+    libplasma_pilot::AccessibilityAction,
+)> {
+    let mut viable = matches
+        .into_iter()
+        .filter(|node| !node.sensitive)
+        .filter(is_tab_candidate)
+        .collect::<Vec<_>>();
+    if viable.is_empty() {
+        bail!("no non-sensitive activatable tab matched name={name}");
+    }
+
+    let exact = viable
+        .iter()
+        .filter(|node| {
+            node.name
+                .as_deref()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !exact.is_empty() {
+        viable = exact;
+    }
+
+    if viable.len() == 1 {
+        let node = viable.remove(0);
+        let action = tab_activation_action(&node)
+            .ok_or_else(|| anyhow::anyhow!("tab has no select or press action"))?;
+        return Ok((node, action));
+    }
+
+    let choices = viable
+        .iter()
+        .take(5)
+        .map(|node| {
+            format!(
+                "{}:{}",
+                node.id,
+                node.name.as_deref().unwrap_or("<unnamed>")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    bail!(
+        "ambiguous tab match for name={name}: {} candidates: {choices}",
+        viable.len()
+    );
+}
+
 fn resolve_text_field_match(
     name: &str,
     matches: Vec<libplasma_pilot::AccessibilityNode>,
@@ -1014,6 +1108,32 @@ fn resolve_text_field_match(
         "ambiguous text field match for name={name}: {} candidates: {choices}",
         viable.len()
     );
+}
+
+fn is_tab_candidate(node: &libplasma_pilot::AccessibilityNode) -> bool {
+    let role = node.role.to_ascii_lowercase();
+    matches!(
+        role.as_str(),
+        "page tab" | "tab" | "tab item" | "page tab list item"
+    ) && tab_activation_action(node).is_some()
+}
+
+fn tab_activation_action(
+    node: &libplasma_pilot::AccessibilityNode,
+) -> Option<libplasma_pilot::AccessibilityAction> {
+    if node
+        .actions
+        .contains(&libplasma_pilot::AccessibilityAction::Select)
+    {
+        Some(libplasma_pilot::AccessibilityAction::Select)
+    } else if node
+        .actions
+        .contains(&libplasma_pilot::AccessibilityAction::Press)
+    {
+        Some(libplasma_pilot::AccessibilityAction::Press)
+    } else {
+        None
+    }
 }
 
 fn is_text_field_candidate(node: &libplasma_pilot::AccessibilityNode) -> bool {
@@ -1550,6 +1670,22 @@ mod tests {
     }
 
     #[test]
+    fn activate_tab_is_control_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::ActivateTab(ActivateTabRequest {
+                name: "General".to_string(),
+                app: Some("settings".to_string()),
+                window_name_contains: Some("preferences".to_string()),
+                max_nodes: 256,
+            }),
+        )
+        .expect_err("activate tab requires control approval by default");
+        assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
     fn click_button_resolver_prefers_exact_match() {
         let target = resolve_click_button_match(
             "OK",
@@ -1607,6 +1743,44 @@ mod tests {
         sensitive.sensitive = true;
         let err = resolve_text_field_match("Password", vec![sensitive])
             .expect_err("sensitive text fields are not viable");
+        assert!(err.to_string().contains("no non-sensitive"));
+    }
+
+    #[test]
+    fn tab_resolver_prefers_exact_match_and_select_action() {
+        let (target, action) = resolve_tab_match(
+            "General",
+            vec![tab_node("1", "General settings"), tab_node("2", "General")],
+        )
+        .expect("exact tab resolves");
+        assert_eq!(target.id, "2");
+        assert_eq!(action, libplasma_pilot::AccessibilityAction::Select);
+    }
+
+    #[test]
+    fn tab_resolver_uses_press_when_select_is_unavailable() {
+        let (target, action) = resolve_tab_match("General", vec![press_tab_node("1", "General")])
+            .expect("pressable tab resolves");
+        assert_eq!(target.id, "1");
+        assert_eq!(action, libplasma_pilot::AccessibilityAction::Press);
+    }
+
+    #[test]
+    fn tab_resolver_refuses_ambiguous_matches() {
+        let err = resolve_tab_match(
+            "General",
+            vec![tab_node("1", "General"), tab_node("2", "General")],
+        )
+        .expect_err("multiple exact tabs are ambiguous");
+        assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn tab_resolver_requires_non_sensitive_tab() {
+        let mut sensitive = tab_node("1", "Security");
+        sensitive.sensitive = true;
+        let err = resolve_tab_match("Security", vec![sensitive])
+            .expect_err("sensitive tabs are not viable");
         assert!(err.to_string().contains("no non-sensitive"));
     }
 
@@ -1742,6 +1916,32 @@ mod tests {
             bounds: None,
             available_actions: Vec::new(),
             actions: vec![libplasma_pilot::AccessibilityAction::SetText],
+            children: Vec::new(),
+        }
+    }
+
+    fn tab_node(id: &str, name: &str) -> libplasma_pilot::AccessibilityNode {
+        let mut node = press_tab_node(id, name);
+        node.actions = vec![
+            libplasma_pilot::AccessibilityAction::Press,
+            libplasma_pilot::AccessibilityAction::Select,
+        ];
+        node.available_actions = vec!["press".to_string(), "select".to_string()];
+        node
+    }
+
+    fn press_tab_node(id: &str, name: &str) -> libplasma_pilot::AccessibilityNode {
+        libplasma_pilot::AccessibilityNode {
+            id: id.to_string(),
+            role: "page tab".to_string(),
+            name: Some(name.to_string()),
+            value: None,
+            value_truncated: false,
+            sensitive: false,
+            states: Vec::new(),
+            bounds: None,
+            available_actions: vec!["press".to_string()],
+            actions: vec![libplasma_pilot::AccessibilityAction::Press],
             children: Vec::new(),
         }
     }

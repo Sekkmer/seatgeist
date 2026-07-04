@@ -927,9 +927,9 @@ Tasks:
   - [x] `pilot.click_button(name, app/window guard)`
   - [x] `pilot.set_text_field(name, text, app/window guard)`
   - `pilot.select_menu(path, app/window guard)`
-  - `pilot.activate_tab(name, app/window guard)`
-- [x] Use AT-SPI first for `click_button` and `set_text_field`; screenshot+coordinate fallback remains future work and must only happen when safe.
-- [x] Add ambiguity refusal for `click_button` and `set_text_field`; broader confidence scoring remains future work.
+  - [x] `pilot.activate_tab(name, app/window guard)`
+- [x] Use AT-SPI first for `click_button`, `set_text_field`, and `activate_tab`; screenshot+coordinate fallback remains future work and must only happen when safe.
+- [x] Add ambiguity refusal for `click_button`, `set_text_field`, and `activate_tab`; broader confidence scoring remains future work.
 
 Acceptance criteria:
 

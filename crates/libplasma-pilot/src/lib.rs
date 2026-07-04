@@ -4,11 +4,12 @@ pub mod types;
 
 pub use protocol::{
     AccessibilityFindRequest, AccessibilityInvokeRequest, AccessibilitySetTextRequest,
-    ActionRequest, ActionResult, CapabilitySet, ClickButtonRequest, ClipboardGetRequest,
-    ClipboardSetRequest, ClipboardText, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse,
-    DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus,
-    JournalEntry, JournalTailRequest, ObserveRequest, PolicyStatus, ScreenshotInfo,
-    ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform, SetTextFieldRequest,
+    ActionRequest, ActionResult, ActivateTabRequest, CapabilitySet, ClickButtonRequest,
+    ClipboardGetRequest, ClipboardSetRequest, ClipboardText, DEFAULT_CLIPBOARD_MAX_BYTES,
+    DaemonRequest, DaemonResponse, DesktopObservation, FocusWindowRequest,
+    FocusedAccessibilityTreeRequest, HealthStatus, JournalEntry, JournalTailRequest,
+    ObserveRequest, PolicyStatus, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest,
+    ScreenshotTransform, SetTextFieldRequest,
 };
 pub use runtime::{current_euid, default_journal_path, default_socket_path};
 pub use types::{
