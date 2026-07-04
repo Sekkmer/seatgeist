@@ -196,6 +196,10 @@ enum JournalCommand {
     Tail {
         #[arg(long, default_value_t = 50)]
         limit: usize,
+        #[arg(long)]
+        method: Option<String>,
+        #[arg(long)]
+        ok: Option<bool>,
     },
 }
 
@@ -433,10 +437,14 @@ fn main() -> Result<()> {
             }),
         )?,
         Command::Journal {
-            command: JournalCommand::Tail { limit },
+            command: JournalCommand::Tail { limit, method, ok },
         } => print_daemon_response(
             &socket,
-            DaemonRequest::JournalTail(JournalTailRequest { limit }),
+            DaemonRequest::JournalTail(JournalTailRequest {
+                limit,
+                method_filter: method,
+                ok,
+            }),
         )?,
         Command::PanicStop {
             command: PanicStopCommand::Status,

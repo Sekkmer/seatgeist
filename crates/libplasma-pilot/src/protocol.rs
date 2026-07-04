@@ -121,6 +121,10 @@ pub struct ScreenshotTileRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalTailRequest {
     pub limit: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method_filter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ok: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -461,9 +465,27 @@ mod tests {
 
     #[test]
     fn serializes_journal_tail_request() {
-        let request = DaemonRequest::JournalTail(JournalTailRequest { limit: 10 });
+        let request = DaemonRequest::JournalTail(JournalTailRequest {
+            limit: 10,
+            method_filter: None,
+            ok: None,
+        });
         let encoded = serde_json::to_string(&request).expect("journal request serializes");
         assert_eq!(encoded, r#"{"method":"journal_tail","limit":10}"#);
+    }
+
+    #[test]
+    fn serializes_filtered_journal_tail_request() {
+        let request = DaemonRequest::JournalTail(JournalTailRequest {
+            limit: 10,
+            method_filter: Some("focus_window".to_string()),
+            ok: Some(false),
+        });
+        let encoded = serde_json::to_string(&request).expect("filtered journal request serializes");
+        assert!(encoded.contains(r#""method":"journal_tail""#));
+        assert!(encoded.contains(r#""limit":10"#));
+        assert!(encoded.contains(r#""method_filter":"focus_window""#));
+        assert!(encoded.contains(r#""ok":false"#));
     }
 
     #[test]

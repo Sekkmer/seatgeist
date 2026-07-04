@@ -59,8 +59,13 @@ impl ActionJournal {
         append_journal_entry(&self.path, &entry)
     }
 
-    fn tail(&self, limit: usize) -> Result<Vec<JournalEntry>> {
-        tail_journal_entries(&self.path, limit)
+    fn tail_filtered(
+        &self,
+        limit: usize,
+        method_filter: Option<&str>,
+        ok: Option<bool>,
+    ) -> Result<Vec<JournalEntry>> {
+        tail_journal_entries(&self.path, limit, method_filter, ok)
     }
 
     fn next_sequence(&self) -> Result<u64> {
@@ -517,12 +522,15 @@ fn handle_request(
                 message: format_error_chain(&err),
             },
         },
-        DaemonRequest::JournalTail(request) => match journal.tail(request.limit) {
-            Ok(entries) => DaemonResponse::Journal(entries),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
-        },
+        DaemonRequest::JournalTail(request) => {
+            match journal.tail_filtered(request.limit, request.method_filter.as_deref(), request.ok)
+            {
+                Ok(entries) => DaemonResponse::Journal(entries),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
         DaemonRequest::FocusWindow(request) => match focus_window(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
             Err(err) => DaemonResponse::Error {
@@ -1557,7 +1565,12 @@ fn append_journal_entry(path: &Path, entry: &JournalEntry) -> Result<()> {
     Ok(())
 }
 
-fn tail_journal_entries(path: &Path, limit: usize) -> Result<Vec<JournalEntry>> {
+fn tail_journal_entries(
+    path: &Path,
+    limit: usize,
+    method_filter: Option<&str>,
+    ok: Option<bool>,
+) -> Result<Vec<JournalEntry>> {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -1571,6 +1584,16 @@ fn tail_journal_entries(path: &Path, limit: usize) -> Result<Vec<JournalEntry>> 
         }
         let entry = serde_json::from_str::<JournalEntry>(line)
             .with_context(|| format!("parse journal line in {}", path.display()))?;
+        if let Some(method_filter) = method_filter
+            && entry.method != method_filter
+        {
+            continue;
+        }
+        if let Some(ok) = ok
+            && entry.ok != ok
+        {
+            continue;
+        }
         entries.push(entry);
     }
     entries.reverse();
@@ -1844,10 +1867,19 @@ mod tests {
             )
             .expect("capabilities record appends");
 
-        let entries = journal.tail(1).expect("journal tail succeeds");
+        let entries = journal
+            .tail_filtered(1, None, None)
+            .expect("journal tail succeeds");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].sequence, 2);
         assert_eq!(entries[0].method, "capabilities");
+        assert!(entries[0].ok);
+
+        let entries = journal
+            .tail_filtered(10, Some("health"), Some(true))
+            .expect("filtered journal tail succeeds");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].method, "health");
         assert!(entries[0].ok);
 
         fs::remove_file(&path).ok();

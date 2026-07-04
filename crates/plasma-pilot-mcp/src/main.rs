@@ -250,6 +250,8 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         }
         "plasma.journal_tail" => Ok(DaemonRequest::JournalTail(JournalTailRequest {
             limit: optional_u64(arguments, "limit")?.unwrap_or(20) as usize,
+            method_filter: optional_string(arguments, "method")?,
+            ok: optional_bool(arguments, "ok")?,
         })),
         "plasma.screenshot" => Ok(DaemonRequest::Screenshot(ScreenshotRequest {
             output: required_string(arguments, "output")?.into(),
@@ -834,10 +836,20 @@ fn tool_definitions() -> Vec<Value> {
             "Journal Tail",
             "Read recent compact daemon journal entries.",
             object_schema(
-                vec![(
-                    "limit",
-                    json!({"type": "integer", "minimum": 1, "maximum": 200}),
-                )],
+                vec![
+                    (
+                        "limit",
+                        json!({"type": "integer", "minimum": 1, "maximum": 200}),
+                    ),
+                    (
+                        "method",
+                        json!({"type": "string", "description": "Optional daemon method name filter, such as focus_window."}),
+                    ),
+                    (
+                        "ok",
+                        json!({"type": "boolean", "description": "Optional success filter."}),
+                    ),
+                ],
                 vec![],
             ),
         ),
@@ -1224,6 +1236,27 @@ mod tests {
         assert_eq!(
             request,
             DaemonRequest::ClipboardGet(ClipboardGetRequest { max_bytes: None })
+        );
+    }
+
+    #[test]
+    fn maps_filtered_journal_tail_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.journal_tail",
+            &json!({
+                "limit": 7,
+                "method": "focus_window",
+                "ok": false
+            }),
+        )
+        .expect("journal tail args map");
+        assert_eq!(
+            request,
+            DaemonRequest::JournalTail(JournalTailRequest {
+                limit: 7,
+                method_filter: Some("focus_window".to_string()),
+                ok: Some(false),
+            })
         );
     }
 

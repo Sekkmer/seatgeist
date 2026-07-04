@@ -147,6 +147,23 @@ fn cli_toggles_private_panic_stop_file() -> Result<()> {
     };
     assert_methods(&entries, &["panic_stop_status", "set_panic_stop"]);
     assert!(entries.iter().all(|entry| entry.ok));
+
+    let journal = daemon.cli_json(&[
+        "journal",
+        "tail",
+        "--limit",
+        "10",
+        "--method",
+        "set_panic_stop",
+        "--ok",
+        "true",
+    ])?;
+    let DaemonResponse::Journal(entries) = journal else {
+        bail!("expected filtered journal response, got {journal:?}");
+    };
+    assert!(!entries.is_empty());
+    assert!(entries.iter().all(|entry| entry.method == "set_panic_stop"));
+    assert!(entries.iter().all(|entry| entry.ok));
     Ok(())
 }
 

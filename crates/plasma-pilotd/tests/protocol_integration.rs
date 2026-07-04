@@ -127,6 +127,8 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
 
     let journal = daemon.request(&DaemonRequest::JournalTail(JournalTailRequest {
         limit: 10,
+        method_filter: None,
+        ok: None,
     }))?;
     let DaemonResponse::Journal(entries) = journal else {
         bail!("expected journal response, got {journal:?}");
@@ -145,11 +147,25 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
 
     let journal = daemon.request(&DaemonRequest::JournalTail(JournalTailRequest {
         limit: 10,
+        method_filter: None,
+        ok: None,
     }))?;
     let DaemonResponse::Journal(entries) = journal else {
         bail!("expected second journal response, got {journal:?}");
     };
     assert_methods(&entries, &["journal_tail"]);
+
+    let journal = daemon.request(&DaemonRequest::JournalTail(JournalTailRequest {
+        limit: 10,
+        method_filter: Some("set_panic_stop".to_string()),
+        ok: Some(true),
+    }))?;
+    let DaemonResponse::Journal(entries) = journal else {
+        bail!("expected filtered journal response, got {journal:?}");
+    };
+    assert!(!entries.is_empty());
+    assert!(entries.iter().all(|entry| entry.method == "set_panic_stop"));
+    assert!(entries.iter().all(|entry| entry.ok));
     Ok(())
 }
 
