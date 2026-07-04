@@ -400,6 +400,7 @@ For an 8K monitor, default screenshots should not blindly return a full-resoluti
 preview_max_edge default: 1600
 tile_max_edge default: 1600
 full_resolution requires: explicit_full_resolution = true
+full_resolution policy default: prompt
 ```
 
 ## 11. MCP tool surface
@@ -788,7 +789,7 @@ Tasks:
 - Return monitor geometry and scale info. Initial implementation parses KWin support information.
 - Save screenshots to `$XDG_RUNTIME_DIR/plasma-pilot/screenshots/`.
 - Add `plasma-pilot-cli screenshot`.
-- Add default downscaled previews and explicit full-resolution capture.
+- [x] Add default downscaled previews and explicit full-resolution capture. Current status: bounded previews are observe-class, while direct and observe-attached full-resolution screenshot requests are classified separately and prompt by default until the daemon is started with explicit full-resolution screenshot approval.
 - Add tiled screenshots for 8K and multi-monitor workflows. Initial implementation supports physical-pixel tile crops with max-edge downscaling.
 - Add coordinate transform metadata for preview/crop/full-size mapping. Initial preview/full-size mapping is implemented with scale factors and source/output dimensions.
 
@@ -955,7 +956,7 @@ Tasks:
 
 - Add mock backends for unit tests. Current status: `plasma-pilot-testkit` provides deterministic screen, window, input, clipboard, and accessibility mocks with call recording.
 - Add integration tests for CLI and daemon protocol. Current status: daemon core protocol and low-risk CLI status commands have Rust integration tests; GUI/desktop CLI coverage remains in smoke targets.
-- Add optional local GUI eval scripts. Current status: `scripts/gui-eval.sh` runs current non-control evals for daemon status, observe, default clipboard-read denial, bounded screenshot preview metadata, and journal output; `scripts/gui-eval.sh control-safety` and `make gui-eval-control-safety` start a private control-approved daemon and verify active-window guard denial plus panic-stop denial before backend control can execute.
+- Add optional local GUI eval scripts. Current status: `scripts/gui-eval.sh` runs current non-control evals for daemon status, observe, default clipboard-read denial, bounded screenshot preview metadata, full-resolution screenshot policy denial, and journal output; `scripts/gui-eval.sh control-safety` and `make gui-eval-control-safety` start a private control-approved daemon and verify active-window guard denial plus panic-stop denial before backend control can execute.
 - Add replayable action traces. Current status: `ReplayTrace` stores daemon requests with expected response metadata, and `plasma-pilot-cli trace replay --file <path>` replays each step through the daemon so policy checks and journaling still apply.
 - Add screenshot/coordinate calibration tests. Current status: protocol tests cover mapping 8K downscaled previews and physical-pixel tiles back to source screenshot coordinates.
 
@@ -969,7 +970,7 @@ Eval 4: focus wrong window and verify guard rejection. Current status: `make gui
 Eval 5: clipboard read denied by policy
 Eval 6: panic-stop blocks input/control. Current status: `make gui-eval-control-safety` enables a private panic-stop file and verifies a focus control request is rejected before backend execution.
 Eval 7: 8K screenshot preview maps clicks back to logical coordinates
-Eval 8: full-resolution screenshot requires explicit policy approval
+Eval 8: full-resolution screenshot requires explicit policy approval. Current status: `scripts/gui-eval.sh full-resolution-denied` verifies full-resolution capture is rejected by policy before any output file is written.
 ```
 
 Acceptance criteria:

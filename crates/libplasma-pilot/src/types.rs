@@ -175,6 +175,7 @@ pub enum ToolApprovalLevel {
 #[serde(rename_all = "snake_case")]
 pub enum SafetyClass {
     Observe,
+    FullResolutionScreenshot,
     ClipboardRead,
     ClipboardWrite,
     ControlPointer,

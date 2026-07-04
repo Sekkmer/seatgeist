@@ -88,6 +88,7 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
         DaemonResponse::PolicyStatus(PolicyStatus {
             default_observe: ToolApprovalLevel::Allow,
             default_control: ToolApprovalLevel::Prompt,
+            default_full_resolution_screenshot: ToolApprovalLevel::Prompt,
             default_clipboard_read: ToolApprovalLevel::Prompt,
             default_clipboard_write: ToolApprovalLevel::Allow,
         })

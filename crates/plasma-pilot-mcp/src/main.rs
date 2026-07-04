@@ -467,9 +467,10 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             format!("{} capabilities", capabilities.capabilities.len())
         }
         DaemonResponse::PolicyStatus(status) => format!(
-            "observe={:?} control={:?} clipboard_read={:?} clipboard_write={:?}",
+            "observe={:?} control={:?} full_resolution_screenshot={:?} clipboard_read={:?} clipboard_write={:?}",
             status.default_observe,
             status.default_control,
+            status.default_full_resolution_screenshot,
             status.default_clipboard_read,
             status.default_clipboard_write
         ),
@@ -661,7 +662,7 @@ fn tool_definitions() -> Vec<Value> {
         tool(
             "plasma.observe",
             "Observe Desktop",
-            "Return compact desktop state: monitors, windows, active window, and optional bounded screenshot metadata.",
+            "Return compact desktop state: monitors, windows, active window, and optional screenshot metadata. Full-resolution screenshots require explicit policy approval.",
             object_schema(
                 vec![
                     (
@@ -674,7 +675,7 @@ fn tool_definitions() -> Vec<Value> {
                     ),
                     (
                         "full_resolution",
-                        json!({"type": "boolean", "description": "Capture the source image without downscaling."}),
+                        json!({"type": "boolean", "description": "Capture the source image without downscaling. This is policy-gated separately and prompts by default."}),
                     ),
                 ],
                 vec![],
@@ -683,7 +684,7 @@ fn tool_definitions() -> Vec<Value> {
         tool(
             "plasma.screenshot",
             "Screenshot",
-            "Capture a screenshot to a PNG path. Defaults to a bounded preview unless full_resolution is true.",
+            "Capture a screenshot to a PNG path. Defaults to a bounded preview; full_resolution is policy-gated separately and prompts by default.",
             object_schema(
                 vec![
                     (
@@ -696,7 +697,7 @@ fn tool_definitions() -> Vec<Value> {
                     ),
                     (
                         "full_resolution",
-                        json!({"type": "boolean", "description": "Capture the source image without downscaling."}),
+                        json!({"type": "boolean", "description": "Capture the source image without downscaling. This is policy-gated separately and prompts by default."}),
                     ),
                 ],
                 vec!["output"],

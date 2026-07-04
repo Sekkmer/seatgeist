@@ -259,6 +259,9 @@ struct Args {
     #[arg(long, env = "PLASMA_PILOT_ALLOW_CLIPBOARD_READ")]
     allow_clipboard_read: bool,
 
+    #[arg(long, env = "PLASMA_PILOT_ALLOW_FULL_RESOLUTION_SCREENSHOT")]
+    allow_full_resolution_screenshot: bool,
+
     #[arg(long)]
     print_capabilities: bool,
 }
@@ -286,7 +289,11 @@ async fn main() -> Result<()> {
         None => default_panic_stop_path().context("resolve default panic-stop path")?,
     };
 
-    let policy_config = policy_config(args.allow_control, args.allow_clipboard_read);
+    let policy_config = policy_config(
+        args.allow_control,
+        args.allow_clipboard_read,
+        args.allow_full_resolution_screenshot,
+    );
 
     run(socket, journal, panic_stop_file, policy_config).await
 }
@@ -641,18 +648,26 @@ fn policy_status_from_config(config: &PolicyConfig) -> PolicyStatus {
     PolicyStatus {
         default_observe: config.default_observe.clone(),
         default_control: config.default_control.clone(),
+        default_full_resolution_screenshot: config.default_full_resolution_screenshot.clone(),
         default_clipboard_read: config.default_clipboard_read.clone(),
         default_clipboard_write: config.default_clipboard_write.clone(),
     }
 }
 
-fn policy_config(allow_control: bool, allow_clipboard_read: bool) -> PolicyConfig {
+fn policy_config(
+    allow_control: bool,
+    allow_clipboard_read: bool,
+    allow_full_resolution_screenshot: bool,
+) -> PolicyConfig {
     let mut config = PolicyConfig::default();
     if allow_control {
         config.default_control = ToolApprovalLevel::Allow;
     }
     if allow_clipboard_read {
         config.default_clipboard_read = ToolApprovalLevel::Allow;
+    }
+    if allow_full_resolution_screenshot {
+        config.default_full_resolution_screenshot = ToolApprovalLevel::Allow;
     }
     config
 }
@@ -1063,12 +1078,28 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::ListWindows
         | DaemonRequest::KwinBridgeStatus
         | DaemonRequest::ActiveWindow
-        | DaemonRequest::Observe(_)
-        | DaemonRequest::Screenshot(_)
         | DaemonRequest::ScreenshotTile(_)
         | DaemonRequest::WaitForChange(_)
         | DaemonRequest::FocusedAccessibilityTree(_)
         | DaemonRequest::AccessibilityFind(_) => SafetyClass::Observe,
+        DaemonRequest::Observe(request) => {
+            if request
+                .screenshot
+                .as_ref()
+                .is_some_and(|screenshot| screenshot.full_resolution)
+            {
+                SafetyClass::FullResolutionScreenshot
+            } else {
+                SafetyClass::Observe
+            }
+        }
+        DaemonRequest::Screenshot(request) => {
+            if request.full_resolution {
+                SafetyClass::FullResolutionScreenshot
+            } else {
+                SafetyClass::Observe
+            }
+        }
         DaemonRequest::ClipboardGet(_) => SafetyClass::ClipboardRead,
         DaemonRequest::ClipboardSet(_) => SafetyClass::ClipboardWrite,
         DaemonRequest::MovePointer(_)
@@ -3030,6 +3061,70 @@ mod tests {
     }
 
     #[test]
+    fn bounded_screenshot_requests_pass_default_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        enforce_policy(
+            &policy,
+            &DaemonRequest::Screenshot(ScreenshotRequest {
+                output: temp_test_path("bounded-screenshot.png"),
+                max_edge: Some(1600),
+                full_resolution: false,
+            }),
+        )
+        .expect("bounded screenshot requests are allowed by default");
+    }
+
+    #[test]
+    fn full_resolution_screenshot_fails_closed_by_default() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::Screenshot(ScreenshotRequest {
+                output: temp_test_path("full-resolution-screenshot.png"),
+                max_edge: None,
+                full_resolution: true,
+            }),
+        )
+        .expect_err("full-resolution screenshots require approval by default");
+        assert!(err.to_string().contains("FullResolutionScreenshot"));
+    }
+
+    #[test]
+    fn full_resolution_observe_screenshot_fails_closed_by_default() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::Observe(ObserveRequest {
+                screenshot: Some(ScreenshotRequest {
+                    output: temp_test_path("full-resolution-observe.png"),
+                    max_edge: None,
+                    full_resolution: true,
+                }),
+            }),
+        )
+        .expect_err("full-resolution observe screenshots require approval by default");
+        assert!(err.to_string().contains("FullResolutionScreenshot"));
+    }
+
+    #[test]
+    fn allow_full_resolution_screenshot_config_allows_full_resolution_policy() {
+        let policy = PolicyEngine::new(policy_config(false, false, true));
+        enforce_policy(
+            &policy,
+            &DaemonRequest::Screenshot(ScreenshotRequest {
+                output: temp_test_path("allowed-full-resolution-screenshot.png"),
+                max_edge: None,
+                full_resolution: true,
+            }),
+        )
+        .expect("explicit full-resolution screenshot override allows capture");
+        assert_eq!(
+            policy_status_from_config(policy.config()).default_full_resolution_screenshot,
+            ToolApprovalLevel::Allow
+        );
+    }
+
+    #[test]
     fn prompt_policy_fails_closed_without_approval_channel() {
         let policy = PolicyEngine::new(PolicyConfig {
             default_observe: ToolApprovalLevel::Prompt,
@@ -3064,7 +3159,7 @@ mod tests {
         let path = temp_test_path("panic-stop-blocks-control");
         fs::write(&path, "enabled").expect("panic-stop fixture file is written");
         let panic_stop = PanicStopState::new(path.clone());
-        let policy = PolicyEngine::new(policy_config(true, false));
+        let policy = PolicyEngine::new(policy_config(true, false, false));
 
         let err = enforce_panic_stop(
             &panic_stop,
@@ -3781,7 +3876,7 @@ mod tests {
 
     #[test]
     fn allow_control_config_allows_focus_policy() {
-        let policy = PolicyEngine::new(policy_config(true, false));
+        let policy = PolicyEngine::new(policy_config(true, false, false));
         enforce_policy(
             &policy,
             &DaemonRequest::FocusWindow(FocusWindowRequest {
@@ -3811,7 +3906,7 @@ mod tests {
 
     #[test]
     fn allow_clipboard_read_config_allows_clipboard_get_policy() {
-        let policy = PolicyEngine::new(policy_config(false, true));
+        let policy = PolicyEngine::new(policy_config(false, true, false));
         enforce_policy(
             &policy,
             &DaemonRequest::ClipboardGet(ClipboardGetRequest {

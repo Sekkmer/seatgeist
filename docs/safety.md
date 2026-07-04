@@ -6,7 +6,7 @@ Default rules:
 - Clipboard reads default to prompt.
 - Clipboard writes default to allow, but still flow through policy and the action journal.
 - Secret/password fields default to deny.
-- Full-resolution screenshots default to prompt.
+- Full-resolution screenshots default to prompt and require an explicit daemon approval mode before the backend capture path runs.
 - Privileged input backends default to prompt.
 - Focus guards should be supplied for pointer, keyboard, and semantic control actions whenever the caller has active-window context.
 - Daemon requests are journaled as compact JSONL records with restrictive file permissions.

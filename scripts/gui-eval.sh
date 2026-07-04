@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
 	cat <<'USAGE'
-Usage: scripts/gui-eval.sh [all|status|observe|clipboard-denied|screenshot-preview|control-safety]
+Usage: scripts/gui-eval.sh [all|status|observe|clipboard-denied|screenshot-preview|full-resolution-denied|control-safety]
 
 Runs opt-in local GUI evals against a private PlasmaPilot daemon socket.
 The default `all` set avoids control actions. `control-safety` starts a private
@@ -19,7 +19,7 @@ if [[ "$case_name" == "--help" || "$case_name" == "-h" ]]; then
 fi
 
 case "$case_name" in
-	all | status | observe | clipboard-denied | screenshot-preview | control-safety) ;;
+	all | status | observe | clipboard-denied | screenshot-preview | full-resolution-denied | control-safety) ;;
 	*)
 		usage >&2
 		exit 2
@@ -112,6 +112,18 @@ eval_screenshot_preview() {
 	' "$run_dir/screenshot-preview.json" >/dev/null
 }
 
+eval_full_resolution_denied() {
+	if cli screenshot --output "$run_dir/full-resolution-denied.png" --full-resolution >"$run_dir/full-resolution-denied.txt" 2>&1; then
+		echo "full-resolution screenshot unexpectedly succeeded without explicit approval" >&2
+		exit 1
+	fi
+	grep -qi "FullResolutionScreenshot" "$run_dir/full-resolution-denied.txt"
+	if [[ -e "$run_dir/full-resolution-denied.png" ]]; then
+		echo "full-resolution screenshot wrote output despite policy denial" >&2
+		exit 1
+	fi
+}
+
 eval_control_safety() {
 	cli panic-stop status >"$run_dir/panic-stop-initial.json"
 	jq -e '.type == "panic_stop" and .data.enabled == false' "$run_dir/panic-stop-initial.json" >/dev/null
@@ -154,12 +166,13 @@ run_case() {
 		observe) eval_observe ;;
 		clipboard-denied) eval_clipboard_denied ;;
 		screenshot-preview) eval_screenshot_preview ;;
+		full-resolution-denied) eval_full_resolution_denied ;;
 		control-safety) eval_control_safety ;;
 	esac
 }
 
 if [[ "$case_name" == "all" ]]; then
-	for eval_name in status observe clipboard-denied screenshot-preview; do
+	for eval_name in status observe clipboard-denied screenshot-preview full-resolution-denied; do
 		run_case "$eval_name"
 	done
 else

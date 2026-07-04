@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct PolicyConfig {
     pub default_observe: ToolApprovalLevel,
     pub default_control: ToolApprovalLevel,
+    pub default_full_resolution_screenshot: ToolApprovalLevel,
     pub default_clipboard_read: ToolApprovalLevel,
     pub default_clipboard_write: ToolApprovalLevel,
 }
@@ -14,6 +15,7 @@ impl Default for PolicyConfig {
         Self {
             default_observe: ToolApprovalLevel::Allow,
             default_control: ToolApprovalLevel::Prompt,
+            default_full_resolution_screenshot: ToolApprovalLevel::Prompt,
             default_clipboard_read: ToolApprovalLevel::Prompt,
             default_clipboard_write: ToolApprovalLevel::Allow,
         }
@@ -37,6 +39,9 @@ impl PolicyEngine {
     pub fn decide(&self, safety_class: &SafetyClass) -> PolicyDecision {
         let level = match safety_class {
             SafetyClass::Observe | SafetyClass::Policy => self.config.default_observe.clone(),
+            SafetyClass::FullResolutionScreenshot => {
+                self.config.default_full_resolution_screenshot.clone()
+            }
             SafetyClass::ClipboardRead => self.config.default_clipboard_read.clone(),
             SafetyClass::ClipboardWrite => self.config.default_clipboard_write.clone(),
             SafetyClass::ControlPointer
@@ -60,5 +65,12 @@ mod tests {
         let policy = PolicyEngine::new(PolicyConfig::default());
         let decision = policy.decide(&SafetyClass::Observe);
         assert_eq!(decision.level, ToolApprovalLevel::Allow);
+    }
+
+    #[test]
+    fn full_resolution_screenshot_prompts_by_default() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let decision = policy.decide(&SafetyClass::FullResolutionScreenshot);
+        assert_eq!(decision.level, ToolApprovalLevel::Prompt);
     }
 }

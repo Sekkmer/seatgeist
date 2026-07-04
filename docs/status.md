@@ -7,7 +7,7 @@ Phase 0 scaffold is present:
 - Cargo virtual workspace with resolver 3.
 - Rust 2024 member crates for shared types, policy, backend traits, daemon, CLI, MCP, KWin, AT-SPI, and testkit.
 - Conservative plugin, MCP, hook, skill, systemd, udev, and polkit skeletons.
-- CLI and daemon are stubs; real socket RPC, screenshot, input, KWin, AT-SPI, and MCP protocol implementation remain future work.
+- The initial CLI and daemon scaffold has been replaced by the implementation slices below.
 
 Phase 1 first slice is implemented:
 
@@ -16,7 +16,7 @@ Phase 1 first slice is implemented:
 - `plasma-pilot-cli doctor`, `capabilities`, and `policy-status` call the daemon over the Unix socket.
 - `make smoke` starts a temporary daemon, calls the CLI health/capability/policy commands, and verifies socket directory/socket modes.
 - The daemon and CLI can capture a full-screen PNG through Spectacle when run in the host KDE session. The smoke capture on this workstation returned a 7680x4320 source image.
-- Screenshot output now defaults to a bounded preview. On the 8K workstation, the default CLI screenshot produced a 1600x900 PNG with source/output dimensions and scale metadata; `--full-resolution` produced a 7680x4320 PNG with scale `1.0`.
+- Screenshot output now defaults to a bounded preview. On the 8K workstation, the default CLI screenshot produced a 1600x900 PNG with source/output dimensions and scale metadata. Full-resolution screenshot requests are explicit and policy-gated separately; they prompt/fail closed by default until the daemon is started with full-resolution screenshot approval.
 - Spectacle captures are serialized inside the daemon because concurrent Spectacle captures can race.
 - `plasma-pilot-cli monitors` now reports KWin monitor metadata from `org.kde.KWin.supportInformation`; on this workstation it reports `HDMI-A-2` as 5120x2880 logical at scale 1.5, matching the 7680x4320 screenshot source.
 - Screenshot responses include the same monitor metadata when KWin responds.
@@ -52,7 +52,7 @@ Phase 1 first slice is implemented:
 - `crates/plasma-pilot-cli/tests/daemon_cli_integration.rs` now starts a real daemon binary and verifies that the actual CLI binary can call `doctor`, `capabilities`, `policy-status`, and `journal tail` over a private Unix socket.
 - `plasma-pilot-testkit` now provides deterministic mock implementations of the screen, window, input, clipboard, and accessibility backend traits, including call recording for future unit tests that must not touch the real desktop.
 - `ScreenshotTransform::output_to_source_point` maps downscaled screenshot output coordinates back to source coordinates, with protocol tests for 8K preview and physical-pixel tile calibration.
-- `scripts/gui-eval.sh` and `make gui-eval` run opt-in local evals against a private daemon socket for current non-control flows: status, observe, default clipboard-read denial, bounded screenshot preview metadata, and journal output.
+- `scripts/gui-eval.sh` and `make gui-eval` run opt-in local evals against a private daemon socket for current non-control flows: status, observe, default clipboard-read denial, bounded screenshot preview metadata, full-resolution screenshot policy denial, and journal output.
 - `scripts/gui-eval.sh control-safety` and `make gui-eval-control-safety` run a private control-approved daemon with an isolated panic-stop file, seed active-window state through the daemon KWin bridge, and verify wrong-window guard denial plus panic-stop denial before backend control execution.
 - `ReplayTrace` and `plasma-pilot-cli trace replay --file <path>` provide replayable daemon-request traces with expected response metadata; replayed steps still flow through daemon policy enforcement and journaling.
 - `plasma-pilot-cli panic-stop status|enable|disable` now controls a daemon-side file-backed panic-stop flag. The daemon journals these requests and rejects control-class actions while the flag is active, even when control policy is explicitly allowed.
