@@ -2,13 +2,16 @@ use std::{
     fs,
     os::unix::fs::{FileTypeExt, PermissionsExt},
     path::{Path, PathBuf},
+    process::Command,
+    thread,
+    time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Error, Result, bail};
 use clap::Parser;
 use libplasma_pilot::{
-    BackendCapability, CapabilitySet, DaemonRequest, DaemonResponse, HealthStatus, PolicyStatus,
-    ToolApprovalLevel, current_euid, default_socket_path,
+    BackendCapability, CapabilitySet, CoordinateSpace, DaemonRequest, DaemonResponse, HealthStatus,
+    PolicyStatus, ScreenshotInfo, ToolApprovalLevel, current_euid, default_socket_path,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -93,6 +96,12 @@ fn handle_request(request: DaemonRequest) -> DaemonResponse {
         DaemonRequest::Health => DaemonResponse::Health(health()),
         DaemonRequest::Capabilities => DaemonResponse::Capabilities(capabilities()),
         DaemonRequest::PolicyStatus => DaemonResponse::PolicyStatus(policy_status()),
+        DaemonRequest::Screenshot { output } => match capture_screenshot(output) {
+            Ok(info) => DaemonResponse::Screenshot(info),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
     }
 }
 
@@ -106,10 +115,7 @@ fn health() -> HealthStatus {
 
 fn capabilities() -> CapabilitySet {
     CapabilitySet {
-        capabilities: vec![
-            BackendCapability::DaemonHealth,
-            BackendCapability::DaemonPolicyStatus,
-        ],
+        capabilities: current_capabilities(),
     }
 }
 
@@ -119,6 +125,122 @@ fn policy_status() -> PolicyStatus {
         default_control: ToolApprovalLevel::Prompt,
         default_clipboard_read: ToolApprovalLevel::Prompt,
         default_clipboard_write: ToolApprovalLevel::Allow,
+    }
+}
+
+fn current_capabilities() -> Vec<BackendCapability> {
+    let mut capabilities = vec![
+        BackendCapability::DaemonHealth,
+        BackendCapability::DaemonPolicyStatus,
+    ];
+    if command_exists("spectacle") {
+        capabilities.push(BackendCapability::Screenshot);
+    }
+    capabilities
+}
+
+fn command_exists(command: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+
+    std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(command);
+        candidate.is_file()
+    })
+}
+
+fn capture_screenshot(output: PathBuf) -> Result<ScreenshotInfo> {
+    prepare_screenshot_output(&output)?;
+    if !command_exists("spectacle") {
+        bail!("spectacle command is not available for KDE screenshot capture");
+    }
+
+    let status = Command::new("spectacle")
+        .args(["-b", "-f", "-n", "-o"])
+        .arg(&output)
+        .status()
+        .context("run spectacle screenshot backend")?;
+    if !status.success() {
+        bail!("spectacle screenshot backend exited with status {status}");
+    }
+
+    let (width, height) = read_png_dimensions_with_retry(&output)
+        .with_context(|| format!("read screenshot dimensions from {}", output.display()))?;
+
+    Ok(ScreenshotInfo {
+        path: output,
+        backend: "spectacle".to_string(),
+        width: Some(width),
+        height: Some(height),
+        coordinate_space: CoordinateSpace::PhysicalPixel,
+        monitors: Vec::new(),
+    })
+}
+
+fn format_error_chain(err: &Error) -> String {
+    err.chain()
+        .map(std::string::ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
+fn prepare_screenshot_output(output: &Path) -> Result<()> {
+    if output.extension().and_then(|ext| ext.to_str()) != Some("png") {
+        bail!(
+            "screenshot output must be a .png path: {}",
+            output.display()
+        );
+    }
+
+    if let Ok(metadata) = fs::symlink_metadata(output) {
+        if metadata.file_type().is_symlink() {
+            bail!(
+                "refusing to write screenshot through symlink {}",
+                output.display()
+            );
+        }
+        if metadata.is_dir() {
+            bail!("screenshot output is a directory: {}", output.display());
+        }
+    }
+
+    let parent = output
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("screenshot output has no parent: {}", output.display()))?;
+    if !parent.as_os_str().is_empty() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create screenshot output dir {}", parent.display()))?;
+    }
+    Ok(())
+}
+
+fn read_png_dimensions(path: &Path) -> Result<(u32, u32)> {
+    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    if bytes.len() < 24 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
+        bail!("screenshot is not a valid PNG: {}", path.display());
+    }
+
+    let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+    Ok((width, height))
+}
+
+fn read_png_dimensions_with_retry(path: &Path) -> Result<(u32, u32)> {
+    let mut last_error = None;
+    for _ in 0..10 {
+        match read_png_dimensions(path) {
+            Ok(dimensions) => return Ok(dimensions),
+            Err(err) => {
+                last_error = Some(err);
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+
+    match last_error {
+        Some(err) => Err(err),
+        None => bail!("could not read screenshot dimensions"),
     }
 }
 

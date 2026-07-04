@@ -50,7 +50,12 @@ fn main() -> Result<()> {
         Command::Capabilities => print_daemon_response(&socket, DaemonRequest::Capabilities)?,
         Command::PolicyStatus => print_daemon_response(&socket, DaemonRequest::PolicyStatus)?,
         Command::Screenshot { output } => {
-            println!("screenshot backend is not implemented yet; requested output={output}");
+            print_daemon_response(
+                &socket,
+                DaemonRequest::Screenshot {
+                    output: output.into(),
+                },
+            )?;
         }
         Command::Windows => println!("window backend is not implemented yet"),
         Command::ActiveWindow => println!("active-window backend is not implemented yet"),

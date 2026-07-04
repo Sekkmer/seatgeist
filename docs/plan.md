@@ -771,7 +771,7 @@ Goal: Codex can see the desktop.
 Tasks:
 
 - Implement `ScreenBackend` trait.
-- Implement a KDE/Wayland screenshot backend.
+- Implement a KDE/Wayland screenshot backend. Initial implementation uses Spectacle as a command backend.
 - Prefer a backend that works on Plasma 6 without manual prompts once trusted/configured.
 - Add fallback backend using command-line tools if needed.
 - Return monitor geometry and scale info.
@@ -785,7 +785,7 @@ Acceptance criteria:
 
 - CLI can capture current screen to PNG.
 - Screenshot response includes coordinate metadata.
-- Multi-monitor metadata is correct or explicitly marked unsupported.
+- Multi-monitor metadata is correct or explicitly marked unsupported. Initial Spectacle backend returns an empty monitor list until KWin/portal metadata is wired.
 
 ### Phase 3: uinput keyboard and pointer control
 

@@ -1,7 +1,11 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::types::{BackendCapability, Observation, SafetyClass, ToolApprovalLevel};
+use crate::types::{
+    BackendCapability, CoordinateSpace, MonitorInfo, Observation, SafetyClass, ToolApprovalLevel,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthStatus {
@@ -23,12 +27,23 @@ pub struct PolicyStatus {
     pub default_clipboard_write: ToolApprovalLevel,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScreenshotInfo {
+    pub path: PathBuf,
+    pub backend: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub coordinate_space: CoordinateSpace,
+    pub monitors: Vec<MonitorInfo>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum DaemonRequest {
     Health,
     Capabilities,
     PolicyStatus,
+    Screenshot { output: PathBuf },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -37,6 +52,7 @@ pub enum DaemonResponse {
     Health(HealthStatus),
     Capabilities(CapabilitySet),
     PolicyStatus(PolicyStatus),
+    Screenshot(ScreenshotInfo),
     Error { message: String },
 }
 
@@ -78,5 +94,15 @@ mod tests {
         let encoded = serde_json::to_string(&response).expect("capabilities response serializes");
         assert!(encoded.contains(r#""type":"capabilities""#));
         assert!(encoded.contains(r#""daemon_health""#));
+    }
+
+    #[test]
+    fn serializes_screenshot_request_with_output_path() {
+        let request = DaemonRequest::Screenshot {
+            output: PathBuf::from("/tmp/plasma-pilot.png"),
+        };
+        let encoded = serde_json::to_string(&request).expect("screenshot request serializes");
+        assert!(encoded.contains(r#""method":"screenshot""#));
+        assert!(encoded.contains(r#"/tmp/plasma-pilot.png"#));
     }
 }
