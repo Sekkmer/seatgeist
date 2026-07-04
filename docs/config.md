@@ -29,6 +29,12 @@ deny = ["org.keepassxc.KeePassXC"]
 
 [safety]
 require_focus_guard = false
+
+[[safety.redact_regions]]
+x = 0
+y = 0
+width = 640
+height = 120
 ```
 
 Path values can use `$XDG_RUNTIME_DIR`, `$XDG_STATE_HOME`, `$XDG_CONFIG_HOME`, and `$HOME`.
@@ -45,4 +51,6 @@ Explicit local approval flags such as `--allow-control`, `--allow-clipboard-read
 
 When `[safety].require_focus_guard = true`, every control-class request must include an active-window guard before the daemon will run backend control. Observe, status, policy, and journal requests are unaffected. The guard is still checked against the active window after this presence check.
 
-Destructive-action policy and sensitive-region screenshot redaction are not implemented yet.
+`[[safety.redact_regions]]` entries define physical-pixel source screenshot rectangles. The daemon maps each rectangle through the screenshot transform and black-fills the matching output pixels before returning screenshot, screenshot-tile, observe screenshot, or wait-for-change outputs. Zero-size regions are ignored.
+
+Destructive-action policy is not implemented yet.

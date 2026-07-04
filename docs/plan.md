@@ -311,7 +311,7 @@ Responsibilities:
 - Generate region crops and tiled screenshots.
 - Preserve coordinate transforms between physical pixels, logical pixels, and downscaled images.
 - [x] Produce screenshot change thresholds for `plasma.wait_for_change`. Current status: the daemon polls bounded screenshots, computes normalized RGB deltas, and returns changed/captures/elapsed/score metadata plus latest screenshot metadata.
-- Redact configured sensitive regions before screenshots leave the daemon.
+- [x] Redact configured sensitive regions before screenshots leave the daemon. Current status: `[[safety.redact_regions]]` physical-pixel rectangles are mapped through full, preview, tile, observe, and wait-for-change screenshot transforms before output PNGs are returned.
 
 ## 9. Backend model
 
@@ -688,6 +688,12 @@ pause_on_human_input = true
 panic_stop_file = "$XDG_RUNTIME_DIR/plasma-pilot/panic-stop"
 preview_max_edge = 1600
 tile_max_edge = 1600
+
+[[safety.redact_regions]]
+x = 0
+y = 0
+width = 640
+height = 120
 ```
 
 Policy values:
@@ -702,7 +708,7 @@ If prompt support is not available through the current client, `prompt` should r
 
 Current implementation: daemon requests are classified before execution and evaluated by `plasma-pilot-policy`. Observe/status requests are allowed by default. Prompt decisions fail closed because no trusted approval channel exists yet.
 
-`plasma-pilotd` now reads the config file from `~/.config/plasma-pilot/config.toml`, or from `--config` / `PLASMA_PILOT_CONFIG` when provided. Implemented fields are `[daemon].socket`, `[daemon].journal`, `[daemon].panic_stop_file`, these `[policy]` keys: `default_observe`, `default_control`, `default_clipboard_read`, `default_clipboard_write`, and `full_resolution_screenshot`, `[apps].allow` and `[apps].deny`, plus `[safety].require_focus_guard`. CLI arguments and environment-backed flags take precedence over file values, so explicit local approval flags such as `--allow-control`, `--allow-clipboard-read`, and `--allow-full-resolution-screenshot` still override prompt/deny defaults for intentional local runs. App deny rules win over allow rules; control fails closed if an app policy is configured and the relevant app id cannot be determined. When `require_focus_guard` is true, every control-class request must include an active-window guard before backend execution. Destructive-action policy and sensitive-region policies remain future policy-engine work.
+`plasma-pilotd` now reads the config file from `~/.config/plasma-pilot/config.toml`, or from `--config` / `PLASMA_PILOT_CONFIG` when provided. Implemented fields are `[daemon].socket`, `[daemon].journal`, `[daemon].panic_stop_file`, these `[policy]` keys: `default_observe`, `default_control`, `default_clipboard_read`, `default_clipboard_write`, and `full_resolution_screenshot`, `[apps].allow` and `[apps].deny`, plus `[safety].require_focus_guard` and `[[safety.redact_regions]]`. CLI arguments and environment-backed flags take precedence over file values, so explicit local approval flags such as `--allow-control`, `--allow-clipboard-read`, and `--allow-full-resolution-screenshot` still override prompt/deny defaults for intentional local runs. App deny rules win over allow rules; control fails closed if an app policy is configured and the relevant app id cannot be determined. When `require_focus_guard` is true, every control-class request must include an active-window guard before backend execution. Configured screenshot redaction regions are physical-pixel source rectangles and are black-filled in output PNGs before screenshot metadata is returned. Destructive-action policy remains future policy-engine work.
 
 ## 15. Action journal
 

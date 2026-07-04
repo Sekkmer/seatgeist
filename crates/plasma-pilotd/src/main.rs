@@ -12,7 +12,7 @@ use std::{
 
 use anyhow::{Context, Error, Result, bail};
 use clap::Parser;
-use image::{GenericImageView, imageops::FilterType};
+use image::{GenericImageView, Rgba, imageops::FilterType};
 use libplasma_pilot::{
     AccessibilityFindRequest, AccessibilityInvokeRequest, AccessibilitySetTextRequest,
     ActionResult, ActivateTabRequest, ActiveWindowGuard, BackendCapability, CapabilitySet,
@@ -281,11 +281,29 @@ struct AppPolicy {
 #[derive(Debug, Default, Deserialize)]
 struct SafetyFileConfig {
     require_focus_guard: Option<bool>,
+    redact_regions: Option<Vec<RedactRegionFileConfig>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RedactRegionFileConfig {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
 }
 
 #[derive(Debug, Clone, Default)]
 struct SafetySettings {
     require_focus_guard: bool,
+    screenshot_redactions: Vec<RedactRegion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RedactRegion {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
 }
 
 #[derive(Debug, Parser)]
@@ -571,31 +589,41 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
             },
         },
         DaemonRequest::Observe(request) => {
-            match observe_desktop(request, &runtime.active_window_state) {
+            match observe_desktop(
+                request,
+                &runtime.active_window_state,
+                &runtime.safety_settings,
+            ) {
                 Ok(observation) => DaemonResponse::Observation(Box::new(observation)),
                 Err(err) => DaemonResponse::Error {
                     message: format_error_chain(&err),
                 },
             }
         }
-        DaemonRequest::Screenshot(request) => match capture_screenshot(request) {
-            Ok(info) => DaemonResponse::Screenshot(info),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
-        },
-        DaemonRequest::ScreenshotTile(request) => match capture_screenshot_tile(request) {
-            Ok(info) => DaemonResponse::Screenshot(info),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
-        },
-        DaemonRequest::WaitForChange(request) => match wait_for_change(request) {
-            Ok(result) => DaemonResponse::WaitForChange(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
-        },
+        DaemonRequest::Screenshot(request) => {
+            match capture_screenshot(request, &runtime.safety_settings.screenshot_redactions) {
+                Ok(info) => DaemonResponse::Screenshot(info),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
+        DaemonRequest::ScreenshotTile(request) => {
+            match capture_screenshot_tile(request, &runtime.safety_settings.screenshot_redactions) {
+                Ok(info) => DaemonResponse::Screenshot(info),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
+        DaemonRequest::WaitForChange(request) => {
+            match wait_for_change(request, &runtime.safety_settings.screenshot_redactions) {
+                Ok(result) => DaemonResponse::WaitForChange(Box::new(result)),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
         DaemonRequest::ClipboardGet(request) => match clipboard_get_text(request) {
             Ok(text) => DaemonResponse::ClipboardText(text),
             Err(err) => DaemonResponse::Error {
@@ -844,11 +872,30 @@ fn normalize_app_policy_list(values: &[String]) -> Vec<String> {
 }
 
 fn safety_settings(file_safety: Option<&SafetyFileConfig>) -> SafetySettings {
+    let screenshot_redactions = file_safety
+        .and_then(|safety| safety.redact_regions.as_deref())
+        .map(redact_regions)
+        .unwrap_or_default();
+
     SafetySettings {
         require_focus_guard: file_safety
             .and_then(|safety| safety.require_focus_guard)
             .unwrap_or(false),
+        screenshot_redactions,
     }
+}
+
+fn redact_regions(values: &[RedactRegionFileConfig]) -> Vec<RedactRegion> {
+    values
+        .iter()
+        .filter(|region| region.width > 0 && region.height > 0)
+        .map(|region| RedactRegion {
+            x: region.x,
+            y: region.y,
+            width: region.width,
+            height: region.height,
+        })
+        .collect()
 }
 
 fn kwin_bridge_status(
@@ -1444,7 +1491,10 @@ fn command_stdout(command: &str, args: &[&str]) -> Result<String> {
     String::from_utf8(output.stdout).with_context(|| format!("{command} stdout is not UTF-8"))
 }
 
-fn capture_screenshot(request: ScreenshotRequest) -> Result<ScreenshotInfo> {
+fn capture_screenshot(
+    request: ScreenshotRequest,
+    redactions: &[RedactRegion],
+) -> Result<ScreenshotInfo> {
     let _guard = SCREENSHOT_CAPTURE_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -1493,12 +1543,9 @@ fn capture_screenshot(request: ScreenshotRequest) -> Result<ScreenshotInfo> {
         )?
     };
 
-    if capture_output != request.output {
-        fs::remove_file(&capture_output).ok();
-    }
     let monitors = list_monitors().unwrap_or_default();
 
-    Ok(ScreenshotInfo {
+    let info = ScreenshotInfo {
         path: request.output,
         backend: "spectacle".to_string(),
         source_width,
@@ -1515,10 +1562,20 @@ fn capture_screenshot(request: ScreenshotRequest) -> Result<ScreenshotInfo> {
         },
         coordinate_space: CoordinateSpace::PhysicalPixel,
         monitors,
-    })
+    };
+    apply_screenshot_redactions(&info, redactions)?;
+
+    if capture_output != info.path {
+        fs::remove_file(&capture_output).ok();
+    }
+
+    Ok(info)
 }
 
-fn capture_screenshot_tile(request: ScreenshotTileRequest) -> Result<ScreenshotInfo> {
+fn capture_screenshot_tile(
+    request: ScreenshotTileRequest,
+    redactions: &[RedactRegion],
+) -> Result<ScreenshotInfo> {
     let _guard = SCREENSHOT_CAPTURE_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -1551,10 +1608,9 @@ fn capture_screenshot_tile(request: ScreenshotTileRequest) -> Result<ScreenshotI
     let (output_width, output_height) =
         write_tile_preview(&capture_output, &request, request.max_edge.unwrap_or(1600))?;
 
-    fs::remove_file(&capture_output).ok();
     let monitors = list_monitors().unwrap_or_default();
 
-    Ok(ScreenshotInfo {
+    let info = ScreenshotInfo {
         path: request.output,
         backend: "spectacle".to_string(),
         source_width,
@@ -1571,10 +1627,17 @@ fn capture_screenshot_tile(request: ScreenshotTileRequest) -> Result<ScreenshotI
         },
         coordinate_space: CoordinateSpace::PhysicalPixel,
         monitors,
-    })
+    };
+    apply_screenshot_redactions(&info, redactions)?;
+
+    fs::remove_file(&capture_output).ok();
+    Ok(info)
 }
 
-fn wait_for_change(request: WaitForChangeRequest) -> Result<WaitForChangeResult> {
+fn wait_for_change(
+    request: WaitForChangeRequest,
+    redactions: &[RedactRegion],
+) -> Result<WaitForChangeResult> {
     validate_wait_for_change_request(&request)?;
     let timeout = Duration::from_millis(request.timeout_ms);
     let interval = Duration::from_millis(request.interval_ms);
@@ -1585,7 +1648,7 @@ fn wait_for_change(request: WaitForChangeRequest) -> Result<WaitForChangeResult>
         full_resolution: false,
     };
 
-    let baseline_info = capture_screenshot(screenshot_request())?;
+    let baseline_info = capture_screenshot(screenshot_request(), redactions)?;
     let baseline = read_image_sample(&baseline_info.path)?;
     let mut final_info = baseline_info;
     let mut captures = 1;
@@ -1595,7 +1658,7 @@ fn wait_for_change(request: WaitForChangeRequest) -> Result<WaitForChangeResult>
     while started.elapsed() < timeout {
         let remaining = timeout.saturating_sub(started.elapsed());
         thread::sleep(interval.min(remaining));
-        final_info = capture_screenshot(screenshot_request())?;
+        final_info = capture_screenshot(screenshot_request(), redactions)?;
         captures += 1;
 
         let candidate = read_image_sample(&final_info.path)?;
@@ -1769,13 +1832,17 @@ fn logical_overlap_area(geometry: &WindowGeometry, monitor: &libplasma_pilot::Mo
 fn observe_desktop(
     request: ObserveRequest,
     active_window_state: &ActiveWindowState,
+    safety_settings: &SafetySettings,
 ) -> Result<DesktopObservation> {
     let monitors = list_monitors().unwrap_or_default();
     let windows = list_windows_with_monitors(&monitors).unwrap_or_default();
     let active_window =
         active_window_with_monitors(active_window_state, &monitors).unwrap_or_default();
     let screenshot = match request.screenshot {
-        Some(request) => Some(capture_screenshot(request)?),
+        Some(request) => Some(capture_screenshot(
+            request,
+            &safety_settings.screenshot_redactions,
+        )?),
         None => None,
     };
 
@@ -2826,6 +2893,96 @@ fn write_tile_preview(
     Ok((output_width, output_height))
 }
 
+fn apply_screenshot_redactions(info: &ScreenshotInfo, redactions: &[RedactRegion]) -> Result<()> {
+    if redactions.is_empty() {
+        return Ok(());
+    }
+
+    let mut image = image::open(&info.path)
+        .with_context(|| format!("open screenshot for redaction {}", info.path.display()))?
+        .to_rgba8();
+    let (width, height) = image.dimensions();
+    let mut changed = false;
+    for redaction in redactions {
+        let Some(rect) = output_redaction_rect(redaction, &info.transform, width, height) else {
+            continue;
+        };
+        changed = true;
+        for y in rect.y..rect.y + rect.height {
+            for x in rect.x..rect.x + rect.width {
+                image.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+    }
+
+    if changed {
+        image
+            .save(&info.path)
+            .with_context(|| format!("write redacted screenshot {}", info.path.display()))?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OutputRedactionRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+fn output_redaction_rect(
+    redaction: &RedactRegion,
+    transform: &ScreenshotTransform,
+    output_width: u32,
+    output_height: u32,
+) -> Option<OutputRedactionRect> {
+    if transform.scale_x <= 0.0 || transform.scale_y <= 0.0 {
+        return None;
+    }
+
+    let source_left = f64::from(transform.source_origin_x);
+    let source_top = f64::from(transform.source_origin_y);
+    let source_right = source_left + f64::from(output_width) / transform.scale_x;
+    let source_bottom = source_top + f64::from(output_height) / transform.scale_y;
+
+    let redact_left = f64::from(redaction.x);
+    let redact_top = f64::from(redaction.y);
+    let redact_right = redact_left + f64::from(redaction.width);
+    let redact_bottom = redact_top + f64::from(redaction.height);
+
+    let left = redact_left.max(source_left);
+    let top = redact_top.max(source_top);
+    let right = redact_right.min(source_right);
+    let bottom = redact_bottom.min(source_bottom);
+    if right <= left || bottom <= top {
+        return None;
+    }
+
+    let output_left = ((left - source_left) * transform.scale_x)
+        .floor()
+        .clamp(0.0, f64::from(output_width)) as u32;
+    let output_top = ((top - source_top) * transform.scale_y)
+        .floor()
+        .clamp(0.0, f64::from(output_height)) as u32;
+    let output_right = ((right - source_left) * transform.scale_x)
+        .ceil()
+        .clamp(0.0, f64::from(output_width)) as u32;
+    let output_bottom = ((bottom - source_top) * transform.scale_y)
+        .ceil()
+        .clamp(0.0, f64::from(output_height)) as u32;
+    if output_right <= output_left || output_bottom <= output_top {
+        return None;
+    }
+
+    Some(OutputRedactionRect {
+        x: output_left,
+        y: output_top,
+        width: output_right - output_left,
+        height: output_bottom - output_top,
+    })
+}
+
 fn scaled_dimension(value: u32, scale: f64) -> u32 {
     (f64::from(value) * scale).round().max(1.0) as u32
 }
@@ -3514,15 +3671,181 @@ mod tests {
         assert!(
             !safety_settings(Some(&SafetyFileConfig {
                 require_focus_guard: None,
+                redact_regions: None,
             }))
             .require_focus_guard
         );
     }
 
     #[test]
+    fn safety_settings_from_config_normalizes_redaction_regions() {
+        let settings = safety_settings(Some(&SafetyFileConfig {
+            require_focus_guard: Some(true),
+            redact_regions: Some(vec![
+                RedactRegionFileConfig {
+                    x: 10,
+                    y: 20,
+                    width: 30,
+                    height: 40,
+                },
+                RedactRegionFileConfig {
+                    x: 1,
+                    y: 2,
+                    width: 0,
+                    height: 4,
+                },
+            ]),
+        }));
+
+        assert!(settings.require_focus_guard);
+        assert_eq!(
+            settings.screenshot_redactions,
+            vec![RedactRegion {
+                x: 10,
+                y: 20,
+                width: 30,
+                height: 40,
+            }]
+        );
+    }
+
+    #[test]
+    fn redaction_rect_maps_source_region_to_preview_output() {
+        let rect = output_redaction_rect(
+            &RedactRegion {
+                x: 400,
+                y: 200,
+                width: 200,
+                height: 100,
+            },
+            &ScreenshotTransform {
+                source_coordinate_space: CoordinateSpace::PhysicalPixel,
+                output_coordinate_space: CoordinateSpace::PhysicalPixel,
+                source_origin_x: 0,
+                source_origin_y: 0,
+                scale_x: 0.5,
+                scale_y: 0.5,
+            },
+            800,
+            450,
+        )
+        .expect("redaction overlaps preview");
+
+        assert_eq!(
+            rect,
+            OutputRedactionRect {
+                x: 200,
+                y: 100,
+                width: 100,
+                height: 50,
+            }
+        );
+    }
+
+    #[test]
+    fn redaction_rect_maps_source_region_to_tile_output() {
+        let rect = output_redaction_rect(
+            &RedactRegion {
+                x: 150,
+                y: 250,
+                width: 100,
+                height: 100,
+            },
+            &ScreenshotTransform {
+                source_coordinate_space: CoordinateSpace::PhysicalPixel,
+                output_coordinate_space: CoordinateSpace::PhysicalPixel,
+                source_origin_x: 100,
+                source_origin_y: 200,
+                scale_x: 0.5,
+                scale_y: 0.5,
+            },
+            200,
+            100,
+        )
+        .expect("redaction overlaps tile");
+
+        assert_eq!(
+            rect,
+            OutputRedactionRect {
+                x: 25,
+                y: 25,
+                width: 50,
+                height: 50,
+            }
+        );
+    }
+
+    #[test]
+    fn redaction_rect_ignores_non_overlapping_region() {
+        let rect = output_redaction_rect(
+            &RedactRegion {
+                x: 1000,
+                y: 1000,
+                width: 100,
+                height: 100,
+            },
+            &ScreenshotTransform {
+                source_coordinate_space: CoordinateSpace::PhysicalPixel,
+                output_coordinate_space: CoordinateSpace::PhysicalPixel,
+                source_origin_x: 0,
+                source_origin_y: 0,
+                scale_x: 1.0,
+                scale_y: 1.0,
+            },
+            100,
+            100,
+        );
+
+        assert_eq!(rect, None);
+    }
+
+    #[test]
+    fn screenshot_redaction_blacks_output_pixels() {
+        let path = temp_test_path("redacted-screenshot").with_extension("png");
+        let image = image::RgbaImage::from_pixel(4, 4, Rgba([255, 255, 255, 255]));
+        image.save(&path).expect("fixture image is written");
+        let info = ScreenshotInfo {
+            path: path.clone(),
+            backend: "test".to_string(),
+            source_width: 4,
+            source_height: 4,
+            output_width: 4,
+            output_height: 4,
+            transform: ScreenshotTransform {
+                source_coordinate_space: CoordinateSpace::PhysicalPixel,
+                output_coordinate_space: CoordinateSpace::PhysicalPixel,
+                source_origin_x: 0,
+                source_origin_y: 0,
+                scale_x: 1.0,
+                scale_y: 1.0,
+            },
+            coordinate_space: CoordinateSpace::PhysicalPixel,
+            monitors: Vec::new(),
+        };
+
+        apply_screenshot_redactions(
+            &info,
+            &[RedactRegion {
+                x: 1,
+                y: 1,
+                width: 2,
+                height: 2,
+            }],
+        )
+        .expect("redaction succeeds");
+
+        let redacted = image::open(&path).expect("redacted image opens").to_rgba8();
+        assert_eq!(*redacted.get_pixel(0, 0), Rgba([255, 255, 255, 255]));
+        assert_eq!(*redacted.get_pixel(1, 1), Rgba([0, 0, 0, 255]));
+        assert_eq!(*redacted.get_pixel(2, 2), Rgba([0, 0, 0, 255]));
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn require_focus_guard_blocks_unguarded_control() {
         let settings = SafetySettings {
             require_focus_guard: true,
+            screenshot_redactions: Vec::new(),
         };
 
         let err = enforce_required_focus_guard(
@@ -3541,6 +3864,7 @@ mod tests {
     fn require_focus_guard_allows_guarded_control_and_observe() {
         let settings = SafetySettings {
             require_focus_guard: true,
+            screenshot_redactions: Vec::new(),
         };
 
         enforce_required_focus_guard(&settings, &DaemonRequest::ListWindows)
@@ -3583,6 +3907,12 @@ deny = ["org.keepassxc.KeePassXC"]
 
 [safety]
 require_focus_guard = true
+
+[[safety.redact_regions]]
+x = 10
+y = 20
+width = 30
+height = 40
 "#,
         )
         .expect("config fixture is written");
@@ -3611,6 +3941,14 @@ require_focus_guard = true
         );
         let safety = config.safety.expect("safety section is present");
         assert_eq!(safety.require_focus_guard, Some(true));
+        assert_eq!(
+            safety
+                .redact_regions
+                .as_ref()
+                .and_then(|regions| regions.first())
+                .map(|region| (region.x, region.y, region.width, region.height)),
+            Some((10, 20, 30, 40))
+        );
         fs::remove_file(&path).ok();
     }
 
