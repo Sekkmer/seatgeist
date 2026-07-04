@@ -956,7 +956,7 @@ Tasks:
 
 - Add mock backends for unit tests. Current status: `plasma-pilot-testkit` provides deterministic screen, window, input, clipboard, and accessibility mocks with call recording.
 - Add integration tests for CLI and daemon protocol. Current status: daemon core protocol and low-risk CLI status commands have Rust integration tests; GUI/desktop CLI coverage remains in smoke targets.
-- Add optional local GUI eval scripts. Current status: `scripts/gui-eval.sh` runs current non-control evals for daemon status, observe, default clipboard-read denial, bounded screenshot preview metadata, full-resolution screenshot policy denial, and journal output; `scripts/gui-eval.sh control-safety` and `make gui-eval-control-safety` start a private control-approved daemon and verify active-window guard denial plus panic-stop denial before backend control can execute.
+- Add optional local GUI eval scripts. Current status: `scripts/gui-eval.sh` runs current non-control evals for daemon status, observe, default clipboard-read denial, bounded screenshot preview metadata, screenshot preview coordinate mapping, full-resolution screenshot policy denial, and journal output; `scripts/gui-eval.sh control-safety` and `make gui-eval-control-safety` start a private control-approved daemon and verify active-window guard denial plus panic-stop denial before backend control can execute.
 - Add replayable action traces. Current status: `ReplayTrace` stores daemon requests with expected response metadata, and `plasma-pilot-cli trace replay --file <path>` replays each step through the daemon so policy checks and journaling still apply.
 - Add screenshot/coordinate calibration tests. Current status: protocol tests cover mapping 8K downscaled previews and physical-pixel tiles back to source screenshot coordinates.
 
@@ -969,7 +969,7 @@ Eval 3: open Firefox, visit localhost, click a button
 Eval 4: focus wrong window and verify guard rejection. Current status: `make gui-eval-control-safety` seeds private active-window state through the daemon KWin bridge and verifies an incorrect guard rejects focus before backend execution.
 Eval 5: clipboard read denied by policy
 Eval 6: panic-stop blocks input/control. Current status: `make gui-eval-control-safety` enables a private panic-stop file and verifies a focus control request is rejected before backend execution.
-Eval 7: 8K screenshot preview maps clicks back to logical coordinates
+Eval 7: 8K screenshot preview maps clicks back to source coordinates. Current status: protocol tests cover the transform math, and `scripts/gui-eval.sh screenshot-coordinate-map` validates real screenshot metadata maps a preview center point back inside the source screenshot bounds.
 Eval 8: full-resolution screenshot requires explicit policy approval. Current status: `scripts/gui-eval.sh full-resolution-denied` verifies full-resolution capture is rejected by policy before any output file is written.
 ```
 
