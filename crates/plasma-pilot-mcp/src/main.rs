@@ -10,9 +10,9 @@ use libplasma_pilot::{
     AccessibilityAction, AccessibilityCopyTextRequest, AccessibilityCutTextRequest,
     AccessibilityDeleteTextRequest, AccessibilityFindRequest, AccessibilityInsertTextRequest,
     AccessibilityInvokeRequest, AccessibilityPasteTextRequest, AccessibilitySetTextRequest,
-    ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest,
-    ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace,
-    DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
+    AccessibilityTextAttributesRequest, ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard,
+    ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest,
+    CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
     DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
     DaemonResponse, DragPointerRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest,
     JournalTailRequest, KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton,
@@ -344,6 +344,13 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 .transpose()?
                 .unwrap_or(512),
         })),
+        "plasma.a11y_text_attributes" => Ok(DaemonRequest::AccessibilityTextAttributes(
+            AccessibilityTextAttributesRequest {
+                node_id: required_string(arguments, "node_id")?,
+                offset: required_i32(arguments, "offset")?,
+                include_defaults: optional_bool(arguments, "include_defaults")?.unwrap_or(false),
+            },
+        )),
         "plasma.a11y_invoke" => Ok(DaemonRequest::AccessibilityInvoke(
             AccessibilityInvokeRequest {
                 node_id: required_string(arguments, "node_id")?,
@@ -701,6 +708,13 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
         DaemonResponse::AccessibilityMatches(matches) => {
             format!("{} accessibility matches", matches.len())
         }
+        DaemonResponse::AccessibilityTextAttributes(attributes) => format!(
+            "text attributes range={}..{} count={} node={}",
+            attributes.start_offset,
+            attributes.end_offset,
+            attributes.attributes.len(),
+            attributes.node_id
+        ),
         DaemonResponse::Journal(entries) => format!("{} journal entries", entries.len()),
         DaemonResponse::Action(result) => result
             .message
@@ -1357,6 +1371,28 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "plasma.a11y_text_attributes",
+            "Text Attributes",
+            "Read the AT-SPI text attribute run at a character offset on a non-sensitive text node.",
+            object_schema(
+                vec![
+                    (
+                        "node_id",
+                        json!({"type": "string", "description": "AT-SPI node id from plasma.a11y_find or plasma.a11y_focused_tree."}),
+                    ),
+                    (
+                        "offset",
+                        json!({"type": "integer", "minimum": 0, "description": "Character offset whose attribute run should be inspected."}),
+                    ),
+                    (
+                        "include_defaults",
+                        json!({"type": "boolean", "description": "Include default text attributes in the returned attribute set. Defaults to false."}),
+                    ),
+                ],
+                vec!["node_id", "offset"],
+            ),
+        ),
+        tool(
             "plasma.a11y_invoke",
             "Invoke Accessibility Action",
             "Invoke a normalized AT-SPI action on a node returned by an accessibility tree/find call. This is policy-gated semantic control.",
@@ -1778,6 +1814,29 @@ mod tests {
     }
 
     #[test]
+    fn text_attributes_compact_text_reports_range_and_count_only() {
+        let text = compact_tool_text(
+            "plasma.a11y_text_attributes",
+            &DaemonResponse::AccessibilityTextAttributes(
+                libplasma_pilot::AccessibilityTextAttributes {
+                    node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                    start_offset: 2,
+                    end_offset: 8,
+                    attributes: vec![libplasma_pilot::TextAttribute {
+                        name: "weight".to_string(),
+                        value: "bold".to_string(),
+                    }],
+                },
+            ),
+        );
+        assert_eq!(
+            text,
+            "text attributes range=2..8 count=1 node=atspi://:1.42/org/a11y/atspi/accessible/7"
+        );
+        assert!(!text.contains("bold"));
+    }
+
+    #[test]
     fn safety_status_compact_text_reports_active_gates() {
         let text = compact_tool_text(
             "plasma.safety_status",
@@ -1930,6 +1989,11 @@ mod tests {
                 .any(|tool| tool["name"] == "plasma.a11y_focused_tree")
         );
         assert!(tools.iter().any(|tool| tool["name"] == "plasma.a11y_find"));
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.a11y_text_attributes")
+        );
         assert!(
             tools
                 .iter()
@@ -2547,6 +2611,27 @@ mod tests {
                 depth: 1,
                 max_results: 3,
                 max_nodes: 200,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_accessibility_text_attributes_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.a11y_text_attributes",
+            &json!({
+                "node_id": "atspi://:1.42/org/a11y/atspi/accessible/7",
+                "offset": 4,
+                "include_defaults": true
+            }),
+        )
+        .expect("a11y text attributes args map");
+        assert_eq!(
+            request,
+            DaemonRequest::AccessibilityTextAttributes(AccessibilityTextAttributesRequest {
+                node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                offset: 4,
+                include_defaults: true,
             })
         );
     }

@@ -16,21 +16,21 @@ use image::{GenericImageView, Rgba, imageops::FilterType};
 use libplasma_pilot::{
     AccessibilityCopyTextRequest, AccessibilityCutTextRequest, AccessibilityDeleteTextRequest,
     AccessibilityFindRequest, AccessibilityInsertTextRequest, AccessibilityInvokeRequest,
-    AccessibilityPasteTextRequest, AccessibilitySetTextRequest, ActionResult, ActivateLinkRequest,
-    ActivateTabRequest, ActiveWindowGuard, BackendCapability, CapabilitySet, CaptureBackendStatus,
-    ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardText, CoordinateSpace,
-    DaemonRequest, DaemonResponse, DesktopObservation, DragPointerRequest, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus, JournalEntry,
-    JournalWindowContext, KeyComboRequest, KwinBridgeStatus, KwinMetadataStatus, LibeiStatus,
-    MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton,
-    PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
-    PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus, SafetyClass, SafetyStatus,
-    ScreenshotInfo, ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest,
-    ScreenshotTransform, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
-    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, SpectacleStatus, ToggleCheckRequest,
-    ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult,
-    WindowGeometry, WindowInfo, current_egid, current_euid, default_journal_path,
-    default_panic_stop_path, default_socket_path,
+    AccessibilityPasteTextRequest, AccessibilitySetTextRequest, AccessibilityTextAttributesRequest,
+    ActionResult, ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard, BackendCapability,
+    CapabilitySet, CaptureBackendStatus, ClickButtonRequest, ClickPointerRequest,
+    ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse,
+    DesktopObservation, DragPointerRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest,
+    HealthStatus, InputBackendStatus, JournalEntry, JournalWindowContext, KeyComboRequest,
+    KwinBridgeStatus, KwinMetadataStatus, LibeiStatus, MovePointerRequest, ObserveRequest,
+    PanicStopStatus, Point, PointerButton, PointerCalibrationPoint, PointerCalibrationStatus,
+    PointerMonitorCalibration, PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus,
+    SafetyClass, SafetyStatus, ScreenshotInfo, ScreenshotPortalStatus, ScreenshotRequest,
+    ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest, SelectItemRequest,
+    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, SpectacleStatus,
+    ToggleCheckRequest, ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest,
+    WaitForChangeResult, WindowGeometry, WindowInfo, current_egid, current_euid,
+    default_journal_path, default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -890,6 +890,14 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::AccessibilityTextAttributes(request) => {
+            match accessibility_text_attributes(request) {
+                Ok(attributes) => DaemonResponse::AccessibilityTextAttributes(attributes),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
         DaemonRequest::AccessibilityInvoke(request) => match accessibility_invoke(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
             Err(err) => DaemonResponse::Error {
@@ -2063,7 +2071,8 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::ScreenshotTile(_)
         | DaemonRequest::WaitForChange(_)
         | DaemonRequest::FocusedAccessibilityTree(_)
-        | DaemonRequest::AccessibilityFind(_) => SafetyClass::Observe,
+        | DaemonRequest::AccessibilityFind(_)
+        | DaemonRequest::AccessibilityTextAttributes(_) => SafetyClass::Observe,
         DaemonRequest::Observe(request) => {
             if request
                 .screenshot
@@ -2859,6 +2868,19 @@ fn accessibility_find(
     request: AccessibilityFindRequest,
 ) -> Result<Vec<libplasma_pilot::AccessibilityNode>> {
     plasma_pilot_atspi::find(request).map_err(|err| anyhow::anyhow!(err))
+}
+
+fn accessibility_text_attributes(
+    request: AccessibilityTextAttributesRequest,
+) -> Result<libplasma_pilot::AccessibilityTextAttributes> {
+    if request.node_id.trim().is_empty() {
+        bail!("node_id must be non-empty");
+    }
+    if request.offset < 0 {
+        bail!("offset must be greater than or equal to zero");
+    }
+    plasma_pilot_atspi::text_attributes(&request.node_id, request.offset, request.include_defaults)
+        .map_err(|err| anyhow::anyhow!(err))
 }
 
 fn accessibility_invoke(request: AccessibilityInvokeRequest) -> Result<ActionResult> {
@@ -4673,6 +4695,13 @@ fn summarize_response(response: &DaemonResponse) -> String {
         DaemonResponse::AccessibilityMatches(matches) => {
             format!("{} accessibility matches", matches.len())
         }
+        DaemonResponse::AccessibilityTextAttributes(attributes) => format!(
+            "accessibility text attributes range={}..{} count={} node={}",
+            attributes.start_offset,
+            attributes.end_offset,
+            attributes.attributes.len(),
+            attributes.node_id
+        ),
         DaemonResponse::Journal(entries) => format!("{} journal entries", entries.len()),
         DaemonResponse::Action(result) => result
             .message
@@ -7267,6 +7296,20 @@ height = 40
             }),
         )
         .expect("accessibility find is observe policy");
+    }
+
+    #[test]
+    fn accessibility_text_attributes_is_observe_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        enforce_policy(
+            &policy,
+            &DaemonRequest::AccessibilityTextAttributes(AccessibilityTextAttributesRequest {
+                node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                offset: 3,
+                include_defaults: false,
+            }),
+        )
+        .expect("accessibility text attributes are observe policy");
     }
 
     fn button_node(id: &str, name: &str) -> libplasma_pilot::AccessibilityNode {

@@ -478,6 +478,7 @@ Clipboard reads should be policy-controlled because clipboard content often cont
 ```text
 pilot.a11y_focused_tree(depth?)
 pilot.a11y_find(role?, name_contains?, app?, window_id?)
+pilot.a11y_text_attributes(node_id, offset, include_defaults?)
 pilot.a11y_invoke(node_id, action, guard?)
 pilot.a11y_set_text(node_id, text, guard?)
 pilot.a11y_insert_text(node_id, offset, text, guard?)
@@ -943,6 +944,7 @@ Tasks:
 - [x] Return compact node summaries: role, name, state, bounds, actions.
 - [x] Return text/value summaries for supported nodes.
 - [x] Implement find by role/name/app/window.
+- [x] Implement text attribute inspection where `org.a11y.atspi.Text` is supported. Current status: CLI/MCP expose observe-class `a11y_text_attributes` for `GetAttributeRun(offset, includeDefaults)` on non-sensitive text nodes, with range/count-only summaries.
 - [x] Implement policy-gated invoke action where `org.a11y.atspi.Action` is supported.
 - [x] Implement set text where `org.a11y.atspi.EditableText` is supported.
 - [x] Implement insert text where `org.a11y.atspi.EditableText` is supported. Current status: CLI/MCP expose policy-gated `a11y_insert_text` with active-window guards, offset validation, an 8192-character text cap, and content-free summaries.

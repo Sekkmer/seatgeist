@@ -348,6 +348,28 @@ pub struct AccessibilityFindRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessibilityTextAttributesRequest {
+    pub node_id: String,
+    pub offset: i32,
+    #[serde(default)]
+    pub include_defaults: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextAttribute {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessibilityTextAttributes {
+    pub node_id: String,
+    pub start_offset: i32,
+    pub end_offset: i32,
+    pub attributes: Vec<TextAttribute>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessibilityInvokeRequest {
     pub node_id: String,
     pub action: AccessibilityAction,
@@ -599,6 +621,7 @@ pub enum DaemonRequest {
     ClipboardSet(ClipboardSetRequest),
     FocusedAccessibilityTree(FocusedAccessibilityTreeRequest),
     AccessibilityFind(AccessibilityFindRequest),
+    AccessibilityTextAttributes(AccessibilityTextAttributesRequest),
     AccessibilityInvoke(AccessibilityInvokeRequest),
     AccessibilitySetText(AccessibilitySetTextRequest),
     AccessibilityInsertText(AccessibilityInsertTextRequest),
@@ -649,6 +672,7 @@ impl DaemonRequest {
             Self::ClipboardSet(_) => "clipboard_set",
             Self::FocusedAccessibilityTree(_) => "focused_accessibility_tree",
             Self::AccessibilityFind(_) => "accessibility_find",
+            Self::AccessibilityTextAttributes(_) => "accessibility_text_attributes",
             Self::AccessibilityInvoke(_) => "accessibility_invoke",
             Self::AccessibilitySetText(_) => "accessibility_set_text",
             Self::AccessibilityInsertText(_) => "accessibility_insert_text",
@@ -698,6 +722,7 @@ pub enum DaemonResponse {
     ClipboardText(ClipboardText),
     AccessibilityTree(Option<AccessibilityNode>),
     AccessibilityMatches(Vec<AccessibilityNode>),
+    AccessibilityTextAttributes(AccessibilityTextAttributes),
     Journal(Vec<JournalEntry>),
     Action(Box<ActionResult>),
     Error { message: String },
@@ -725,6 +750,7 @@ impl DaemonResponse {
             Self::ClipboardText(_) => "clipboard_text",
             Self::AccessibilityTree(_) => "accessibility_tree",
             Self::AccessibilityMatches(_) => "accessibility_matches",
+            Self::AccessibilityTextAttributes(_) => "accessibility_text_attributes",
             Self::Journal(_) => "journal",
             Self::Action(_) => "action",
             Self::Error { .. } => "error",
@@ -1382,6 +1408,22 @@ mod tests {
         assert!(encoded.contains(r#""method":"accessibility_find""#));
         assert!(encoded.contains(r#""role":"button""#));
         assert!(encoded.contains(r#""name_contains":"ok""#));
+    }
+
+    #[test]
+    fn serializes_accessibility_text_attributes_request() {
+        let request =
+            DaemonRequest::AccessibilityTextAttributes(AccessibilityTextAttributesRequest {
+                node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                offset: 4,
+                include_defaults: true,
+            });
+        let encoded =
+            serde_json::to_string(&request).expect("a11y text attributes request serializes");
+        assert_eq!(
+            encoded,
+            r#"{"method":"accessibility_text_attributes","node_id":"atspi://:1.42/org/a11y/atspi/accessible/7","offset":4,"include_defaults":true}"#
+        );
     }
 
     #[test]

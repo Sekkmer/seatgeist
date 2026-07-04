@@ -2,7 +2,7 @@ use std::process::Command;
 
 use libplasma_pilot::{
     AccessibilityAction, AccessibilityBounds, AccessibilityFindRequest, AccessibilityNode,
-    CoordinateSpace, PilotError,
+    AccessibilityTextAttributes, CoordinateSpace, PilotError, TextAttribute,
 };
 
 pub const BACKEND_NAME: &str = "atspi";
@@ -113,6 +113,21 @@ pub fn find(request: AccessibilityFindRequest) -> Result<Vec<AccessibilityNode>>
     }
 
     Ok(matches)
+}
+
+pub fn text_attributes(
+    node_id: &str,
+    offset: i32,
+    include_defaults: bool,
+) -> Result<AccessibilityTextAttributes> {
+    if offset < 0 {
+        return Err(PilotError::InvalidRequest(
+            "offset must be greater than or equal to zero".to_string(),
+        ));
+    }
+    let node = parse_node_id(node_id)?;
+    let bus = AtspiBus::connect()?;
+    bus.text_attributes(&node, node_id, offset, include_defaults)
 }
 
 pub fn invoke(node_id: &str, action: AccessibilityAction) -> Result<()> {
@@ -496,6 +511,46 @@ impl AtspiBus {
     fn actions(&self, node: &AtspiRef) -> Result<Vec<String>> {
         let output = self.call(&node.service, &node.path, ATSPI_ACTION, "GetActions")?;
         Ok(parse_action_names(&output))
+    }
+
+    fn text_attributes(
+        &self,
+        node: &AtspiRef,
+        node_id: &str,
+        offset: i32,
+        include_defaults: bool,
+    ) -> Result<AccessibilityTextAttributes> {
+        let role = self
+            .role_name(node)
+            .unwrap_or_else(|_| "unknown".to_string());
+        if is_sensitive_role(&role) {
+            return Err(PilotError::PolicyDenied(
+                "refusing to read text attributes on sensitive accessibility node".to_string(),
+            ));
+        }
+        let interfaces = self.interfaces(node)?;
+        if !interfaces.iter().any(|interface| interface == ATSPI_TEXT) {
+            return Err(PilotError::InvalidRequest(
+                "node does not expose org.a11y.atspi.Text".to_string(),
+            ));
+        }
+
+        let offset = offset.to_string();
+        let include_defaults = if include_defaults { "true" } else { "false" };
+        let output = self.call_with_args(
+            &node.service,
+            &node.path,
+            ATSPI_TEXT,
+            "GetAttributeRun",
+            &["ib", &offset, include_defaults],
+        )?;
+        let (attributes, start_offset, end_offset) = parse_text_attributes(&output)?;
+        Ok(AccessibilityTextAttributes {
+            node_id: node_id.to_string(),
+            start_offset,
+            end_offset,
+            attributes,
+        })
     }
 
     fn invoke(&self, node: &AtspiRef, action: AccessibilityAction) -> Result<()> {
@@ -970,6 +1025,52 @@ fn parse_bool_value(output: &str) -> Result<bool> {
     }
 }
 
+fn parse_text_attributes(output: &str) -> Result<(Vec<TextAttribute>, i32, i32)> {
+    let attributes = parse_strings(output)
+        .chunks_exact(2)
+        .filter_map(|chunk| {
+            non_empty(chunk[0].clone()).map(|name| TextAttribute {
+                name,
+                value: chunk[1].clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let values = unquote_for_numeric_parse(output)
+        .split_whitespace()
+        .filter_map(|value| value.parse::<i32>().ok())
+        .collect::<Vec<_>>();
+    let [.., start_offset, end_offset] = values.as_slice() else {
+        return Err(PilotError::InvalidRequest(format!(
+            "expected AT-SPI text attribute range: {output}"
+        )));
+    };
+    Ok((attributes, *start_offset, *end_offset))
+}
+
+fn unquote_for_numeric_parse(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut in_quote = false;
+    let mut escaped = false;
+    for character in input.chars() {
+        if in_quote {
+            output.push(' ');
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_quote = false;
+            }
+        } else if character == '"' {
+            in_quote = true;
+            output.push(' ');
+        } else {
+            output.push(character);
+        }
+    }
+    output
+}
+
 fn parse_action_names(output: &str) -> Vec<String> {
     parse_strings(output)
         .chunks_exact(3)
@@ -1169,6 +1270,52 @@ mod tests {
             normalize_actions(&actions),
             vec![AccessibilityAction::Press]
         );
+    }
+
+    #[test]
+    fn parses_text_attributes_from_dictionary_and_offsets() {
+        let (attributes, start_offset, end_offset) =
+            parse_text_attributes(r#"a{ss} 2 "weight" "bold" "style" "italic" 3 9"#)
+                .expect("text attributes parse");
+        assert_eq!(
+            attributes,
+            vec![
+                TextAttribute {
+                    name: "weight".to_string(),
+                    value: "bold".to_string(),
+                },
+                TextAttribute {
+                    name: "style".to_string(),
+                    value: "italic".to_string(),
+                },
+            ]
+        );
+        assert_eq!(start_offset, 3);
+        assert_eq!(end_offset, 9);
+    }
+
+    #[test]
+    fn parses_text_attributes_from_tuple_wrapped_output() {
+        let (attributes, start_offset, end_offset) =
+            parse_text_attributes(r#"(a{ss}ii) 1 "fg-color" "rgb(1,2,3)" 0 12"#)
+                .expect("text attributes parse");
+        assert_eq!(
+            attributes,
+            vec![TextAttribute {
+                name: "fg-color".to_string(),
+                value: "rgb(1,2,3)".to_string(),
+            }]
+        );
+        assert_eq!(start_offset, 0);
+        assert_eq!(end_offset, 12);
+    }
+
+    #[test]
+    fn parses_text_attribute_offsets_after_quoted_numbers() {
+        let (_, start_offset, end_offset) =
+            parse_text_attributes(r#"a{ss} 1 "level" "2" 4 8"#).expect("text attributes parse");
+        assert_eq!(start_offset, 4);
+        assert_eq!(end_offset, 8);
     }
 
     #[test]

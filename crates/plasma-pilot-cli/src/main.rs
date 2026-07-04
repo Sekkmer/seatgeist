@@ -11,9 +11,9 @@ use libplasma_pilot::{
     AccessibilityAction, AccessibilityCopyTextRequest, AccessibilityCutTextRequest,
     AccessibilityDeleteTextRequest, AccessibilityFindRequest, AccessibilityInsertTextRequest,
     AccessibilityInvokeRequest, AccessibilityPasteTextRequest, AccessibilitySetTextRequest,
-    ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest,
-    ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace,
-    DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
+    AccessibilityTextAttributesRequest, ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard,
+    ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest,
+    CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
     DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
     DaemonResponse, DragPointerRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest,
     JournalTailRequest, KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton,
@@ -273,6 +273,14 @@ enum AtspiCommand {
         max_results: usize,
         #[arg(long, default_value_t = 512)]
         max_nodes: usize,
+    },
+    TextAttributes {
+        #[arg(long)]
+        node: String,
+        #[arg(long)]
+        offset: i32,
+        #[arg(long)]
+        include_defaults: bool,
     },
     Invoke {
         #[arg(long)]
@@ -860,6 +868,21 @@ fn main() -> Result<()> {
                 depth,
                 max_results,
                 max_nodes,
+            }),
+        )?,
+        Command::Atspi {
+            command:
+                AtspiCommand::TextAttributes {
+                    node,
+                    offset,
+                    include_defaults,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::AccessibilityTextAttributes(AccessibilityTextAttributesRequest {
+                node_id: node,
+                offset,
+                include_defaults,
             }),
         )?,
         Command::Atspi {

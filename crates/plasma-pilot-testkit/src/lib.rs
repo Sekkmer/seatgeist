@@ -2,8 +2,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use libplasma_pilot::{
-    AccessibilityAction, AccessibilityFindRequest, AccessibilityNode, CoordinateSpace, MonitorInfo,
-    PilotError, Point, PointerButton, ScreenshotTarget, WindowGeometry, WindowId, WindowInfo,
+    AccessibilityAction, AccessibilityFindRequest, AccessibilityNode, AccessibilityTextAttributes,
+    CoordinateSpace, MonitorInfo, PilotError, Point, PointerButton, ScreenshotTarget,
+    TextAttribute, WindowGeometry, WindowId, WindowInfo,
 };
 use plasma_pilot_backend::{
     AccessibilityBackend, ClipboardBackend, InputBackend, Result, ScreenBackend, Screenshot,
@@ -59,6 +60,18 @@ pub fn sample_accessibility_node() -> AccessibilityNode {
         available_actions: Vec::new(),
         actions: Vec::new(),
         children: Vec::new(),
+    }
+}
+
+pub fn sample_text_attributes() -> AccessibilityTextAttributes {
+    AccessibilityTextAttributes {
+        node_id: "atspi://sample/text".to_string(),
+        start_offset: 0,
+        end_offset: 5,
+        attributes: vec![TextAttribute {
+            name: "weight".to_string(),
+            value: "bold".to_string(),
+        }],
     }
 }
 
@@ -328,6 +341,13 @@ pub struct MockAccessibilityTextPaste {
     pub offset: i32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MockAccessibilityTextAttributesRequest {
+    pub node_id: String,
+    pub offset: i32,
+    pub include_defaults: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MockAccessibilityValueSet {
     pub node_id: String,
@@ -338,7 +358,9 @@ pub struct MockAccessibilityValueSet {
 pub struct MockAccessibilityBackend {
     focused_tree: AccessibilityNode,
     find_matches: Vec<AccessibilityNode>,
+    text_attributes: AccessibilityTextAttributes,
     find_requests: Arc<Mutex<Vec<AccessibilityFindRequest>>>,
+    text_attribute_requests: Arc<Mutex<Vec<MockAccessibilityTextAttributesRequest>>>,
     invocations: Arc<Mutex<Vec<MockAccessibilityInvocation>>>,
     text_sets: Arc<Mutex<Vec<MockAccessibilityTextSet>>>,
     text_inserts: Arc<Mutex<Vec<MockAccessibilityTextInsert>>>,
@@ -354,7 +376,9 @@ impl MockAccessibilityBackend {
         Self {
             focused_tree,
             find_matches: Vec::new(),
+            text_attributes: sample_text_attributes(),
             find_requests: Arc::new(Mutex::new(Vec::new())),
+            text_attribute_requests: Arc::new(Mutex::new(Vec::new())),
             invocations: Arc::new(Mutex::new(Vec::new())),
             text_sets: Arc::new(Mutex::new(Vec::new())),
             text_inserts: Arc::new(Mutex::new(Vec::new())),
@@ -371,8 +395,17 @@ impl MockAccessibilityBackend {
         self
     }
 
+    pub fn with_text_attributes(mut self, text_attributes: AccessibilityTextAttributes) -> Self {
+        self.text_attributes = text_attributes;
+        self
+    }
+
     pub fn find_requests(&self) -> Result<Vec<AccessibilityFindRequest>> {
         Ok(lock(&self.find_requests)?.clone())
+    }
+
+    pub fn text_attribute_requests(&self) -> Result<Vec<MockAccessibilityTextAttributesRequest>> {
+        Ok(lock(&self.text_attribute_requests)?.clone())
     }
 
     pub fn invocations(&self) -> Result<Vec<MockAccessibilityInvocation>> {
@@ -423,6 +456,20 @@ impl AccessibilityBackend for MockAccessibilityBackend {
     async fn find(&self, request: AccessibilityFindRequest) -> Result<Vec<AccessibilityNode>> {
         lock(&self.find_requests)?.push(request);
         Ok(self.find_matches.clone())
+    }
+
+    async fn text_attributes(
+        &self,
+        node_id: &str,
+        offset: i32,
+        include_defaults: bool,
+    ) -> Result<AccessibilityTextAttributes> {
+        lock(&self.text_attribute_requests)?.push(MockAccessibilityTextAttributesRequest {
+            node_id: node_id.to_string(),
+            offset,
+            include_defaults,
+        });
+        Ok(self.text_attributes.clone())
     }
 
     async fn invoke(&self, node_id: &str, action: AccessibilityAction) -> Result<()> {
@@ -623,7 +670,21 @@ mod tests {
 
         assert_eq!(backend.focused_tree(1).await?, sample_accessibility_node());
         assert_eq!(backend.find(find_request.clone()).await?, vec![match_node]);
+        assert_eq!(
+            backend
+                .text_attributes("atspi://sample/text", 2, true)
+                .await?,
+            sample_text_attributes()
+        );
         assert_eq!(backend.find_requests()?, vec![find_request]);
+        assert_eq!(
+            backend.text_attribute_requests()?,
+            vec![MockAccessibilityTextAttributesRequest {
+                node_id: "atspi://sample/text".to_string(),
+                offset: 2,
+                include_defaults: true,
+            }]
+        );
         backend
             .invoke("atspi://sample/root", AccessibilityAction::Press)
             .await?;

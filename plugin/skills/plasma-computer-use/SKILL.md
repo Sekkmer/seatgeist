@@ -22,6 +22,7 @@ When GUI state matters, use PlasmaPilot tools through MCP:
 Useful control tools:
 
 - `plasma.type_text` and `plasma.key_combo` for guarded text entry and shortcuts.
+- `plasma.a11y_text_attributes` when a known non-sensitive text node needs formatting or attribute-run inspection before choosing an edit path.
 - `plasma.a11y_insert_text` only when a known non-sensitive `EditableText` node needs insertion at a specific character offset and high-level `plasma.set_text_field` is not appropriate.
 - `plasma.a11y_delete_text` only when a known non-sensitive `EditableText` node needs range deletion at specific character offsets.
 - `plasma.a11y_copy_text` and `plasma.a11y_cut_text` only when a known non-sensitive `EditableText` node needs clipboard copy/cut at specific character offsets.
