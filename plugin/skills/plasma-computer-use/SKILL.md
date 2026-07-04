@@ -23,6 +23,7 @@ Useful control tools:
 - `plasma.type_text` and `plasma.key_combo` for guarded text entry and shortcuts.
 - `plasma.a11y_insert_text` only when a known non-sensitive `EditableText` node needs insertion at a specific character offset and high-level `plasma.set_text_field` is not appropriate.
 - `plasma.a11y_delete_text` only when a known non-sensitive `EditableText` node needs range deletion at specific character offsets.
+- `plasma.a11y_copy_text` and `plasma.a11y_cut_text` only when a known non-sensitive `EditableText` node needs clipboard copy/cut at specific character offsets.
 - `plasma.a11y_paste_text` only when a known non-sensitive `EditableText` node needs clipboard paste at a specific character offset and the clipboard was intentionally prepared.
 - `plasma.move_pointer`, `plasma.click_pointer`, and `plasma.scroll_pointer` only after semantic routes are unavailable.
 - `plasma.wait_for_change` to confirm bounded visual changes without repeatedly dumping screenshots.

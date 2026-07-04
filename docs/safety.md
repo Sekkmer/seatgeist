@@ -32,6 +32,7 @@ Default rules:
 - AT-SPI set-text is semantic control: it must reject sensitive nodes by default and journal replacement length rather than replacement contents.
 - AT-SPI insert-text is semantic control: it must reject sensitive nodes by default and journal inserted-text length plus offset rather than inserted contents.
 - AT-SPI delete-text is semantic control: it must reject sensitive nodes by default and journal only the deleted offset range, not deleted contents.
+- AT-SPI copy-text and cut-text are semantic control: they must reject sensitive nodes by default, must not read clipboard contents after writing the selected range to the system clipboard, and must journal only offset ranges.
 - AT-SPI paste-text is semantic control: it must reject sensitive nodes by default, must not read clipboard contents for the paste operation, and must journal only the paste offset.
 - High-level semantic actions must refuse ambiguous matches instead of choosing one candidate implicitly; ambiguity errors should include bounded non-sensitive candidate choices so the caller can disambiguate.
 

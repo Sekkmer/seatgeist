@@ -252,6 +252,20 @@ pub struct MockAccessibilityTextDelete {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MockAccessibilityTextCopy {
+    pub node_id: String,
+    pub start_offset: i32,
+    pub end_offset: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MockAccessibilityTextCut {
+    pub node_id: String,
+    pub start_offset: i32,
+    pub end_offset: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MockAccessibilityTextPaste {
     pub node_id: String,
     pub offset: i32,
@@ -266,6 +280,8 @@ pub struct MockAccessibilityBackend {
     text_sets: Arc<Mutex<Vec<MockAccessibilityTextSet>>>,
     text_inserts: Arc<Mutex<Vec<MockAccessibilityTextInsert>>>,
     text_deletes: Arc<Mutex<Vec<MockAccessibilityTextDelete>>>,
+    text_copies: Arc<Mutex<Vec<MockAccessibilityTextCopy>>>,
+    text_cuts: Arc<Mutex<Vec<MockAccessibilityTextCut>>>,
     text_pastes: Arc<Mutex<Vec<MockAccessibilityTextPaste>>>,
 }
 
@@ -279,6 +295,8 @@ impl MockAccessibilityBackend {
             text_sets: Arc::new(Mutex::new(Vec::new())),
             text_inserts: Arc::new(Mutex::new(Vec::new())),
             text_deletes: Arc::new(Mutex::new(Vec::new())),
+            text_copies: Arc::new(Mutex::new(Vec::new())),
+            text_cuts: Arc::new(Mutex::new(Vec::new())),
             text_pastes: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -306,6 +324,14 @@ impl MockAccessibilityBackend {
 
     pub fn text_deletes(&self) -> Result<Vec<MockAccessibilityTextDelete>> {
         Ok(lock(&self.text_deletes)?.clone())
+    }
+
+    pub fn text_copies(&self) -> Result<Vec<MockAccessibilityTextCopy>> {
+        Ok(lock(&self.text_copies)?.clone())
+    }
+
+    pub fn text_cuts(&self) -> Result<Vec<MockAccessibilityTextCut>> {
+        Ok(lock(&self.text_cuts)?.clone())
     }
 
     pub fn text_pastes(&self) -> Result<Vec<MockAccessibilityTextPaste>> {
@@ -357,6 +383,24 @@ impl AccessibilityBackend for MockAccessibilityBackend {
 
     async fn delete_text(&self, node_id: &str, start_offset: i32, end_offset: i32) -> Result<()> {
         lock(&self.text_deletes)?.push(MockAccessibilityTextDelete {
+            node_id: node_id.to_string(),
+            start_offset,
+            end_offset,
+        });
+        Ok(())
+    }
+
+    async fn copy_text(&self, node_id: &str, start_offset: i32, end_offset: i32) -> Result<()> {
+        lock(&self.text_copies)?.push(MockAccessibilityTextCopy {
+            node_id: node_id.to_string(),
+            start_offset,
+            end_offset,
+        });
+        Ok(())
+    }
+
+    async fn cut_text(&self, node_id: &str, start_offset: i32, end_offset: i32) -> Result<()> {
+        lock(&self.text_cuts)?.push(MockAccessibilityTextCut {
             node_id: node_id.to_string(),
             start_offset,
             end_offset,
@@ -486,6 +530,8 @@ mod tests {
             .insert_text("atspi://sample/text", 5, " world")
             .await?;
         backend.delete_text("atspi://sample/text", 1, 3).await?;
+        backend.copy_text("atspi://sample/text", 2, 4).await?;
+        backend.cut_text("atspi://sample/text", 3, 5).await?;
         backend.paste_text("atspi://sample/text", 4).await?;
         assert_eq!(
             backend.invocations()?,
@@ -515,6 +561,22 @@ mod tests {
                 node_id: "atspi://sample/text".to_string(),
                 start_offset: 1,
                 end_offset: 3,
+            }]
+        );
+        assert_eq!(
+            backend.text_copies()?,
+            vec![MockAccessibilityTextCopy {
+                node_id: "atspi://sample/text".to_string(),
+                start_offset: 2,
+                end_offset: 4,
+            }]
+        );
+        assert_eq!(
+            backend.text_cuts()?,
+            vec![MockAccessibilityTextCut {
+                node_id: "atspi://sample/text".to_string(),
+                start_offset: 3,
+                end_offset: 5,
             }]
         );
         assert_eq!(

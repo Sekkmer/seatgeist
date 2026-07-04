@@ -147,6 +147,20 @@ pub fn delete_text(node_id: &str, start_offset: i32, end_offset: i32) -> Result<
     bus.delete_text(&node, start_offset, end_offset)
 }
 
+pub fn copy_text(node_id: &str, start_offset: i32, end_offset: i32) -> Result<()> {
+    validate_text_range(start_offset, end_offset)?;
+    let node = parse_node_id(node_id)?;
+    let bus = AtspiBus::connect()?;
+    bus.copy_text(&node, start_offset, end_offset)
+}
+
+pub fn cut_text(node_id: &str, start_offset: i32, end_offset: i32) -> Result<()> {
+    validate_text_range(start_offset, end_offset)?;
+    let node = parse_node_id(node_id)?;
+    let bus = AtspiBus::connect()?;
+    bus.cut_text(&node, start_offset, end_offset)
+}
+
 pub fn paste_text(node_id: &str, offset: i32) -> Result<()> {
     if offset < 0 {
         return Err(PilotError::InvalidRequest(
@@ -583,13 +597,32 @@ impl AtspiBus {
     }
 
     fn delete_text(&self, node: &AtspiRef, start_offset: i32, end_offset: i32) -> Result<()> {
+        self.editable_text_range_action(node, start_offset, end_offset, "DeleteText", "delete")
+    }
+
+    fn copy_text(&self, node: &AtspiRef, start_offset: i32, end_offset: i32) -> Result<()> {
+        self.editable_text_range_action(node, start_offset, end_offset, "CopyText", "copy")
+    }
+
+    fn cut_text(&self, node: &AtspiRef, start_offset: i32, end_offset: i32) -> Result<()> {
+        self.editable_text_range_action(node, start_offset, end_offset, "CutText", "cut")
+    }
+
+    fn editable_text_range_action(
+        &self,
+        node: &AtspiRef,
+        start_offset: i32,
+        end_offset: i32,
+        method: &str,
+        action: &str,
+    ) -> Result<()> {
         let role = self
             .role_name(node)
             .unwrap_or_else(|_| "unknown".to_string());
         if is_sensitive_role(&role) {
-            return Err(PilotError::PolicyDenied(
-                "refusing to delete text on sensitive accessibility node".to_string(),
-            ));
+            return Err(PilotError::PolicyDenied(format!(
+                "refusing to {action} text on sensitive accessibility node"
+            )));
         }
         let interfaces = self.interfaces(node)?;
         if !interfaces
@@ -606,15 +639,15 @@ impl AtspiBus {
             &node.service,
             &node.path,
             ATSPI_EDITABLE_TEXT,
-            "DeleteText",
+            method,
             &["ii", &start, &end],
         )?;
         if parse_bool_value(&output)? {
             Ok(())
         } else {
-            Err(PilotError::BackendUnavailable(
-                "AT-SPI DeleteText returned false".to_string(),
-            ))
+            Err(PilotError::BackendUnavailable(format!(
+                "AT-SPI {method} returned false"
+            )))
         }
     }
 

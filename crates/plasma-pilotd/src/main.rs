@@ -14,20 +14,21 @@ use anyhow::{Context, Error, Result, bail};
 use clap::Parser;
 use image::{GenericImageView, Rgba, imageops::FilterType};
 use libplasma_pilot::{
-    AccessibilityDeleteTextRequest, AccessibilityFindRequest, AccessibilityInsertTextRequest,
-    AccessibilityInvokeRequest, AccessibilityPasteTextRequest, AccessibilitySetTextRequest,
-    ActionResult, ActivateTabRequest, ActiveWindowGuard, BackendCapability, CapabilitySet,
-    ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardText, CoordinateSpace,
-    DaemonRequest, DaemonResponse, DesktopObservation, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus, JournalEntry,
-    KeyComboRequest, KwinBridgeStatus, LibeiStatus, MovePointerRequest, ObserveRequest,
-    PanicStopStatus, Point, PointerButton, PointerCalibrationPoint, PointerCalibrationStatus,
-    PointerMonitorCalibration, PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus,
-    SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
-    ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
-    SetValueRequest, ToggleCheckRequest, ToolApprovalLevel, TypeTextRequest, UinputStatus,
-    WaitForChangeRequest, WaitForChangeResult, WindowGeometry, WindowInfo, current_egid,
-    current_euid, default_journal_path, default_panic_stop_path, default_socket_path,
+    AccessibilityCopyTextRequest, AccessibilityCutTextRequest, AccessibilityDeleteTextRequest,
+    AccessibilityFindRequest, AccessibilityInsertTextRequest, AccessibilityInvokeRequest,
+    AccessibilityPasteTextRequest, AccessibilitySetTextRequest, ActionResult, ActivateTabRequest,
+    ActiveWindowGuard, BackendCapability, CapabilitySet, ClickButtonRequest, ClickPointerRequest,
+    ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse,
+    DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus,
+    InputBackendStatus, JournalEntry, KeyComboRequest, KwinBridgeStatus, LibeiStatus,
+    MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton,
+    PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
+    PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus, SafetyClass, ScreenshotInfo,
+    ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest,
+    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest,
+    ToggleCheckRequest, ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest,
+    WaitForChangeResult, WindowGeometry, WindowInfo, current_egid, current_euid,
+    default_journal_path, default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -695,6 +696,18 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
                 },
             }
         }
+        DaemonRequest::AccessibilityCopyText(request) => match accessibility_copy_text(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
+        DaemonRequest::AccessibilityCutText(request) => match accessibility_cut_text(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::AccessibilityPasteText(request) => match accessibility_paste_text(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
             Err(err) => DaemonResponse::Error {
@@ -1476,6 +1489,8 @@ fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWin
         DaemonRequest::AccessibilitySetText(request) => request.guard.as_ref(),
         DaemonRequest::AccessibilityInsertText(request) => request.guard.as_ref(),
         DaemonRequest::AccessibilityDeleteText(request) => request.guard.as_ref(),
+        DaemonRequest::AccessibilityCopyText(request) => request.guard.as_ref(),
+        DaemonRequest::AccessibilityCutText(request) => request.guard.as_ref(),
         DaemonRequest::AccessibilityPasteText(request) => request.guard.as_ref(),
         DaemonRequest::TypeText(request) => request.guard.as_ref(),
         DaemonRequest::KeyCombo(request) => request.guard.as_ref(),
@@ -1539,6 +1554,8 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::AccessibilitySetText(_)
         | DaemonRequest::AccessibilityInsertText(_)
         | DaemonRequest::AccessibilityDeleteText(_)
+        | DaemonRequest::AccessibilityCopyText(_)
+        | DaemonRequest::AccessibilityCutText(_)
         | DaemonRequest::AccessibilityPasteText(_) => SafetyClass::ControlSemantic,
         DaemonRequest::AccessibilityInvoke(request) => {
             if request.destructive {
@@ -2378,6 +2395,52 @@ fn accessibility_delete_text(request: AccessibilityDeleteTextRequest) -> Result<
         observation: None,
         message: Some(format!(
             "deleted accessibility text range={}..{} node={}",
+            request.start_offset, request.end_offset, request.node_id
+        )),
+    })
+}
+
+fn accessibility_copy_text(request: AccessibilityCopyTextRequest) -> Result<ActionResult> {
+    if request.node_id.trim().is_empty() {
+        bail!("node_id must be non-empty");
+    }
+    if request.start_offset < 0 {
+        bail!("start_offset must be greater than or equal to zero");
+    }
+    if request.end_offset <= request.start_offset {
+        bail!("end_offset must be greater than start_offset");
+    }
+    plasma_pilot_atspi::copy_text(&request.node_id, request.start_offset, request.end_offset)
+        .map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "copied accessibility text range={}..{} node={}",
+            request.start_offset, request.end_offset, request.node_id
+        )),
+    })
+}
+
+fn accessibility_cut_text(request: AccessibilityCutTextRequest) -> Result<ActionResult> {
+    if request.node_id.trim().is_empty() {
+        bail!("node_id must be non-empty");
+    }
+    if request.start_offset < 0 {
+        bail!("start_offset must be greater than or equal to zero");
+    }
+    if request.end_offset <= request.start_offset {
+        bail!("end_offset must be greater than start_offset");
+    }
+    plasma_pilot_atspi::cut_text(&request.node_id, request.start_offset, request.end_offset)
+        .map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "cut accessibility text range={}..{} node={}",
             request.start_offset, request.end_offset, request.node_id
         )),
     })
@@ -5169,6 +5232,38 @@ height = 40
             }),
         )
         .expect_err("accessibility delete-text requires control approval by default");
+        assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
+    fn accessibility_copy_text_is_control_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::AccessibilityCopyText(AccessibilityCopyTextRequest {
+                node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                start_offset: 2,
+                end_offset: 5,
+                guard: None,
+            }),
+        )
+        .expect_err("accessibility copy-text requires control approval by default");
+        assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
+    fn accessibility_cut_text_is_control_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::AccessibilityCutText(AccessibilityCutTextRequest {
+                node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                start_offset: 2,
+                end_offset: 5,
+                guard: None,
+            }),
+        )
+        .expect_err("accessibility cut-text requires control approval by default");
         assert!(err.to_string().contains("ControlSemantic"));
     }
 

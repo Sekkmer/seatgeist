@@ -7,17 +7,18 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use libplasma_pilot::{
-    AccessibilityAction, AccessibilityDeleteTextRequest, AccessibilityFindRequest,
-    AccessibilityInsertTextRequest, AccessibilityInvokeRequest, AccessibilityPasteTextRequest,
-    AccessibilitySetTextRequest, ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest,
-    ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace,
-    DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
-    DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
-    DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
-    KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton, ScreenshotRequest,
-    ScreenshotTileRequest, ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest,
-    SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
-    WaitForChangeRequest, default_socket_path,
+    AccessibilityAction, AccessibilityCopyTextRequest, AccessibilityCutTextRequest,
+    AccessibilityDeleteTextRequest, AccessibilityFindRequest, AccessibilityInsertTextRequest,
+    AccessibilityInvokeRequest, AccessibilityPasteTextRequest, AccessibilitySetTextRequest,
+    ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest, ClickPointerRequest,
+    ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES,
+    DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
+    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest, DaemonResponse, FocusWindowRequest,
+    FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, MovePointerRequest,
+    ObserveRequest, Point, PointerButton, ScreenshotRequest, ScreenshotTileRequest,
+    ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
+    SetValueRequest, ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest,
+    default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -366,6 +367,22 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         )),
         "plasma.a11y_delete_text" => Ok(DaemonRequest::AccessibilityDeleteText(
             AccessibilityDeleteTextRequest {
+                node_id: required_string(arguments, "node_id")?,
+                start_offset: required_i32(arguments, "start_offset")?,
+                end_offset: required_i32(arguments, "end_offset")?,
+                guard: active_window_guard(arguments)?,
+            },
+        )),
+        "plasma.a11y_copy_text" => Ok(DaemonRequest::AccessibilityCopyText(
+            AccessibilityCopyTextRequest {
+                node_id: required_string(arguments, "node_id")?,
+                start_offset: required_i32(arguments, "start_offset")?,
+                end_offset: required_i32(arguments, "end_offset")?,
+                guard: active_window_guard(arguments)?,
+            },
+        )),
+        "plasma.a11y_cut_text" => Ok(DaemonRequest::AccessibilityCutText(
+            AccessibilityCutTextRequest {
                 node_id: required_string(arguments, "node_id")?,
                 start_offset: required_i32(arguments, "start_offset")?,
                 end_offset: required_i32(arguments, "end_offset")?,
@@ -1260,6 +1277,50 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "plasma.a11y_copy_text",
+            "Copy Accessibility Text",
+            "Copy a character-offset range from a non-sensitive AT-SPI EditableText node into the system clipboard. This is policy-gated semantic control and summaries report offsets only.",
+            object_schema(
+                with_guard_properties(vec![
+                    (
+                        "node_id",
+                        json!({"type": "string", "description": "AT-SPI node id from a previous accessibility result."}),
+                    ),
+                    (
+                        "start_offset",
+                        json!({"type": "integer", "minimum": 0, "description": "Starting character offset to copy."}),
+                    ),
+                    (
+                        "end_offset",
+                        json!({"type": "integer", "minimum": 1, "description": "First character offset past the copied range."}),
+                    ),
+                ]),
+                vec!["node_id", "start_offset", "end_offset"],
+            ),
+        ),
+        tool(
+            "plasma.a11y_cut_text",
+            "Cut Accessibility Text",
+            "Cut a character-offset range from a non-sensitive AT-SPI EditableText node into the system clipboard. This is policy-gated semantic control and summaries report offsets only.",
+            object_schema(
+                with_guard_properties(vec![
+                    (
+                        "node_id",
+                        json!({"type": "string", "description": "AT-SPI node id from a previous accessibility result."}),
+                    ),
+                    (
+                        "start_offset",
+                        json!({"type": "integer", "minimum": 0, "description": "Starting character offset to cut."}),
+                    ),
+                    (
+                        "end_offset",
+                        json!({"type": "integer", "minimum": 1, "description": "First character offset past the cut range."}),
+                    ),
+                ]),
+                vec!["node_id", "start_offset", "end_offset"],
+            ),
+        ),
+        tool(
             "plasma.a11y_paste_text",
             "Paste Accessibility Text",
             "Paste current system clipboard text at a character offset on a non-sensitive AT-SPI EditableText node. This is policy-gated semantic control and summaries report offset only.",
@@ -1637,6 +1698,16 @@ mod tests {
             tools
                 .iter()
                 .any(|tool| tool["name"] == "plasma.a11y_set_text")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.a11y_copy_text")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.a11y_cut_text")
         );
         assert!(
             tools
@@ -2217,6 +2288,50 @@ mod tests {
         assert_eq!(
             request,
             DaemonRequest::AccessibilityDeleteText(AccessibilityDeleteTextRequest {
+                node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                start_offset: 2,
+                end_offset: 5,
+                guard: None,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_accessibility_copy_text_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.a11y_copy_text",
+            &json!({
+                "node_id": "atspi://:1.42/org/a11y/atspi/accessible/7",
+                "start_offset": 2,
+                "end_offset": 5
+            }),
+        )
+        .expect("a11y copy-text args map");
+        assert_eq!(
+            request,
+            DaemonRequest::AccessibilityCopyText(AccessibilityCopyTextRequest {
+                node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                start_offset: 2,
+                end_offset: 5,
+                guard: None,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_accessibility_cut_text_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.a11y_cut_text",
+            &json!({
+                "node_id": "atspi://:1.42/org/a11y/atspi/accessible/7",
+                "start_offset": 2,
+                "end_offset": 5
+            }),
+        )
+        .expect("a11y cut-text args map");
+        assert_eq!(
+            request,
+            DaemonRequest::AccessibilityCutText(AccessibilityCutTextRequest {
                 node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
                 start_offset: 2,
                 end_offset: 5,
