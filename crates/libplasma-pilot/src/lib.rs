@@ -6,11 +6,13 @@ pub use protocol::{
     AccessibilityFindRequest, AccessibilityInvokeRequest, AccessibilitySetTextRequest,
     ActionRequest, ActionResult, ActivateTabRequest, ActiveWindowGuard, CapabilitySet,
     ClickButtonRequest, ClipboardGetRequest, ClipboardSetRequest, ClipboardText,
-    DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse, DesktopObservation,
-    FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus, JournalEntry,
-    JournalTailRequest, ObserveRequest, PanicStopStatus, PolicyStatus, ReplayTrace, ScreenshotInfo,
-    ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform, SelectMenuRequest,
-    SetPanicStopRequest, SetTextFieldRequest, TraceStep,
+    DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
+    DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
+    DaemonResponse, DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest,
+    HealthStatus, JournalEntry, JournalTailRequest, ObserveRequest, PanicStopStatus, PolicyStatus,
+    ReplayTrace, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
+    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, TraceStep, WaitForChangeRequest,
+    WaitForChangeResult,
 };
 pub use runtime::{
     current_euid, default_journal_path, default_panic_stop_path, default_socket_path,

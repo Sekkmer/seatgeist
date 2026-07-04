@@ -9,10 +9,12 @@ use clap::Parser;
 use libplasma_pilot::{
     AccessibilityAction, AccessibilityFindRequest, AccessibilityInvokeRequest,
     AccessibilitySetTextRequest, ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest,
-    ClipboardGetRequest, ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest,
-    DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
-    ObserveRequest, ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest,
-    SetPanicStopRequest, SetTextFieldRequest, default_socket_path,
+    ClipboardGetRequest, ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES,
+    DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
+    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest, DaemonResponse, FocusWindowRequest,
+    FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest, ScreenshotRequest,
+    ScreenshotTileRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
+    WaitForChangeRequest, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -271,6 +273,19 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 .transpose()?
                 .or(Some(1600)),
         })),
+        "plasma.wait_for_change" => Ok(DaemonRequest::WaitForChange(WaitForChangeRequest {
+            output: required_string(arguments, "output")?.into(),
+            max_edge: optional_u64(arguments, "max_edge")?
+                .map(u64_to_u32)
+                .transpose()?
+                .or(Some(1600)),
+            timeout_ms: optional_u64(arguments, "timeout_ms")?
+                .unwrap_or(DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS),
+            interval_ms: optional_u64(arguments, "interval_ms")?
+                .unwrap_or(DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS),
+            threshold: optional_f64(arguments, "threshold")?
+                .unwrap_or(DEFAULT_WAIT_FOR_CHANGE_THRESHOLD),
+        })),
         "plasma.clipboard_get_text" => {
             let full = optional_bool(arguments, "full")?.unwrap_or(false);
             Ok(DaemonRequest::ClipboardGet(ClipboardGetRequest {
@@ -449,6 +464,14 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             info.source_height,
             info.path.display()
         ),
+        DaemonResponse::WaitForChange(result) => format!(
+            "wait_for_change changed={} captures={} score={:.6} threshold={:.6} path={}",
+            result.changed,
+            result.captures,
+            result.score,
+            result.threshold,
+            result.screenshot.path.display()
+        ),
         DaemonResponse::ClipboardText(text) => format!(
             "clipboard text length={} truncated={} original_bytes={}",
             text.text.len(),
@@ -594,6 +617,36 @@ fn tool_definitions() -> Vec<Value> {
                     ),
                 ],
                 vec!["output", "x", "y", "width", "height"],
+            ),
+        ),
+        tool(
+            "plasma.wait_for_change",
+            "Wait For Change",
+            "Poll bounded screenshots until the normalized pixel delta reaches a threshold or the timeout expires.",
+            object_schema(
+                vec![
+                    (
+                        "output",
+                        json!({"type": "string", "description": "PNG output path for the latest bounded screenshot."}),
+                    ),
+                    (
+                        "max_edge",
+                        json!({"type": "integer", "minimum": 1, "description": "Screenshot preview max edge in pixels. Defaults to 1600."}),
+                    ),
+                    (
+                        "timeout_ms",
+                        json!({"type": "integer", "minimum": 1, "description": "Maximum time to wait in milliseconds. Defaults to 5000."}),
+                    ),
+                    (
+                        "interval_ms",
+                        json!({"type": "integer", "minimum": 1, "description": "Polling interval in milliseconds. Defaults to 250."}),
+                    ),
+                    (
+                        "threshold",
+                        json!({"type": "number", "exclusiveMinimum": 0.0, "maximum": 1.0, "description": "Normalized RGB delta threshold. Defaults to 0.01."}),
+                    ),
+                ],
+                vec!["output"],
             ),
         ),
         tool(
@@ -948,6 +1001,16 @@ fn optional_u64(arguments: &Value, key: &str) -> Result<Option<u64>> {
     }
 }
 
+fn optional_f64(arguments: &Value, key: &str) -> Result<Option<f64>> {
+    match arguments.get(key) {
+        Some(Value::Null) | None => Ok(None),
+        Some(value) => value
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| anyhow!("argument '{key}' must be a number")),
+    }
+}
+
 fn optional_string(arguments: &Value, key: &str) -> Result<Option<String>> {
     match arguments.get(key) {
         Some(Value::Null) | None => Ok(None),
@@ -1052,6 +1115,11 @@ mod tests {
         assert!(
             tools
                 .iter()
+                .any(|tool| tool["name"] == "plasma.wait_for_change")
+        );
+        assert!(
+            tools
+                .iter()
                 .any(|tool| tool["name"] == "plasma.click_button")
         );
         assert!(
@@ -1115,6 +1183,31 @@ mod tests {
                 width: 640,
                 height: 480,
                 max_edge: Some(320),
+            })
+        );
+    }
+
+    #[test]
+    fn maps_wait_for_change_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.wait_for_change",
+            &json!({
+                "output": "/tmp/wait.png",
+                "max_edge": 800,
+                "timeout_ms": 2000,
+                "interval_ms": 100,
+                "threshold": 0.02
+            }),
+        )
+        .expect("wait args map");
+        assert_eq!(
+            request,
+            DaemonRequest::WaitForChange(WaitForChangeRequest {
+                output: "/tmp/wait.png".into(),
+                max_edge: Some(800),
+                timeout_ms: 2000,
+                interval_ms: 100,
+                threshold: 0.02,
             })
         );
     }

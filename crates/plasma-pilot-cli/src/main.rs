@@ -5,10 +5,12 @@ use clap::{Parser, Subcommand};
 use libplasma_pilot::{
     AccessibilityAction, AccessibilityFindRequest, AccessibilityInvokeRequest,
     AccessibilitySetTextRequest, ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest,
-    ClipboardGetRequest, ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest,
-    DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
-    ObserveRequest, ReplayTrace, ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest,
-    SetPanicStopRequest, SetTextFieldRequest, default_socket_path,
+    ClipboardGetRequest, ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES,
+    DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
+    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest, DaemonResponse, FocusWindowRequest,
+    FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest, ReplayTrace,
+    ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest, SetPanicStopRequest,
+    SetTextFieldRequest, WaitForChangeRequest, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -58,6 +60,18 @@ enum Command {
         max_edge: u32,
         #[arg(long)]
         full_resolution: bool,
+    },
+    WaitForChange {
+        #[arg(long)]
+        output: String,
+        #[arg(long, default_value_t = 1600)]
+        max_edge: u32,
+        #[arg(long, default_value_t = DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS)]
+        timeout_ms: u64,
+        #[arg(long, default_value_t = DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS)]
+        interval_ms: u64,
+        #[arg(long, default_value_t = DEFAULT_WAIT_FOR_CHANGE_THRESHOLD)]
+        threshold: f64,
     },
     Windows,
     ActiveWindow,
@@ -326,6 +340,22 @@ fn main() -> Result<()> {
                     },
                     full_resolution,
                 }),
+            }),
+        )?,
+        Command::WaitForChange {
+            output,
+            max_edge,
+            timeout_ms,
+            interval_ms,
+            threshold,
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::WaitForChange(WaitForChangeRequest {
+                output: output.into(),
+                max_edge: Some(max_edge),
+                timeout_ms,
+                interval_ms,
+                threshold,
             }),
         )?,
         Command::Windows => print_daemon_response(&socket, DaemonRequest::ListWindows)?,

@@ -14,6 +14,7 @@ Default rules:
 - Replay traces are not a policy bypass: `plasma-pilot-cli trace replay` resubmits each recorded daemon request through the normal daemon socket, so control and clipboard-read requests remain policy-checked and journaled.
 - Panic-stop is file-backed and checked inside the daemon after policy approval but before control execution; when active, it blocks control-class requests even if the daemon was started with `--allow-control`.
 - Current control requests can carry active-window guards. When supplied, the daemon checks the active window id, app id, and title substring before control execution and rejects stale guards.
+- `wait_for_change` is observe-class and stores only the caller-requested bounded screenshot output path plus compact delta metadata in journal/MCP summaries.
 - Clipboard journal entries and compact MCP status text must not echo clipboard contents; they should report metadata such as text length.
 - Clipboard read tools should be bounded by default and require an explicit full-read option for unbounded content.
 - AT-SPI password-text nodes must be marked sensitive before they are used for any future semantic control action.

@@ -9,6 +9,9 @@ use crate::types::{
 };
 
 pub const DEFAULT_CLIPBOARD_MAX_BYTES: usize = 64 * 1024;
+pub const DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS: u64 = 5_000;
+pub const DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS: u64 = 250;
+pub const DEFAULT_WAIT_FOR_CHANGE_THRESHOLD: f64 = 0.01;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthStatus {
@@ -50,14 +53,14 @@ pub struct JournalEntry {
     pub summary: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReplayTrace {
     pub version: u32,
     pub description: Option<String>,
     pub steps: Vec<TraceStep>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TraceStep {
     pub label: Option<String>,
     pub request: DaemonRequest,
@@ -130,6 +133,25 @@ pub struct JournalTailRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObserveRequest {
     pub screenshot: Option<ScreenshotRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WaitForChangeRequest {
+    pub output: PathBuf,
+    pub max_edge: Option<u32>,
+    pub timeout_ms: u64,
+    pub interval_ms: u64,
+    pub threshold: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WaitForChangeResult {
+    pub changed: bool,
+    pub captures: u32,
+    pub elapsed_ms: u64,
+    pub score: f64,
+    pub threshold: f64,
+    pub screenshot: ScreenshotInfo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,7 +270,7 @@ pub struct FocusWindowRequest {
     pub guard: Option<ActiveWindowGuard>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum DaemonRequest {
     Health,
@@ -262,6 +284,7 @@ pub enum DaemonRequest {
     Observe(ObserveRequest),
     Screenshot(ScreenshotRequest),
     ScreenshotTile(ScreenshotTileRequest),
+    WaitForChange(WaitForChangeRequest),
     ClipboardGet(ClipboardGetRequest),
     ClipboardSet(ClipboardSetRequest),
     FocusedAccessibilityTree(FocusedAccessibilityTreeRequest),
@@ -290,6 +313,7 @@ impl DaemonRequest {
             Self::Observe(_) => "observe",
             Self::Screenshot(_) => "screenshot",
             Self::ScreenshotTile(_) => "screenshot_tile",
+            Self::WaitForChange(_) => "wait_for_change",
             Self::ClipboardGet(_) => "clipboard_get",
             Self::ClipboardSet(_) => "clipboard_set",
             Self::FocusedAccessibilityTree(_) => "focused_accessibility_tree",
@@ -318,6 +342,7 @@ pub enum DaemonResponse {
     ActiveWindow(Option<WindowInfo>),
     Observation(Box<DesktopObservation>),
     Screenshot(ScreenshotInfo),
+    WaitForChange(Box<WaitForChangeResult>),
     ClipboardText(ClipboardText),
     AccessibilityTree(Option<AccessibilityNode>),
     AccessibilityMatches(Vec<AccessibilityNode>),
@@ -338,6 +363,7 @@ impl DaemonResponse {
             Self::ActiveWindow(_) => "active_window",
             Self::Observation(_) => "observation",
             Self::Screenshot(_) => "screenshot",
+            Self::WaitForChange(_) => "wait_for_change",
             Self::ClipboardText(_) => "clipboard_text",
             Self::AccessibilityTree(_) => "accessibility_tree",
             Self::AccessibilityMatches(_) => "accessibility_matches",
@@ -433,6 +459,55 @@ mod tests {
         assert!(encoded.contains(r#""method":"screenshot_tile""#));
         assert!(encoded.contains(r#""x":100"#));
         assert!(encoded.contains(r#""max_edge":400"#));
+    }
+
+    #[test]
+    fn serializes_wait_for_change_request() {
+        let request = DaemonRequest::WaitForChange(WaitForChangeRequest {
+            output: PathBuf::from("/tmp/plasma-pilot-wait.png"),
+            max_edge: Some(1200),
+            timeout_ms: DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS,
+            interval_ms: DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
+            threshold: DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
+        });
+        let encoded = serde_json::to_string(&request).expect("wait request serializes");
+        assert!(encoded.contains(r#""method":"wait_for_change""#));
+        assert!(encoded.contains(r#""timeout_ms":5000"#));
+        assert!(encoded.contains(r#""interval_ms":250"#));
+        assert!(encoded.contains(r#""threshold":0.01"#));
+    }
+
+    #[test]
+    fn serializes_wait_for_change_response_with_type_tag() {
+        let response = DaemonResponse::WaitForChange(Box::new(WaitForChangeResult {
+            changed: true,
+            captures: 3,
+            elapsed_ms: 500,
+            score: 0.05,
+            threshold: 0.01,
+            screenshot: ScreenshotInfo {
+                path: PathBuf::from("/tmp/plasma-pilot-wait.png"),
+                backend: "spectacle".to_string(),
+                source_width: 7680,
+                source_height: 4320,
+                output_width: 1600,
+                output_height: 900,
+                transform: ScreenshotTransform {
+                    source_coordinate_space: CoordinateSpace::PhysicalPixel,
+                    output_coordinate_space: CoordinateSpace::PhysicalPixel,
+                    source_origin_x: 0,
+                    source_origin_y: 0,
+                    scale_x: 1600.0 / 7680.0,
+                    scale_y: 900.0 / 4320.0,
+                },
+                coordinate_space: CoordinateSpace::PhysicalPixel,
+                monitors: Vec::new(),
+            },
+        }));
+        let encoded = serde_json::to_string(&response).expect("wait response serializes");
+        assert!(encoded.contains(r#""type":"wait_for_change""#));
+        assert!(encoded.contains(r#""changed":true"#));
+        assert_eq!(response.response_type(), "wait_for_change");
     }
 
     #[test]

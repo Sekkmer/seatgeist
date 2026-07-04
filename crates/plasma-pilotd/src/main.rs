@@ -7,7 +7,7 @@ use std::{
     process::{Command, Stdio},
     sync::{Arc, Mutex, OnceLock},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Error, Result, bail};
@@ -20,8 +20,9 @@ use libplasma_pilot::{
     DaemonResponse, DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest,
     HealthStatus, JournalEntry, ObserveRequest, PanicStopStatus, PolicyStatus, SafetyClass,
     ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
-    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, ToolApprovalLevel, WindowGeometry,
-    WindowInfo, current_euid, default_journal_path, default_panic_stop_path, default_socket_path,
+    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, ToolApprovalLevel,
+    WaitForChangeRequest, WaitForChangeResult, WindowGeometry, WindowInfo, current_euid,
+    default_journal_path, default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -465,6 +466,12 @@ fn handle_request(
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::WaitForChange(request) => match wait_for_change(request) {
+            Ok(result) => DaemonResponse::WaitForChange(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::ClipboardGet(request) => match clipboard_get_text(request) {
             Ok(text) => DaemonResponse::ClipboardText(text),
             Err(err) => DaemonResponse::Error {
@@ -681,6 +688,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::Observe(_)
         | DaemonRequest::Screenshot(_)
         | DaemonRequest::ScreenshotTile(_)
+        | DaemonRequest::WaitForChange(_)
         | DaemonRequest::FocusedAccessibilityTree(_)
         | DaemonRequest::AccessibilityFind(_) => SafetyClass::Observe,
         DaemonRequest::ClipboardGet(_) => SafetyClass::ClipboardRead,
@@ -864,6 +872,114 @@ fn capture_screenshot_tile(request: ScreenshotTileRequest) -> Result<ScreenshotI
         coordinate_space: CoordinateSpace::PhysicalPixel,
         monitors,
     })
+}
+
+fn wait_for_change(request: WaitForChangeRequest) -> Result<WaitForChangeResult> {
+    validate_wait_for_change_request(&request)?;
+    let timeout = Duration::from_millis(request.timeout_ms);
+    let interval = Duration::from_millis(request.interval_ms);
+    let started = Instant::now();
+    let screenshot_request = || ScreenshotRequest {
+        output: request.output.clone(),
+        max_edge: request.max_edge.or(Some(1600)),
+        full_resolution: false,
+    };
+
+    let baseline_info = capture_screenshot(screenshot_request())?;
+    let baseline = read_image_sample(&baseline_info.path)?;
+    let mut final_info = baseline_info;
+    let mut captures = 1;
+    let mut score = 0.0;
+    let mut changed = false;
+
+    while started.elapsed() < timeout {
+        let remaining = timeout.saturating_sub(started.elapsed());
+        thread::sleep(interval.min(remaining));
+        final_info = capture_screenshot(screenshot_request())?;
+        captures += 1;
+
+        let candidate = read_image_sample(&final_info.path)?;
+        score = normalized_image_difference(&baseline, &candidate)?;
+        if score >= request.threshold {
+            changed = true;
+            break;
+        }
+    }
+
+    Ok(WaitForChangeResult {
+        changed,
+        captures,
+        elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        score,
+        threshold: request.threshold,
+        screenshot: final_info,
+    })
+}
+
+fn validate_wait_for_change_request(request: &WaitForChangeRequest) -> Result<()> {
+    if request.timeout_ms == 0 {
+        bail!("timeout_ms must be greater than zero");
+    }
+    if request.interval_ms == 0 {
+        bail!("interval_ms must be greater than zero");
+    }
+    if request.max_edge == Some(0) {
+        bail!("max_edge must be greater than zero");
+    }
+    if !request.threshold.is_finite() || request.threshold <= 0.0 || request.threshold > 1.0 {
+        bail!("threshold must be greater than 0.0 and less than or equal to 1.0");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImageSample {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+}
+
+fn read_image_sample(path: &Path) -> Result<ImageSample> {
+    let image = image::open(path)
+        .with_context(|| format!("read wait_for_change image {}", path.display()))?
+        .to_rgba8();
+    Ok(ImageSample {
+        width: image.width(),
+        height: image.height(),
+        rgba: image.into_raw(),
+    })
+}
+
+fn normalized_image_difference(baseline: &ImageSample, candidate: &ImageSample) -> Result<f64> {
+    if baseline.width != candidate.width || baseline.height != candidate.height {
+        bail!(
+            "wait_for_change image size changed from {}x{} to {}x{}",
+            baseline.width,
+            baseline.height,
+            candidate.width,
+            candidate.height
+        );
+    }
+    if baseline.rgba.len() != candidate.rgba.len() {
+        bail!("wait_for_change image buffers have different lengths");
+    }
+
+    let mut sum = 0u64;
+    let mut channels = 0u64;
+    for (baseline, candidate) in baseline
+        .rgba
+        .chunks_exact(4)
+        .zip(candidate.rgba.chunks_exact(4))
+    {
+        for index in 0..3 {
+            sum += u64::from(baseline[index].abs_diff(candidate[index]));
+            channels += 1;
+        }
+    }
+    if channels == 0 {
+        return Ok(0.0);
+    }
+    Ok(sum as f64 / (channels as f64 * 255.0))
 }
 
 fn list_monitors() -> Result<Vec<libplasma_pilot::MonitorInfo>> {
@@ -1697,6 +1813,14 @@ fn summarize_response(response: &DaemonResponse) -> String {
             info.source_height,
             info.path.display()
         ),
+        DaemonResponse::WaitForChange(result) => format!(
+            "wait_for_change changed={} captures={} score={:.6} threshold={:.6} path={}",
+            result.changed,
+            result.captures,
+            result.score,
+            result.threshold,
+            result.screenshot.path.display()
+        ),
         DaemonResponse::ClipboardText(text) => format!(
             "clipboard text length={} truncated={} original_bytes={}",
             text.text.len(),
@@ -2081,6 +2205,62 @@ mod tests {
         )
         .expect_err("stale active-window guard fails");
         assert!(err.to_string().contains("active-window guard failed"));
+    }
+
+    #[test]
+    fn validates_wait_for_change_request() {
+        validate_wait_for_change_request(&WaitForChangeRequest {
+            output: temp_test_path("wait-valid.png"),
+            max_edge: Some(1600),
+            timeout_ms: 1000,
+            interval_ms: 100,
+            threshold: libplasma_pilot::DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
+        })
+        .expect("valid wait request passes");
+
+        let err = validate_wait_for_change_request(&WaitForChangeRequest {
+            output: temp_test_path("wait-invalid.png"),
+            max_edge: Some(1600),
+            timeout_ms: 1000,
+            interval_ms: 100,
+            threshold: 0.0,
+        })
+        .expect_err("zero threshold is rejected");
+        assert!(err.to_string().contains("threshold"));
+    }
+
+    #[test]
+    fn image_difference_reports_normalized_rgb_delta() {
+        let baseline = ImageSample {
+            width: 1,
+            height: 1,
+            rgba: vec![0, 0, 0, 255],
+        };
+        let candidate = ImageSample {
+            width: 1,
+            height: 1,
+            rgba: vec![255, 0, 0, 255],
+        };
+
+        let score =
+            normalized_image_difference(&baseline, &candidate).expect("same dimensions compare");
+        assert!((score - (1.0 / 3.0)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn wait_for_change_is_observe_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        enforce_policy(
+            &policy,
+            &DaemonRequest::WaitForChange(WaitForChangeRequest {
+                output: temp_test_path("wait-policy.png"),
+                max_edge: Some(1600),
+                timeout_ms: 1000,
+                interval_ms: 100,
+                threshold: libplasma_pilot::DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
+            }),
+        )
+        .expect("wait_for_change is observe policy");
     }
 
     #[test]
