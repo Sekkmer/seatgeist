@@ -7,8 +7,8 @@ Usage: scripts/gui-eval.sh [all|status|observe|clipboard-denied|screenshot-previ
 
 Runs opt-in local GUI evals against a private PlasmaPilot daemon socket.
 The default `all` set avoids control actions. `control-safety` starts a private
-daemon with control approval, then verifies guard and panic-stop denials before
-any backend control action can execute.
+daemon with a method-scoped approval grant, then verifies guard and panic-stop
+denials before any backend control action can execute.
 USAGE
 }
 
@@ -40,14 +40,16 @@ socket="$socket_dir/plasma-pilotd.sock"
 log="$run_dir/daemon.log"
 journal="$run_dir/journal.jsonl"
 panic_stop_file="$run_dir/panic-stop.flag"
+approval_file="$run_dir/approvals.jsonl"
 
 rm -rf "$run_dir" "$socket_dir"
 mkdir -p "$run_dir"
+chmod 700 "$run_dir"
 
 cargo build -p plasma-pilotd -p plasma-pilot-cli
 daemon_args=(--socket "$socket" --journal "$journal" --panic-stop-file "$panic_stop_file")
 if [[ "$case_name" == "control-safety" ]]; then
-	daemon_args+=(--allow-control)
+	daemon_args+=(--approval-file "$approval_file")
 fi
 target/debug/plasma-pilotd "${daemon_args[@]}" >"$log" 2>&1 &
 pid=$!
@@ -162,6 +164,14 @@ eval_full_resolution_denied() {
 eval_control_safety() {
 	cli panic-stop status >"$run_dir/panic-stop-initial.json"
 	jq -e '.type == "panic_stop" and .data.enabled == false' "$run_dir/panic-stop-initial.json" >/dev/null
+	cli approve \
+		--approval-file "$approval_file" \
+		--safety-class control-semantic \
+		--method focus_window \
+		--ttl-ms 60000 \
+		--reason "gui-eval control-safety" >"$run_dir/control-safety-approval.json"
+	jq -e '.method == "focus_window" and .safety_class == "control_semantic"' "$run_dir/control-safety-approval.json" >/dev/null
+	test "$(stat -c '%a' "$approval_file")" = "600"
 
 	if command -v qdbus6 >/dev/null 2>&1; then
 		for _ in {1..50}; do
