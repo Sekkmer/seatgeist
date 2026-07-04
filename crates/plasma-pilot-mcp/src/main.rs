@@ -241,6 +241,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         "plasma.kwin_bridge_status" => Ok(DaemonRequest::KwinBridgeStatus),
         "plasma.uinput_status" => Ok(DaemonRequest::UinputStatus),
         "plasma.input_backend_status" => Ok(DaemonRequest::InputBackendStatus),
+        "plasma.capture_backend_status" => Ok(DaemonRequest::CaptureBackendStatus),
         "plasma.pointer_calibration" => Ok(DaemonRequest::PointerCalibration),
         "plasma.list_monitors" => Ok(DaemonRequest::ListMonitors),
         "plasma.list_windows" => Ok(DaemonRequest::ListWindows),
@@ -619,6 +620,17 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status.libei.client_library_available || status.libei.socket_env_present,
             status.uinput_available
         ),
+        DaemonResponse::CaptureBackendStatus(status) => format!(
+            "capture backends preferred={} portal_screenshot={} portal_screencast={} kwin_metadata={} spectacle={}",
+            status
+                .preferred_available_backend
+                .as_deref()
+                .unwrap_or("none"),
+            status.screenshot_portal.screenshot_interface_available,
+            status.screenshot_portal.screencast_interface_available,
+            status.kwin_metadata.support_information_available,
+            status.spectacle.command_available
+        ),
         DaemonResponse::PointerCalibration(status) => format!(
             "pointer calibration bounds={},{} {}x{} monitors={} coordinate_space={:?}",
             status.bounds.min_x,
@@ -741,6 +753,12 @@ fn tool_definitions() -> Vec<Value> {
             "plasma.input_backend_status",
             "Input Backend Status",
             "Probe read-only input backend availability in priority order: xdg-desktop-portal RemoteDesktop, libei, then uinput fallback.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.capture_backend_status",
+            "Capture Backend Status",
+            "Probe read-only capture backend availability: xdg-desktop-portal Screenshot/ScreenCast, KWin metadata, and Spectacle fallback.",
             object_schema(vec![], vec![]),
         ),
         tool(
@@ -1763,6 +1781,11 @@ mod tests {
         assert!(
             tools
                 .iter()
+                .any(|tool| tool["name"] == "plasma.capture_backend_status")
+        );
+        assert!(
+            tools
+                .iter()
                 .any(|tool| tool["name"] == "plasma.pointer_calibration")
         );
         assert!(
@@ -2133,6 +2156,15 @@ mod tests {
             daemon_request_for_tool("plasma.input_backend_status", &json!({}))
                 .expect("input backend status maps"),
             DaemonRequest::InputBackendStatus
+        );
+    }
+
+    #[test]
+    fn maps_capture_backend_status_tool() {
+        assert_eq!(
+            daemon_request_for_tool("plasma.capture_backend_status", &json!({}))
+                .expect("capture backend status maps"),
+            DaemonRequest::CaptureBackendStatus
         );
     }
 

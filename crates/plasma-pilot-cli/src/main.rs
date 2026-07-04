@@ -42,6 +42,7 @@ enum Command {
     Capabilities,
     PolicyStatus,
     KwinBridgeStatus,
+    CaptureBackends,
     Monitors,
     Screenshot {
         #[arg(long)]
@@ -550,6 +551,9 @@ fn main() -> Result<()> {
         Command::PolicyStatus => print_daemon_response(&socket, DaemonRequest::PolicyStatus)?,
         Command::KwinBridgeStatus => {
             print_daemon_response(&socket, DaemonRequest::KwinBridgeStatus)?;
+        }
+        Command::CaptureBackends => {
+            print_daemon_response(&socket, DaemonRequest::CaptureBackendStatus)?;
         }
         Command::Monitors => print_daemon_response(&socket, DaemonRequest::ListMonitors)?,
         Command::Screenshot {

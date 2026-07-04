@@ -814,6 +814,7 @@ Tasks:
 - [x] Add default downscaled previews and explicit full-resolution capture. Current status: bounded previews are observe-class, while direct and observe-attached full-resolution screenshot requests are classified separately and prompt by default until the daemon is started with explicit full-resolution screenshot approval.
 - Add tiled screenshots for 8K and multi-monitor workflows. Initial implementation supports physical-pixel tile crops with max-edge downscaling.
 - Add coordinate transform metadata for preview/crop/full-size mapping. Initial preview/full-size mapping is implemented with scale factors and source/output dimensions.
+- [x] Add safe capture backend diagnostics before implementing portal/KWin-native capture. Current status: `plasma-pilot-cli capture-backends`, MCP `plasma.capture_backend_status`, and `make smoke-capture-backends` probe xdg-desktop-portal Screenshot/ScreenCast interface visibility, KWin supportInformation metadata availability, and Spectacle fallback availability without starting a portal session or capturing pixels.
 
 Acceptance criteria:
 

@@ -77,6 +77,39 @@ pub struct InputBackendStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureBackendStatus {
+    pub screenshot_portal: ScreenshotPortalStatus,
+    pub kwin_metadata: KwinMetadataStatus,
+    pub spectacle: SpectacleStatus,
+    pub preferred_available_backend: Option<String>,
+    pub setup_hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenshotPortalStatus {
+    pub busctl_available: bool,
+    pub portal_service_available: bool,
+    pub screenshot_interface_available: bool,
+    pub screencast_interface_available: bool,
+    pub kde_portal_service_available: bool,
+    pub setup_hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KwinMetadataStatus {
+    pub busctl_available: bool,
+    pub kwin_service_available: bool,
+    pub support_information_available: bool,
+    pub setup_hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpectacleStatus {
+    pub command_available: bool,
+    pub setup_hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteDesktopPortalStatus {
     pub busctl_available: bool,
     pub portal_service_available: bool,
@@ -541,6 +574,7 @@ pub enum DaemonRequest {
     KwinBridgeStatus,
     UinputStatus,
     InputBackendStatus,
+    CaptureBackendStatus,
     PointerCalibration,
     ListMonitors,
     ListWindows,
@@ -589,6 +623,7 @@ impl DaemonRequest {
             Self::KwinBridgeStatus => "kwin_bridge_status",
             Self::UinputStatus => "uinput_status",
             Self::InputBackendStatus => "input_backend_status",
+            Self::CaptureBackendStatus => "capture_backend_status",
             Self::PointerCalibration => "pointer_calibration",
             Self::ListMonitors => "list_monitors",
             Self::ListWindows => "list_windows",
@@ -638,6 +673,7 @@ pub enum DaemonResponse {
     KwinBridgeStatus(KwinBridgeStatus),
     UinputStatus(UinputStatus),
     InputBackendStatus(InputBackendStatus),
+    CaptureBackendStatus(CaptureBackendStatus),
     PointerCalibration(PointerCalibrationStatus),
     Monitors(Vec<MonitorInfo>),
     Windows(Vec<WindowInfo>),
@@ -663,6 +699,7 @@ impl DaemonResponse {
             Self::KwinBridgeStatus(_) => "kwin_bridge_status",
             Self::UinputStatus(_) => "uinput_status",
             Self::InputBackendStatus(_) => "input_backend_status",
+            Self::CaptureBackendStatus(_) => "capture_backend_status",
             Self::PointerCalibration(_) => "pointer_calibration",
             Self::Monitors(_) => "monitors",
             Self::Windows(_) => "windows",
@@ -1100,6 +1137,42 @@ mod tests {
         assert!(encoded.contains(r#""type":"input_backend_status""#));
         assert!(encoded.contains(r#""preferred_available_backend":"portal_remote_desktop""#));
         assert_eq!(response.response_type(), "input_backend_status");
+    }
+
+    #[test]
+    fn serializes_capture_backend_status() {
+        let request = DaemonRequest::CaptureBackendStatus;
+        assert_eq!(
+            serde_json::to_string(&request).expect("capture backend status request serializes"),
+            r#"{"method":"capture_backend_status"}"#
+        );
+
+        let response = DaemonResponse::CaptureBackendStatus(CaptureBackendStatus {
+            screenshot_portal: ScreenshotPortalStatus {
+                busctl_available: true,
+                portal_service_available: true,
+                screenshot_interface_available: true,
+                screencast_interface_available: true,
+                kde_portal_service_available: true,
+                setup_hint: "portal screenshot interface is visible".to_string(),
+            },
+            kwin_metadata: KwinMetadataStatus {
+                busctl_available: true,
+                kwin_service_available: true,
+                support_information_available: true,
+                setup_hint: "KWin support information is available".to_string(),
+            },
+            spectacle: SpectacleStatus {
+                command_available: true,
+                setup_hint: "Spectacle command backend is available".to_string(),
+            },
+            preferred_available_backend: Some("portal_screenshot".to_string()),
+            setup_hint: "prefer portal Screenshot before Spectacle fallback".to_string(),
+        });
+        let encoded = serde_json::to_string(&response).expect("capture backend status serializes");
+        assert!(encoded.contains(r#""type":"capture_backend_status""#));
+        assert!(encoded.contains(r#""preferred_available_backend":"portal_screenshot""#));
+        assert_eq!(response.response_type(), "capture_backend_status");
     }
 
     #[test]

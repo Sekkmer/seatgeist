@@ -195,6 +195,15 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
     assert!(!status.libei.setup_hint.is_empty());
     assert!(!status.setup_hint.is_empty());
 
+    let capture_backends = daemon.request(&DaemonRequest::CaptureBackendStatus)?;
+    let DaemonResponse::CaptureBackendStatus(status) = capture_backends else {
+        bail!("expected capture backend status response, got {capture_backends:?}");
+    };
+    assert!(!status.screenshot_portal.setup_hint.is_empty());
+    assert!(!status.kwin_metadata.setup_hint.is_empty());
+    assert!(!status.spectacle.setup_hint.is_empty());
+    assert!(!status.setup_hint.is_empty());
+
     let panic_stop = daemon.request(&DaemonRequest::SetPanicStop(SetPanicStopRequest {
         enabled: true,
     }))?;
@@ -230,6 +239,7 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
             "panic_stop_status",
             "uinput_status",
             "input_backend_status",
+            "capture_backend_status",
             "set_panic_stop",
         ],
     );

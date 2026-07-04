@@ -17,19 +17,20 @@ use libplasma_pilot::{
     AccessibilityCopyTextRequest, AccessibilityCutTextRequest, AccessibilityDeleteTextRequest,
     AccessibilityFindRequest, AccessibilityInsertTextRequest, AccessibilityInvokeRequest,
     AccessibilityPasteTextRequest, AccessibilitySetTextRequest, ActionResult, ActivateLinkRequest,
-    ActivateTabRequest, ActiveWindowGuard, BackendCapability, CapabilitySet, ClickButtonRequest,
-    ClickPointerRequest, ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest,
-    DaemonResponse, DesktopObservation, DragPointerRequest, FocusWindowRequest,
+    ActivateTabRequest, ActiveWindowGuard, BackendCapability, CapabilitySet, CaptureBackendStatus,
+    ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardText, CoordinateSpace,
+    DaemonRequest, DaemonResponse, DesktopObservation, DragPointerRequest, FocusWindowRequest,
     FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus, JournalEntry,
-    JournalWindowContext, KeyComboRequest, KwinBridgeStatus, LibeiStatus, MovePointerRequest,
-    ObserveRequest, PanicStopStatus, Point, PointerButton, PointerCalibrationPoint,
-    PointerCalibrationStatus, PointerMonitorCalibration, PointerPhysicalBounds, PolicyStatus,
-    RemoteDesktopPortalStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest,
-    ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest, SelectItemRequest,
-    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest,
-    ToggleCheckRequest, ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest,
-    WaitForChangeResult, WindowGeometry, WindowInfo, current_egid, current_euid,
-    default_journal_path, default_panic_stop_path, default_socket_path,
+    JournalWindowContext, KeyComboRequest, KwinBridgeStatus, KwinMetadataStatus, LibeiStatus,
+    MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton,
+    PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
+    PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus, SafetyClass, ScreenshotInfo,
+    ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
+    ScrollPointerRequest, SelectItemRequest, SelectMenuRequest, SetPanicStopRequest,
+    SetTextFieldRequest, SetValueRequest, SpectacleStatus, ToggleCheckRequest, ToolApprovalLevel,
+    TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult, WindowGeometry,
+    WindowInfo, current_egid, current_euid, default_journal_path, default_panic_stop_path,
+    default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -793,6 +794,9 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::CaptureBackendStatus => {
+            DaemonResponse::CaptureBackendStatus(capture_backend_status())
+        }
         DaemonRequest::PointerCalibration => match pointer_calibration_status() {
             Ok(status) => DaemonResponse::PointerCalibration(status),
             Err(err) => DaemonResponse::Error {
@@ -1379,6 +1383,216 @@ fn input_backend_status() -> Result<InputBackendStatus> {
     })
 }
 
+fn capture_backend_status() -> CaptureBackendStatus {
+    let screenshot_portal = screenshot_portal_status();
+    let kwin_metadata = kwin_metadata_status();
+    let spectacle = spectacle_status();
+    let preferred_available_backend =
+        preferred_capture_backend(&screenshot_portal, spectacle.command_available);
+    let setup_hint = capture_backend_setup_hint(
+        preferred_available_backend.as_deref(),
+        &screenshot_portal,
+        &kwin_metadata,
+        &spectacle,
+    );
+
+    CaptureBackendStatus {
+        screenshot_portal,
+        kwin_metadata,
+        spectacle,
+        preferred_available_backend,
+        setup_hint,
+    }
+}
+
+fn screenshot_portal_status() -> ScreenshotPortalStatus {
+    let busctl_available = command_exists("busctl");
+    if !busctl_available {
+        return ScreenshotPortalStatus {
+            busctl_available,
+            portal_service_available: false,
+            screenshot_interface_available: false,
+            screencast_interface_available: false,
+            kde_portal_service_available: false,
+            setup_hint: screenshot_portal_setup_hint(false, false, false, false, false),
+        };
+    }
+
+    let service_list =
+        command_stdout("busctl", &["--user", "--no-pager", "--list"]).unwrap_or_default();
+    let portal_service_available = service_list.contains("org.freedesktop.portal.Desktop");
+    let kde_portal_service_available =
+        service_list.contains("org.freedesktop.impl.portal.desktop.kde");
+    let screenshot_interface_available = portal_service_available
+        && command_success(
+            "busctl",
+            &[
+                "--user",
+                "--no-pager",
+                "introspect",
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.Screenshot",
+            ],
+        );
+    let screencast_interface_available = portal_service_available
+        && command_success(
+            "busctl",
+            &[
+                "--user",
+                "--no-pager",
+                "introspect",
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.ScreenCast",
+            ],
+        );
+
+    ScreenshotPortalStatus {
+        busctl_available,
+        portal_service_available,
+        screenshot_interface_available,
+        screencast_interface_available,
+        kde_portal_service_available,
+        setup_hint: screenshot_portal_setup_hint(
+            busctl_available,
+            portal_service_available,
+            screenshot_interface_available,
+            screencast_interface_available,
+            kde_portal_service_available,
+        ),
+    }
+}
+
+fn kwin_metadata_status() -> KwinMetadataStatus {
+    let busctl_available = command_exists("busctl");
+    let kwin_service_available = busctl_available
+        && command_stdout("busctl", &["--user", "--no-pager", "--list"])
+            .unwrap_or_default()
+            .contains("org.kde.KWin");
+    let support_information_available = command_exists("qdbus6")
+        && command_success(
+            "qdbus6",
+            &["org.kde.KWin", "/KWin", "org.kde.KWin.supportInformation"],
+        );
+
+    KwinMetadataStatus {
+        busctl_available,
+        kwin_service_available,
+        support_information_available,
+        setup_hint: kwin_metadata_setup_hint(
+            busctl_available,
+            kwin_service_available,
+            support_information_available,
+        ),
+    }
+}
+
+fn spectacle_status() -> SpectacleStatus {
+    let command_available = command_exists("spectacle");
+    SpectacleStatus {
+        command_available,
+        setup_hint: spectacle_setup_hint(command_available),
+    }
+}
+
+fn preferred_capture_backend(
+    screenshot_portal: &ScreenshotPortalStatus,
+    spectacle_available: bool,
+) -> Option<String> {
+    if screenshot_portal.screenshot_interface_available {
+        return Some("portal_screenshot".to_string());
+    }
+    if spectacle_available {
+        return Some("spectacle".to_string());
+    }
+    None
+}
+
+fn capture_backend_setup_hint(
+    preferred: Option<&str>,
+    screenshot_portal: &ScreenshotPortalStatus,
+    kwin_metadata: &KwinMetadataStatus,
+    spectacle: &SpectacleStatus,
+) -> String {
+    match preferred {
+        Some("portal_screenshot") if kwin_metadata.support_information_available => {
+            "prefer xdg-desktop-portal Screenshot for consented capture with KWin metadata for monitor scale and coordinate mapping".to_string()
+        }
+        Some("portal_screenshot") => {
+            "portal Screenshot is visible; KWin supportInformation is unavailable, so monitor scale metadata may be incomplete".to_string()
+        }
+        Some("spectacle") if kwin_metadata.support_information_available => {
+            "using Spectacle command fallback with KWin metadata for monitor scale and coordinate mapping".to_string()
+        }
+        Some("spectacle") => {
+            "using Spectacle command fallback; KWin supportInformation is unavailable, so monitor scale metadata may be incomplete".to_string()
+        }
+        _ if !screenshot_portal.busctl_available && !spectacle.command_available => {
+            "install busctl/systemd tools or Spectacle before probing or using capture backends".to_string()
+        }
+        _ if !screenshot_portal.screenshot_interface_available && !spectacle.command_available => {
+            "no capture backend is currently available; configure xdg-desktop-portal Screenshot or install Spectacle".to_string()
+        }
+        _ => "capture backend state is partial; inspect portal, KWin metadata, and Spectacle fields".to_string(),
+    }
+}
+
+fn screenshot_portal_setup_hint(
+    busctl_available: bool,
+    portal_service_available: bool,
+    screenshot_interface_available: bool,
+    screencast_interface_available: bool,
+    kde_portal_service_available: bool,
+) -> String {
+    if !busctl_available {
+        return "busctl is unavailable; cannot probe xdg-desktop-portal capture interfaces"
+            .to_string();
+    }
+    if !portal_service_available {
+        return "org.freedesktop.portal.Desktop is not visible on the user bus".to_string();
+    }
+    if !screenshot_interface_available && !screencast_interface_available {
+        return "portal service is visible, but Screenshot and ScreenCast did not introspect successfully".to_string();
+    }
+    if !kde_portal_service_available {
+        return "portal capture interface is visible; KDE portal backend service was not listed"
+            .to_string();
+    }
+    if screenshot_interface_available && screencast_interface_available {
+        return "portal Screenshot, ScreenCast, and KDE portal backend are visible".to_string();
+    }
+    if screenshot_interface_available {
+        return "portal Screenshot and KDE portal backend are visible".to_string();
+    }
+    "portal ScreenCast and KDE portal backend are visible; still need a Screenshot or stream capture implementation".to_string()
+}
+
+fn kwin_metadata_setup_hint(
+    busctl_available: bool,
+    kwin_service_available: bool,
+    support_information_available: bool,
+) -> String {
+    if support_information_available {
+        return "KWin supportInformation is available for monitor scale and geometry metadata"
+            .to_string();
+    }
+    if !busctl_available {
+        return "busctl is unavailable; cannot confirm org.kde.KWin on the user bus".to_string();
+    }
+    if !kwin_service_available {
+        return "org.kde.KWin is not visible on the user bus".to_string();
+    }
+    "org.kde.KWin is visible, but qdbus6 supportInformation did not succeed".to_string()
+}
+
+fn spectacle_setup_hint(command_available: bool) -> String {
+    if command_available {
+        return "Spectacle command backend is available as the current fallback".to_string();
+    }
+    "Spectacle command backend is not on PATH".to_string()
+}
+
 fn remote_desktop_portal_status() -> RemoteDesktopPortalStatus {
     let busctl_available = command_exists("busctl");
     if !busctl_available {
@@ -1803,6 +2017,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::SetPanicStop(_)
         | DaemonRequest::UinputStatus
         | DaemonRequest::InputBackendStatus
+        | DaemonRequest::CaptureBackendStatus
         | DaemonRequest::PointerCalibration
         | DaemonRequest::JournalTail(_) => SafetyClass::Policy,
         DaemonRequest::ListMonitors
@@ -1958,7 +2173,7 @@ fn current_capabilities() -> Vec<BackendCapability> {
         BackendCapability::DaemonHealth,
         BackendCapability::DaemonPolicyStatus,
     ];
-    if command_exists("spectacle") {
+    if command_exists("spectacle") || screenshot_portal_status().screenshot_interface_available {
         capabilities.push(BackendCapability::Screenshot);
     }
     if command_exists("qdbus6") {
@@ -4343,6 +4558,17 @@ fn summarize_response(response: &DaemonResponse) -> String {
             status.libei.client_library_available || status.libei.socket_env_present,
             status.uinput_available
         ),
+        DaemonResponse::CaptureBackendStatus(status) => format!(
+            "capture backends preferred={} portal_screenshot={} portal_screencast={} kwin_metadata={} spectacle={}",
+            status
+                .preferred_available_backend
+                .as_deref()
+                .unwrap_or("none"),
+            status.screenshot_portal.screenshot_interface_available,
+            status.screenshot_portal.screencast_interface_available,
+            status.kwin_metadata.support_information_available,
+            status.spectacle.command_available
+        ),
         DaemonResponse::PointerCalibration(status) => format!(
             "pointer calibration bounds={},{} {}x{} monitors={} coordinate_space={:?}",
             status.bounds.min_x,
@@ -5730,6 +5956,8 @@ height = 40
             .expect("uinput status is allowed as policy diagnostics");
         enforce_policy(&policy, &DaemonRequest::InputBackendStatus)
             .expect("input backend status is allowed as policy diagnostics");
+        enforce_policy(&policy, &DaemonRequest::CaptureBackendStatus)
+            .expect("capture backend status is allowed as policy diagnostics");
         enforce_policy(&policy, &DaemonRequest::PointerCalibration)
             .expect("pointer calibration is allowed as policy diagnostics");
     }
@@ -5790,6 +6018,48 @@ height = 40
         );
         assert!(libei_setup_hint(false, false, false).contains("pkg-config"));
         assert!(libei_setup_hint(true, false, true).contains("LIBEI_SOCKET"));
+    }
+
+    #[test]
+    fn capture_backend_preference_uses_portal_then_spectacle() {
+        let portal = screenshot_portal_status_fixture(true, true);
+        assert_eq!(
+            preferred_capture_backend(&portal, true).as_deref(),
+            Some("portal_screenshot")
+        );
+
+        let portal = screenshot_portal_status_fixture(false, true);
+        assert_eq!(
+            preferred_capture_backend(&portal, true).as_deref(),
+            Some("spectacle")
+        );
+        assert_eq!(preferred_capture_backend(&portal, false), None);
+    }
+
+    #[test]
+    fn capture_backend_setup_hints_report_missing_probe_paths() {
+        let portal = screenshot_portal_status_fixture(false, false);
+        let kwin = KwinMetadataStatus {
+            busctl_available: false,
+            kwin_service_available: false,
+            support_information_available: false,
+            setup_hint: String::new(),
+        };
+        let spectacle = SpectacleStatus {
+            command_available: false,
+            setup_hint: String::new(),
+        };
+
+        let hint = capture_backend_setup_hint(None, &portal, &kwin, &spectacle);
+        assert!(hint.contains("busctl") || hint.contains("capture backend"));
+        assert!(screenshot_portal_setup_hint(false, false, false, false, false).contains("busctl"));
+        assert!(
+            screenshot_portal_setup_hint(true, true, false, false, true)
+                .contains("did not introspect")
+        );
+        assert!(kwin_metadata_setup_hint(false, false, false).contains("busctl"));
+        assert!(kwin_metadata_setup_hint(true, false, false).contains("org.kde.KWin"));
+        assert!(spectacle_setup_hint(false).contains("not on PATH"));
     }
 
     #[test]
@@ -7147,6 +7417,20 @@ height = 40
             portal_service_available: available,
             remote_desktop_interface_available: available,
             kde_portal_service_available: available,
+            setup_hint: String::new(),
+        }
+    }
+
+    fn screenshot_portal_status_fixture(
+        screenshot_available: bool,
+        busctl_available: bool,
+    ) -> ScreenshotPortalStatus {
+        ScreenshotPortalStatus {
+            busctl_available,
+            portal_service_available: screenshot_available,
+            screenshot_interface_available: screenshot_available,
+            screencast_interface_available: screenshot_available,
+            kde_portal_service_available: screenshot_available,
             setup_hint: String::new(),
         }
     }
