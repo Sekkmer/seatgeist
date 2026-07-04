@@ -18,10 +18,10 @@ use libplasma_pilot::{
     ActionResult, ActivateTabRequest, BackendCapability, CapabilitySet, ClickButtonRequest,
     ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse,
     DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus,
-    JournalEntry, ObserveRequest, PolicyStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest,
-    ScreenshotTileRequest, ScreenshotTransform, SelectMenuRequest, SetTextFieldRequest,
-    ToolApprovalLevel, WindowGeometry, WindowInfo, current_euid, default_journal_path,
-    default_socket_path,
+    JournalEntry, ObserveRequest, PanicStopStatus, PolicyStatus, SafetyClass, ScreenshotInfo,
+    ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform, SelectMenuRequest,
+    SetPanicStopRequest, SetTextFieldRequest, ToolApprovalLevel, WindowGeometry, WindowInfo,
+    current_euid, default_journal_path, default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -116,6 +116,57 @@ struct ActiveWindowSnapshot {
 }
 
 #[derive(Debug, Clone)]
+struct PanicStopState {
+    path: PathBuf,
+}
+
+impl PanicStopState {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn status(&self) -> PanicStopStatus {
+        PanicStopStatus {
+            enabled: self.path.exists(),
+            path: self.path.clone(),
+        }
+    }
+
+    fn set_enabled(&self, enabled: bool) -> Result<PanicStopStatus> {
+        if enabled {
+            let parent = self.path.parent().ok_or_else(|| {
+                anyhow::anyhow!("panic-stop path has no parent: {}", self.path.display())
+            })?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create panic-stop dir {}", parent.display()))?;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+                .with_context(|| format!("set panic-stop dir permissions {}", parent.display()))?;
+            let mut file = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&self.path)
+                .with_context(|| format!("create panic-stop file {}", self.path.display()))?;
+            writeln!(file, "enabled_at_unix_ms={}", unix_time_ms()?)
+                .context("write panic-stop file")?;
+            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("set panic-stop permissions {}", self.path.display()))?;
+        } else {
+            match fs::remove_file(&self.path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(err).with_context(|| {
+                        format!("remove panic-stop file {}", self.path.display())
+                    });
+                }
+            }
+        }
+        Ok(self.status())
+    }
+}
+
+#[derive(Debug, Clone)]
 struct KwinBridge {
     active_window_state: ActiveWindowState,
 }
@@ -189,6 +240,9 @@ struct Args {
     #[arg(long, env = "PLASMA_PILOT_JOURNAL")]
     journal: Option<PathBuf>,
 
+    #[arg(long, env = "PLASMA_PILOT_PANIC_STOP_FILE")]
+    panic_stop_file: Option<PathBuf>,
+
     #[arg(long, env = "PLASMA_PILOT_ALLOW_CONTROL")]
     allow_control: bool,
 
@@ -217,14 +271,24 @@ async fn main() -> Result<()> {
         Some(path) => path,
         None => default_journal_path().context("resolve default journal path")?,
     };
+    let panic_stop_file = match args.panic_stop_file {
+        Some(path) => path,
+        None => default_panic_stop_path().context("resolve default panic-stop path")?,
+    };
 
     let policy_config = policy_config(args.allow_control, args.allow_clipboard_read);
 
-    run(socket, journal, policy_config).await
+    run(socket, journal, panic_stop_file, policy_config).await
 }
 
-async fn run(socket: PathBuf, journal_path: PathBuf, policy_config: PolicyConfig) -> Result<()> {
+async fn run(
+    socket: PathBuf,
+    journal_path: PathBuf,
+    panic_stop_path: PathBuf,
+    policy_config: PolicyConfig,
+) -> Result<()> {
     let journal = ActionJournal::new(journal_path);
+    let panic_stop = PanicStopState::new(panic_stop_path);
     let policy = PolicyEngine::new(policy_config);
     let active_window_state = ActiveWindowState::default();
     let _kwin_bridge_connection = match start_kwin_bridge(active_window_state.clone()).await {
@@ -248,9 +312,12 @@ async fn run(socket: PathBuf, journal_path: PathBuf, policy_config: PolicyConfig
         let (stream, _addr) = listener.accept().await.context("accept client")?;
         let active_window_state = active_window_state.clone();
         let journal = journal.clone();
+        let panic_stop = panic_stop.clone();
         let policy = policy.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_client(stream, active_window_state, journal, policy).await {
+            if let Err(err) =
+                handle_client(stream, active_window_state, journal, panic_stop, policy).await
+            {
                 warn!(error = %err, "client request failed");
             }
         });
@@ -285,6 +352,7 @@ async fn handle_client(
     stream: UnixStream,
     active_window_state: ActiveWindowState,
     journal: ActionJournal,
+    panic_stop: PanicStopState,
     policy: PolicyEngine,
 ) -> Result<()> {
     validate_peer_uid(&stream)?;
@@ -300,7 +368,13 @@ async fn handle_client(
 
     let request = serde_json::from_str::<DaemonRequest>(&line).context("parse daemon request")?;
     let method = request.method_name();
-    let response = handle_request(request, &active_window_state, &journal, &policy);
+    let response = handle_request(
+        request,
+        &active_window_state,
+        &journal,
+        &panic_stop,
+        &policy,
+    );
     journal
         .record(method, &response)
         .context("record request in action journal")?;
@@ -318,9 +392,15 @@ fn handle_request(
     request: DaemonRequest,
     active_window_state: &ActiveWindowState,
     journal: &ActionJournal,
+    panic_stop: &PanicStopState,
     policy: &PolicyEngine,
 ) -> DaemonResponse {
     if let Err(err) = enforce_policy(policy, &request) {
+        return DaemonResponse::Error {
+            message: format_error_chain(&err),
+        };
+    }
+    if let Err(err) = enforce_panic_stop(panic_stop, &request) {
         return DaemonResponse::Error {
             message: format_error_chain(&err),
         };
@@ -332,6 +412,13 @@ fn handle_request(
         DaemonRequest::PolicyStatus => {
             DaemonResponse::PolicyStatus(policy_status_from_config(policy.config()))
         }
+        DaemonRequest::PanicStopStatus => DaemonResponse::PanicStop(panic_stop.status()),
+        DaemonRequest::SetPanicStop(request) => match set_panic_stop(panic_stop, request) {
+            Ok(status) => DaemonResponse::PanicStop(status),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::ListMonitors => match list_monitors() {
             Ok(monitors) => DaemonResponse::Monitors(monitors),
             Err(err) => DaemonResponse::Error {
@@ -491,11 +578,33 @@ fn enforce_policy(policy: &PolicyEngine, request: &DaemonRequest) -> Result<()> 
     }
 }
 
+fn enforce_panic_stop(panic_stop: &PanicStopState, request: &DaemonRequest) -> Result<()> {
+    let status = panic_stop.status();
+    let safety_class = safety_class_for_request(request);
+    if status.enabled
+        && matches!(
+            safety_class,
+            SafetyClass::ControlPointer
+                | SafetyClass::ControlKeyboard
+                | SafetyClass::ControlSemantic
+        )
+    {
+        bail!(
+            "panic-stop is active at {}; refusing {:?}",
+            status.path.display(),
+            safety_class
+        );
+    }
+    Ok(())
+}
+
 fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
     match request {
         DaemonRequest::Health
         | DaemonRequest::Capabilities
         | DaemonRequest::PolicyStatus
+        | DaemonRequest::PanicStopStatus
+        | DaemonRequest::SetPanicStop(_)
         | DaemonRequest::JournalTail(_) => SafetyClass::Policy,
         DaemonRequest::ListMonitors
         | DaemonRequest::ListWindows
@@ -515,6 +624,13 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::ActivateTab(_)
         | DaemonRequest::SelectMenu(_) => SafetyClass::ControlSemantic,
     }
+}
+
+fn set_panic_stop(
+    panic_stop: &PanicStopState,
+    request: SetPanicStopRequest,
+) -> Result<PanicStopStatus> {
+    panic_stop.set_enabled(request.enabled)
 }
 
 fn current_capabilities() -> Vec<BackendCapability> {
@@ -1468,6 +1584,11 @@ fn summarize_response(response: &DaemonResponse) -> String {
             format!("{} capabilities", capabilities.capabilities.len())
         }
         DaemonResponse::PolicyStatus(_) => "policy status".to_string(),
+        DaemonResponse::PanicStop(status) => format!(
+            "panic-stop enabled={} path={}",
+            status.enabled,
+            status.path.display()
+        ),
         DaemonResponse::Monitors(monitors) => format!("{} monitors", monitors.len()),
         DaemonResponse::Windows(windows) => format!("{} windows", windows.len()),
         DaemonResponse::Observation(observation) => format!(
@@ -1751,6 +1872,64 @@ mod tests {
     }
 
     #[test]
+    fn panic_stop_state_round_trips_file_flag() {
+        let path = temp_test_path("panic-stop-state");
+        let state = PanicStopState::new(path.clone());
+
+        assert!(!state.status().enabled);
+        let status = state.set_enabled(true).expect("panic-stop can be enabled");
+        assert!(status.enabled);
+        assert_eq!(status.path, path);
+        assert!(state.status().enabled);
+
+        let status = state
+            .set_enabled(false)
+            .expect("panic-stop can be disabled");
+        assert!(!status.enabled);
+        assert!(!path.exists());
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn panic_stop_blocks_control_after_policy_allows_it() {
+        let path = temp_test_path("panic-stop-blocks-control");
+        fs::write(&path, "enabled").expect("panic-stop fixture file is written");
+        let panic_stop = PanicStopState::new(path.clone());
+        let policy = PolicyEngine::new(policy_config(true, false));
+
+        let err = enforce_panic_stop(
+            &panic_stop,
+            &DaemonRequest::FocusWindow(FocusWindowRequest {
+                window_id: "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}".to_string(),
+            }),
+        )
+        .expect_err("panic-stop blocks allowed control");
+        assert!(err.to_string().contains("panic-stop is active"));
+
+        enforce_policy(
+            &policy,
+            &DaemonRequest::FocusWindow(FocusWindowRequest {
+                window_id: "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}".to_string(),
+            }),
+        )
+        .expect("control policy is explicitly allowed");
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn panic_stop_does_not_block_observe_requests() {
+        let path = temp_test_path("panic-stop-observe");
+        fs::write(&path, "enabled").expect("panic-stop fixture file is written");
+        let panic_stop = PanicStopState::new(path.clone());
+
+        enforce_panic_stop(&panic_stop, &DaemonRequest::ListWindows)
+            .expect("panic-stop does not block observe");
+        enforce_panic_stop(&panic_stop, &DaemonRequest::PanicStopStatus)
+            .expect("panic-stop does not block status");
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn focus_window_is_control_policy() {
         let policy = PolicyEngine::new(PolicyConfig::default());
         let err = enforce_policy(
@@ -1854,6 +2033,18 @@ mod tests {
         )
         .expect_err("select menu requires control approval by default");
         assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
+    fn panic_stop_requests_are_policy_class() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        enforce_policy(&policy, &DaemonRequest::PanicStopStatus)
+            .expect("panic-stop status is allowed by policy");
+        enforce_policy(
+            &policy,
+            &DaemonRequest::SetPanicStop(SetPanicStopRequest { enabled: true }),
+        )
+        .expect("panic-stop mutation is policy class and journaled by daemon");
     }
 
     #[test]
@@ -2216,5 +2407,13 @@ mod tests {
             actions: vec![libplasma_pilot::AccessibilityAction::Press],
             children: Vec::new(),
         }
+    }
+
+    fn temp_test_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "plasma-pilot-{name}-{}-{}",
+            std::process::id(),
+            unix_time_ms().expect("time is available")
+        ))
     }
 }

@@ -39,6 +39,15 @@ pub fn default_journal_path() -> io::Result<PathBuf> {
     Ok(state_dir.join("plasma-pilot").join("journal.jsonl"))
 }
 
+pub fn default_panic_stop_path() -> io::Result<PathBuf> {
+    let runtime_dir = match env::var_os("XDG_RUNTIME_DIR") {
+        Some(value) => PathBuf::from(value),
+        None => PathBuf::from(format!("/run/user/{}", current_euid()?)),
+    };
+
+    Ok(runtime_dir.join("plasma-pilot").join("panic-stop"))
+}
+
 pub fn parent_dir(path: &Path) -> io::Result<&Path> {
     path.parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "socket path has no parent"))

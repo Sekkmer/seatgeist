@@ -403,6 +403,11 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status.default_clipboard_read,
             status.default_clipboard_write
         ),
+        DaemonResponse::PanicStop(status) => format!(
+            "panic-stop enabled={} path={}",
+            status.enabled,
+            status.path.display()
+        ),
         DaemonResponse::Monitors(monitors) => format!("{} monitors", monitors.len()),
         DaemonResponse::Windows(windows) => format!("{} windows", windows.len()),
         DaemonResponse::Observation(observation) => format!(

@@ -7,8 +7,8 @@ use libplasma_pilot::{
     AccessibilitySetTextRequest, ActivateTabRequest, ClickButtonRequest, ClipboardGetRequest,
     ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse,
     FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest,
-    ReplayTrace, ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest, SetTextFieldRequest,
-    default_socket_path,
+    ReplayTrace, ScreenshotRequest, ScreenshotTileRequest, SelectMenuRequest, SetPanicStopRequest,
+    SetTextFieldRequest, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -80,6 +80,10 @@ enum Command {
     Journal {
         #[command(subcommand)]
         command: JournalCommand,
+    },
+    PanicStop {
+        #[command(subcommand)]
+        command: PanicStopCommand,
     },
     Trace {
         #[command(subcommand)]
@@ -193,6 +197,13 @@ enum JournalCommand {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum PanicStopCommand {
+    Status,
+    Enable,
+    Disable,
 }
 
 #[derive(Debug, Subcommand)]
@@ -426,6 +437,21 @@ fn main() -> Result<()> {
         } => print_daemon_response(
             &socket,
             DaemonRequest::JournalTail(JournalTailRequest { limit }),
+        )?,
+        Command::PanicStop {
+            command: PanicStopCommand::Status,
+        } => print_daemon_response(&socket, DaemonRequest::PanicStopStatus)?,
+        Command::PanicStop {
+            command: PanicStopCommand::Enable,
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::SetPanicStop(SetPanicStopRequest { enabled: true }),
+        )?,
+        Command::PanicStop {
+            command: PanicStopCommand::Disable,
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::SetPanicStop(SetPanicStopRequest { enabled: false }),
         )?,
         Command::Trace {
             command: TraceCommand::Replay { file },

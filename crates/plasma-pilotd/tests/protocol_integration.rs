@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use libplasma_pilot::{
     CapabilitySet, DaemonRequest, DaemonResponse, HealthStatus, JournalEntry, JournalTailRequest,
-    PolicyStatus, ToolApprovalLevel,
+    PanicStopStatus, PolicyStatus, SetPanicStopRequest, ToolApprovalLevel,
 };
 
 struct DaemonFixture {
@@ -26,11 +26,14 @@ impl DaemonFixture {
         fs::create_dir_all(&root).context("create integration temp dir")?;
         let socket = root.join("plasma-pilotd.sock");
         let journal = root.join("journal.jsonl");
+        let panic_stop = root.join("panic-stop");
         let child = Command::new(env!("CARGO_BIN_EXE_plasma-pilotd"))
             .arg("--socket")
             .arg(&socket)
             .arg("--journal")
             .arg(&journal)
+            .arg("--panic-stop-file")
+            .arg(&panic_stop)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -97,13 +100,47 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
     assert!(capabilities.contains(&libplasma_pilot::BackendCapability::DaemonHealth));
     assert!(capabilities.contains(&libplasma_pilot::BackendCapability::DaemonPolicyStatus));
 
+    let panic_stop = daemon.request(&DaemonRequest::PanicStopStatus)?;
+    let DaemonResponse::PanicStop(PanicStopStatus { enabled, path }) = panic_stop else {
+        bail!("expected panic-stop response, got {panic_stop:?}");
+    };
+    assert!(!enabled);
+    assert!(path.starts_with(&daemon.root));
+
+    let panic_stop = daemon.request(&DaemonRequest::SetPanicStop(SetPanicStopRequest {
+        enabled: true,
+    }))?;
+    let DaemonResponse::PanicStop(PanicStopStatus { enabled, path }) = panic_stop else {
+        bail!("expected panic-stop enable response, got {panic_stop:?}");
+    };
+    assert!(enabled);
+    assert!(path.exists());
+
+    let panic_stop = daemon.request(&DaemonRequest::SetPanicStop(SetPanicStopRequest {
+        enabled: false,
+    }))?;
+    let DaemonResponse::PanicStop(PanicStopStatus { enabled, path }) = panic_stop else {
+        bail!("expected panic-stop disable response, got {panic_stop:?}");
+    };
+    assert!(!enabled);
+    assert!(!path.exists());
+
     let journal = daemon.request(&DaemonRequest::JournalTail(JournalTailRequest {
         limit: 10,
     }))?;
     let DaemonResponse::Journal(entries) = journal else {
         bail!("expected journal response, got {journal:?}");
     };
-    assert_methods(&entries, &["health", "policy_status", "capabilities"]);
+    assert_methods(
+        &entries,
+        &[
+            "health",
+            "policy_status",
+            "capabilities",
+            "panic_stop_status",
+            "set_panic_stop",
+        ],
+    );
     assert!(entries.iter().all(|entry| entry.ok));
 
     let journal = daemon.request(&DaemonRequest::JournalTail(JournalTailRequest {

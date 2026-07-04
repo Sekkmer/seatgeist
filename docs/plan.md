@@ -805,7 +805,7 @@ Tasks:
 - Add udev/polkit/systemd instructions.
 - Implement move, click, double-click, scroll, key combo, type text.
 - Implement focus guard checks before actions.
-- Add panic-stop flag.
+- [x] Add panic-stop flag. Current status: `plasma-pilotd` has a file-backed panic-stop state, `plasma-pilot-cli panic-stop status|enable|disable` journals state changes, and active panic-stop blocks control-class daemon requests before execution.
 - Probe whether xdg-desktop-portal RemoteDesktop or libei can satisfy input needs before requiring uinput on the local machine.
 
 Acceptance criteria:

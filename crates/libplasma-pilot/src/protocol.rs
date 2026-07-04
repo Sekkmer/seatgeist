@@ -31,6 +31,17 @@ pub struct PolicyStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PanicStopStatus {
+    pub enabled: bool,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetPanicStopRequest {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalEntry {
     pub sequence: u64,
     pub unix_time_ms: u64,
@@ -215,6 +226,8 @@ pub enum DaemonRequest {
     Health,
     Capabilities,
     PolicyStatus,
+    PanicStopStatus,
+    SetPanicStop(SetPanicStopRequest),
     ListMonitors,
     ListWindows,
     ActiveWindow,
@@ -241,6 +254,8 @@ impl DaemonRequest {
             Self::Health => "health",
             Self::Capabilities => "capabilities",
             Self::PolicyStatus => "policy_status",
+            Self::PanicStopStatus => "panic_stop_status",
+            Self::SetPanicStop(_) => "set_panic_stop",
             Self::ListMonitors => "list_monitors",
             Self::ListWindows => "list_windows",
             Self::ActiveWindow => "active_window",
@@ -269,6 +284,7 @@ pub enum DaemonResponse {
     Health(HealthStatus),
     Capabilities(CapabilitySet),
     PolicyStatus(PolicyStatus),
+    PanicStop(PanicStopStatus),
     Monitors(Vec<MonitorInfo>),
     Windows(Vec<WindowInfo>),
     ActiveWindow(Option<WindowInfo>),
@@ -288,6 +304,7 @@ impl DaemonResponse {
             Self::Health(_) => "health",
             Self::Capabilities(_) => "capabilities",
             Self::PolicyStatus(_) => "policy_status",
+            Self::PanicStop(_) => "panic_stop",
             Self::Monitors(_) => "monitors",
             Self::Windows(_) => "windows",
             Self::ActiveWindow(_) => "active_window",
@@ -447,6 +464,21 @@ mod tests {
         let request = DaemonRequest::JournalTail(JournalTailRequest { limit: 10 });
         let encoded = serde_json::to_string(&request).expect("journal request serializes");
         assert_eq!(encoded, r#"{"method":"journal_tail","limit":10}"#);
+    }
+
+    #[test]
+    fn serializes_panic_stop_requests() {
+        let status = DaemonRequest::PanicStopStatus;
+        assert_eq!(
+            serde_json::to_string(&status).expect("panic status serializes"),
+            r#"{"method":"panic_stop_status"}"#
+        );
+
+        let set = DaemonRequest::SetPanicStop(SetPanicStopRequest { enabled: true });
+        assert_eq!(
+            serde_json::to_string(&set).expect("panic set serializes"),
+            r#"{"method":"set_panic_stop","enabled":true}"#
+        );
     }
 
     #[test]
