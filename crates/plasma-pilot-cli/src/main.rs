@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use libplasma_pilot::{
-    AccessibilityFindRequest, ClipboardGetRequest, ClipboardSetRequest,
-    DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest, ScreenshotRequest,
-    ScreenshotTileRequest, default_socket_path,
+    AccessibilityAction, AccessibilityFindRequest, AccessibilityInvokeRequest, ClipboardGetRequest,
+    ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse,
+    FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest,
+    ScreenshotRequest, ScreenshotTileRequest, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -116,6 +116,12 @@ enum AtspiCommand {
         max_results: usize,
         #[arg(long, default_value_t = 512)]
         max_nodes: usize,
+    },
+    Invoke {
+        #[arg(long)]
+        node: String,
+        #[arg(long)]
+        action: AccessibilityAction,
     },
 }
 
@@ -255,6 +261,15 @@ fn main() -> Result<()> {
                 depth,
                 max_results,
                 max_nodes,
+            }),
+        )?,
+        Command::Atspi {
+            command: AtspiCommand::Invoke { node, action },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::AccessibilityInvoke(AccessibilityInvokeRequest {
+                node_id: node,
+                action,
             }),
         )?,
         Command::Journal {

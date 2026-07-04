@@ -14,5 +14,6 @@ Default rules:
 - Clipboard journal entries and compact MCP status text must not echo clipboard contents; they should report metadata such as text length.
 - Clipboard read tools should be bounded by default and require an explicit full-read option for unbounded content.
 - AT-SPI password-text nodes must be marked sensitive before they are used for any future semantic control action.
+- AT-SPI invoke is semantic control: it may only run through the policy engine and action journal, and defaults to prompt/deny when no approval channel is available.
 
 The daemon should pause automation when panic-stop is active or when configured human-input detection indicates the user has taken over.

@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -99,6 +101,31 @@ pub enum AccessibilityAction {
     SetText,
     Focus,
     Select,
+}
+
+impl AccessibilityAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Press => "press",
+            Self::SetText => "set_text",
+            Self::Focus => "focus",
+            Self::Select => "select",
+        }
+    }
+}
+
+impl FromStr for AccessibilityAction {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "press" | "click" | "default" | "activate" => Ok(Self::Press),
+            "set_text" | "settext" => Ok(Self::SetText),
+            "focus" => Ok(Self::Focus),
+            "select" => Ok(Self::Select),
+            other => Err(format!("unsupported accessibility action: {other}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

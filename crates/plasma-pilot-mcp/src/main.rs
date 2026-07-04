@@ -7,10 +7,10 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use libplasma_pilot::{
-    AccessibilityFindRequest, ClipboardGetRequest, ClipboardSetRequest,
-    DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest, ScreenshotRequest,
-    ScreenshotTileRequest, default_socket_path,
+    AccessibilityAction, AccessibilityFindRequest, AccessibilityInvokeRequest, ClipboardGetRequest,
+    ClipboardSetRequest, DEFAULT_CLIPBOARD_MAX_BYTES, DaemonRequest, DaemonResponse,
+    FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest, ObserveRequest,
+    ScreenshotRequest, ScreenshotTileRequest, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -308,6 +308,12 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 .transpose()?
                 .unwrap_or(512),
         })),
+        "plasma.a11y_invoke" => Ok(DaemonRequest::AccessibilityInvoke(
+            AccessibilityInvokeRequest {
+                node_id: required_string(arguments, "node_id")?,
+                action: required_accessibility_action(arguments, "action")?,
+            },
+        )),
         "plasma.focus_window" => Ok(DaemonRequest::FocusWindow(FocusWindowRequest {
             window_id: required_string(arguments, "window_id")?,
         })),
@@ -605,6 +611,24 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "plasma.a11y_invoke",
+            "Invoke Accessibility Action",
+            "Invoke a normalized AT-SPI action on a node returned by an accessibility tree/find call. This is policy-gated semantic control.",
+            object_schema(
+                vec![
+                    (
+                        "node_id",
+                        json!({"type": "string", "description": "AT-SPI node id from a previous accessibility result."}),
+                    ),
+                    (
+                        "action",
+                        json!({"type": "string", "enum": ["press", "focus", "select"], "description": "Normalized action to invoke."}),
+                    ),
+                ],
+                vec!["node_id", "action"],
+            ),
+        ),
+        tool(
             "plasma.journal_tail",
             "Journal Tail",
             "Read recent compact daemon journal entries.",
@@ -689,6 +713,12 @@ fn optional_bool(arguments: &Value, key: &str) -> Result<Option<bool>> {
     }
 }
 
+fn required_accessibility_action(arguments: &Value, key: &str) -> Result<AccessibilityAction> {
+    required_string(arguments, key)?
+        .parse()
+        .map_err(|err: String| anyhow!(err))
+}
+
 fn u64_to_u32(value: u64) -> Result<u32> {
     u32::try_from(value).map_err(|_| anyhow!("integer argument {value} exceeds u32"))
 }
@@ -738,6 +768,11 @@ mod tests {
                 .any(|tool| tool["name"] == "plasma.a11y_focused_tree")
         );
         assert!(tools.iter().any(|tool| tool["name"] == "plasma.a11y_find"));
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.a11y_invoke")
+        );
     }
 
     #[test]
@@ -858,6 +893,25 @@ mod tests {
                 depth: 1,
                 max_results: 3,
                 max_nodes: 200,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_accessibility_invoke_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.a11y_invoke",
+            &json!({
+                "node_id": "atspi://:1.42/org/a11y/atspi/accessible/7",
+                "action": "press"
+            }),
+        )
+        .expect("a11y invoke args map");
+        assert_eq!(
+            request,
+            DaemonRequest::AccessibilityInvoke(AccessibilityInvokeRequest {
+                node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                action: AccessibilityAction::Press,
             })
         );
     }

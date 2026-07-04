@@ -113,6 +113,12 @@ pub fn find(request: AccessibilityFindRequest) -> Result<Vec<AccessibilityNode>>
     Ok(matches)
 }
 
+pub fn invoke(node_id: &str, action: AccessibilityAction) -> Result<()> {
+    let node = parse_node_id(node_id)?;
+    let bus = AtspiBus::connect()?;
+    bus.invoke(&node, action)
+}
+
 impl AtspiBus {
     fn connect() -> Result<Self> {
         Ok(Self {
@@ -402,6 +408,34 @@ impl AtspiBus {
         Ok(parse_action_names(&output))
     }
 
+    fn invoke(&self, node: &AtspiRef, action: AccessibilityAction) -> Result<()> {
+        let actions = self.actions(node)?;
+        let Some(index) = actions
+            .iter()
+            .position(|candidate| action_name_matches(candidate, &action))
+        else {
+            return Err(PilotError::InvalidRequest(format!(
+                "node does not expose {} action",
+                action.as_str()
+            )));
+        };
+        let index_string = index.to_string();
+        let output = self.call_with_args(
+            &node.service,
+            &node.path,
+            ATSPI_ACTION,
+            "DoAction",
+            &["i", &index_string],
+        )?;
+        if parse_bool_value(&output)? {
+            Ok(())
+        } else {
+            Err(PilotError::BackendUnavailable(format!(
+                "AT-SPI DoAction({index}) returned false"
+            )))
+        }
+    }
+
     fn node_value(&self, node: &AtspiRef, interfaces: &[String]) -> Result<(Option<String>, bool)> {
         if interfaces.iter().any(|interface| interface == ATSPI_TEXT) {
             return self.text_value(node);
@@ -472,6 +506,26 @@ fn validate_find_request(request: &AccessibilityFindRequest) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn parse_node_id(node_id: &str) -> Result<AtspiRef> {
+    let rest = node_id
+        .strip_prefix("atspi://")
+        .ok_or_else(|| PilotError::InvalidRequest(format!("invalid AT-SPI node id: {node_id}")))?;
+    let Some((service, path)) = rest.split_once('/') else {
+        return Err(PilotError::InvalidRequest(format!(
+            "invalid AT-SPI node id: {node_id}"
+        )));
+    };
+    if service.is_empty() || path.is_empty() {
+        return Err(PilotError::InvalidRequest(format!(
+            "invalid AT-SPI node id: {node_id}"
+        )));
+    }
+    Ok(AtspiRef {
+        service: service.to_string(),
+        path: format!("/{path}"),
+    })
 }
 
 fn command_output(output: std::process::Output, context: &str) -> Result<String> {
@@ -605,6 +659,16 @@ fn parse_scalar_value(output: &str) -> Result<String> {
         .ok_or_else(|| PilotError::InvalidRequest(format!("expected scalar value: {output}")))
 }
 
+fn parse_bool_value(output: &str) -> Result<bool> {
+    match output.split_whitespace().last() {
+        Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        _ => Err(PilotError::InvalidRequest(format!(
+            "expected bool value: {output}"
+        ))),
+    }
+}
+
 fn parse_action_names(output: &str) -> Vec<String> {
     parse_strings(output)
         .chunks_exact(3)
@@ -637,14 +701,13 @@ fn state_bit(words: &[u32], index: usize) -> bool {
 fn normalize_actions(actions: &[String]) -> Vec<AccessibilityAction> {
     let mut normalized = Vec::new();
     for action in actions {
-        let lower = action.to_ascii_lowercase();
-        let candidate = if lower.contains("press") || lower.contains("click") {
+        let candidate = if action_name_matches(action, &AccessibilityAction::Press) {
             Some(AccessibilityAction::Press)
-        } else if lower.contains("set") && lower.contains("text") {
+        } else if action_name_matches(action, &AccessibilityAction::SetText) {
             Some(AccessibilityAction::SetText)
-        } else if lower.contains("focus") {
+        } else if action_name_matches(action, &AccessibilityAction::Focus) {
             Some(AccessibilityAction::Focus)
-        } else if lower.contains("select") {
+        } else if action_name_matches(action, &AccessibilityAction::Select) {
             Some(AccessibilityAction::Select)
         } else {
             None
@@ -656,6 +719,21 @@ fn normalize_actions(actions: &[String]) -> Vec<AccessibilityAction> {
         }
     }
     normalized
+}
+
+fn action_name_matches(action_name: &str, action: &AccessibilityAction) -> bool {
+    let lower = action_name.to_ascii_lowercase();
+    match action {
+        AccessibilityAction::Press => {
+            lower.contains("press")
+                || lower.contains("click")
+                || lower.contains("activate")
+                || lower.contains("default")
+        }
+        AccessibilityAction::SetText => lower.contains("set") && lower.contains("text"),
+        AccessibilityAction::Focus => lower.contains("focus"),
+        AccessibilityAction::Select => lower.contains("select"),
+    }
 }
 
 fn is_sensitive_role(role: &str) -> bool {
@@ -800,6 +878,30 @@ mod tests {
             parse_scalar_value("d 0.75").expect("double scalar parses"),
             "0.75"
         );
+        assert!(parse_bool_value("b true").expect("bool parses"));
+        assert!(!parse_bool_value("b false").expect("bool parses"));
+    }
+
+    #[test]
+    fn parses_atspi_node_id() {
+        let node =
+            parse_node_id("atspi://:1.42/org/a11y/atspi/accessible/7").expect("node id parses");
+        assert_eq!(node.service, ":1.42");
+        assert_eq!(node.path, "/org/a11y/atspi/accessible/7");
+    }
+
+    #[test]
+    fn matches_normalized_action_names() {
+        assert!(action_name_matches("click", &AccessibilityAction::Press));
+        assert!(action_name_matches(
+            "set text",
+            &AccessibilityAction::SetText
+        ));
+        assert!(action_name_matches(
+            "grab focus",
+            &AccessibilityAction::Focus
+        ));
+        assert!(action_name_matches("select", &AccessibilityAction::Select));
     }
 
     #[test]

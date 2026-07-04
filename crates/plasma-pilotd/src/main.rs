@@ -14,12 +14,12 @@ use anyhow::{Context, Error, Result, bail};
 use clap::Parser;
 use image::{GenericImageView, imageops::FilterType};
 use libplasma_pilot::{
-    AccessibilityFindRequest, ActionResult, BackendCapability, CapabilitySet, ClipboardGetRequest,
-    ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse, DesktopObservation,
-    FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus, JournalEntry,
-    ObserveRequest, PolicyStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest,
-    ScreenshotTileRequest, ScreenshotTransform, ToolApprovalLevel, WindowGeometry, WindowInfo,
-    current_euid, default_journal_path, default_socket_path,
+    AccessibilityFindRequest, AccessibilityInvokeRequest, ActionResult, BackendCapability,
+    CapabilitySet, ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest,
+    DaemonResponse, DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest,
+    HealthStatus, JournalEntry, ObserveRequest, PolicyStatus, SafetyClass, ScreenshotInfo,
+    ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform, ToolApprovalLevel,
+    WindowGeometry, WindowInfo, current_euid, default_journal_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -392,6 +392,12 @@ fn handle_request(
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::AccessibilityInvoke(request) => match accessibility_invoke(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::JournalTail(request) => match journal.tail(request.limit) {
             Ok(entries) => DaemonResponse::Journal(entries),
             Err(err) => DaemonResponse::Error {
@@ -469,7 +475,9 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::AccessibilityFind(_) => SafetyClass::Observe,
         DaemonRequest::ClipboardGet(_) => SafetyClass::ClipboardRead,
         DaemonRequest::ClipboardSet(_) => SafetyClass::ClipboardWrite,
-        DaemonRequest::FocusWindow(_) => SafetyClass::ControlSemantic,
+        DaemonRequest::FocusWindow(_) | DaemonRequest::AccessibilityInvoke(_) => {
+            SafetyClass::ControlSemantic
+        }
     }
 }
 
@@ -491,6 +499,7 @@ fn current_capabilities() -> Vec<BackendCapability> {
     }
     if command_exists("busctl") && plasma_pilot_atspi::available() {
         capabilities.push(BackendCapability::AccessibilityTree);
+        capabilities.push(BackendCapability::SemanticActions);
     }
     capabilities
 }
@@ -783,6 +792,24 @@ fn accessibility_find(
     request: AccessibilityFindRequest,
 ) -> Result<Vec<libplasma_pilot::AccessibilityNode>> {
     plasma_pilot_atspi::find(request).map_err(|err| anyhow::anyhow!(err))
+}
+
+fn accessibility_invoke(request: AccessibilityInvokeRequest) -> Result<ActionResult> {
+    if request.node_id.trim().is_empty() {
+        bail!("node_id must be non-empty");
+    }
+    plasma_pilot_atspi::invoke(&request.node_id, request.action.clone())
+        .map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "invoked accessibility action={} node={}",
+            request.action.as_str(),
+            request.node_id
+        )),
+    })
 }
 
 fn temporary_capture_path(output: &Path) -> PathBuf {
@@ -1243,6 +1270,20 @@ mod tests {
             }),
         )
         .expect_err("focus requires control approval by default");
+        assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
+    fn accessibility_invoke_is_control_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::AccessibilityInvoke(AccessibilityInvokeRequest {
+                node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                action: libplasma_pilot::AccessibilityAction::Press,
+            }),
+        )
+        .expect_err("accessibility invoke requires control approval by default");
         assert!(err.to_string().contains("ControlSemantic"));
     }
 

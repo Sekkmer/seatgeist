@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::types::{
-    AccessibilityNode, BackendCapability, CoordinateSpace, MonitorInfo, Observation, SafetyClass,
-    ToolApprovalLevel, WindowInfo,
+    AccessibilityAction, AccessibilityNode, BackendCapability, CoordinateSpace, MonitorInfo,
+    Observation, SafetyClass, ToolApprovalLevel, WindowInfo,
 };
 
 pub const DEFAULT_CLIPBOARD_MAX_BYTES: usize = 64 * 1024;
@@ -123,6 +123,12 @@ pub struct AccessibilityFindRequest {
     pub max_nodes: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessibilityInvokeRequest {
+    pub node_id: String,
+    pub action: AccessibilityAction,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DesktopObservation {
     pub active_window: Option<WindowInfo>,
@@ -152,6 +158,7 @@ pub enum DaemonRequest {
     ClipboardSet(ClipboardSetRequest),
     FocusedAccessibilityTree(FocusedAccessibilityTreeRequest),
     AccessibilityFind(AccessibilityFindRequest),
+    AccessibilityInvoke(AccessibilityInvokeRequest),
     JournalTail(JournalTailRequest),
     FocusWindow(FocusWindowRequest),
 }
@@ -172,6 +179,7 @@ impl DaemonRequest {
             Self::ClipboardSet(_) => "clipboard_set",
             Self::FocusedAccessibilityTree(_) => "focused_accessibility_tree",
             Self::AccessibilityFind(_) => "accessibility_find",
+            Self::AccessibilityInvoke(_) => "accessibility_invoke",
             Self::JournalTail(_) => "journal_tail",
             Self::FocusWindow(_) => "focus_window",
         }
@@ -355,5 +363,34 @@ mod tests {
         assert!(encoded.contains(r#""method":"accessibility_find""#));
         assert!(encoded.contains(r#""role":"button""#));
         assert!(encoded.contains(r#""name_contains":"ok""#));
+    }
+
+    #[test]
+    fn serializes_accessibility_invoke_request() {
+        let request = DaemonRequest::AccessibilityInvoke(AccessibilityInvokeRequest {
+            node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+            action: AccessibilityAction::Press,
+        });
+        let encoded = serde_json::to_string(&request).expect("a11y invoke request serializes");
+        assert_eq!(
+            encoded,
+            r#"{"method":"accessibility_invoke","node_id":"atspi://:1.42/org/a11y/atspi/accessible/7","action":"press"}"#
+        );
+    }
+
+    #[test]
+    fn parses_accessibility_action_names() {
+        assert_eq!(
+            "click"
+                .parse::<AccessibilityAction>()
+                .expect("click parses as press"),
+            AccessibilityAction::Press
+        );
+        assert_eq!(
+            "set-text"
+                .parse::<AccessibilityAction>()
+                .expect("hyphenated set-text parses"),
+            AccessibilityAction::SetText
+        );
     }
 }

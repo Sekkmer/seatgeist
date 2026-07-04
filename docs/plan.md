@@ -907,8 +907,9 @@ Tasks:
 - [x] Return compact node summaries: role, name, state, bounds, actions.
 - [x] Return text/value summaries for supported nodes.
 - [x] Implement find by role/name/app/window.
-- Implement invoke action and set text where supported.
-- Add secret/password-field detection.
+- [x] Implement policy-gated invoke action where `org.a11y.atspi.Action` is supported.
+- [ ] Implement set text where `org.a11y.atspi.EditableText` is supported.
+- [x] Add secret/password-field detection.
 
 Acceptance criteria:
 
