@@ -71,6 +71,7 @@ impl ActionJournal {
             safety_class: Some(context.safety_class),
             guard_present: context.guard_present,
             active_window_before: context.active_window_before,
+            active_window_after: context.active_window_after,
             ok: !matches!(response, DaemonResponse::Error { .. }),
             summary: summarize_response(response),
         };
@@ -101,6 +102,7 @@ struct JournalContext {
     safety_class: SafetyClass,
     guard_present: bool,
     active_window_before: Option<JournalWindowContext>,
+    active_window_after: Option<JournalWindowContext>,
 }
 
 const KWIN_BRIDGE_SERVICE: &str = "org.plasmapilot.KWinBridge";
@@ -649,8 +651,12 @@ async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()>
 
     let request = serde_json::from_str::<DaemonRequest>(&line).context("parse daemon request")?;
     let method = request.method_name();
-    let journal_context = journal_context_for_request(&request, &runtime);
+    let mut journal_context = journal_context_for_request(&request, &runtime);
     let response = handle_request(request, &runtime);
+    journal_context.active_window_after = active_window_context_for_safety_class(
+        &journal_context.safety_class,
+        &runtime.active_window_state,
+    );
     runtime
         .journal
         .record(method, journal_context, &response)
@@ -667,19 +673,27 @@ async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()>
 
 fn journal_context_for_request(request: &DaemonRequest, runtime: &DaemonRuntime) -> JournalContext {
     let safety_class = safety_class_for_request(request);
-    let active_window_before = if is_control_safety_class(&safety_class) {
-        active_window(&runtime.active_window_state)
-            .ok()
-            .flatten()
-            .map(journal_window_context)
-    } else {
-        None
-    };
+    let active_window_before =
+        active_window_context_for_safety_class(&safety_class, &runtime.active_window_state);
     JournalContext {
         safety_class,
         guard_present: active_window_guard_for_request(request).is_some(),
         active_window_before,
+        active_window_after: None,
     }
+}
+
+fn active_window_context_for_safety_class(
+    safety_class: &SafetyClass,
+    active_window_state: &ActiveWindowState,
+) -> Option<JournalWindowContext> {
+    if !is_control_safety_class(safety_class) {
+        return None;
+    }
+    active_window(active_window_state)
+        .ok()
+        .flatten()
+        .map(journal_window_context)
 }
 
 fn journal_window_context(window: WindowInfo) -> JournalWindowContext {
@@ -4575,6 +4589,33 @@ mod tests {
     }
 
     #[test]
+    fn journal_active_window_context_is_control_only() {
+        let state = ActiveWindowState::default();
+        state
+            .update_from_payload(
+                r#"{
+                    "active": true,
+                    "id": "window-1",
+                    "title": "Test Window",
+                    "app_id": "org.kde.test",
+                    "geometry": {"x": 10, "y": 20, "width": 800, "height": 600}
+                }"#,
+            )
+            .expect("payload updates active-window state");
+
+        assert!(
+            active_window_context_for_safety_class(&SafetyClass::Observe, &state).is_none(),
+            "observe requests should not add active-window journal context"
+        );
+
+        let context = active_window_context_for_safety_class(&SafetyClass::ControlSemantic, &state)
+            .expect("control requests include active-window context");
+        assert_eq!(context.id, "window-1");
+        assert_eq!(context.app_id.as_deref(), Some("org.kde.test"));
+        assert_eq!(context.title, "Test Window");
+    }
+
+    #[test]
     fn assigns_window_monitor_by_largest_logical_overlap() {
         let monitors = vec![
             monitor("left", -1920, 0, 1920, 1080, 1920, 1080, 1.0),
@@ -4641,6 +4682,7 @@ mod tests {
                     safety_class: SafetyClass::Policy,
                     guard_present: false,
                     active_window_before: None,
+                    active_window_after: None,
                 },
                 &DaemonResponse::Health(HealthStatus {
                     service: "plasma-pilotd".to_string(),
@@ -4651,9 +4693,9 @@ mod tests {
             .expect("health record appends");
         journal
             .record(
-                "capabilities",
+                "focus_window",
                 JournalContext {
-                    safety_class: SafetyClass::Observe,
+                    safety_class: SafetyClass::ControlSemantic,
                     guard_present: true,
                     active_window_before: Some(JournalWindowContext {
                         id: "window-1".to_string(),
@@ -4661,20 +4703,29 @@ mod tests {
                         title: "main.rs".to_string(),
                         monitor_id: Some("main".to_string()),
                     }),
+                    active_window_after: Some(JournalWindowContext {
+                        id: "window-2".to_string(),
+                        app_id: Some("org.kde.konsole".to_string()),
+                        title: "shell".to_string(),
+                        monitor_id: Some("main".to_string()),
+                    }),
                 },
-                &DaemonResponse::Capabilities(CapabilitySet {
-                    capabilities: vec![BackendCapability::DaemonHealth],
-                }),
+                &DaemonResponse::Action(Box::new(ActionResult {
+                    id: Uuid::nil(),
+                    ok: true,
+                    observation: None,
+                    message: Some("focused window".to_string()),
+                })),
             )
-            .expect("capabilities record appends");
+            .expect("focus record appends");
 
         let entries = journal
             .tail_filtered(1, None, None)
             .expect("journal tail succeeds");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].sequence, 2);
-        assert_eq!(entries[0].method, "capabilities");
-        assert_eq!(entries[0].safety_class, Some(SafetyClass::Observe));
+        assert_eq!(entries[0].method, "focus_window");
+        assert_eq!(entries[0].safety_class, Some(SafetyClass::ControlSemantic));
         assert!(entries[0].guard_present);
         assert_eq!(
             entries[0]
@@ -4682,6 +4733,13 @@ mod tests {
                 .as_ref()
                 .and_then(|window| window.app_id.as_deref()),
             Some("org.kde.kate")
+        );
+        assert_eq!(
+            entries[0]
+                .active_window_after
+                .as_ref()
+                .and_then(|window| window.app_id.as_deref()),
+            Some("org.kde.konsole")
         );
         assert!(entries[0].ok);
 

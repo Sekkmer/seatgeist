@@ -151,6 +151,8 @@ pub struct JournalEntry {
     pub guard_present: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_window_before: Option<JournalWindowContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_window_after: Option<JournalWindowContext>,
     pub ok: bool,
     pub summary: String,
 }
@@ -900,6 +902,7 @@ mod tests {
         assert_eq!(entry.safety_class, None);
         assert!(!entry.guard_present);
         assert_eq!(entry.active_window_before, None);
+        assert_eq!(entry.active_window_after, None);
     }
 
     #[test]
@@ -916,6 +919,12 @@ mod tests {
                 title: "main.rs".to_string(),
                 monitor_id: Some("main".to_string()),
             }),
+            active_window_after: Some(JournalWindowContext {
+                id: "window-2".to_string(),
+                app_id: Some("org.kde.konsole".to_string()),
+                title: "shell".to_string(),
+                monitor_id: Some("main".to_string()),
+            }),
             ok: false,
             summary: "policy denied".to_string(),
         };
@@ -923,7 +932,9 @@ mod tests {
         assert!(encoded.contains(r#""safety_class":"control_semantic""#));
         assert!(encoded.contains(r#""guard_present":true"#));
         assert!(encoded.contains(r#""active_window_before""#));
+        assert!(encoded.contains(r#""active_window_after""#));
         assert!(encoded.contains(r#""app_id":"org.kde.kate""#));
+        assert!(encoded.contains(r#""app_id":"org.kde.konsole""#));
     }
 
     #[test]
