@@ -9,5 +9,6 @@ Default rules:
 - Privileged input backends default to prompt.
 - Focus guards are required for normal control actions.
 - Daemon requests are journaled as compact JSONL records with restrictive file permissions.
+- Daemon requests pass through the policy engine before execution; prompt-level decisions fail closed until a trusted approval channel is implemented.
 
 The daemon should pause automation when panic-stop is active or when configured human-input detection indicates the user has taken over.

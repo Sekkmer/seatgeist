@@ -15,10 +15,11 @@ use clap::Parser;
 use image::{GenericImageView, imageops::FilterType};
 use libplasma_pilot::{
     BackendCapability, CapabilitySet, CoordinateSpace, DaemonRequest, DaemonResponse, HealthStatus,
-    JournalEntry, PolicyStatus, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest,
-    ScreenshotTransform, ToolApprovalLevel, WindowGeometry, WindowInfo, current_euid,
-    default_journal_path, default_socket_path,
+    JournalEntry, PolicyStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest,
+    ScreenshotTileRequest, ScreenshotTransform, ToolApprovalLevel, WindowGeometry, WindowInfo,
+    current_euid, default_journal_path, default_socket_path,
 };
+use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -211,6 +212,7 @@ async fn main() -> Result<()> {
 
 async fn run(socket: PathBuf, journal_path: PathBuf) -> Result<()> {
     let journal = ActionJournal::new(journal_path);
+    let policy = PolicyEngine::new(PolicyConfig::default());
     let active_window_state = ActiveWindowState::default();
     let _kwin_bridge_connection = match start_kwin_bridge(active_window_state.clone()).await {
         Ok(connection) => Some(connection),
@@ -233,8 +235,9 @@ async fn run(socket: PathBuf, journal_path: PathBuf) -> Result<()> {
         let (stream, _addr) = listener.accept().await.context("accept client")?;
         let active_window_state = active_window_state.clone();
         let journal = journal.clone();
+        let policy = policy.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_client(stream, active_window_state, journal).await {
+            if let Err(err) = handle_client(stream, active_window_state, journal, policy).await {
                 warn!(error = %err, "client request failed");
             }
         });
@@ -269,6 +272,7 @@ async fn handle_client(
     stream: UnixStream,
     active_window_state: ActiveWindowState,
     journal: ActionJournal,
+    policy: PolicyEngine,
 ) -> Result<()> {
     validate_peer_uid(&stream)?;
     let mut reader = BufReader::new(stream);
@@ -283,7 +287,7 @@ async fn handle_client(
 
     let request = serde_json::from_str::<DaemonRequest>(&line).context("parse daemon request")?;
     let method = request.method_name();
-    let response = handle_request(request, &active_window_state, &journal);
+    let response = handle_request(request, &active_window_state, &journal, &policy);
     journal
         .record(method, &response)
         .context("record request in action journal")?;
@@ -301,7 +305,14 @@ fn handle_request(
     request: DaemonRequest,
     active_window_state: &ActiveWindowState,
     journal: &ActionJournal,
+    policy: &PolicyEngine,
 ) -> DaemonResponse {
+    if let Err(err) = enforce_policy(policy, &request) {
+        return DaemonResponse::Error {
+            message: format_error_chain(&err),
+        };
+    }
+
     match request {
         DaemonRequest::Health => DaemonResponse::Health(health()),
         DaemonRequest::Capabilities => DaemonResponse::Capabilities(capabilities()),
@@ -360,11 +371,38 @@ fn capabilities() -> CapabilitySet {
 }
 
 fn policy_status() -> PolicyStatus {
+    let config = PolicyConfig::default();
     PolicyStatus {
-        default_observe: ToolApprovalLevel::Allow,
-        default_control: ToolApprovalLevel::Prompt,
-        default_clipboard_read: ToolApprovalLevel::Prompt,
-        default_clipboard_write: ToolApprovalLevel::Allow,
+        default_observe: config.default_observe,
+        default_control: config.default_control,
+        default_clipboard_read: config.default_clipboard_read,
+        default_clipboard_write: config.default_clipboard_write,
+    }
+}
+
+fn enforce_policy(policy: &PolicyEngine, request: &DaemonRequest) -> Result<()> {
+    let safety_class = safety_class_for_request(request);
+    let decision = policy.decide(&safety_class);
+    match decision.level {
+        ToolApprovalLevel::Allow => Ok(()),
+        ToolApprovalLevel::Prompt => bail!(
+            "policy prompt required for {safety_class:?}, but no approval channel is available"
+        ),
+        ToolApprovalLevel::Deny => bail!("policy denied {safety_class:?}: {}", decision.reason),
+    }
+}
+
+fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
+    match request {
+        DaemonRequest::Health
+        | DaemonRequest::Capabilities
+        | DaemonRequest::PolicyStatus
+        | DaemonRequest::JournalTail(_) => SafetyClass::Policy,
+        DaemonRequest::ListMonitors
+        | DaemonRequest::ListWindows
+        | DaemonRequest::ActiveWindow
+        | DaemonRequest::Screenshot(_)
+        | DaemonRequest::ScreenshotTile(_) => SafetyClass::Observe,
     }
 }
 
@@ -940,5 +978,23 @@ mod tests {
         assert!(entries[0].ok);
 
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn observe_requests_pass_default_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        enforce_policy(&policy, &DaemonRequest::ListWindows)
+            .expect("observe requests are allowed by default");
+    }
+
+    #[test]
+    fn prompt_policy_fails_closed_without_approval_channel() {
+        let policy = PolicyEngine::new(PolicyConfig {
+            default_observe: ToolApprovalLevel::Prompt,
+            ..PolicyConfig::default()
+        });
+        let err = enforce_policy(&policy, &DaemonRequest::ListWindows)
+            .expect_err("prompt requires approval channel");
+        assert!(err.to_string().contains("no approval channel is available"));
     }
 }

@@ -695,6 +695,8 @@ deny
 
 If prompt support is not available through the current client, `prompt` should resolve to `deny` for high-risk actions and `allow` only for low-risk actions explicitly configured that way.
 
+Current implementation: daemon requests are classified before execution and evaluated by `plasma-pilot-policy`. Observe/status requests are allowed by default. Prompt decisions fail closed because no trusted approval channel exists yet.
+
 ## 15. Action journal
 
 Write JSONL records to:
