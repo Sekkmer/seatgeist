@@ -242,6 +242,8 @@ smoke-atspi:
 	grep -q "policy" "$$out"
 	if target/debug/plasma-pilot-cli --socket "$$socket" atspi paste-text --node atspi://:1.42/org/a11y/atspi/accessible/7 --offset 0 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
 	grep -q "policy" "$$out"
+	if target/debug/plasma-pilot-cli --socket "$$socket" atspi text-attributes --node "" --offset 0 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
+	grep -q "node_id must be non-empty" "$$out"
 	if target/debug/plasma-pilot-cli --socket "$$socket" semantic click-button --name OK --max-nodes 128 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
 	grep -q "policy" "$$out"
 	if target/debug/plasma-pilot-cli --socket "$$socket" semantic set-text-field --name Search smoke-text --max-nodes 128 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
@@ -267,6 +269,7 @@ smoke-atspi:
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "accessibility_copy_text"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "accessibility_cut_text"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "accessibility_paste_text"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "accessibility_text_attributes"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "click_button"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "set_text_field"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "activate_tab"
@@ -427,8 +430,14 @@ smoke-mcp:
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.select_menu")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_focused_tree")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_find")' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_text_attributes")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_invoke")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_set_text")' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_insert_text")' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_delete_text")' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_copy_text")' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_cut_text")' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_paste_text")' "$$out" >/dev/null
 	jq -e 'select(.id == 3) | .result.isError == false and .result.structuredContent.type == "health"' "$$out" >/dev/null
 	jq -e 'select(.id == 4) | .result.isError == false and .result.structuredContent.type == "observation"' "$$out" >/dev/null
 
