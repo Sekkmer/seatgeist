@@ -396,6 +396,17 @@ pub struct ToggleCheckRequest {
     pub guard: Option<ActiveWindowGuard>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetValueRequest {
+    pub name: String,
+    pub value: f64,
+    pub app: Option<String>,
+    pub window_name_contains: Option<String>,
+    pub max_nodes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectMenuRequest {
     pub path: Vec<String>,
@@ -461,6 +472,7 @@ pub enum DaemonRequest {
     SetTextField(SetTextFieldRequest),
     ActivateTab(ActivateTabRequest),
     ToggleCheck(ToggleCheckRequest),
+    SetValue(SetValueRequest),
     SelectMenu(SelectMenuRequest),
     JournalTail(JournalTailRequest),
     FocusWindow(FocusWindowRequest),
@@ -500,6 +512,7 @@ impl DaemonRequest {
             Self::SetTextField(_) => "set_text_field",
             Self::ActivateTab(_) => "activate_tab",
             Self::ToggleCheck(_) => "toggle_check",
+            Self::SetValue(_) => "set_value",
             Self::SelectMenu(_) => "select_menu",
             Self::JournalTail(_) => "journal_tail",
             Self::FocusWindow(_) => "focus_window",
@@ -1182,6 +1195,23 @@ mod tests {
         assert!(encoded.contains(r#""method":"toggle_check""#));
         assert!(encoded.contains(r#""name":"Enable feature""#));
         assert!(encoded.contains(r#""checked":true"#));
+        assert!(encoded.contains(r#""app":"settings""#));
+    }
+
+    #[test]
+    fn serializes_set_value_request() {
+        let request = DaemonRequest::SetValue(SetValueRequest {
+            name: "Volume".to_string(),
+            value: 0.75,
+            app: Some("settings".to_string()),
+            window_name_contains: Some("sound".to_string()),
+            max_nodes: 512,
+            guard: None,
+        });
+        let encoded = serde_json::to_string(&request).expect("set value request serializes");
+        assert!(encoded.contains(r#""method":"set_value""#));
+        assert!(encoded.contains(r#""name":"Volume""#));
+        assert!(encoded.contains(r#""value":0.75"#));
         assert!(encoded.contains(r#""app":"settings""#));
     }
 

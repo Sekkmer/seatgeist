@@ -128,6 +128,17 @@ pub fn set_text(node_id: &str, text: &str) -> Result<()> {
     bus.set_text(&node, text)
 }
 
+pub fn set_current_value(node_id: &str, value: f64) -> Result<()> {
+    if !value.is_finite() {
+        return Err(PilotError::InvalidRequest(
+            "value must be finite".to_string(),
+        ));
+    }
+    let node = parse_node_id(node_id)?;
+    let bus = AtspiBus::connect()?;
+    bus.set_current_value(&node, value)
+}
+
 impl AtspiBus {
     fn connect() -> Result<Self> {
         Ok(Self {
@@ -369,6 +380,32 @@ impl AtspiBus {
         command_output(output, "busctl AT-SPI get-property")
     }
 
+    fn set_property(
+        &self,
+        service: &str,
+        path: &str,
+        interface: &str,
+        property: &str,
+        signature: &str,
+        value: &str,
+    ) -> Result<String> {
+        let output = Command::new("busctl")
+            .args([
+                "--address",
+                &self.address,
+                "set-property",
+                service,
+                path,
+                interface,
+                property,
+                signature,
+                value,
+            ])
+            .output()
+            .map_err(|err| PilotError::BackendUnavailable(format!("run busctl: {err}")))?;
+        command_output(output, "busctl AT-SPI set-property")
+    }
+
     fn children(&self, node: &AtspiRef) -> Result<Vec<AtspiRef>> {
         let output = self.call(&node.service, &node.path, ATSPI_ACCESSIBLE, "GetChildren")?;
         Ok(parse_object_refs(&output))
@@ -477,6 +514,33 @@ impl AtspiBus {
                 "AT-SPI SetTextContents returned false".to_string(),
             ))
         }
+    }
+
+    fn set_current_value(&self, node: &AtspiRef, value: f64) -> Result<()> {
+        let role = self
+            .role_name(node)
+            .unwrap_or_else(|_| "unknown".to_string());
+        if is_sensitive_role(&role) {
+            return Err(PilotError::PolicyDenied(
+                "refusing to set value on sensitive accessibility node".to_string(),
+            ));
+        }
+        let interfaces = self.interfaces(node)?;
+        if !interfaces.iter().any(|interface| interface == ATSPI_VALUE) {
+            return Err(PilotError::InvalidRequest(
+                "node does not expose org.a11y.atspi.Value".to_string(),
+            ));
+        }
+        let value = value.to_string();
+        self.set_property(
+            &node.service,
+            &node.path,
+            ATSPI_VALUE,
+            "CurrentValue",
+            "d",
+            &value,
+        )?;
+        Ok(())
     }
 
     fn node_value(&self, node: &AtspiRef, interfaces: &[String]) -> Result<(Option<String>, bool)> {

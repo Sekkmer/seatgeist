@@ -15,8 +15,8 @@ use libplasma_pilot::{
     DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
     KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton, ScreenshotRequest,
     ScreenshotTileRequest, ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest,
-    SetTextFieldRequest, ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest,
-    default_socket_path,
+    SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
+    WaitForChangeRequest, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -424,6 +424,17 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         "plasma.toggle_check" => Ok(DaemonRequest::ToggleCheck(ToggleCheckRequest {
             name: required_string(arguments, "name")?,
             checked: optional_bool(arguments, "checked")?,
+            app: optional_string(arguments, "app")?,
+            window_name_contains: optional_string(arguments, "window_name_contains")?,
+            max_nodes: optional_u64(arguments, "max_nodes")?
+                .map(u64_to_usize)
+                .transpose()?
+                .unwrap_or(1024),
+            guard: active_window_guard(arguments)?,
+        })),
+        "plasma.set_value" => Ok(DaemonRequest::SetValue(SetValueRequest {
+            name: required_string(arguments, "name")?,
+            value: required_f64(arguments, "value")?,
             app: optional_string(arguments, "app")?,
             window_name_contains: optional_string(arguments, "window_name_contains")?,
             max_nodes: optional_u64(arguments, "max_nodes")?
@@ -995,6 +1006,36 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "plasma.set_value",
+            "Set Value",
+            "Find a named non-sensitive AT-SPI slider, spin button, scrollbar, or dial and set its numeric CurrentValue only when exactly one viable match is found. This is policy-gated semantic control.",
+            object_schema(
+                with_guard_properties(vec![
+                    (
+                        "name",
+                        json!({"type": "string", "description": "Accessible value-control name to match."}),
+                    ),
+                    (
+                        "value",
+                        json!({"type": "number", "description": "Finite numeric value to set through org.a11y.atspi.Value.CurrentValue."}),
+                    ),
+                    (
+                        "app",
+                        json!({"type": "string", "description": "Optional application accessible-name guard."}),
+                    ),
+                    (
+                        "window_name_contains",
+                        json!({"type": "string", "description": "Optional containing frame/dialog/window accessible-name guard."}),
+                    ),
+                    (
+                        "max_nodes",
+                        json!({"type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum accessibility nodes to scan. Defaults to 1024."}),
+                    ),
+                ]),
+                vec!["name", "value"],
+            ),
+        ),
+        tool(
             "plasma.select_menu",
             "Select Menu",
             "Select a visible AT-SPI menu path only when exactly one non-sensitive activatable item matches. This is policy-gated semantic control.",
@@ -1476,6 +1517,7 @@ mod tests {
                 .iter()
                 .any(|tool| tool["name"] == "plasma.toggle_check")
         );
+        assert!(tools.iter().any(|tool| tool["name"] == "plasma.set_value"));
         assert!(
             tools
                 .iter()
@@ -1841,6 +1883,32 @@ mod tests {
                 checked: Some(true),
                 app: Some("settings".to_string()),
                 window_name_contains: Some("preferences".to_string()),
+                max_nodes: 256,
+                guard: None,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_set_value_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.set_value",
+            &json!({
+                "name": "Volume",
+                "value": 0.75,
+                "app": "settings",
+                "window_name_contains": "sound",
+                "max_nodes": 256
+            }),
+        )
+        .expect("set value args map");
+        assert_eq!(
+            request,
+            DaemonRequest::SetValue(SetValueRequest {
+                name: "Volume".to_string(),
+                value: 0.75,
+                app: Some("settings".to_string()),
+                window_name_contains: Some("sound".to_string()),
                 max_nodes: 256,
                 guard: None,
             })

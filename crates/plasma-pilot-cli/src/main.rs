@@ -11,7 +11,7 @@ use libplasma_pilot::{
     DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
     KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton, ReplayTrace,
     ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectMenuRequest,
-    SetPanicStopRequest, SetTextFieldRequest, ToggleCheckRequest, TypeTextRequest,
+    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
     WaitForChangeRequest, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
@@ -316,6 +316,24 @@ enum SemanticCommand {
         name: String,
         #[arg(long)]
         checked: Option<bool>,
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long)]
+        window_name_contains: Option<String>,
+        #[arg(long, default_value_t = 1024)]
+        max_nodes: usize,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
+    SetValue {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        value: f64,
         #[arg(long)]
         app: Option<String>,
         #[arg(long)]
@@ -799,6 +817,33 @@ fn main() -> Result<()> {
             DaemonRequest::ToggleCheck(ToggleCheckRequest {
                 name,
                 checked,
+                app,
+                window_name_contains,
+                max_nodes,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
+        )?,
+        Command::Semantic {
+            command:
+                SemanticCommand::SetValue {
+                    name,
+                    value,
+                    app,
+                    window_name_contains,
+                    max_nodes,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::SetValue(SetValueRequest {
+                name,
+                value,
                 app,
                 window_name_contains,
                 max_nodes,

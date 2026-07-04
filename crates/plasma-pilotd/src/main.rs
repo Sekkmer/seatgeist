@@ -24,9 +24,9 @@ use libplasma_pilot::{
     PointerMonitorCalibration, PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus,
     SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
     ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
-    ToggleCheckRequest, ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest,
-    WaitForChangeResult, WindowGeometry, WindowInfo, current_egid, current_euid,
-    default_journal_path, default_panic_stop_path, default_socket_path,
+    SetValueRequest, ToggleCheckRequest, ToolApprovalLevel, TypeTextRequest, UinputStatus,
+    WaitForChangeRequest, WaitForChangeResult, WindowGeometry, WindowInfo, current_egid,
+    current_euid, default_journal_path, default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -727,6 +727,12 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
             },
         },
         DaemonRequest::ToggleCheck(request) => match toggle_check(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
+        DaemonRequest::SetValue(request) => match set_value(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
             Err(err) => DaemonResponse::Error {
                 message: format_error_chain(&err),
@@ -1454,6 +1460,7 @@ fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWin
         DaemonRequest::SetTextField(request) => request.guard.as_ref(),
         DaemonRequest::ActivateTab(request) => request.guard.as_ref(),
         DaemonRequest::ToggleCheck(request) => request.guard.as_ref(),
+        DaemonRequest::SetValue(request) => request.guard.as_ref(),
         DaemonRequest::SelectMenu(request) => request.guard.as_ref(),
         _ => None,
     }
@@ -1533,9 +1540,9 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
                 SafetyClass::ControlSemantic
             }
         }
-        DaemonRequest::ActivateTab(_) | DaemonRequest::ToggleCheck(_) => {
-            SafetyClass::ControlSemantic
-        }
+        DaemonRequest::ActivateTab(_)
+        | DaemonRequest::ToggleCheck(_)
+        | DaemonRequest::SetValue(_) => SafetyClass::ControlSemantic,
     }
 }
 
@@ -2720,6 +2727,44 @@ fn toggle_check(request: ToggleCheckRequest) -> Result<ActionResult> {
     })
 }
 
+fn set_value(request: SetValueRequest) -> Result<ActionResult> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        bail!("value control name must be non-empty");
+    }
+    if !request.value.is_finite() {
+        bail!("value must be finite");
+    }
+    if request.max_nodes == 0 {
+        bail!("max_nodes must be greater than zero");
+    }
+
+    let matches = accessibility_find(AccessibilityFindRequest {
+        role: None,
+        name_contains: Some(name.to_string()),
+        app: request.app.clone(),
+        window_name_contains: request.window_name_contains.clone(),
+        depth: 0,
+        max_results: 10,
+        max_nodes: request.max_nodes,
+    })?;
+    let target = resolve_value_match(name, matches)?;
+    plasma_pilot_atspi::set_current_value(&target.id, request.value)
+        .map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "set value name={} value={} previous_value={} node={}",
+            target.name.as_deref().unwrap_or(name),
+            request.value,
+            target.value.as_deref().unwrap_or("unknown"),
+            target.id
+        )),
+    })
+}
+
 fn select_menu(request: SelectMenuRequest) -> Result<ActionResult> {
     let path = normalize_semantic_path(&request.path);
     if path.is_empty() {
@@ -2914,6 +2959,43 @@ fn resolve_check_match(
     );
 }
 
+fn resolve_value_match(
+    name: &str,
+    matches: Vec<libplasma_pilot::AccessibilityNode>,
+) -> Result<libplasma_pilot::AccessibilityNode> {
+    let mut viable = matches
+        .into_iter()
+        .filter(|node| !node.sensitive)
+        .filter(is_value_candidate)
+        .collect::<Vec<_>>();
+    if viable.is_empty() {
+        bail!("no non-sensitive writable value control matched name={name}");
+    }
+
+    let exact = viable
+        .iter()
+        .filter(|node| {
+            node.name
+                .as_deref()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !exact.is_empty() {
+        viable = exact;
+    }
+
+    if viable.len() == 1 {
+        return Ok(viable.remove(0));
+    }
+
+    let choices = semantic_choice_summary(&viable);
+    bail!(
+        "ambiguous value control match for name={name}: {} candidates; choices=[{choices}]",
+        viable.len()
+    );
+}
+
 fn collect_menu_path_candidates(
     node: &libplasma_pilot::AccessibilityNode,
     path: &[String],
@@ -3097,6 +3179,21 @@ fn node_checked_state(node: &libplasma_pilot::AccessibilityNode) -> bool {
         let state = state.to_ascii_lowercase();
         matches!(state.as_str(), "checked" | "selected")
     })
+}
+
+fn is_value_candidate(node: &libplasma_pilot::AccessibilityNode) -> bool {
+    matches!(
+        node.role.to_ascii_lowercase().as_str(),
+        "slider" | "spin button" | "scroll bar" | "dial"
+    ) && node
+        .value
+        .as_deref()
+        .is_some_and(|value| parse_node_value(value).is_some())
+}
+
+fn parse_node_value(value: &str) -> Option<f64> {
+    let parsed = value.parse::<f64>().ok()?;
+    parsed.is_finite().then_some(parsed)
 }
 
 fn is_tab_candidate(node: &libplasma_pilot::AccessibilityNode) -> bool {
@@ -5058,6 +5155,24 @@ height = 40
     }
 
     #[test]
+    fn set_value_is_control_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::SetValue(SetValueRequest {
+                name: "Volume".to_string(),
+                value: 0.75,
+                app: Some("settings".to_string()),
+                window_name_contains: Some("sound".to_string()),
+                max_nodes: 256,
+                guard: None,
+            }),
+        )
+        .expect_err("set value requires control approval by default");
+        assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
     fn select_menu_is_control_policy() {
         let policy = PolicyEngine::new(PolicyConfig::default());
         let err = enforce_policy(
@@ -5282,6 +5397,45 @@ height = 40
         sensitive.sensitive = true;
         let err = resolve_check_match("Enable feature", vec![sensitive])
             .expect_err("sensitive checks are not viable");
+        assert!(err.to_string().contains("no non-sensitive"));
+    }
+
+    #[test]
+    fn value_resolver_prefers_exact_numeric_match() {
+        let target = resolve_value_match(
+            "Volume",
+            vec![
+                value_node("1", "Volume control", "0.25"),
+                value_node("2", "Volume", "0.50"),
+            ],
+        )
+        .expect("exact value control resolves");
+        assert_eq!(target.id, "2");
+    }
+
+    #[test]
+    fn value_resolver_refuses_ambiguous_matches() {
+        let err = resolve_value_match(
+            "Volume",
+            vec![
+                value_node("1", "Volume", "0.25"),
+                value_node("2", "Volume", "0.50"),
+            ],
+        )
+        .expect_err("multiple exact value controls are ambiguous");
+        let err = err.to_string();
+        assert!(err.contains("ambiguous"));
+        assert!(err.contains("choices=[id=1 role=slider name=Volume"));
+        assert!(err.contains("id=2 role=slider name=Volume"));
+    }
+
+    #[test]
+    fn value_resolver_requires_non_sensitive_numeric_value_control() {
+        let mut sensitive = value_node("1", "Volume", "0.25");
+        sensitive.sensitive = true;
+        let non_numeric = value_node("2", "Volume", "loud");
+        let err = resolve_value_match("Volume", vec![sensitive, non_numeric])
+            .expect_err("sensitive and non-numeric value controls are not viable");
         assert!(err.to_string().contains("no non-sensitive"));
     }
 
@@ -5563,6 +5717,22 @@ height = 40
             bounds: None,
             available_actions: vec!["press".to_string()],
             actions: vec![libplasma_pilot::AccessibilityAction::Press],
+            children: Vec::new(),
+        }
+    }
+
+    fn value_node(id: &str, name: &str, value: &str) -> libplasma_pilot::AccessibilityNode {
+        libplasma_pilot::AccessibilityNode {
+            id: id.to_string(),
+            role: "slider".to_string(),
+            name: Some(name.to_string()),
+            value: Some(value.to_string()),
+            value_truncated: false,
+            sensitive: false,
+            states: Vec::new(),
+            bounds: None,
+            available_actions: Vec::new(),
+            actions: Vec::new(),
             children: Vec::new(),
         }
     }

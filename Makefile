@@ -232,16 +232,22 @@ smoke-atspi:
 	grep -q "policy" "$$out"
 	if target/debug/plasma-pilot-cli --socket "$$socket" semantic activate-tab --name General --max-nodes 128 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
 	grep -q "policy" "$$out"
+	if target/debug/plasma-pilot-cli --socket "$$socket" semantic toggle-check --name Enable --max-nodes 128 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
+	grep -q "policy" "$$out"
+	if target/debug/plasma-pilot-cli --socket "$$socket" semantic set-value --name Volume --value 0.5 --max-nodes 128 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
+	grep -q "policy" "$$out"
 	if target/debug/plasma-pilot-cli --socket "$$socket" semantic select-menu --path File/Open --max-nodes 128 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
 	grep -q "policy" "$$out"
-	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "focused_accessibility_tree"
-	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "accessibility_find"
-	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "accessibility_invoke"
-	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "accessibility_set_text"
-	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "click_button"
-	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "set_text_field"
-	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "activate_tab"
-	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "select_menu"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "focused_accessibility_tree"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "accessibility_find"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "accessibility_invoke"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "accessibility_set_text"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "click_button"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "set_text_field"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "activate_tab"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "toggle_check"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "set_value"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "select_menu"
 
 smoke-uinput-status:
 	set -euo pipefail
