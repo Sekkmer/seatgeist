@@ -1,7 +1,7 @@
 SHELL := /usr/bin/bash
 .ONESHELL:
 
-.PHONY: fmt check test clippy verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-mcp install-kwin-script
+.PHONY: fmt check test clippy verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-mcp gui-eval install-kwin-script
 
 fmt:
 	cargo fmt --all
@@ -286,6 +286,9 @@ smoke-mcp:
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_set_text")' "$$out" >/dev/null
 	jq -e 'select(.id == 3) | .result.isError == false and .result.structuredContent.type == "health"' "$$out" >/dev/null
 	jq -e 'select(.id == 4) | .result.isError == false and .result.structuredContent.type == "observation"' "$$out" >/dev/null
+
+gui-eval:
+	scripts/gui-eval.sh all
 
 install-kwin-script:
 	set -euo pipefail

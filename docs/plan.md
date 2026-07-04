@@ -944,7 +944,7 @@ Tasks:
 
 - Add mock backends for unit tests. Current status: `plasma-pilot-testkit` provides deterministic screen, window, input, clipboard, and accessibility mocks with call recording.
 - Add integration tests for CLI and daemon protocol. Current status: daemon core protocol and low-risk CLI status commands have Rust integration tests; GUI/desktop CLI coverage remains in smoke targets.
-- Add optional local GUI eval scripts.
+- Add optional local GUI eval scripts. Current status: `scripts/gui-eval.sh` runs current non-control evals for daemon status, observe, default clipboard-read denial, bounded screenshot preview metadata, and journal output.
 - Add replayable action traces.
 - Add screenshot/coordinate calibration tests. Current status: protocol tests cover mapping 8K downscaled previews and physical-pixel tiles back to source screenshot coordinates.
 
