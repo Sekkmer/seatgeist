@@ -29,7 +29,7 @@ pub trait WindowBackend: Send + Sync {
 #[async_trait]
 pub trait InputBackend: Send + Sync {
     async fn move_pointer(&self, point: Point) -> Result<()>;
-    async fn click(&self, point: Point) -> Result<()>;
+    async fn click(&self, point: Point, button: PointerButton, clicks: u8) -> Result<()>;
     async fn drag(
         &self,
         from: Point,

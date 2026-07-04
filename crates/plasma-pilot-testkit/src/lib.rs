@@ -155,7 +155,11 @@ impl WindowBackend for MockWindowBackend {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MockInputEvent {
     MovePointer(Point),
-    Click(Point),
+    Click {
+        point: Point,
+        button: PointerButton,
+        clicks: u8,
+    },
     Drag {
         from: Point,
         to: Point,
@@ -188,8 +192,12 @@ impl InputBackend for MockInputBackend {
         Ok(())
     }
 
-    async fn click(&self, point: Point) -> Result<()> {
-        lock(&self.events)?.push(MockInputEvent::Click(point));
+    async fn click(&self, point: Point, button: PointerButton, clicks: u8) -> Result<()> {
+        lock(&self.events)?.push(MockInputEvent::Click {
+            point,
+            button,
+            clicks,
+        });
         Ok(())
     }
 
@@ -500,7 +508,7 @@ mod tests {
         };
 
         backend.move_pointer(point).await?;
-        backend.click(point).await?;
+        backend.click(point, PointerButton::Right, 2).await?;
         backend.drag(point, point, PointerButton::Left, 250).await?;
         backend.scroll(-3, 1).await?;
         backend.type_text("hello").await?;
@@ -510,7 +518,11 @@ mod tests {
             backend.events()?,
             vec![
                 MockInputEvent::MovePointer(point),
-                MockInputEvent::Click(point),
+                MockInputEvent::Click {
+                    point,
+                    button: PointerButton::Right,
+                    clicks: 2,
+                },
                 MockInputEvent::Drag {
                     from: point,
                     to: point,
