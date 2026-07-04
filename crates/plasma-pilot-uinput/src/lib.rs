@@ -679,11 +679,11 @@ fn event_as_bytes(event: &InputEvent) -> &[u8] {
 fn char_to_stroke(character: char) -> Result<KeyStroke> {
     let stroke = match character {
         'a'..='z' => KeyStroke {
-            code: KEY_A + (character as u16 - 'a' as u16),
+            code: letter_key_code(character)?,
             shift: false,
         },
         'A'..='Z' => KeyStroke {
-            code: KEY_A + (character as u16 - 'A' as u16),
+            code: letter_key_code(character.to_ascii_lowercase())?,
             shift: true,
         },
         '1' => key(KEY_1),
@@ -737,6 +737,39 @@ fn char_to_stroke(character: char) -> Result<KeyStroke> {
         ),
     };
     Ok(stroke)
+}
+
+fn letter_key_code(character: char) -> Result<u16> {
+    let code = match character {
+        'a' => KEY_A,
+        'b' => KEY_B,
+        'c' => KEY_C,
+        'd' => KEY_D,
+        'e' => KEY_E,
+        'f' => KEY_F,
+        'g' => KEY_G,
+        'h' => KEY_H,
+        'i' => KEY_I,
+        'j' => KEY_J,
+        'k' => KEY_K,
+        'l' => KEY_L,
+        'm' => KEY_M,
+        'n' => KEY_N,
+        'o' => KEY_O,
+        'p' => KEY_P,
+        'q' => KEY_Q,
+        'r' => KEY_R,
+        's' => KEY_S,
+        't' => KEY_T,
+        'u' => KEY_U,
+        'v' => KEY_V,
+        'w' => KEY_W,
+        'x' => KEY_X,
+        'y' => KEY_Y,
+        'z' => KEY_Z,
+        other => bail!("unsupported letter for uinput US keyboard mapping: {other}"),
+    };
+    Ok(code)
 }
 
 fn key(code: u16) -> KeyStroke {
@@ -852,6 +885,8 @@ mod tests {
     fn maps_ascii_text_to_us_evdev_strokes() {
         assert_eq!(char_to_stroke('a').expect("a maps"), key(KEY_A));
         assert_eq!(char_to_stroke('A').expect("A maps"), shifted(KEY_A));
+        assert_eq!(char_to_stroke('p').expect("p maps"), key(KEY_P));
+        assert_eq!(char_to_stroke('z').expect("z maps"), key(KEY_Z));
         assert_eq!(char_to_stroke('!').expect("! maps"), shifted(KEY_1));
         assert_eq!(char_to_stroke('\n').expect("newline maps"), key(KEY_ENTER));
     }

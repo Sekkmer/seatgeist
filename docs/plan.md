@@ -810,12 +810,12 @@ Tasks:
 - [x] Add panic-stop flag. Current status: `plasma-pilotd` has a file-backed panic-stop state, `plasma-pilot-cli panic-stop status|enable|disable` journals state changes, and active panic-stop blocks control-class daemon requests before execution.
 - [x] Probe whether xdg-desktop-portal RemoteDesktop or libei can satisfy input needs before requiring uinput on the local machine. Current status: `plasma-pilot-cli input backends` and MCP `plasma.input_backend_status` probe the user bus for `org.freedesktop.portal.RemoteDesktop`, KDE portal service visibility, libei client metadata/socket hints, and uinput fallback availability without starting a portal session.
 - [x] Add pointer calibration diagnostics. Current status: `plasma-pilot-cli input pointer-calibration`, MCP `plasma.pointer_calibration`, and `make smoke-pointer-calibration` report monitor-derived physical pointer bounds, per-monitor physical origins, and representative physical-pixel sample points without moving the pointer.
-- Add host GUI smoke for a known test window before treating pixel-click use as production-ready.
+- [x] Add host GUI smoke for a known test window before treating pixel-click use as production-ready. Current status: `make smoke-gui-input` opens a disposable KWrite/Kate file, focuses it through KWin, requires an active-window guard, maps a window point to physical pixels through pointer calibration, clicks, types a sentinel through uinput, saves, verifies file content, and checks the journal.
 
 Acceptance criteria:
 
-- CLI can type into Kate/KWrite. Current implementation provides the daemon-backed command path; host GUI smoke remains to be added once `/dev/uinput` access is configured.
-- CLI can click a known point in a test window. Current implementation provides the daemon-backed command path, physical bounds validation, and pointer calibration diagnostics; host GUI smoke remains to be added once `/dev/uinput` access is configured.
+- CLI can type into Kate/KWrite. Current implementation provides the daemon-backed command path and `make smoke-gui-input` verified KWrite typing on this workstation.
+- CLI can click a known point in a test window. Current implementation provides the daemon-backed command path, physical bounds validation, pointer calibration diagnostics, and `make smoke-gui-input` verified a guarded physical-pixel click into a disposable KWrite window on this workstation.
 - Panic-stop prevents further input actions.
 - Focus guard rejects action if active window changed. Current implementation covers current daemon control requests when a guard is supplied.
 
@@ -1040,7 +1040,7 @@ cargo check --workspace
 - [x] Add backend notes doc.
 - [x] Implement Phase 1.
 - [x] Implement Phase 2.
-- [ ] Implement Phase 3. Current status: keyboard and pointer command paths, uinput setup diagnostics/docs, portal/libei input backend probes, and pointer calibration diagnostics exist; host GUI smoke remains.
+- [x] Implement Phase 3. Current status: keyboard and pointer command paths, uinput setup diagnostics/docs, portal/libei input backend probes, pointer calibration diagnostics, and guarded KWrite GUI input smoke exist.
 
 ## 20. Definition of done for v0.1
 

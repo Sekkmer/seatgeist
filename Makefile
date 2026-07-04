@@ -1,7 +1,7 @@
 SHELL := /usr/bin/bash
 .ONESHELL:
 
-.PHONY: fmt check test clippy verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-pointer-calibration smoke-mcp gui-eval install-kwin-script
+.PHONY: fmt check test clippy verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-pointer-calibration smoke-gui-input smoke-mcp gui-eval install-kwin-script
 
 fmt:
 	cargo fmt --all
@@ -299,6 +299,9 @@ smoke-pointer-calibration:
 	target/debug/plasma-pilot-cli --socket "$$socket" input pointer-calibration >"$$out"
 	jq -e '.type == "pointer_calibration" and .data.coordinate_space == "physical_pixel" and (.data.monitors | length) >= 1 and (.data.sample_points | length) >= 3' "$$out" >/dev/null
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "pointer_calibration"
+
+smoke-gui-input:
+	scripts/gui-input-smoke.sh text-editor
 
 smoke-mcp:
 	set -euo pipefail

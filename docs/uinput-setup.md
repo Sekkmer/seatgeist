@@ -81,3 +81,11 @@ make smoke-pointer-calibration
 ```
 
 Actual click/type GUI smoke should be run only in a disposable test window with explicit `--allow-control` and a known active-window guard.
+
+The opt-in host GUI smoke does exactly that. It opens a disposable KWrite/Kate file, focuses the matching KWin window, validates the active-window guard, maps a safe point inside the window through pointer calibration, clicks, types a sentinel, saves the file, verifies the saved content, and confirms journal entries:
+
+```bash
+make smoke-gui-input
+```
+
+This target sends real pointer and keyboard input. Run it only from the intended KDE session.
