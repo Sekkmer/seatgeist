@@ -43,6 +43,7 @@ use uuid::Uuid;
 
 static SCREENSHOT_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 const SEMANTIC_CHOICE_LIMIT: usize = 5;
+const DEFAULT_REQUIRE_FOCUS_GUARD: bool = true;
 const DEFAULT_HUMAN_INPUT_QUIET_MS: u64 = 1500;
 
 #[derive(Debug, Clone)]
@@ -1233,7 +1234,7 @@ fn safety_settings(file_safety: Option<&SafetyFileConfig>) -> Result<SafetySetti
     Ok(SafetySettings {
         require_focus_guard: file_safety
             .and_then(|safety| safety.require_focus_guard)
-            .unwrap_or(false),
+            .unwrap_or(DEFAULT_REQUIRE_FOCUS_GUARD),
         pause_on_human_input,
         human_input_activity_file,
         human_input_quiet_ms: file_safety
@@ -5240,14 +5241,14 @@ mod tests {
     }
 
     #[test]
-    fn safety_settings_from_config_defaults_focus_guard_to_false() {
+    fn safety_settings_from_config_defaults_focus_guard_to_true() {
         assert!(
-            !safety_settings(None)
+            safety_settings(None)
                 .expect("default safety settings resolve")
                 .require_focus_guard
         );
         assert!(
-            !safety_settings(Some(&SafetyFileConfig {
+            safety_settings(Some(&SafetyFileConfig {
                 require_focus_guard: None,
                 pause_on_human_input: None,
                 human_input_activity_file: None,
@@ -5255,6 +5256,17 @@ mod tests {
                 redact_regions: None,
             }))
             .expect("empty safety config resolves")
+            .require_focus_guard
+        );
+        assert!(
+            !safety_settings(Some(&SafetyFileConfig {
+                require_focus_guard: Some(false),
+                pause_on_human_input: None,
+                human_input_activity_file: None,
+                human_input_quiet_ms: None,
+                redact_regions: None,
+            }))
+            .expect("explicit focus guard opt-out resolves")
             .require_focus_guard
         );
     }

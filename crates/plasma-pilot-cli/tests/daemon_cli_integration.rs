@@ -117,7 +117,7 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
     assert_eq!(
         safety,
         DaemonResponse::SafetyStatus(SafetyStatus {
-            require_focus_guard: false,
+            require_focus_guard: true,
             pause_on_human_input: false,
             human_input_activity_file: None,
             human_input_quiet_ms: 1500,

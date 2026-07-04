@@ -10,13 +10,14 @@ When GUI state matters, use PlasmaPilot tools through MCP:
 1. Call `plasma.observe` before acting. Include a bounded screenshot only when visual state matters.
 2. Prefer `plasma.click_button`, `plasma.set_text_field`, `plasma.select_menu`, `plasma.select_item`, `plasma.activate_tab`, `plasma.activate_link`, `plasma.toggle_check`, `plasma.set_value`, and `plasma.focus_window` over raw coordinates.
 3. Use `plasma.a11y_focused_tree` or `plasma.a11y_find` before semantic actions when the target is not obvious from `plasma.observe`.
-4. Before pointer actions, call `plasma.pointer_calibration` and use only explicit `physical_pixel` coordinates.
-5. Include `expected_active_window`, `expected_active_app`, or `active_title_contains` on every focus, semantic, keyboard, pointer, and scroll action when current window context is known.
-6. Observe again after each action unless performing one bounded text-entry sequence.
-7. Stop if `plasma.active_window` or `plasma.observe` reports a different target than expected.
-8. Check `plasma.panic_stop_status` if control actions are unexpectedly denied or the desktop appears unsafe.
-9. Do not interact with password fields, payment flows, account-security settings, or destructive dialogs without explicit user approval.
-10. Set `destructive=true` on `plasma.click_button`, `plasma.select_menu`, or `plasma.a11y_invoke` when the action may delete, discard, close, quit, overwrite, or otherwise lose state.
+4. Call `plasma.safety_status` before the first control action in a run. If `focus_guard=true`, include an active-window guard or expect the daemon to reject the action.
+5. Before pointer actions, call `plasma.pointer_calibration` and use only explicit `physical_pixel` coordinates.
+6. Include `expected_active_window`, `expected_active_app`, or `active_title_contains` on every focus, semantic, keyboard, pointer, and scroll action when current window context is known.
+7. Observe again after each action unless performing one bounded text-entry sequence.
+8. Stop if `plasma.active_window` or `plasma.observe` reports a different target than expected.
+9. Check `plasma.panic_stop_status` if control actions are unexpectedly denied or the desktop appears unsafe.
+10. Do not interact with password fields, payment flows, account-security settings, or destructive dialogs without explicit user approval.
+11. Set `destructive=true` on `plasma.click_button`, `plasma.select_menu`, or `plasma.a11y_invoke` when the action may delete, discard, close, quit, overwrite, or otherwise lose state.
 
 Useful control tools:
 
