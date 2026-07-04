@@ -259,7 +259,7 @@ Implementation strategy:
 
 1. First probe existing DBus/KWin interfaces from Rust.
 2. Use KWin's `WindowsRunner` plus `org.kde.KWin.getWindowInfo` for initial stable window listing when available.
-3. Add a KWin script when a supported scripting API can provide the missing active-window, focus, or richer window metadata/control path.
+3. Use the packaged `kwin/plasma-pilot-bridge` script for active-window updates; it reads `workspace.activeWindow` and calls the daemon's `org.plasmapilot.KWinBridge1.UpdateActiveWindow` method over DBus.
 4. Use a small KWin plugin only when script/DBus APIs cannot provide stable geometry, focus, scaling, or capture semantics.
 5. Document install/enable commands using `kpackagetool6`, `kwriteconfig6`, and KWin reconfigure.
 
@@ -816,16 +816,16 @@ Goal: Codex knows what windows exist and can focus target windows.
 Tasks:
 
 - [x] Probe available KWin/Plasma DBus interfaces.
-- [ ] Implement active window query. Current status: requires a PlasmaPilot KWin script bridge because KWin's interactive `queryWindowInfo` is not an unattended active-window API.
+- [x] Implement active window query bridge. Current status: daemon DBus receiver and packaged KWin script exist; installation is explicit through `make install-kwin-script`.
 - [x] Implement initial window list with stable KWin id, title, app id, and logical geometry through `WindowsRunner` plus `org.kde.KWin.getWindowInfo`.
 - [ ] Add pid and monitor association if a supported KWin, portal, or script path exposes them.
 - Implement focus window.
-- If required, create a KWin script exposing missing window metadata through DBus.
+- [x] Create a KWin script exposing active-window metadata through DBus.
 
 Acceptance criteria:
 
 - CLI lists open windows with stable ids. Initial implementation is present through `plasma-pilot-cli windows`.
-- CLI reports active window after the KWin script bridge is installed.
+- CLI reports active window after the KWin script bridge is installed and has published its first update.
 - CLI can focus Kate/Firefox/Konsole by id.
 - Tool output is compact enough for model context.
 

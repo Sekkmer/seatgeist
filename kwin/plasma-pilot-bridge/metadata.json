@@ -1,0 +1,20 @@
+{
+  "KPlugin": {
+    "Authors": [
+      {
+        "Email": "sekkmer@gmail.com",
+        "Name": "Sekkmer"
+      }
+    ],
+    "Description": "Publishes KWin active-window metadata to the local PlasmaPilot daemon.",
+    "Icon": "preferences-system-windows",
+    "Id": "plasma-pilot-bridge",
+    "License": "MIT OR Apache-2.0",
+    "Name": "PlasmaPilot Bridge",
+    "Version": "0.1.0",
+    "Website": "https://example.invalid/plasma-pilot"
+  },
+  "KPackageStructure": "KWin/Script",
+  "X-Plasma-API": "javascript",
+  "X-Plasma-MainScript": "code/main.js"
+}

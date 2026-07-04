@@ -1,7 +1,7 @@
 SHELL := /usr/bin/bash
 .ONESHELL:
 
-.PHONY: fmt check test clippy verify smoke smoke-monitors smoke-windows
+.PHONY: fmt check test clippy verify smoke smoke-monitors smoke-windows install-kwin-script
 
 fmt:
 	cargo fmt --all
@@ -98,7 +98,17 @@ smoke-windows:
 	fi
 	target/debug/plasma-pilot-cli --socket "$$socket" windows >/dev/null
 	if target/debug/plasma-pilot-cli --socket "$$socket" active-window >"$$active_log" 2>&1; then
-		cat "$$active_log"
-		exit 1
+		grep -q '"type": "active_window"' "$$active_log"
+	else
+		grep -q "KWin script bridge" "$$active_log"
 	fi
-	grep -q "KWin script bridge" "$$active_log"
+
+install-kwin-script:
+	set -euo pipefail
+	if kpackagetool6 --type=KWin/Script --list | grep -q "plasma-pilot-bridge"; then
+		kpackagetool6 --type=KWin/Script -u kwin/plasma-pilot-bridge
+	else
+		kpackagetool6 --type=KWin/Script -i kwin/plasma-pilot-bridge
+	fi
+	kwriteconfig6 --file kwinrc --group Plugins --key plasma-pilot-bridgeEnabled true
+	qdbus6 org.kde.KWin /KWin reconfigure

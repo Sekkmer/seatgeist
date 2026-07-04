@@ -10,3 +10,22 @@ Preferred KDE Plasma 6 Wayland order:
 6. Custom KWin plugin, KDE patch, or kernel module only after a measured gap remains.
 
 Every backend must report capabilities and provenance. The daemon should refuse ambiguous fallback behavior.
+
+## KWin Script Bridge
+
+The repository includes `kwin/plasma-pilot-bridge`, a packaged KWin script that publishes active-window metadata to the user-session daemon over the session bus:
+
+- DBus service: `org.plasmapilot.KWinBridge`
+- DBus path: `/org/plasmapilot/KWinBridge1`
+- DBus interface: `org.plasmapilot.KWinBridge1`
+- Method: `UpdateActiveWindow(payload: string)`
+
+The payload is compact JSON containing active state, stable KWin window id, title, app id, pid, and logical window geometry. The daemon keeps the latest update in memory and serves it through `plasma-pilot-cli active-window`.
+
+Install or update the script explicitly with:
+
+```bash
+make install-kwin-script
+```
+
+Do not make this target part of normal verification because it mutates the user's KWin configuration.

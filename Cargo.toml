@@ -28,6 +28,7 @@ tokio = { version = "1.46.1", features = ["io-util", "macros", "net", "rt-multi-
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
 uuid = { version = "1.17.0", features = ["serde", "v4"] }
+zbus = { version = "5.16.0", default-features = false, features = ["tokio"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

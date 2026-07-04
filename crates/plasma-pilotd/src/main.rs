@@ -3,7 +3,7 @@ use std::{
     os::unix::fs::{FileTypeExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::Duration,
 };
@@ -14,8 +14,9 @@ use image::{GenericImageView, imageops::FilterType};
 use libplasma_pilot::{
     BackendCapability, CapabilitySet, CoordinateSpace, DaemonRequest, DaemonResponse, HealthStatus,
     PolicyStatus, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
-    ToolApprovalLevel, current_euid, default_socket_path,
+    ToolApprovalLevel, WindowGeometry, WindowInfo, current_euid, default_socket_path,
 };
+use serde::Deserialize;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
@@ -23,6 +24,113 @@ use tokio::{
 use tracing::{error, info, warn};
 
 static SCREENSHOT_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+const KWIN_BRIDGE_SERVICE: &str = "org.plasmapilot.KWinBridge";
+const KWIN_BRIDGE_PATH: &str = "/org/plasmapilot/KWinBridge1";
+const KWIN_BRIDGE_INTERFACE: &str = "org.plasmapilot.KWinBridge1";
+
+#[derive(Debug, Clone, Default)]
+struct ActiveWindowState {
+    inner: Arc<Mutex<ActiveWindowSnapshot>>,
+}
+
+impl ActiveWindowState {
+    fn update_from_payload(&self, payload: &str) -> Result<()> {
+        let payload = serde_json::from_str::<KwinActiveWindowPayload>(payload)
+            .context("parse KWin active-window payload")?;
+        let window = payload.into_window()?;
+        let mut snapshot = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("active-window state lock is poisoned"))?;
+        snapshot.updated = true;
+        snapshot.window = window;
+        Ok(())
+    }
+
+    fn snapshot(&self) -> Result<Option<Option<WindowInfo>>> {
+        let snapshot = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("active-window state lock is poisoned"))?;
+        if snapshot.updated {
+            Ok(Some(snapshot.window.clone()))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ActiveWindowSnapshot {
+    updated: bool,
+    window: Option<WindowInfo>,
+}
+
+#[derive(Debug, Clone)]
+struct KwinBridge {
+    active_window_state: ActiveWindowState,
+}
+
+#[zbus::interface(name = "org.plasmapilot.KWinBridge1")]
+impl KwinBridge {
+    async fn update_active_window(&self, payload: &str) -> zbus::fdo::Result<()> {
+        self.active_window_state
+            .update_from_payload(payload)
+            .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct KwinActiveWindowPayload {
+    active: bool,
+    id: Option<String>,
+    title: Option<String>,
+    app_id: Option<String>,
+    pid: Option<u32>,
+    geometry: Option<KwinActiveWindowGeometry>,
+}
+
+impl KwinActiveWindowPayload {
+    fn into_window(self) -> Result<Option<WindowInfo>> {
+        if !self.active {
+            return Ok(None);
+        }
+        let id = self
+            .id
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("KWin active-window payload missing id"))?;
+        Ok(Some(WindowInfo {
+            id,
+            app_id: self.app_id.filter(|app_id| !app_id.trim().is_empty()),
+            title: self.title.unwrap_or_default(),
+            pid: self.pid,
+            monitor_id: None,
+            geometry: self.geometry.map(Into::into),
+        }))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct KwinActiveWindowGeometry {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+impl From<KwinActiveWindowGeometry> for WindowGeometry {
+    fn from(geometry: KwinActiveWindowGeometry) -> Self {
+        Self {
+            x: geometry.x,
+            y: geometry.y,
+            width: geometry.width.max(1),
+            height: geometry.height.max(1),
+            space: CoordinateSpace::LogicalPixel,
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(version, about = "PlasmaPilot local desktop-control daemon")]
@@ -53,6 +161,15 @@ async fn main() -> Result<()> {
 }
 
 async fn run(socket: PathBuf) -> Result<()> {
+    let active_window_state = ActiveWindowState::default();
+    let _kwin_bridge_connection = match start_kwin_bridge(active_window_state.clone()).await {
+        Ok(connection) => Some(connection),
+        Err(err) => {
+            warn!(error = %err, "KWin bridge DBus service is unavailable");
+            None
+        }
+    };
+
     prepare_socket_path(&socket)?;
     let listener = UnixListener::bind(&socket)
         .with_context(|| format!("bind daemon socket at {}", socket.display()))?;
@@ -64,15 +181,40 @@ async fn run(socket: PathBuf) -> Result<()> {
 
     loop {
         let (stream, _addr) = listener.accept().await.context("accept client")?;
+        let active_window_state = active_window_state.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_client(stream).await {
+            if let Err(err) = handle_client(stream, active_window_state).await {
                 warn!(error = %err, "client request failed");
             }
         });
     }
 }
 
-async fn handle_client(stream: UnixStream) -> Result<()> {
+async fn start_kwin_bridge(active_window_state: ActiveWindowState) -> Result<zbus::Connection> {
+    let connection = zbus::connection::Builder::session()
+        .context("connect to session bus for KWin bridge")?
+        .name(KWIN_BRIDGE_SERVICE)
+        .context("request KWin bridge DBus service name")?
+        .serve_at(
+            KWIN_BRIDGE_PATH,
+            KwinBridge {
+                active_window_state,
+            },
+        )
+        .context("serve KWin bridge DBus object")?
+        .build()
+        .await
+        .context("build KWin bridge DBus connection")?;
+    info!(
+        service = KWIN_BRIDGE_SERVICE,
+        path = KWIN_BRIDGE_PATH,
+        interface = KWIN_BRIDGE_INTERFACE,
+        "KWin bridge DBus service registered"
+    );
+    Ok(connection)
+}
+
+async fn handle_client(stream: UnixStream, active_window_state: ActiveWindowState) -> Result<()> {
     validate_peer_uid(&stream)?;
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
@@ -85,7 +227,7 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
     }
 
     let request = serde_json::from_str::<DaemonRequest>(&line).context("parse daemon request")?;
-    let response = handle_request(request);
+    let response = handle_request(request, &active_window_state);
     let mut stream = reader.into_inner();
     let response_line = serde_json::to_string(&response).context("serialize daemon response")?;
     stream
@@ -96,7 +238,10 @@ async fn handle_client(stream: UnixStream) -> Result<()> {
     Ok(())
 }
 
-fn handle_request(request: DaemonRequest) -> DaemonResponse {
+fn handle_request(
+    request: DaemonRequest,
+    active_window_state: &ActiveWindowState,
+) -> DaemonResponse {
     match request {
         DaemonRequest::Health => DaemonResponse::Health(health()),
         DaemonRequest::Capabilities => DaemonResponse::Capabilities(capabilities()),
@@ -113,7 +258,7 @@ fn handle_request(request: DaemonRequest) -> DaemonResponse {
                 message: format_error_chain(&err),
             },
         },
-        DaemonRequest::ActiveWindow => match active_window() {
+        DaemonRequest::ActiveWindow => match active_window(active_window_state) {
             Ok(window) => DaemonResponse::ActiveWindow(window),
             Err(err) => DaemonResponse::Error {
                 message: format_error_chain(&err),
@@ -321,7 +466,10 @@ fn list_windows() -> Result<Vec<libplasma_pilot::WindowInfo>> {
     plasma_pilot_kwin::list_windows().map_err(|err| anyhow::anyhow!(err))
 }
 
-fn active_window() -> Result<Option<libplasma_pilot::WindowInfo>> {
+fn active_window(active_window_state: &ActiveWindowState) -> Result<Option<WindowInfo>> {
+    if let Some(window) = active_window_state.snapshot()? {
+        return Ok(window);
+    }
     plasma_pilot_kwin::active_window().map_err(|err| anyhow::anyhow!(err))
 }
 
@@ -555,4 +703,60 @@ fn validate_peer_uid(stream: &UnixStream) -> Result<()> {
         bail!("peer uid {peer_uid} does not match daemon uid {daemon_uid}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_window_state_accepts_kwin_payload() {
+        let state = ActiveWindowState::default();
+        state
+            .update_from_payload(
+                r#"{
+                    "active": true,
+                    "id": "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}",
+                    "title": "Konsole",
+                    "app_id": "org.kde.konsole",
+                    "pid": 1234,
+                    "geometry": {"x": 10, "y": 20, "width": 800, "height": 600}
+                }"#,
+            )
+            .expect("payload updates active-window state");
+
+        let window = state
+            .snapshot()
+            .expect("state snapshot succeeds")
+            .expect("bridge reported")
+            .expect("active window exists");
+        assert_eq!(window.id, "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}");
+        assert_eq!(window.app_id.as_deref(), Some("org.kde.konsole"));
+        assert_eq!(window.pid, Some(1234));
+        let geometry = window.geometry.expect("geometry is present");
+        assert_eq!(geometry.x, 10);
+        assert_eq!(geometry.y, 20);
+        assert_eq!(geometry.width, 800);
+        assert_eq!(geometry.height, 600);
+        assert_eq!(geometry.space, CoordinateSpace::LogicalPixel);
+    }
+
+    #[test]
+    fn active_window_state_accepts_no_active_window() {
+        let state = ActiveWindowState::default();
+        assert!(
+            state
+                .snapshot()
+                .expect("initial snapshot succeeds")
+                .is_none()
+        );
+
+        state
+            .update_from_payload(r#"{"active": false}"#)
+            .expect("payload updates active-window state");
+        assert_eq!(
+            state.snapshot().expect("state snapshot succeeds"),
+            Some(None)
+        );
+    }
 }
