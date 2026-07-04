@@ -1391,14 +1391,83 @@ fn list_monitors() -> Result<Vec<libplasma_pilot::MonitorInfo>> {
 }
 
 fn list_windows() -> Result<Vec<libplasma_pilot::WindowInfo>> {
-    plasma_pilot_kwin::list_windows().map_err(|err| anyhow::anyhow!(err))
+    let monitors = list_monitors().unwrap_or_default();
+    list_windows_with_monitors(&monitors)
+}
+
+fn list_windows_with_monitors(
+    monitors: &[libplasma_pilot::MonitorInfo],
+) -> Result<Vec<libplasma_pilot::WindowInfo>> {
+    let mut windows = plasma_pilot_kwin::list_windows().map_err(|err| anyhow::anyhow!(err))?;
+    assign_monitor_ids(&mut windows, monitors);
+    Ok(windows)
 }
 
 fn active_window(active_window_state: &ActiveWindowState) -> Result<Option<WindowInfo>> {
+    let monitors = list_monitors().unwrap_or_default();
+    active_window_with_monitors(active_window_state, &monitors)
+}
+
+fn active_window_with_monitors(
+    active_window_state: &ActiveWindowState,
+    monitors: &[libplasma_pilot::MonitorInfo],
+) -> Result<Option<WindowInfo>> {
     if let Some(window) = active_window_state.snapshot()? {
-        return Ok(window);
+        return Ok(window.map(|mut window| {
+            assign_monitor_id(&mut window, monitors);
+            window
+        }));
     }
-    plasma_pilot_kwin::active_window().map_err(|err| anyhow::anyhow!(err))
+    let mut window = plasma_pilot_kwin::active_window().map_err(|err| anyhow::anyhow!(err))?;
+    if let Some(window) = window.as_mut() {
+        assign_monitor_id(window, monitors);
+    }
+    Ok(window)
+}
+
+fn assign_monitor_ids(windows: &mut [WindowInfo], monitors: &[libplasma_pilot::MonitorInfo]) {
+    for window in windows {
+        assign_monitor_id(window, monitors);
+    }
+}
+
+fn assign_monitor_id(window: &mut WindowInfo, monitors: &[libplasma_pilot::MonitorInfo]) {
+    if window.monitor_id.is_none() {
+        window.monitor_id = window_monitor_id(window, monitors);
+    }
+}
+
+fn window_monitor_id(
+    window: &WindowInfo,
+    monitors: &[libplasma_pilot::MonitorInfo],
+) -> Option<String> {
+    let geometry = window.geometry.as_ref()?;
+    if geometry.space != CoordinateSpace::LogicalPixel {
+        return None;
+    }
+    monitors
+        .iter()
+        .filter_map(|monitor| {
+            let area = logical_overlap_area(geometry, monitor);
+            (area > 0).then(|| (area, monitor.id.clone()))
+        })
+        .max_by_key(|(area, _)| *area)
+        .map(|(_, id)| id)
+}
+
+fn logical_overlap_area(geometry: &WindowGeometry, monitor: &libplasma_pilot::MonitorInfo) -> i64 {
+    let window_left = i64::from(geometry.x);
+    let window_top = i64::from(geometry.y);
+    let window_right = window_left + i64::from(geometry.width);
+    let window_bottom = window_top + i64::from(geometry.height);
+    let monitor_left = i64::from(monitor.logical_origin_x);
+    let monitor_top = i64::from(monitor.logical_origin_y);
+    let monitor_right = monitor_left + i64::from(monitor.logical_width);
+    let monitor_bottom = monitor_top + i64::from(monitor.logical_height);
+
+    let overlap_width = (window_right.min(monitor_right) - window_left.max(monitor_left)).max(0);
+    let overlap_height = (window_bottom.min(monitor_bottom) - window_top.max(monitor_top)).max(0);
+    overlap_width * overlap_height
 }
 
 fn observe_desktop(
@@ -1406,8 +1475,9 @@ fn observe_desktop(
     active_window_state: &ActiveWindowState,
 ) -> Result<DesktopObservation> {
     let monitors = list_monitors().unwrap_or_default();
-    let windows = list_windows().unwrap_or_default();
-    let active_window = active_window(active_window_state).unwrap_or_default();
+    let windows = list_windows_with_monitors(&monitors).unwrap_or_default();
+    let active_window =
+        active_window_with_monitors(active_window_state, &monitors).unwrap_or_default();
     let screenshot = match request.screenshot {
         Some(request) => Some(capture_screenshot(request)?),
         None => None,
@@ -2729,6 +2799,57 @@ mod tests {
             state.snapshot().expect("state snapshot succeeds"),
             Some(None)
         );
+    }
+
+    #[test]
+    fn assigns_window_monitor_by_largest_logical_overlap() {
+        let monitors = vec![
+            monitor("left", -1920, 0, 1920, 1080, 1920, 1080, 1.0),
+            monitor("main", 0, 0, 7680, 4320, 5120, 2880, 1.5),
+        ];
+        let mut window = WindowInfo {
+            id: "window-1".to_string(),
+            app_id: Some("org.kde.test".to_string()),
+            title: "Test".to_string(),
+            pid: None,
+            monitor_id: None,
+            geometry: Some(WindowGeometry {
+                x: -100,
+                y: 200,
+                width: 500,
+                height: 300,
+                space: CoordinateSpace::LogicalPixel,
+            }),
+        };
+
+        assign_monitor_id(&mut window, &monitors);
+
+        assert_eq!(window.monitor_id.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn active_window_with_monitors_enriches_bridge_window() {
+        let state = ActiveWindowState::default();
+        state
+            .update_from_payload(
+                r#"{
+                    "active": true,
+                    "id": "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}",
+                    "title": "Konsole",
+                    "app_id": "org.kde.konsole",
+                    "pid": 1234,
+                    "geometry": {"x": 10, "y": 20, "width": 800, "height": 600}
+                }"#,
+            )
+            .expect("payload updates active-window state");
+        let monitors = vec![monitor("main", 0, 0, 7680, 4320, 5120, 2880, 1.5)];
+
+        let window = active_window_with_monitors(&state, &monitors)
+            .expect("active window resolves")
+            .expect("active window exists");
+
+        assert_eq!(window.pid, Some(1234));
+        assert_eq!(window.monitor_id.as_deref(), Some("main"));
     }
 
     #[test]

@@ -829,7 +829,7 @@ Tasks:
 - [x] Implement active window query bridge. Current status: daemon DBus receiver and packaged KWin script exist; installation is explicit through `make install-kwin-script`.
 - [x] Add active-window bridge installation diagnostics. Current status: `kwin_bridge_status` reports daemon DBus receiver state, bridge update state, and user-local package/config installation state.
 - [x] Implement initial window list with stable KWin id, title, app id, and logical geometry through `WindowsRunner` plus `org.kde.KWin.getWindowInfo`.
-- [ ] Add pid and monitor association if a supported KWin, portal, or script path exposes them.
+- [x] Add pid and monitor association if a supported KWin, portal, or script path exposes them. Current status: daemon window and active-window responses derive `monitor_id` from the largest logical overlap between KWin window geometry and KWin monitor geometry; active-window bridge payloads preserve pid when KWin script provides it. The current `WindowsRunner`/`getWindowInfo` list path does not expose pid for all windows, so list pids remain `null` until a supported path is added.
 - [x] Implement focus window. Current status: `plasma-pilot-cli focus --window <id>` uses KWin `WindowsRunner.Run` and is policy-gated as `ControlSemantic`; default policy fails closed without an approval channel, while `plasma-pilotd --allow-control` enables explicit local use.
 - [x] Create a KWin script exposing active-window metadata through DBus.
 
