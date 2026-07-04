@@ -902,7 +902,7 @@ fn tool_definitions() -> Vec<Value> {
         tool(
             "plasma.move_pointer",
             "Move Pointer",
-            "Move the pointer to an explicit desktop coordinate. This is policy-gated pointer control; the current daemon accepts physical_pixel coordinates.",
+            "Move the pointer to an explicit coordinate. This is policy-gated pointer control; the daemon accepts physical_pixel or guarded active-window window_local coordinates.",
             object_schema(
                 with_guard_properties(vec![
                     (
@@ -915,7 +915,7 @@ fn tool_definitions() -> Vec<Value> {
                     ),
                     (
                         "coordinate_space",
-                        json!({"type": "string", "enum": ["physical_pixel", "logical_pixel", "window_local", "accessibility_node"], "description": "Coordinate space for x and y. Current daemon support is physical_pixel."}),
+                        json!({"type": "string", "enum": ["physical_pixel", "logical_pixel", "window_local", "accessibility_node"], "description": "Coordinate space for x and y. Supported daemon spaces are physical_pixel and window_local. window_local is relative to the active window and requires an active-window guard."}),
                     ),
                 ]),
                 vec!["x", "y", "coordinate_space"],
@@ -924,7 +924,7 @@ fn tool_definitions() -> Vec<Value> {
         tool(
             "plasma.click_pointer",
             "Click Pointer",
-            "Move the pointer to an explicit desktop coordinate and click once or twice. This is policy-gated pointer control; the current daemon accepts physical_pixel coordinates.",
+            "Move the pointer to an explicit coordinate and click once or twice. This is policy-gated pointer control; the daemon accepts physical_pixel or guarded active-window window_local coordinates.",
             object_schema(
                 with_guard_properties(vec![
                     (
@@ -937,7 +937,7 @@ fn tool_definitions() -> Vec<Value> {
                     ),
                     (
                         "coordinate_space",
-                        json!({"type": "string", "enum": ["physical_pixel", "logical_pixel", "window_local", "accessibility_node"], "description": "Coordinate space for x and y. Current daemon support is physical_pixel."}),
+                        json!({"type": "string", "enum": ["physical_pixel", "logical_pixel", "window_local", "accessibility_node"], "description": "Coordinate space for x and y. Supported daemon spaces are physical_pixel and window_local. window_local is relative to the active window and requires an active-window guard."}),
                     ),
                     (
                         "button",
@@ -954,7 +954,7 @@ fn tool_definitions() -> Vec<Value> {
         tool(
             "plasma.drag_pointer",
             "Drag Pointer",
-            "Drag from one explicit desktop coordinate to another by pressing, moving, and releasing a pointer button. This is policy-gated pointer control; the current daemon accepts physical_pixel coordinates.",
+            "Drag from one explicit coordinate to another by pressing, moving, and releasing a pointer button. This is policy-gated pointer control; the daemon accepts physical_pixel or guarded active-window window_local coordinates.",
             object_schema(
                 with_guard_properties(vec![
                     (
@@ -975,7 +975,7 @@ fn tool_definitions() -> Vec<Value> {
                     ),
                     (
                         "coordinate_space",
-                        json!({"type": "string", "enum": ["physical_pixel", "logical_pixel", "window_local", "accessibility_node"], "description": "Coordinate space for all coordinates. Current daemon support is physical_pixel."}),
+                        json!({"type": "string", "enum": ["physical_pixel", "logical_pixel", "window_local", "accessibility_node"], "description": "Coordinate space for all coordinates. Supported daemon spaces are physical_pixel and window_local. window_local is relative to the active window and requires an active-window guard."}),
                     ),
                     (
                         "button",

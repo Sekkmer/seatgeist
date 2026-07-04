@@ -786,24 +786,30 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
                 message: format_error_chain(&err),
             },
         },
-        DaemonRequest::MovePointer(request) => match move_pointer(request) {
-            Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
-        },
-        DaemonRequest::ClickPointer(request) => match click_pointer(request) {
-            Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
-        },
-        DaemonRequest::DragPointer(request) => match drag_pointer(request) {
-            Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
-        },
+        DaemonRequest::MovePointer(request) => {
+            match move_pointer(request, &runtime.active_window_state) {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
+        DaemonRequest::ClickPointer(request) => {
+            match click_pointer(request, &runtime.active_window_state) {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
+        DaemonRequest::DragPointer(request) => {
+            match drag_pointer(request, &runtime.active_window_state) {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
         DaemonRequest::ScrollPointer(request) => match scroll_pointer(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
             Err(err) => DaemonResponse::Error {
@@ -1427,6 +1433,11 @@ fn enforce_human_input_pause(settings: &SafetySettings, request: &DaemonRequest)
 }
 
 fn enforce_required_focus_guard(settings: &SafetySettings, request: &DaemonRequest) -> Result<()> {
+    if pointer_request_uses_window_local(request)
+        && active_window_guard_for_request(request).is_none()
+    {
+        bail!("active-window guard is required for window_local pointer coordinates");
+    }
     if !settings.require_focus_guard {
         return Ok(());
     }
@@ -1440,6 +1451,18 @@ fn enforce_required_focus_guard(settings: &SafetySettings, request: &DaemonReque
         "focus guard is required for {:?} by safety.require_focus_guard",
         safety_class_for_request(request)
     )
+}
+
+fn pointer_request_uses_window_local(request: &DaemonRequest) -> bool {
+    match request {
+        DaemonRequest::MovePointer(request) => request.point.space == CoordinateSpace::WindowLocal,
+        DaemonRequest::ClickPointer(request) => request.point.space == CoordinateSpace::WindowLocal,
+        DaemonRequest::DragPointer(request) => {
+            request.from.space == CoordinateSpace::WindowLocal
+                || request.to.space == CoordinateSpace::WindowLocal
+        }
+        _ => false,
+    }
 }
 
 fn enforce_app_policy(
@@ -2658,10 +2681,12 @@ fn pointer_monitor_calibrations(
         .collect()
 }
 
-fn move_pointer(request: MovePointerRequest) -> Result<ActionResult> {
-    let bounds = physical_pointer_bounds()?;
-    validate_pointer_point(request.point, bounds)?;
-    plasma_pilot_uinput::move_pointer(request.point.x, request.point.y, bounds)
+fn move_pointer(
+    request: MovePointerRequest,
+    active_window_state: &ActiveWindowState,
+) -> Result<ActionResult> {
+    let (point, bounds) = resolve_pointer_point(request.point, active_window_state)?;
+    plasma_pilot_uinput::move_pointer(point.x, point.y, bounds)
         .map_err(|err| anyhow::anyhow!(err))?;
     Ok(ActionResult {
         id: Uuid::new_v4(),
@@ -2669,20 +2694,22 @@ fn move_pointer(request: MovePointerRequest) -> Result<ActionResult> {
         observation: None,
         message: Some(format!(
             "moved pointer x={:.0} y={:.0} space={:?}",
-            request.point.x, request.point.y, request.point.space
+            point.x, point.y, request.point.space
         )),
     })
 }
 
-fn click_pointer(request: ClickPointerRequest) -> Result<ActionResult> {
+fn click_pointer(
+    request: ClickPointerRequest,
+    active_window_state: &ActiveWindowState,
+) -> Result<ActionResult> {
     if request.clicks == 0 || request.clicks > 2 {
         bail!("clicks must be 1 or 2");
     }
-    let bounds = physical_pointer_bounds()?;
-    validate_pointer_point(request.point, bounds)?;
+    let (point, bounds) = resolve_pointer_point(request.point, active_window_state)?;
     plasma_pilot_uinput::click_pointer(
-        request.point.x,
-        request.point.y,
+        point.x,
+        point.y,
         bounds,
         pointer_button_to_uinput(request.button),
         request.clicks,
@@ -2694,23 +2721,35 @@ fn click_pointer(request: ClickPointerRequest) -> Result<ActionResult> {
         observation: None,
         message: Some(format!(
             "clicked pointer button={:?} clicks={} x={:.0} y={:.0} space={:?}",
-            request.button, request.clicks, request.point.x, request.point.y, request.point.space
+            request.button, request.clicks, point.x, point.y, request.point.space
         )),
     })
 }
 
-fn drag_pointer(request: DragPointerRequest) -> Result<ActionResult> {
+fn drag_pointer(
+    request: DragPointerRequest,
+    active_window_state: &ActiveWindowState,
+) -> Result<ActionResult> {
     if request.duration_ms > 10_000 {
         bail!("duration_ms must be at most 10000");
     }
-    let bounds = physical_pointer_bounds()?;
-    validate_pointer_point(request.from, bounds)?;
-    validate_pointer_point(request.to, bounds)?;
+    if request.from.space != request.to.space {
+        bail!(
+            "drag pointer coordinates must use one coordinate space, got {:?} and {:?}",
+            request.from.space,
+            request.to.space
+        );
+    }
+    let (from, bounds) = resolve_pointer_point(request.from, active_window_state)?;
+    let (to, to_bounds) = resolve_pointer_point(request.to, active_window_state)?;
+    if bounds != to_bounds {
+        bail!("resolved drag pointer bounds changed while mapping coordinates");
+    }
     plasma_pilot_uinput::drag_pointer(
-        request.from.x,
-        request.from.y,
-        request.to.x,
-        request.to.y,
+        from.x,
+        from.y,
+        to.x,
+        to.y,
         bounds,
         pointer_button_to_uinput(request.button),
         request.duration_ms,
@@ -2722,13 +2761,7 @@ fn drag_pointer(request: DragPointerRequest) -> Result<ActionResult> {
         observation: None,
         message: Some(format!(
             "dragged pointer button={:?} from={:.0},{:.0} to={:.0},{:.0} duration_ms={} space={:?}",
-            request.button,
-            request.from.x,
-            request.from.y,
-            request.to.x,
-            request.to.y,
-            request.duration_ms,
-            request.from.space
+            request.button, from.x, from.y, to.x, to.y, request.duration_ms, request.from.space
         )),
     })
 }
@@ -2753,6 +2786,107 @@ fn scroll_pointer(request: ScrollPointerRequest) -> Result<ActionResult> {
 
 fn physical_pointer_bounds() -> Result<plasma_pilot_uinput::PointerBounds> {
     physical_pointer_bounds_from_monitors(&list_monitors()?)
+}
+
+fn resolve_pointer_point(
+    point: Point,
+    active_window_state: &ActiveWindowState,
+) -> Result<(Point, plasma_pilot_uinput::PointerBounds)> {
+    let monitors = list_monitors()?;
+    let bounds = physical_pointer_bounds_from_monitors(&monitors)?;
+    let point = match point.space {
+        CoordinateSpace::PhysicalPixel => point,
+        CoordinateSpace::WindowLocal => {
+            active_window_local_to_physical_point(point, active_window_state, &monitors)?
+        }
+        CoordinateSpace::LogicalPixel | CoordinateSpace::AccessibilityNode => {
+            bail!(
+                "pointer actions currently support physical_pixel and active-window window_local coordinate spaces, got {:?}",
+                point.space
+            );
+        }
+    };
+    validate_physical_pointer_point(point, bounds)?;
+    Ok((point, bounds))
+}
+
+fn active_window_local_to_physical_point(
+    point: Point,
+    active_window_state: &ActiveWindowState,
+    monitors: &[libplasma_pilot::MonitorInfo],
+) -> Result<Point> {
+    if !point.x.is_finite() || !point.y.is_finite() {
+        bail!("window-local pointer coordinates must be finite");
+    }
+    let window = active_window_with_monitors(active_window_state, monitors)?.ok_or_else(|| {
+        anyhow::anyhow!("window_local pointer coordinates require an active window")
+    })?;
+    let geometry = window.geometry.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("active window has no geometry for window_local pointer coordinates")
+    })?;
+    if geometry.space != CoordinateSpace::LogicalPixel {
+        bail!(
+            "active window geometry must be logical_pixel for window_local pointer coordinates, got {:?}",
+            geometry.space
+        );
+    }
+    if geometry.width == 0 || geometry.height == 0 {
+        bail!("active window geometry has invalid size");
+    }
+    if point.x < 0.0
+        || point.y < 0.0
+        || point.x >= f64::from(geometry.width)
+        || point.y >= f64::from(geometry.height)
+    {
+        bail!(
+            "window_local pointer coordinate {},{} is outside active window {} {}x{}",
+            point.x,
+            point.y,
+            window.id,
+            geometry.width,
+            geometry.height
+        );
+    }
+    let monitor = monitor_for_window_point(&window, geometry, point, monitors)?;
+    let physical_origin_x = scaled_physical_origin(monitor.logical_origin_x, monitor.scale_factor)?;
+    let physical_origin_y = scaled_physical_origin(monitor.logical_origin_y, monitor.scale_factor)?;
+    let global_logical_x = f64::from(geometry.x) + point.x;
+    let global_logical_y = f64::from(geometry.y) + point.y;
+    Ok(Point {
+        x: f64::from(physical_origin_x)
+            + (global_logical_x - f64::from(monitor.logical_origin_x)) * monitor.scale_factor,
+        y: f64::from(physical_origin_y)
+            + (global_logical_y - f64::from(monitor.logical_origin_y)) * monitor.scale_factor,
+        space: CoordinateSpace::PhysicalPixel,
+    })
+}
+
+fn monitor_for_window_point<'a>(
+    window: &WindowInfo,
+    geometry: &WindowGeometry,
+    point: Point,
+    monitors: &'a [libplasma_pilot::MonitorInfo],
+) -> Result<&'a libplasma_pilot::MonitorInfo> {
+    if let Some(monitor_id) = window.monitor_id.as_deref()
+        && let Some(monitor) = monitors.iter().find(|monitor| monitor.id == monitor_id)
+    {
+        return Ok(monitor);
+    }
+
+    let global_x = f64::from(geometry.x) + point.x;
+    let global_y = f64::from(geometry.y) + point.y;
+    monitors
+        .iter()
+        .find(|monitor| {
+            let left = f64::from(monitor.logical_origin_x);
+            let top = f64::from(monitor.logical_origin_y);
+            let right = left + f64::from(monitor.logical_width);
+            let bottom = top + f64::from(monitor.logical_height);
+            global_x >= left && global_x < right && global_y >= top && global_y < bottom
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!("window_local pointer coordinate does not map to a known monitor")
+        })
 }
 
 fn physical_pointer_bounds_from_monitors(
@@ -2808,10 +2942,13 @@ fn scaled_physical_origin(origin: i32, scale_factor: f64) -> Result<i32> {
     Ok(scaled.round() as i32)
 }
 
-fn validate_pointer_point(point: Point, bounds: plasma_pilot_uinput::PointerBounds) -> Result<()> {
+fn validate_physical_pointer_point(
+    point: Point,
+    bounds: plasma_pilot_uinput::PointerBounds,
+) -> Result<()> {
     if point.space != CoordinateSpace::PhysicalPixel {
         bail!(
-            "pointer actions currently require physical_pixel coordinate space, got {:?}",
+            "resolved pointer actions require physical_pixel coordinate space, got {:?}",
             point.space
         );
     }
@@ -4817,6 +4954,52 @@ mod tests {
     }
 
     #[test]
+    fn window_local_pointer_requires_active_window_guard() {
+        let settings = SafetySettings {
+            require_focus_guard: false,
+            pause_on_human_input: false,
+            human_input_activity_file: None,
+            human_input_quiet_ms: DEFAULT_HUMAN_INPUT_QUIET_MS,
+            screenshot_redactions: Vec::new(),
+        };
+
+        let err = enforce_required_focus_guard(
+            &settings,
+            &DaemonRequest::ClickPointer(ClickPointerRequest {
+                point: Point {
+                    x: 10.0,
+                    y: 20.0,
+                    space: CoordinateSpace::WindowLocal,
+                },
+                button: PointerButton::Left,
+                clicks: 1,
+                guard: None,
+            }),
+        )
+        .expect_err("window-local pointer requests need a guard");
+        assert!(err.to_string().contains("window_local pointer coordinates"));
+
+        enforce_required_focus_guard(
+            &settings,
+            &DaemonRequest::ClickPointer(ClickPointerRequest {
+                point: Point {
+                    x: 10.0,
+                    y: 20.0,
+                    space: CoordinateSpace::WindowLocal,
+                },
+                button: PointerButton::Left,
+                clicks: 1,
+                guard: Some(ActiveWindowGuard {
+                    expected_window_id: Some("window-1".to_string()),
+                    expected_app_id: None,
+                    title_contains: None,
+                }),
+            }),
+        )
+        .expect("guarded window-local pointer request passes precheck");
+    }
+
+    #[test]
     fn require_focus_guard_allows_guarded_control_and_observe() {
         let settings = SafetySettings {
             require_focus_guard: true,
@@ -5469,12 +5652,12 @@ height = 40
             height: 4320,
         };
 
-        validate_pointer_point(physical_point(-1920.0, 0.0), bounds)
+        validate_physical_pointer_point(physical_point(-1920.0, 0.0), bounds)
             .expect("minimum physical point is valid");
-        validate_pointer_point(physical_point(7679.0, 4319.0), bounds)
+        validate_physical_pointer_point(physical_point(7679.0, 4319.0), bounds)
             .expect("maximum physical point is valid");
 
-        let err = validate_pointer_point(
+        let err = validate_physical_pointer_point(
             Point {
                 x: 10.0,
                 y: 10.0,
@@ -5485,9 +5668,91 @@ height = 40
         .expect_err("logical coordinate space is rejected for now");
         assert!(err.to_string().contains("physical_pixel"));
 
-        let err = validate_pointer_point(physical_point(7680.0, 4319.0), bounds)
+        let err = validate_physical_pointer_point(physical_point(7680.0, 4319.0), bounds)
             .expect_err("out-of-bounds coordinate is rejected");
         assert!(err.to_string().contains("outside physical desktop bounds"));
+    }
+
+    #[test]
+    fn maps_window_local_pointer_points_to_scaled_physical_pixels() {
+        let state = active_window_state_fixture();
+        state
+            .update_from_payload(
+                r#"{
+                    "active": true,
+                    "id": "window-1",
+                    "title": "Editor",
+                    "app_id": "org.kde.kate",
+                    "geometry": {"x": 100, "y": 200, "width": 800, "height": 600}
+                }"#,
+            )
+            .expect("active window updates");
+        let monitors = vec![monitor("main-8k", 0, 0, 7680, 4320, 5120, 2880, 1.5)];
+
+        let point = active_window_local_to_physical_point(
+            Point {
+                x: 50.0,
+                y: 60.0,
+                space: CoordinateSpace::WindowLocal,
+            },
+            &state,
+            &monitors,
+        )
+        .expect("window-local point maps");
+
+        assert_eq!(point.space, CoordinateSpace::PhysicalPixel);
+        assert_eq!(point.x, 225.0);
+        assert_eq!(point.y, 390.0);
+    }
+
+    #[test]
+    fn rejects_window_local_pointer_points_outside_active_window() {
+        let state = active_window_state_fixture();
+        state
+            .update_from_payload(
+                r#"{
+                    "active": true,
+                    "id": "window-1",
+                    "title": "Editor",
+                    "app_id": "org.kde.kate",
+                    "geometry": {"x": 100, "y": 200, "width": 800, "height": 600}
+                }"#,
+            )
+            .expect("active window updates");
+        let monitors = vec![monitor("main", 0, 0, 1920, 1080, 1920, 1080, 1.0)];
+
+        let err = active_window_local_to_physical_point(
+            Point {
+                x: 800.0,
+                y: 10.0,
+                space: CoordinateSpace::WindowLocal,
+            },
+            &state,
+            &monitors,
+        )
+        .expect_err("edge outside active window is rejected");
+        assert!(err.to_string().contains("outside active window"));
+    }
+
+    #[test]
+    fn rejects_window_local_pointer_points_without_active_window() {
+        let state = active_window_state_fixture();
+        state
+            .update_from_payload(r#"{"active": false}"#)
+            .expect("inactive payload updates");
+        let monitors = vec![monitor("main", 0, 0, 1920, 1080, 1920, 1080, 1.0)];
+
+        let err = active_window_local_to_physical_point(
+            Point {
+                x: 10.0,
+                y: 10.0,
+                space: CoordinateSpace::WindowLocal,
+            },
+            &state,
+            &monitors,
+        )
+        .expect_err("missing active window is rejected");
+        assert!(err.to_string().contains("require an active window"));
     }
 
     #[test]
@@ -6553,6 +6818,12 @@ height = 40
             x,
             y,
             space: CoordinateSpace::PhysicalPixel,
+        }
+    }
+
+    fn active_window_state_fixture() -> ActiveWindowState {
+        ActiveWindowState {
+            inner: Arc::new(Mutex::new(ActiveWindowSnapshot::default())),
         }
     }
 
