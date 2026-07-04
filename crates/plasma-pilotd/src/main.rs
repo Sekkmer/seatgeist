@@ -241,9 +241,35 @@ impl From<KwinActiveWindowGeometry> for WindowGeometry {
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct DaemonConfigFile {
+    daemon: Option<DaemonFileConfig>,
+    policy: Option<PolicyFileConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DaemonFileConfig {
+    socket: Option<String>,
+    journal: Option<String>,
+    panic_stop_file: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PolicyFileConfig {
+    default_observe: Option<ToolApprovalLevel>,
+    default_control: Option<ToolApprovalLevel>,
+    default_clipboard_read: Option<ToolApprovalLevel>,
+    default_clipboard_write: Option<ToolApprovalLevel>,
+    #[serde(alias = "full_resolution_screenshot")]
+    default_full_resolution_screenshot: Option<ToolApprovalLevel>,
+}
+
 #[derive(Debug, Parser)]
 #[command(version, about = "PlasmaPilot local desktop-control daemon")]
 struct Args {
+    #[arg(long, env = "PLASMA_PILOT_CONFIG")]
+    config: Option<PathBuf>,
+
     #[arg(long, env = "PLASMA_PILOT_SOCKET")]
     socket: Option<PathBuf>,
 
@@ -276,20 +302,30 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let socket = match args.socket {
-        Some(path) => path,
-        None => default_socket_path().context("resolve default socket path")?,
-    };
-    let journal = match args.journal {
-        Some(path) => path,
-        None => default_journal_path().context("resolve default journal path")?,
-    };
-    let panic_stop_file = match args.panic_stop_file {
-        Some(path) => path,
-        None => default_panic_stop_path().context("resolve default panic-stop path")?,
-    };
+    let file_config = load_daemon_config(args.config.as_deref())?;
+    let daemon_file_config = file_config.daemon.as_ref();
+
+    let socket = configured_path(
+        args.socket,
+        daemon_file_config.and_then(|config| config.socket.as_deref()),
+        default_socket_path,
+    )
+    .context("resolve daemon socket path")?;
+    let journal = configured_path(
+        args.journal,
+        daemon_file_config.and_then(|config| config.journal.as_deref()),
+        default_journal_path,
+    )
+    .context("resolve daemon journal path")?;
+    let panic_stop_file = configured_path(
+        args.panic_stop_file,
+        daemon_file_config.and_then(|config| config.panic_stop_file.as_deref()),
+        default_panic_stop_path,
+    )
+    .context("resolve daemon panic-stop path")?;
 
     let policy_config = policy_config(
+        file_config.policy.as_ref(),
         args.allow_control,
         args.allow_clipboard_read,
         args.allow_full_resolution_screenshot,
@@ -654,12 +690,83 @@ fn policy_status_from_config(config: &PolicyConfig) -> PolicyStatus {
     }
 }
 
+fn load_daemon_config(explicit_path: Option<&Path>) -> Result<DaemonConfigFile> {
+    let path = explicit_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(default_config_path);
+
+    if !path.exists() {
+        if explicit_path.is_some() {
+            bail!("config file does not exist: {}", path.display());
+        }
+        return Ok(DaemonConfigFile::default());
+    }
+
+    let contents = fs::read_to_string(&path)
+        .with_context(|| format!("read config file {}", path.display()))?;
+    toml::from_str(&contents).with_context(|| format!("parse config file {}", path.display()))
+}
+
+fn default_config_path() -> PathBuf {
+    xdg_config_home().join("plasma-pilot/config.toml")
+}
+
+fn configured_path(
+    cli_path: Option<PathBuf>,
+    config_path: Option<&str>,
+    default_path: impl FnOnce() -> std::io::Result<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(path) = cli_path {
+        return Ok(path);
+    }
+    if let Some(path) = config_path {
+        return expand_config_path(path);
+    }
+    default_path().map_err(Into::into)
+}
+
+fn expand_config_path(value: &str) -> Result<PathBuf> {
+    let mut expanded = value.to_string();
+    for name in [
+        "XDG_RUNTIME_DIR",
+        "XDG_STATE_HOME",
+        "XDG_CONFIG_HOME",
+        "HOME",
+    ] {
+        let marker = format!("${name}");
+        if expanded.contains(&marker) {
+            let replacement = env::var(name)
+                .with_context(|| format!("{name} is required to expand config path {value}"))?;
+            expanded = expanded.replace(&marker, &replacement);
+        }
+    }
+    Ok(PathBuf::from(expanded))
+}
+
 fn policy_config(
+    file_policy: Option<&PolicyFileConfig>,
     allow_control: bool,
     allow_clipboard_read: bool,
     allow_full_resolution_screenshot: bool,
 ) -> PolicyConfig {
     let mut config = PolicyConfig::default();
+    if let Some(file_policy) = file_policy {
+        if let Some(level) = &file_policy.default_observe {
+            config.default_observe = level.clone();
+        }
+        if let Some(level) = &file_policy.default_control {
+            config.default_control = level.clone();
+        }
+        if let Some(level) = &file_policy.default_clipboard_read {
+            config.default_clipboard_read = level.clone();
+        }
+        if let Some(level) = &file_policy.default_clipboard_write {
+            config.default_clipboard_write = level.clone();
+        }
+        if let Some(level) = &file_policy.default_full_resolution_screenshot {
+            config.default_full_resolution_screenshot = level.clone();
+        }
+    }
     if allow_control {
         config.default_control = ToolApprovalLevel::Allow;
     }
@@ -3108,7 +3215,7 @@ mod tests {
 
     #[test]
     fn allow_full_resolution_screenshot_config_allows_full_resolution_policy() {
-        let policy = PolicyEngine::new(policy_config(false, false, true));
+        let policy = PolicyEngine::new(policy_config(None, false, false, true));
         enforce_policy(
             &policy,
             &DaemonRequest::Screenshot(ScreenshotRequest {
@@ -3122,6 +3229,97 @@ mod tests {
             policy_status_from_config(policy.config()).default_full_resolution_screenshot,
             ToolApprovalLevel::Allow
         );
+    }
+
+    #[test]
+    fn config_file_policy_values_override_defaults() {
+        let file_policy = PolicyFileConfig {
+            default_observe: Some(ToolApprovalLevel::Deny),
+            default_control: Some(ToolApprovalLevel::Deny),
+            default_clipboard_read: Some(ToolApprovalLevel::Allow),
+            default_clipboard_write: Some(ToolApprovalLevel::Prompt),
+            default_full_resolution_screenshot: Some(ToolApprovalLevel::Deny),
+        };
+
+        let config = policy_config(Some(&file_policy), false, false, false);
+
+        assert_eq!(config.default_observe, ToolApprovalLevel::Deny);
+        assert_eq!(config.default_control, ToolApprovalLevel::Deny);
+        assert_eq!(config.default_clipboard_read, ToolApprovalLevel::Allow);
+        assert_eq!(config.default_clipboard_write, ToolApprovalLevel::Prompt);
+        assert_eq!(
+            config.default_full_resolution_screenshot,
+            ToolApprovalLevel::Deny
+        );
+    }
+
+    #[test]
+    fn approval_flags_override_config_file_policy_values() {
+        let file_policy = PolicyFileConfig {
+            default_observe: None,
+            default_control: Some(ToolApprovalLevel::Deny),
+            default_clipboard_read: Some(ToolApprovalLevel::Deny),
+            default_clipboard_write: None,
+            default_full_resolution_screenshot: Some(ToolApprovalLevel::Deny),
+        };
+
+        let config = policy_config(Some(&file_policy), true, true, true);
+
+        assert_eq!(config.default_control, ToolApprovalLevel::Allow);
+        assert_eq!(config.default_clipboard_read, ToolApprovalLevel::Allow);
+        assert_eq!(
+            config.default_full_resolution_screenshot,
+            ToolApprovalLevel::Allow
+        );
+    }
+
+    #[test]
+    fn parses_daemon_config_file() {
+        let path = temp_test_path("daemon-config.toml");
+        fs::write(
+            &path,
+            r#"
+[daemon]
+socket = "$XDG_RUNTIME_DIR/plasma-pilot/configured.sock"
+journal = "$XDG_STATE_HOME/plasma-pilot/configured.jsonl"
+panic_stop_file = "$XDG_RUNTIME_DIR/plasma-pilot/configured-panic-stop"
+
+[policy]
+default_observe = "allow"
+default_control = "deny"
+default_clipboard_read = "allow"
+default_clipboard_write = "prompt"
+full_resolution_screenshot = "deny"
+"#,
+        )
+        .expect("config fixture is written");
+
+        let config = load_daemon_config(Some(&path)).expect("config file parses");
+        let daemon = config.daemon.expect("daemon section is present");
+        assert_eq!(
+            daemon.socket.as_deref(),
+            Some("$XDG_RUNTIME_DIR/plasma-pilot/configured.sock")
+        );
+
+        let policy = config.policy.expect("policy section is present");
+        assert_eq!(policy.default_control, Some(ToolApprovalLevel::Deny));
+        assert_eq!(
+            policy.default_full_resolution_screenshot,
+            Some(ToolApprovalLevel::Deny)
+        );
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn configured_path_prefers_cli_over_config() {
+        let path = configured_path(
+            Some(PathBuf::from("/tmp/plasma-pilot-cli.sock")),
+            Some("/tmp/plasma-pilot-config.sock"),
+            || Ok(PathBuf::from("/tmp/plasma-pilot-default.sock")),
+        )
+        .expect("configured path resolves");
+
+        assert_eq!(path, PathBuf::from("/tmp/plasma-pilot-cli.sock"));
     }
 
     #[test]
@@ -3159,7 +3357,7 @@ mod tests {
         let path = temp_test_path("panic-stop-blocks-control");
         fs::write(&path, "enabled").expect("panic-stop fixture file is written");
         let panic_stop = PanicStopState::new(path.clone());
-        let policy = PolicyEngine::new(policy_config(true, false, false));
+        let policy = PolicyEngine::new(policy_config(None, true, false, false));
 
         let err = enforce_panic_stop(
             &panic_stop,
@@ -3876,7 +4074,7 @@ mod tests {
 
     #[test]
     fn allow_control_config_allows_focus_policy() {
-        let policy = PolicyEngine::new(policy_config(true, false, false));
+        let policy = PolicyEngine::new(policy_config(None, true, false, false));
         enforce_policy(
             &policy,
             &DaemonRequest::FocusWindow(FocusWindowRequest {
@@ -3906,7 +4104,7 @@ mod tests {
 
     #[test]
     fn allow_clipboard_read_config_allows_clipboard_get_policy() {
-        let policy = PolicyEngine::new(policy_config(false, true, false));
+        let policy = PolicyEngine::new(policy_config(None, false, true, false));
         enforce_policy(
             &policy,
             &DaemonRequest::ClipboardGet(ClipboardGetRequest {

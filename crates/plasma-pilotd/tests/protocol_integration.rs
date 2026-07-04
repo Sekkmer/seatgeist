@@ -46,6 +46,37 @@ impl DaemonFixture {
         })
     }
 
+    fn start_with_config(config_contents: &str) -> Result<Self> {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).context("create integration temp dir")?;
+        let socket = root.join("configured.sock");
+        let journal = root.join("configured-journal.jsonl");
+        let panic_stop = root.join("configured-panic-stop");
+        let config = root.join("config.toml");
+        fs::write(
+            &config,
+            config_contents
+                .replace("__SOCKET__", &socket.display().to_string())
+                .replace("__JOURNAL__", &journal.display().to_string())
+                .replace("__PANIC_STOP__", &panic_stop.display().to_string()),
+        )
+        .context("write daemon config fixture")?;
+
+        let child = Command::new(env!("CARGO_BIN_EXE_plasma-pilotd"))
+            .arg("--config")
+            .arg(&config)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("spawn configured plasma-pilotd")?;
+        wait_for_socket(&socket)?;
+        Ok(Self {
+            child,
+            socket,
+            root,
+        })
+    }
+
     fn request(&self, request: &DaemonRequest) -> Result<DaemonResponse> {
         let mut stream = UnixStream::connect(&self.socket).context("connect to daemon socket")?;
         let line = serde_json::to_string(request).context("serialize daemon request")?;
@@ -66,6 +97,38 @@ impl Drop for DaemonFixture {
         let _ = self.child.wait();
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+fn daemon_loads_socket_and_policy_from_config_file() -> Result<()> {
+    let daemon = DaemonFixture::start_with_config(
+        r#"
+[daemon]
+socket = "__SOCKET__"
+journal = "__JOURNAL__"
+panic_stop_file = "__PANIC_STOP__"
+
+[policy]
+default_observe = "allow"
+default_control = "deny"
+default_clipboard_read = "allow"
+default_clipboard_write = "prompt"
+full_resolution_screenshot = "deny"
+"#,
+    )?;
+
+    let policy = daemon.request(&DaemonRequest::PolicyStatus)?;
+    assert_eq!(
+        policy,
+        DaemonResponse::PolicyStatus(PolicyStatus {
+            default_observe: ToolApprovalLevel::Allow,
+            default_control: ToolApprovalLevel::Deny,
+            default_full_resolution_screenshot: ToolApprovalLevel::Deny,
+            default_clipboard_read: ToolApprovalLevel::Allow,
+            default_clipboard_write: ToolApprovalLevel::Prompt,
+        })
+    );
+    Ok(())
 }
 
 #[test]

@@ -702,6 +702,8 @@ If prompt support is not available through the current client, `prompt` should r
 
 Current implementation: daemon requests are classified before execution and evaluated by `plasma-pilot-policy`. Observe/status requests are allowed by default. Prompt decisions fail closed because no trusted approval channel exists yet.
 
+`plasma-pilotd` now reads the config file from `~/.config/plasma-pilot/config.toml`, or from `--config` / `PLASMA_PILOT_CONFIG` when provided. Implemented fields are `[daemon].socket`, `[daemon].journal`, `[daemon].panic_stop_file`, and these `[policy]` keys: `default_observe`, `default_control`, `default_clipboard_read`, `default_clipboard_write`, and `full_resolution_screenshot`. CLI arguments and environment-backed flags take precedence over file values, so explicit local approval flags such as `--allow-control`, `--allow-clipboard-read`, and `--allow-full-resolution-screenshot` still override prompt/deny defaults for intentional local runs. App allow/deny lists, destructive-action policy, and sensitive-region policies remain future policy-engine work.
+
 ## 15. Action journal
 
 Write JSONL records to:

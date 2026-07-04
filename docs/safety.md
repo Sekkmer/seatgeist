@@ -11,6 +11,7 @@ Default rules:
 - Focus guards should be supplied for pointer, keyboard, and semantic control actions whenever the caller has active-window context.
 - Daemon requests are journaled as compact JSONL records with restrictive file permissions.
 - Daemon requests pass through the policy engine before execution; prompt-level decisions fail closed until a trusted approval channel is implemented.
+- The daemon reads optional path and policy defaults from `~/.config/plasma-pilot/config.toml` or `--config` / `PLASMA_PILOT_CONFIG`. Explicit CLI/env approval flags override file policy defaults for intentional local sessions.
 - Replay traces are not a policy bypass: `plasma-pilot-cli trace replay` resubmits each recorded daemon request through the normal daemon socket, so control and clipboard-read requests remain policy-checked and journaled.
 - Panic-stop is file-backed and checked inside the daemon after policy approval but before control execution; when active, it blocks control-class requests even if the daemon was started with `--allow-control`.
 - Current control requests can carry active-window guards. When supplied, the daemon checks the active window id, app id, and title substring before control execution and rejects stale guards.
