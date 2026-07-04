@@ -38,6 +38,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 static SCREENSHOT_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+const DEFAULT_HUMAN_INPUT_QUIET_MS: u64 = 1500;
 
 #[derive(Debug, Clone)]
 struct ActionJournal {
@@ -282,6 +283,9 @@ struct AppPolicy {
 #[derive(Debug, Default, Deserialize)]
 struct SafetyFileConfig {
     require_focus_guard: Option<bool>,
+    pause_on_human_input: Option<bool>,
+    human_input_activity_file: Option<String>,
+    human_input_quiet_ms: Option<u64>,
     redact_regions: Option<Vec<RedactRegionFileConfig>>,
 }
 
@@ -296,6 +300,9 @@ struct RedactRegionFileConfig {
 #[derive(Debug, Clone, Default)]
 struct SafetySettings {
     require_focus_guard: bool,
+    pause_on_human_input: bool,
+    human_input_activity_file: Option<PathBuf>,
+    human_input_quiet_ms: u64,
     screenshot_redactions: Vec<RedactRegion>,
 }
 
@@ -374,7 +381,8 @@ async fn main() -> Result<()> {
         args.allow_full_resolution_screenshot,
     );
     let app_policy = app_policy(file_config.apps.as_ref());
-    let safety_settings = safety_settings(file_config.safety.as_ref());
+    let safety_settings =
+        safety_settings(file_config.safety.as_ref()).context("resolve safety settings")?;
 
     run(
         socket,
@@ -508,6 +516,11 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
         };
     }
     if let Err(err) = enforce_panic_stop(&runtime.panic_stop, &request) {
+        return DaemonResponse::Error {
+            message: format_error_chain(&err),
+        };
+    }
+    if let Err(err) = enforce_human_input_pause(&runtime.safety_settings, &request) {
         return DaemonResponse::Error {
             message: format_error_chain(&err),
         };
@@ -876,18 +889,40 @@ fn normalize_app_policy_list(values: &[String]) -> Vec<String> {
     normalized
 }
 
-fn safety_settings(file_safety: Option<&SafetyFileConfig>) -> SafetySettings {
+fn safety_settings(file_safety: Option<&SafetyFileConfig>) -> Result<SafetySettings> {
     let screenshot_redactions = file_safety
         .and_then(|safety| safety.redact_regions.as_deref())
         .map(redact_regions)
         .unwrap_or_default();
+    let pause_on_human_input = file_safety
+        .and_then(|safety| safety.pause_on_human_input)
+        .unwrap_or(false);
+    let human_input_activity_file = if pause_on_human_input {
+        Some(
+            match file_safety.and_then(|safety| safety.human_input_activity_file.as_deref()) {
+                Some(path) => expand_config_path(path)?,
+                None => default_human_input_activity_path()?,
+            },
+        )
+    } else {
+        None
+    };
 
-    SafetySettings {
+    Ok(SafetySettings {
         require_focus_guard: file_safety
             .and_then(|safety| safety.require_focus_guard)
             .unwrap_or(false),
+        pause_on_human_input,
+        human_input_activity_file,
+        human_input_quiet_ms: file_safety
+            .and_then(|safety| safety.human_input_quiet_ms)
+            .unwrap_or(DEFAULT_HUMAN_INPUT_QUIET_MS),
         screenshot_redactions,
-    }
+    })
+}
+
+fn default_human_input_activity_path() -> Result<PathBuf> {
+    Ok(default_panic_stop_path()?.with_file_name("human-input-active"))
 }
 
 fn redact_regions(values: &[RedactRegionFileConfig]) -> Vec<RedactRegion> {
@@ -1216,15 +1251,7 @@ fn enforce_policy(policy: &PolicyEngine, request: &DaemonRequest) -> Result<()> 
 fn enforce_panic_stop(panic_stop: &PanicStopState, request: &DaemonRequest) -> Result<()> {
     let status = panic_stop.status();
     let safety_class = safety_class_for_request(request);
-    if status.enabled
-        && matches!(
-            safety_class,
-            SafetyClass::ControlPointer
-                | SafetyClass::ControlKeyboard
-                | SafetyClass::ControlSemantic
-                | SafetyClass::DestructiveAction
-        )
-    {
+    if status.enabled && is_control_safety_class(&safety_class) {
         bail!(
             "panic-stop is active at {}; refusing {:?}",
             status.path.display(),
@@ -1234,17 +1261,44 @@ fn enforce_panic_stop(panic_stop: &PanicStopState, request: &DaemonRequest) -> R
     Ok(())
 }
 
+fn enforce_human_input_pause(settings: &SafetySettings, request: &DaemonRequest) -> Result<()> {
+    if !settings.pause_on_human_input {
+        return Ok(());
+    }
+    let safety_class = safety_class_for_request(request);
+    if !is_control_safety_class(&safety_class) {
+        return Ok(());
+    }
+    let Some(path) = &settings.human_input_activity_file else {
+        return Ok(());
+    };
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("stat {}", path.display())),
+    };
+    let modified = metadata
+        .modified()
+        .with_context(|| format!("read mtime for {}", path.display()))?;
+    let quiet_for = SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or(Duration::ZERO);
+    if quiet_for <= Duration::from_millis(settings.human_input_quiet_ms) {
+        bail!(
+            "human input activity signal is fresh at {}; refusing {:?} until quiet for {}ms",
+            path.display(),
+            safety_class,
+            settings.human_input_quiet_ms
+        );
+    }
+    Ok(())
+}
+
 fn enforce_required_focus_guard(settings: &SafetySettings, request: &DaemonRequest) -> Result<()> {
     if !settings.require_focus_guard {
         return Ok(());
     }
-    if !matches!(
-        safety_class_for_request(request),
-        SafetyClass::ControlPointer
-            | SafetyClass::ControlKeyboard
-            | SafetyClass::ControlSemantic
-            | SafetyClass::DestructiveAction
-    ) {
+    if !is_control_safety_class(&safety_class_for_request(request)) {
         return Ok(());
     }
     if active_window_guard_for_request(request).is_some() {
@@ -1264,13 +1318,7 @@ fn enforce_app_policy(
     if app_policy.allow.is_empty() && app_policy.deny.is_empty() {
         return Ok(());
     }
-    if !matches!(
-        safety_class_for_request(request),
-        SafetyClass::ControlPointer
-            | SafetyClass::ControlKeyboard
-            | SafetyClass::ControlSemantic
-            | SafetyClass::DestructiveAction
-    ) {
+    if !is_control_safety_class(&safety_class_for_request(request)) {
         return Ok(());
     }
 
@@ -1324,6 +1372,16 @@ fn enforce_app_policy_for_app(
 
 fn app_id_matches(policy_value: &str, app_id: &str) -> bool {
     policy_value.eq_ignore_ascii_case(app_id)
+}
+
+fn is_control_safety_class(safety_class: &SafetyClass) -> bool {
+    matches!(
+        safety_class,
+        SafetyClass::ControlPointer
+            | SafetyClass::ControlKeyboard
+            | SafetyClass::ControlSemantic
+            | SafetyClass::DestructiveAction
+    )
 }
 
 fn enforce_active_window_guard(
@@ -3735,12 +3793,20 @@ mod tests {
 
     #[test]
     fn safety_settings_from_config_defaults_focus_guard_to_false() {
-        assert!(!safety_settings(None).require_focus_guard);
+        assert!(
+            !safety_settings(None)
+                .expect("default safety settings resolve")
+                .require_focus_guard
+        );
         assert!(
             !safety_settings(Some(&SafetyFileConfig {
                 require_focus_guard: None,
+                pause_on_human_input: None,
+                human_input_activity_file: None,
+                human_input_quiet_ms: None,
                 redact_regions: None,
             }))
+            .expect("empty safety config resolves")
             .require_focus_guard
         );
     }
@@ -3749,6 +3815,9 @@ mod tests {
     fn safety_settings_from_config_normalizes_redaction_regions() {
         let settings = safety_settings(Some(&SafetyFileConfig {
             require_focus_guard: Some(true),
+            pause_on_human_input: None,
+            human_input_activity_file: None,
+            human_input_quiet_ms: None,
             redact_regions: Some(vec![
                 RedactRegionFileConfig {
                     x: 10,
@@ -3763,7 +3832,8 @@ mod tests {
                     height: 4,
                 },
             ]),
-        }));
+        }))
+        .expect("redaction safety settings resolve");
 
         assert!(settings.require_focus_guard);
         assert_eq!(
@@ -3775,6 +3845,27 @@ mod tests {
                 height: 40,
             }]
         );
+    }
+
+    #[test]
+    fn safety_settings_from_config_resolves_human_input_pause() {
+        let path = temp_test_path("human-input-signal");
+        let path_text = path.to_string_lossy().to_string();
+        let settings = safety_settings(Some(&SafetyFileConfig {
+            require_focus_guard: None,
+            pause_on_human_input: Some(true),
+            human_input_activity_file: Some(path_text.clone()),
+            human_input_quiet_ms: Some(2500),
+            redact_regions: None,
+        }))
+        .expect("human input pause settings resolve");
+
+        assert!(settings.pause_on_human_input);
+        assert_eq!(
+            settings.human_input_activity_file,
+            Some(PathBuf::from(path_text))
+        );
+        assert_eq!(settings.human_input_quiet_ms, 2500);
     }
 
     #[test]
@@ -3913,6 +4004,9 @@ mod tests {
     fn require_focus_guard_blocks_unguarded_control() {
         let settings = SafetySettings {
             require_focus_guard: true,
+            pause_on_human_input: false,
+            human_input_activity_file: None,
+            human_input_quiet_ms: DEFAULT_HUMAN_INPUT_QUIET_MS,
             screenshot_redactions: Vec::new(),
         };
 
@@ -3932,6 +4026,9 @@ mod tests {
     fn require_focus_guard_allows_guarded_control_and_observe() {
         let settings = SafetySettings {
             require_focus_guard: true,
+            pause_on_human_input: false,
+            human_input_activity_file: None,
+            human_input_quiet_ms: DEFAULT_HUMAN_INPUT_QUIET_MS,
             screenshot_redactions: Vec::new(),
         };
 
@@ -3949,6 +4046,76 @@ mod tests {
             }),
         )
         .expect("guarded control is accepted by require-focus-guard precheck");
+    }
+
+    #[test]
+    fn human_input_pause_blocks_control_on_fresh_signal() {
+        let path = temp_test_path("human-input-blocks-control");
+        fs::write(&path, "activity").expect("human input signal fixture is written");
+        let settings = SafetySettings {
+            require_focus_guard: false,
+            pause_on_human_input: true,
+            human_input_activity_file: Some(path.clone()),
+            human_input_quiet_ms: 60_000,
+            screenshot_redactions: Vec::new(),
+        };
+
+        let err = enforce_human_input_pause(
+            &settings,
+            &DaemonRequest::TypeText(TypeTextRequest {
+                text: "hello".to_string(),
+                guard: None,
+            }),
+        )
+        .expect_err("fresh human input signal blocks control");
+
+        assert!(
+            err.to_string()
+                .contains("human input activity signal is fresh")
+        );
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn human_input_pause_allows_observe_and_missing_or_quiet_signal() {
+        let missing_path = temp_test_path("human-input-missing");
+        let settings = SafetySettings {
+            require_focus_guard: false,
+            pause_on_human_input: true,
+            human_input_activity_file: Some(missing_path),
+            human_input_quiet_ms: 60_000,
+            screenshot_redactions: Vec::new(),
+        };
+        enforce_human_input_pause(&settings, &DaemonRequest::ListWindows)
+            .expect("human input pause does not block observe requests");
+        enforce_human_input_pause(
+            &settings,
+            &DaemonRequest::TypeText(TypeTextRequest {
+                text: "hello".to_string(),
+                guard: None,
+            }),
+        )
+        .expect("missing human input signal does not block control");
+
+        let path = temp_test_path("human-input-quiet");
+        fs::write(&path, "activity").expect("human input signal fixture is written");
+        let settings = SafetySettings {
+            require_focus_guard: false,
+            pause_on_human_input: true,
+            human_input_activity_file: Some(path.clone()),
+            human_input_quiet_ms: 0,
+            screenshot_redactions: Vec::new(),
+        };
+        std::thread::sleep(Duration::from_millis(2));
+        enforce_human_input_pause(
+            &settings,
+            &DaemonRequest::TypeText(TypeTextRequest {
+                text: "hello".to_string(),
+                guard: None,
+            }),
+        )
+        .expect("quiet human input signal does not block control");
+        fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -3976,6 +4143,9 @@ deny = ["org.keepassxc.KeePassXC"]
 
 [safety]
 require_focus_guard = true
+pause_on_human_input = true
+human_input_activity_file = "$XDG_RUNTIME_DIR/plasma-pilot/human-input-active"
+human_input_quiet_ms = 2500
 
 [[safety.redact_regions]]
 x = 10
@@ -4011,6 +4181,12 @@ height = 40
         );
         let safety = config.safety.expect("safety section is present");
         assert_eq!(safety.require_focus_guard, Some(true));
+        assert_eq!(safety.pause_on_human_input, Some(true));
+        assert_eq!(
+            safety.human_input_activity_file.as_deref(),
+            Some("$XDG_RUNTIME_DIR/plasma-pilot/human-input-active")
+        );
+        assert_eq!(safety.human_input_quiet_ms, Some(2500));
         assert_eq!(
             safety
                 .redact_regions

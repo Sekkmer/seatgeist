@@ -16,6 +16,7 @@ Default rules:
 - Configured app deny rules block control-class actions before backend execution. If an app allow list is configured, control-class actions require a matching app id; deny rules take precedence.
 - `[policy].destructive_actions` applies to requests explicitly marked `destructive` and to high-level button/menu labels that obviously imply delete, remove, discard, quit, shutdown, restart, or similar state loss.
 - `[safety].require_focus_guard = true` makes active-window guards mandatory for control-class requests before backend execution.
+- `[safety].pause_on_human_input = true` blocks control-class requests when the configured human-input activity file is newer than `human_input_quiet_ms`.
 - `[[safety.redact_regions]]` physical-pixel rectangles are mapped through screenshot output transforms and black-filled before screenshots leave the daemon.
 - Replay traces are not a policy bypass: `plasma-pilot-cli trace replay` resubmits each recorded daemon request through the normal daemon socket, so control and clipboard-read requests remain policy-checked and journaled.
 - Panic-stop is file-backed and checked inside the daemon after policy approval but before control execution; when active, it blocks control-class requests even if the daemon was started with `--allow-control`.
@@ -30,4 +31,4 @@ Default rules:
 - AT-SPI set-text is semantic control: it must reject sensitive nodes by default and journal replacement length rather than replacement contents.
 - High-level semantic actions must refuse ambiguous matches instead of choosing one candidate implicitly.
 
-The daemon should pause automation when configured human-input detection indicates the user has taken over.
+The current human-input pause uses a file-backed activity signal so a future KDE/libinput watcher can touch the file when the user takes over.

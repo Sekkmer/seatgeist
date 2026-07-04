@@ -30,6 +30,9 @@ deny = ["org.keepassxc.KeePassXC"]
 
 [safety]
 require_focus_guard = false
+pause_on_human_input = false
+human_input_activity_file = "$XDG_RUNTIME_DIR/plasma-pilot/human-input-active"
+human_input_quiet_ms = 1500
 
 [[safety.redact_regions]]
 x = 0
@@ -53,6 +56,8 @@ Explicit local approval flags such as `--allow-control`, `--allow-clipboard-read
 `[apps].deny` blocks control-class actions when the relevant app id matches. Deny rules win over allow rules. If `[apps].allow` is non-empty, control-class actions are allowed only for matching app ids. For focus requests, the daemon checks the target window app id; for keyboard, pointer, and semantic control, it checks the active window app id and fails closed if app policy is configured but the app id is unavailable.
 
 When `[safety].require_focus_guard = true`, every control-class request must include an active-window guard before the daemon will run backend control. Observe, status, policy, and journal requests are unaffected. The guard is still checked against the active window after this presence check.
+
+When `[safety].pause_on_human_input = true`, the daemon checks `human_input_activity_file` before control-class requests. If the file exists and its mtime is newer than `human_input_quiet_ms`, control is refused before backend execution. This is a file-backed signal for a future KDE/libinput watcher; observe, status, policy, and journal requests are unaffected.
 
 `[[safety.redact_regions]]` entries define physical-pixel source screenshot rectangles. The daemon maps each rectangle through the screenshot transform and black-fills the matching output pixels before returning screenshot, screenshot-tile, observe screenshot, or wait-for-change outputs. Zero-size regions are ignored.
 
