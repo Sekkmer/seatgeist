@@ -38,6 +38,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 static SCREENSHOT_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+const SEMANTIC_CHOICE_LIMIT: usize = 5;
 const DEFAULT_HUMAN_INPUT_QUIET_MS: u64 = 1500;
 
 #[derive(Debug, Clone)]
@@ -2721,20 +2722,9 @@ fn resolve_click_button_match(
         return Ok(viable.remove(0));
     }
 
-    let choices = viable
-        .iter()
-        .take(5)
-        .map(|node| {
-            format!(
-                "{}:{}",
-                node.id,
-                node.name.as_deref().unwrap_or("<unnamed>")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+    let choices = semantic_choice_summary(&viable);
     bail!(
-        "ambiguous button match for name={name}: {} candidates: {choices}",
+        "ambiguous button match for name={name}: {} candidates; choices=[{choices}]",
         viable.len()
     );
 }
@@ -2765,20 +2755,9 @@ fn resolve_menu_path_match(
         return Ok(candidates.remove(0));
     }
 
-    let choices = candidates
-        .iter()
-        .take(5)
-        .map(|(node, _)| {
-            format!(
-                "{}:{}",
-                node.id,
-                node.name.as_deref().unwrap_or("<unnamed>")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+    let choices = semantic_menu_choice_summary(&candidates);
     bail!(
-        "ambiguous menu path={} matched {} candidates: {choices}",
+        "ambiguous menu path={} matched {} candidates; choices=[{choices}]",
         path.join("/"),
         candidates.len()
     );
@@ -2820,20 +2799,9 @@ fn resolve_tab_match(
         return Ok((node, action));
     }
 
-    let choices = viable
-        .iter()
-        .take(5)
-        .map(|node| {
-            format!(
-                "{}:{}",
-                node.id,
-                node.name.as_deref().unwrap_or("<unnamed>")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+    let choices = semantic_choice_summary(&viable);
     bail!(
-        "ambiguous tab match for name={name}: {} candidates: {choices}",
+        "ambiguous tab match for name={name}: {} candidates; choices=[{choices}]",
         viable.len()
     );
 }
@@ -2929,22 +2897,59 @@ fn resolve_text_field_match(
         return Ok(viable.remove(0));
     }
 
-    let choices = viable
-        .iter()
-        .take(5)
-        .map(|node| {
-            format!(
-                "{}:{}",
-                node.id,
-                node.name.as_deref().unwrap_or("<unnamed>")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+    let choices = semantic_choice_summary(&viable);
     bail!(
-        "ambiguous text field match for name={name}: {} candidates: {choices}",
+        "ambiguous text field match for name={name}: {} candidates; choices=[{choices}]",
         viable.len()
     );
+}
+
+fn semantic_choice_summary(nodes: &[libplasma_pilot::AccessibilityNode]) -> String {
+    let mut choices = nodes
+        .iter()
+        .take(SEMANTIC_CHOICE_LIMIT)
+        .map(semantic_node_choice)
+        .collect::<Vec<_>>();
+    append_omitted_choice_count(&mut choices, nodes.len());
+    choices.join("; ")
+}
+
+fn semantic_menu_choice_summary(
+    candidates: &[(
+        libplasma_pilot::AccessibilityNode,
+        libplasma_pilot::AccessibilityAction,
+    )],
+) -> String {
+    let mut choices = candidates
+        .iter()
+        .take(SEMANTIC_CHOICE_LIMIT)
+        .map(|(node, action)| format!("{} action={}", semantic_node_choice(node), action.as_str()))
+        .collect::<Vec<_>>();
+    append_omitted_choice_count(&mut choices, candidates.len());
+    choices.join("; ")
+}
+
+fn append_omitted_choice_count(choices: &mut Vec<String>, total: usize) {
+    if total > SEMANTIC_CHOICE_LIMIT {
+        choices.push(format!("+{} more", total - SEMANTIC_CHOICE_LIMIT));
+    }
+}
+
+fn semantic_node_choice(node: &libplasma_pilot::AccessibilityNode) -> String {
+    let name = node.name.as_deref().unwrap_or("<unnamed>");
+    let actions = if node.actions.is_empty() {
+        "none".to_string()
+    } else {
+        node.actions
+            .iter()
+            .map(libplasma_pilot::AccessibilityAction::as_str)
+            .collect::<Vec<_>>()
+            .join("|")
+    };
+    format!(
+        "id={} role={} name={} actions={actions}",
+        node.id, node.role, name
+    )
 }
 
 fn is_menu_item_candidate(node: &libplasma_pilot::AccessibilityNode) -> bool {
@@ -4991,7 +4996,10 @@ height = 40
             vec![button_node("1", "Open"), button_node("2", "Open")],
         )
         .expect_err("multiple exact matches are ambiguous");
-        assert!(err.to_string().contains("ambiguous"));
+        let err = err.to_string();
+        assert!(err.contains("ambiguous"));
+        assert!(err.contains("choices=[id=1 role=button name=Open actions=press"));
+        assert!(err.contains("id=2 role=button name=Open actions=press"));
     }
 
     #[test]
@@ -5023,7 +5031,10 @@ height = 40
             vec![text_node("1", "Search"), text_node("2", "Search")],
         )
         .expect_err("multiple exact text fields are ambiguous");
-        assert!(err.to_string().contains("ambiguous"));
+        let err = err.to_string();
+        assert!(err.contains("ambiguous"));
+        assert!(err.contains("choices=[id=1 role=text name=Search actions=set_text"));
+        assert!(err.contains("id=2 role=text name=Search actions=set_text"));
     }
 
     #[test]
@@ -5061,7 +5072,10 @@ height = 40
             vec![tab_node("1", "General"), tab_node("2", "General")],
         )
         .expect_err("multiple exact tabs are ambiguous");
-        assert!(err.to_string().contains("ambiguous"));
+        let err = err.to_string();
+        assert!(err.contains("ambiguous"));
+        assert!(err.contains("choices=[id=1 role=page tab name=General actions=press|select"));
+        assert!(err.contains("id=2 role=page tab name=General actions=press|select"));
     }
 
     #[test]
@@ -5113,7 +5127,24 @@ height = 40
             ],
         )
         .expect_err("duplicate visible menu paths are ambiguous");
-        assert!(err.to_string().contains("ambiguous"));
+        let err = err.to_string();
+        assert!(err.contains("ambiguous"));
+        assert!(err.contains("choices=[id=open1 role=menu item name=Open actions=press|select"));
+        assert!(err.contains("id=open2 role=menu item name=Open actions=press|select"));
+        assert!(err.contains("action=select"));
+    }
+
+    #[test]
+    fn semantic_choice_summary_is_bounded() {
+        let choices = (1..=7)
+            .map(|index| button_node(&format!("button-{index}"), "Open"))
+            .collect::<Vec<_>>();
+
+        let summary = semantic_choice_summary(&choices);
+        assert!(summary.contains("id=button-1 role=button name=Open actions=press"));
+        assert!(summary.contains("id=button-5 role=button name=Open actions=press"));
+        assert!(!summary.contains("id=button-6"));
+        assert!(summary.contains("+2 more"));
     }
 
     #[test]
