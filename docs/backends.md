@@ -13,6 +13,8 @@ Every backend must report capabilities and provenance. The daemon should refuse 
 
 Current KWin focus implementation uses `org.kde.krunner1.Run` on KWin's `WindowsRunner` service with a window id previously discovered from `WindowsRunner.Match`. This is kept behind the window backend boundary and policy-gated as a control action. A future KWin script/plugin focus path remains a fallback if `WindowsRunner` proves unstable across Plasma versions.
 
+Current clipboard text implementation uses the standard Wayland `wl-copy` and `wl-paste` commands when both are available. The daemon reports `clipboard_text` capability only in that case. Clipboard reads are policy-gated separately from clipboard writes, and compact daemon/MCP summaries report only text length. Future backend work should add portal or KDE-native clipboard integration and expose provenance/fallback diagnostics when the Wayland command backend is unavailable.
+
 ## KWin Script Bridge
 
 The repository includes `kwin/plasma-pilot-bridge`, a packaged KWin script that publishes active-window metadata to the user-session daemon over the session bus:

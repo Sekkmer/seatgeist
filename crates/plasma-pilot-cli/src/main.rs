@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use libplasma_pilot::{
-    DaemonRequest, DaemonResponse, FocusWindowRequest, JournalTailRequest, ObserveRequest,
-    ScreenshotRequest, ScreenshotTileRequest, default_socket_path,
+    ClipboardSetRequest, DaemonRequest, DaemonResponse, FocusWindowRequest, JournalTailRequest,
+    ObserveRequest, ScreenshotRequest, ScreenshotTileRequest, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -61,9 +61,22 @@ enum Command {
         #[arg(long)]
         window: String,
     },
+    Clipboard {
+        #[command(subcommand)]
+        command: ClipboardCommand,
+    },
     Journal {
         #[command(subcommand)]
         command: JournalCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ClipboardCommand {
+    Get,
+    Set {
+        #[arg(value_name = "TEXT")]
+        text: String,
     },
 }
 
@@ -148,6 +161,15 @@ fn main() -> Result<()> {
         Command::Focus { window } => print_daemon_response(
             &socket,
             DaemonRequest::FocusWindow(FocusWindowRequest { window_id: window }),
+        )?,
+        Command::Clipboard {
+            command: ClipboardCommand::Get,
+        } => print_daemon_response(&socket, DaemonRequest::ClipboardGet)?,
+        Command::Clipboard {
+            command: ClipboardCommand::Set { text },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::ClipboardSet(ClipboardSetRequest { text }),
         )?,
         Command::Journal {
             command: JournalCommand::Tail { limit },

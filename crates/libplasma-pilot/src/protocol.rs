@@ -87,6 +87,16 @@ pub struct ObserveRequest {
     pub screenshot: Option<ScreenshotRequest>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipboardText {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipboardSetRequest {
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DesktopObservation {
     pub active_window: Option<WindowInfo>,
@@ -112,6 +122,8 @@ pub enum DaemonRequest {
     Observe(ObserveRequest),
     Screenshot(ScreenshotRequest),
     ScreenshotTile(ScreenshotTileRequest),
+    ClipboardGet,
+    ClipboardSet(ClipboardSetRequest),
     JournalTail(JournalTailRequest),
     FocusWindow(FocusWindowRequest),
 }
@@ -128,6 +140,8 @@ impl DaemonRequest {
             Self::Observe(_) => "observe",
             Self::Screenshot(_) => "screenshot",
             Self::ScreenshotTile(_) => "screenshot_tile",
+            Self::ClipboardGet => "clipboard_get",
+            Self::ClipboardSet(_) => "clipboard_set",
             Self::JournalTail(_) => "journal_tail",
             Self::FocusWindow(_) => "focus_window",
         }
@@ -145,6 +159,7 @@ pub enum DaemonResponse {
     ActiveWindow(Option<WindowInfo>),
     Observation(Box<DesktopObservation>),
     Screenshot(ScreenshotInfo),
+    ClipboardText(ClipboardText),
     Journal(Vec<JournalEntry>),
     Action(Box<ActionResult>),
     Error { message: String },
@@ -263,5 +278,18 @@ mod tests {
         assert!(encoded.contains(r#""method":"observe""#));
         assert!(encoded.contains(r#"/tmp/observe.png"#));
         assert!(encoded.contains(r#""max_edge":1200"#));
+    }
+
+    #[test]
+    fn serializes_clipboard_requests() {
+        let get = serde_json::to_string(&DaemonRequest::ClipboardGet)
+            .expect("clipboard get request serializes");
+        assert_eq!(get, r#"{"method":"clipboard_get"}"#);
+
+        let set = DaemonRequest::ClipboardSet(ClipboardSetRequest {
+            text: "hello".to_string(),
+        });
+        let encoded = serde_json::to_string(&set).expect("clipboard set request serializes");
+        assert_eq!(encoded, r#"{"method":"clipboard_set","text":"hello"}"#);
     }
 }

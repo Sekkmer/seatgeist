@@ -460,7 +460,7 @@ pilot.clipboard_get_text(max_bytes?)
 pilot.clipboard_set_text(text)
 ```
 
-Clipboard reads should be policy-controlled because clipboard content often contains secrets.
+Clipboard reads should be policy-controlled because clipboard content often contains secrets. The current MCP names are `plasma.clipboard_get_text` and `plasma.clipboard_set_text`.
 
 ### 11.4 Accessibility tools
 
@@ -843,7 +843,8 @@ Tasks:
 
 - [x] Implement MCP stdio server. Current status: line-delimited JSON-RPC over stdio with `initialize`, `ping`, `tools/list`, and `tools/call`.
 - [x] Expose current daemon tools: health, capabilities, policy status, monitor/window listing, active-window, observe, screenshot, screenshot tile, focus window, and journal tail.
-- [ ] Expose wait_for_change, click, key, type_text, clipboard_set/get after the backing daemon capabilities exist.
+- [x] Expose clipboard_set/get after the backing daemon capability exists.
+- [ ] Expose wait_for_change, click, key, and type_text after the backing daemon capabilities exist.
 - [x] Add MCP-side argument validation for exposed tools.
 - Add docs for installing MCP manually and through plugin.
 - [x] Ensure outputs are model-friendly for exposed tools: tool results include compact text plus structured JSON.
@@ -883,16 +884,18 @@ Goal: controlled clipboard integration.
 
 Tasks:
 
-- Implement clipboard get/set for text.
-- Prefer native Wayland/KDE method; fallback to `wl-copy`/`wl-paste` if acceptable.
-- Enforce clipboard read policy.
-- Truncate large clipboard reads by default.
+- [x] Implement clipboard get/set for UTF-8 text.
+- [x] Use `wl-copy`/`wl-paste` as the first Wayland backend when available.
+- [x] Enforce clipboard read policy.
+- [ ] Add KDE/portal-native fallback and explicit provenance selection if `wl-copy`/`wl-paste` is unavailable.
+- [ ] Truncate large clipboard reads by default.
 
 Acceptance criteria:
 
 - CLI can set and get text clipboard.
 - MCP can set clipboard text for paste workflows.
 - Clipboard reads are logged and policy-checked.
+- Clipboard journal summaries and compact MCP status text do not echo clipboard contents.
 
 ### Phase 8: AT-SPI semantic UI
 

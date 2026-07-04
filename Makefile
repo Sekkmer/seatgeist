@@ -1,7 +1,7 @@
 SHELL := /usr/bin/bash
 .ONESHELL:
 
-.PHONY: fmt check test clippy verify smoke smoke-monitors smoke-windows smoke-focus smoke-mcp install-kwin-script
+.PHONY: fmt check test clippy verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-mcp install-kwin-script
 
 fmt:
 	cargo fmt --all
@@ -145,6 +145,48 @@ smoke-focus:
 	grep -q "focused window" "$$focus"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "focus_window"
 
+smoke-clipboard:
+	set -euo pipefail
+	socket="/tmp/plasma-pilot-clipboard-smoke/plasma-pilotd.sock"
+	log="target/plasma-pilot-clipboard-smoke-daemon.log"
+	journal="target/plasma-pilot-clipboard-smoke-journal.jsonl"
+	previous_json="target/plasma-pilot-clipboard-previous.json"
+	previous_text="target/plasma-pilot-clipboard-previous.txt"
+	current_json="target/plasma-pilot-clipboard-current.json"
+	set_result="target/plasma-pilot-clipboard-set.json"
+	rm -rf /tmp/plasma-pilot-clipboard-smoke "$$log" "$$journal" "$$previous_json" "$$previous_text" "$$current_json" "$$set_result"
+	cargo build -p plasma-pilotd -p plasma-pilot-cli
+	target/debug/plasma-pilotd --socket "$$socket" --journal "$$journal" --allow-clipboard-read >"$$log" 2>&1 &
+	pid=$$!
+	cleanup() {
+		if [[ -f "$$previous_text" ]]; then
+			target/debug/plasma-pilot-cli --socket "$$socket" clipboard set "$$(<"$$previous_text")" >/dev/null 2>&1 || true
+		fi
+		kill "$$pid" 2>/dev/null || true
+		wait "$$pid" 2>/dev/null || true
+		rm -f "$$previous_json" "$$previous_text" "$$current_json" "$$set_result"
+	}
+	trap cleanup EXIT
+	for _ in {1..50}; do
+		if [[ -S "$$socket" ]]; then
+			break
+		fi
+		sleep 0.1
+	done
+	if [[ ! -S "$$socket" ]]; then
+		cat "$$log"
+		exit 1
+	fi
+	if target/debug/plasma-pilot-cli --socket "$$socket" clipboard get >"$$previous_json" 2>/dev/null; then
+		jq -r '.data.text' "$$previous_json" >"$$previous_text"
+	fi
+	sentinel="plasma-pilot-clipboard-smoke-$$(date +%s)"
+	target/debug/plasma-pilot-cli --socket "$$socket" clipboard set "$$sentinel" >"$$set_result"
+	target/debug/plasma-pilot-cli --socket "$$socket" clipboard get >"$$current_json"
+	jq -e --arg text "$$sentinel" '.type == "clipboard_text" and .data.text == $$text' "$$current_json" >/dev/null
+	grep -q '"type": "action"' "$$set_result"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "clipboard"
+
 smoke-mcp:
 	set -euo pipefail
 	socket="/tmp/plasma-pilot-mcp-smoke/plasma-pilotd.sock"
@@ -180,6 +222,8 @@ smoke-mcp:
 	test "$$(wc -l <"$$out")" = "4"
 	jq -e 'select(.id == 1) | .result.capabilities.tools.listChanged == false' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.list_windows")' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.clipboard_get_text")' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.clipboard_set_text")' "$$out" >/dev/null
 	jq -e 'select(.id == 3) | .result.isError == false and .result.structuredContent.type == "health"' "$$out" >/dev/null
 	jq -e 'select(.id == 4) | .result.isError == false and .result.structuredContent.type == "observation"' "$$out" >/dev/null
 

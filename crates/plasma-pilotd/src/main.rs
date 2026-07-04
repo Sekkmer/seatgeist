@@ -4,7 +4,7 @@ use std::{
     io::Write,
     os::unix::fs::{FileTypeExt, PermissionsExt},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{Arc, Mutex, OnceLock},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -14,11 +14,11 @@ use anyhow::{Context, Error, Result, bail};
 use clap::Parser;
 use image::{GenericImageView, imageops::FilterType};
 use libplasma_pilot::{
-    ActionResult, BackendCapability, CapabilitySet, CoordinateSpace, DaemonRequest, DaemonResponse,
-    DesktopObservation, FocusWindowRequest, HealthStatus, JournalEntry, ObserveRequest,
-    PolicyStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest,
-    ScreenshotTransform, ToolApprovalLevel, WindowGeometry, WindowInfo, current_euid,
-    default_journal_path, default_socket_path,
+    ActionResult, BackendCapability, CapabilitySet, ClipboardText, CoordinateSpace, DaemonRequest,
+    DaemonResponse, DesktopObservation, FocusWindowRequest, HealthStatus, JournalEntry,
+    ObserveRequest, PolicyStatus, SafetyClass, ScreenshotInfo, ScreenshotRequest,
+    ScreenshotTileRequest, ScreenshotTransform, ToolApprovalLevel, WindowGeometry, WindowInfo,
+    current_euid, default_journal_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -189,6 +189,9 @@ struct Args {
     #[arg(long, env = "PLASMA_PILOT_ALLOW_CONTROL")]
     allow_control: bool,
 
+    #[arg(long, env = "PLASMA_PILOT_ALLOW_CLIPBOARD_READ")]
+    allow_clipboard_read: bool,
+
     #[arg(long)]
     print_capabilities: bool,
 }
@@ -212,7 +215,7 @@ async fn main() -> Result<()> {
         None => default_journal_path().context("resolve default journal path")?,
     };
 
-    let policy_config = policy_config(args.allow_control);
+    let policy_config = policy_config(args.allow_control, args.allow_clipboard_read);
 
     run(socket, journal, policy_config).await
 }
@@ -362,6 +365,18 @@ fn handle_request(
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::ClipboardGet => match clipboard_get_text() {
+            Ok(text) => DaemonResponse::ClipboardText(text),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
+        DaemonRequest::ClipboardSet(request) => match clipboard_set_text(&request.text) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::JournalTail(request) => match journal.tail(request.limit) {
             Ok(entries) => DaemonResponse::Journal(entries),
             Err(err) => DaemonResponse::Error {
@@ -400,10 +415,13 @@ fn policy_status_from_config(config: &PolicyConfig) -> PolicyStatus {
     }
 }
 
-fn policy_config(allow_control: bool) -> PolicyConfig {
+fn policy_config(allow_control: bool, allow_clipboard_read: bool) -> PolicyConfig {
     let mut config = PolicyConfig::default();
     if allow_control {
         config.default_control = ToolApprovalLevel::Allow;
+    }
+    if allow_clipboard_read {
+        config.default_clipboard_read = ToolApprovalLevel::Allow;
     }
     config
 }
@@ -432,6 +450,8 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::Observe(_)
         | DaemonRequest::Screenshot(_)
         | DaemonRequest::ScreenshotTile(_) => SafetyClass::Observe,
+        DaemonRequest::ClipboardGet => SafetyClass::ClipboardRead,
+        DaemonRequest::ClipboardSet(_) => SafetyClass::ClipboardWrite,
         DaemonRequest::FocusWindow(_) => SafetyClass::ControlSemantic,
     }
 }
@@ -448,6 +468,9 @@ fn current_capabilities() -> Vec<BackendCapability> {
         capabilities.push(BackendCapability::MonitorMetadata);
         capabilities.push(BackendCapability::WindowList);
         capabilities.push(BackendCapability::WindowFocus);
+    }
+    if command_exists("wl-copy") && command_exists("wl-paste") {
+        capabilities.push(BackendCapability::ClipboardText);
     }
     capabilities
 }
@@ -641,6 +664,60 @@ fn focus_window(request: FocusWindowRequest) -> Result<ActionResult> {
     })
 }
 
+fn clipboard_get_text() -> Result<ClipboardText> {
+    if !command_exists("wl-paste") {
+        bail!("wl-paste command is not available for Wayland clipboard reads");
+    }
+
+    let output = Command::new("wl-paste")
+        .arg("--no-newline")
+        .output()
+        .context("run wl-paste clipboard backend")?;
+    if !output.status.success() {
+        bail!(
+            "wl-paste clipboard backend exited with status {}",
+            output.status
+        );
+    }
+
+    Ok(ClipboardText {
+        text: String::from_utf8(output.stdout).context("clipboard text is not valid UTF-8")?,
+    })
+}
+
+fn clipboard_set_text(text: &str) -> Result<ActionResult> {
+    if !command_exists("wl-copy") {
+        bail!("wl-copy command is not available for Wayland clipboard writes");
+    }
+
+    let mut child = Command::new("wl-copy")
+        .arg("--type")
+        .arg("text/plain;charset=utf-8")
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("start wl-copy clipboard backend")?;
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("wl-copy stdin is unavailable"))?;
+        stdin
+            .write_all(text.as_bytes())
+            .context("write text to wl-copy")?;
+    }
+    let status = child.wait().context("wait for wl-copy clipboard backend")?;
+    if !status.success() {
+        bail!("wl-copy clipboard backend exited with status {status}");
+    }
+
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!("set clipboard text length={}", text.len())),
+    })
+}
+
 fn temporary_capture_path(output: &Path) -> PathBuf {
     let file_name = output
         .file_name()
@@ -831,6 +908,9 @@ fn summarize_response(response: &DaemonResponse) -> String {
             info.source_height,
             info.path.display()
         ),
+        DaemonResponse::ClipboardText(text) => {
+            format!("clipboard text length={}", text.text.len())
+        }
         DaemonResponse::Journal(entries) => format!("{} journal entries", entries.len()),
         DaemonResponse::Action(result) => result
             .message
@@ -1088,7 +1168,7 @@ mod tests {
 
     #[test]
     fn allow_control_config_allows_focus_policy() {
-        let policy = PolicyEngine::new(policy_config(true));
+        let policy = PolicyEngine::new(policy_config(true, false));
         enforce_policy(
             &policy,
             &DaemonRequest::FocusWindow(FocusWindowRequest {
@@ -1100,5 +1180,36 @@ mod tests {
             policy_status_from_config(policy.config()).default_control,
             ToolApprovalLevel::Allow
         );
+    }
+
+    #[test]
+    fn clipboard_read_fails_closed_by_default() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(&policy, &DaemonRequest::ClipboardGet)
+            .expect_err("clipboard reads require approval by default");
+        assert!(err.to_string().contains("ClipboardRead"));
+    }
+
+    #[test]
+    fn allow_clipboard_read_config_allows_clipboard_get_policy() {
+        let policy = PolicyEngine::new(policy_config(false, true));
+        enforce_policy(&policy, &DaemonRequest::ClipboardGet)
+            .expect("explicit clipboard-read override allows clipboard get");
+        assert_eq!(
+            policy_status_from_config(policy.config()).default_clipboard_read,
+            ToolApprovalLevel::Allow
+        );
+    }
+
+    #[test]
+    fn clipboard_write_is_allowed_by_default() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        enforce_policy(
+            &policy,
+            &DaemonRequest::ClipboardSet(libplasma_pilot::ClipboardSetRequest {
+                text: "hello".to_string(),
+            }),
+        )
+        .expect("clipboard writes are allowed by default policy");
     }
 }

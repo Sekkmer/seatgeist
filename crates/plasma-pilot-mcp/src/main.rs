@@ -7,8 +7,8 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use libplasma_pilot::{
-    DaemonRequest, DaemonResponse, FocusWindowRequest, JournalTailRequest, ObserveRequest,
-    ScreenshotRequest, ScreenshotTileRequest, default_socket_path,
+    ClipboardSetRequest, DaemonRequest, DaemonResponse, FocusWindowRequest, JournalTailRequest,
+    ObserveRequest, ScreenshotRequest, ScreenshotTileRequest, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -258,6 +258,10 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 .transpose()?
                 .or(Some(1600)),
         })),
+        "plasma.clipboard_get_text" => Ok(DaemonRequest::ClipboardGet),
+        "plasma.clipboard_set_text" => Ok(DaemonRequest::ClipboardSet(ClipboardSetRequest {
+            text: required_string(arguments, "text")?,
+        })),
         "plasma.focus_window" => Ok(DaemonRequest::FocusWindow(FocusWindowRequest {
             window_id: required_string(arguments, "window_id")?,
         })),
@@ -327,6 +331,9 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             info.source_height,
             info.path.display()
         ),
+        DaemonResponse::ClipboardText(text) => {
+            format!("clipboard text length={}", text.text.len())
+        }
         DaemonResponse::Journal(entries) => format!("{} journal entries", entries.len()),
         DaemonResponse::Action(result) => result
             .message
@@ -453,6 +460,24 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "plasma.clipboard_get_text",
+            "Clipboard Get Text",
+            "Read UTF-8 text from the Wayland clipboard. This is policy-gated and usually requires explicit daemon clipboard-read approval mode.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.clipboard_set_text",
+            "Clipboard Set Text",
+            "Set UTF-8 text on the Wayland clipboard. The daemon journals the action without echoing the text in summaries.",
+            object_schema(
+                vec![(
+                    "text",
+                    json!({"type": "string", "description": "UTF-8 text to place on the clipboard."}),
+                )],
+                vec!["text"],
+            ),
+        ),
+        tool(
             "plasma.journal_tail",
             "Journal Tail",
             "Read recent compact daemon journal entries.",
@@ -571,6 +596,11 @@ mod tests {
                 .iter()
                 .any(|tool| tool["name"] == "plasma.focus_window")
         );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.clipboard_get_text")
+        );
     }
 
     #[test]
@@ -613,6 +643,26 @@ mod tests {
                 window_id: "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn maps_clipboard_set_arguments() {
+        let request =
+            daemon_request_for_tool("plasma.clipboard_set_text", &json!({"text": "copy this"}))
+                .expect("clipboard set args map");
+        assert_eq!(
+            request,
+            DaemonRequest::ClipboardSet(ClipboardSetRequest {
+                text: "copy this".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn maps_clipboard_get_arguments() {
+        let request =
+            daemon_request_for_tool("plasma.clipboard_get_text", &json!({})).expect("get maps");
+        assert_eq!(request, DaemonRequest::ClipboardGet);
     }
 
     #[test]
