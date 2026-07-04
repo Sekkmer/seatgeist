@@ -67,6 +67,7 @@ pub struct MockScreenBackend {
     monitors: Vec<MonitorInfo>,
     screenshot: Screenshot,
     screenshots: Arc<Mutex<Vec<ScreenshotTarget>>>,
+    scaled_screenshots: Arc<Mutex<Vec<(ScreenshotTarget, u32)>>>,
 }
 
 impl MockScreenBackend {
@@ -75,11 +76,16 @@ impl MockScreenBackend {
             monitors,
             screenshot,
             screenshots: Arc::new(Mutex::new(Vec::new())),
+            scaled_screenshots: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     pub fn screenshots(&self) -> Result<Vec<ScreenshotTarget>> {
         Ok(lock(&self.screenshots)?.clone())
+    }
+
+    pub fn scaled_screenshots(&self) -> Result<Vec<(ScreenshotTarget, u32)>> {
+        Ok(lock(&self.scaled_screenshots)?.clone())
     }
 }
 
@@ -104,6 +110,15 @@ impl ScreenBackend for MockScreenBackend {
 
     async fn screenshot(&self, target: ScreenshotTarget) -> Result<Screenshot> {
         lock(&self.screenshots)?.push(target);
+        Ok(self.screenshot.clone())
+    }
+
+    async fn screenshot_scaled(
+        &self,
+        target: ScreenshotTarget,
+        max_edge: u32,
+    ) -> Result<Screenshot> {
+        lock(&self.scaled_screenshots)?.push((target, max_edge));
         Ok(self.screenshot.clone())
     }
 }
@@ -484,6 +499,15 @@ mod tests {
         let screenshot = backend.screenshot(ScreenshotTarget::AllMonitors).await?;
         assert_eq!(screenshot.width, 1600);
         assert_eq!(backend.screenshots()?, vec![ScreenshotTarget::AllMonitors]);
+
+        let scaled = backend
+            .screenshot_scaled(ScreenshotTarget::ActiveWindow, 800)
+            .await?;
+        assert_eq!(scaled.height, 900);
+        assert_eq!(
+            backend.scaled_screenshots()?,
+            vec![(ScreenshotTarget::ActiveWindow, 800)]
+        );
         Ok(())
     }
 

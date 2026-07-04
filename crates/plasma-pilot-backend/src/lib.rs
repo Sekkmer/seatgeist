@@ -17,6 +17,11 @@ pub struct Screenshot {
 pub trait ScreenBackend: Send + Sync {
     async fn list_monitors(&self) -> Result<Vec<MonitorInfo>>;
     async fn screenshot(&self, target: ScreenshotTarget) -> Result<Screenshot>;
+    async fn screenshot_scaled(
+        &self,
+        target: ScreenshotTarget,
+        max_edge: u32,
+    ) -> Result<Screenshot>;
 }
 
 #[async_trait]
