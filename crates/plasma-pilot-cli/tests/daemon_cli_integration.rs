@@ -117,13 +117,27 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
     assert_eq!(path, PathBuf::from("/dev/uinput"));
     assert!(!setup_hint.is_empty());
 
+    let input_backends = daemon.cli_json(&["input", "backends"])?;
+    let DaemonResponse::InputBackendStatus(status) = input_backends else {
+        bail!("expected input backend status response, got {input_backends:?}");
+    };
+    assert!(!status.remote_desktop_portal.setup_hint.is_empty());
+    assert!(!status.libei.setup_hint.is_empty());
+    assert!(!status.setup_hint.is_empty());
+
     let journal = daemon.cli_json(&["journal", "tail", "--limit", "10"])?;
     let DaemonResponse::Journal(entries) = journal else {
         bail!("expected journal response, got {journal:?}");
     };
     assert_methods(
         &entries,
-        &["health", "capabilities", "policy_status", "uinput_status"],
+        &[
+            "health",
+            "capabilities",
+            "policy_status",
+            "uinput_status",
+            "input_backend_status",
+        ],
     );
     assert!(entries.iter().all(|entry| entry.ok));
     Ok(())

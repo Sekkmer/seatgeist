@@ -9,11 +9,12 @@ pub use protocol::{
     ClipboardText, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
     DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
     DaemonResponse, DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest,
-    HealthStatus, JournalEntry, JournalTailRequest, KeyComboRequest, KwinBridgeStatus,
-    MovePointerRequest, ObserveRequest, PanicStopStatus, PolicyStatus, ReplayTrace, ScreenshotInfo,
-    ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest,
-    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, TraceStep, TypeTextRequest,
-    UinputStatus, WaitForChangeRequest, WaitForChangeResult,
+    HealthStatus, InputBackendStatus, JournalEntry, JournalTailRequest, KeyComboRequest,
+    KwinBridgeStatus, LibeiStatus, MovePointerRequest, ObserveRequest, PanicStopStatus,
+    PolicyStatus, RemoteDesktopPortalStatus, ReplayTrace, ScreenshotInfo, ScreenshotRequest,
+    ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest, SelectMenuRequest,
+    SetPanicStopRequest, SetTextFieldRequest, TraceStep, TypeTextRequest, UinputStatus,
+    WaitForChangeRequest, WaitForChangeResult,
 };
 pub use runtime::{
     current_egid, current_euid, default_journal_path, default_panic_stop_path, default_socket_path,

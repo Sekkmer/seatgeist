@@ -65,6 +65,32 @@ pub struct UinputStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputBackendStatus {
+    pub uinput_available: bool,
+    pub remote_desktop_portal: RemoteDesktopPortalStatus,
+    pub libei: LibeiStatus,
+    pub preferred_available_backend: Option<String>,
+    pub setup_hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteDesktopPortalStatus {
+    pub busctl_available: bool,
+    pub portal_service_available: bool,
+    pub remote_desktop_interface_available: bool,
+    pub kde_portal_service_available: bool,
+    pub setup_hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibeiStatus {
+    pub pkg_config_available: bool,
+    pub client_library_available: bool,
+    pub socket_env_present: bool,
+    pub setup_hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetPanicStopRequest {
     pub enabled: bool,
 }
@@ -343,6 +369,7 @@ pub enum DaemonRequest {
     SetPanicStop(SetPanicStopRequest),
     KwinBridgeStatus,
     UinputStatus,
+    InputBackendStatus,
     ListMonitors,
     ListWindows,
     ActiveWindow,
@@ -379,6 +406,7 @@ impl DaemonRequest {
             Self::SetPanicStop(_) => "set_panic_stop",
             Self::KwinBridgeStatus => "kwin_bridge_status",
             Self::UinputStatus => "uinput_status",
+            Self::InputBackendStatus => "input_backend_status",
             Self::ListMonitors => "list_monitors",
             Self::ListWindows => "list_windows",
             Self::ActiveWindow => "active_window",
@@ -416,6 +444,7 @@ pub enum DaemonResponse {
     PanicStop(PanicStopStatus),
     KwinBridgeStatus(KwinBridgeStatus),
     UinputStatus(UinputStatus),
+    InputBackendStatus(InputBackendStatus),
     Monitors(Vec<MonitorInfo>),
     Windows(Vec<WindowInfo>),
     ActiveWindow(Option<WindowInfo>),
@@ -439,6 +468,7 @@ impl DaemonResponse {
             Self::PanicStop(_) => "panic_stop",
             Self::KwinBridgeStatus(_) => "kwin_bridge_status",
             Self::UinputStatus(_) => "uinput_status",
+            Self::InputBackendStatus(_) => "input_backend_status",
             Self::Monitors(_) => "monitors",
             Self::Windows(_) => "windows",
             Self::ActiveWindow(_) => "active_window",
@@ -777,6 +807,38 @@ mod tests {
         assert!(encoded.contains(r#""type":"uinput_status""#));
         assert!(encoded.contains(r#""available":true"#));
         assert_eq!(response.response_type(), "uinput_status");
+    }
+
+    #[test]
+    fn serializes_input_backend_status() {
+        let request = DaemonRequest::InputBackendStatus;
+        assert_eq!(
+            serde_json::to_string(&request).expect("input backend status request serializes"),
+            r#"{"method":"input_backend_status"}"#
+        );
+
+        let response = DaemonResponse::InputBackendStatus(InputBackendStatus {
+            uinput_available: true,
+            remote_desktop_portal: RemoteDesktopPortalStatus {
+                busctl_available: true,
+                portal_service_available: true,
+                remote_desktop_interface_available: true,
+                kde_portal_service_available: true,
+                setup_hint: "portal remote desktop interface is visible".to_string(),
+            },
+            libei: LibeiStatus {
+                pkg_config_available: true,
+                client_library_available: true,
+                socket_env_present: false,
+                setup_hint: "libei client library is available".to_string(),
+            },
+            preferred_available_backend: Some("portal_remote_desktop".to_string()),
+            setup_hint: "prefer portal RemoteDesktop/libei before uinput".to_string(),
+        });
+        let encoded = serde_json::to_string(&response).expect("input backend status serializes");
+        assert!(encoded.contains(r#""type":"input_backend_status""#));
+        assert!(encoded.contains(r#""preferred_available_backend":"portal_remote_desktop""#));
+        assert_eq!(response.response_type(), "input_backend_status");
     }
 
     #[test]

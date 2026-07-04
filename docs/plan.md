@@ -808,7 +808,7 @@ Tasks:
 - [x] Implement key combo and type text. Current status: US evdev ASCII text plus newline/tab and named key combos such as `Ctrl+L` are supported; non-US text is rejected instead of guessed.
 - [x] Implement focus guard checks before actions. Current status: current daemon control requests accept optional active-window guards (`expected_active_window`, `expected_active_app`, and `active_title_contains`) and reject stale guards before execution.
 - [x] Add panic-stop flag. Current status: `plasma-pilotd` has a file-backed panic-stop state, `plasma-pilot-cli panic-stop status|enable|disable` journals state changes, and active panic-stop blocks control-class daemon requests before execution.
-- Probe whether xdg-desktop-portal RemoteDesktop or libei can satisfy input needs before requiring uinput on the local machine.
+- [x] Probe whether xdg-desktop-portal RemoteDesktop or libei can satisfy input needs before requiring uinput on the local machine. Current status: `plasma-pilot-cli input backends` and MCP `plasma.input_backend_status` probe the user bus for `org.freedesktop.portal.RemoteDesktop`, KDE portal service visibility, libei client metadata/socket hints, and uinput fallback availability without starting a portal session.
 - Add pointer calibration diagnostics and host GUI smoke for a known test window before treating pixel-click use as production-ready.
 
 Acceptance criteria:
@@ -1039,7 +1039,7 @@ cargo check --workspace
 - [x] Add backend notes doc.
 - [x] Implement Phase 1.
 - [x] Implement Phase 2.
-- [ ] Implement Phase 3. Current status: keyboard and pointer command paths and uinput setup diagnostics/docs exist; portal/libei probing and host GUI smoke remain.
+- [ ] Implement Phase 3. Current status: keyboard and pointer command paths, uinput setup diagnostics/docs, and portal/libei input backend probes exist; pointer calibration diagnostics and host GUI smoke remain.
 
 ## 20. Definition of done for v0.1
 

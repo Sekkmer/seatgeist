@@ -117,6 +117,14 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
     assert_eq!(path, plasma_pilot_uinput::uinput_path());
     assert!(!setup_hint.is_empty());
 
+    let input_backends = daemon.request(&DaemonRequest::InputBackendStatus)?;
+    let DaemonResponse::InputBackendStatus(status) = input_backends else {
+        bail!("expected input backend status response, got {input_backends:?}");
+    };
+    assert!(!status.remote_desktop_portal.setup_hint.is_empty());
+    assert!(!status.libei.setup_hint.is_empty());
+    assert!(!status.setup_hint.is_empty());
+
     let panic_stop = daemon.request(&DaemonRequest::SetPanicStop(SetPanicStopRequest {
         enabled: true,
     }))?;
@@ -151,6 +159,7 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
             "capabilities",
             "panic_stop_status",
             "uinput_status",
+            "input_backend_status",
             "set_panic_stop",
         ],
     );

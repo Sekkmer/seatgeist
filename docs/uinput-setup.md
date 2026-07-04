@@ -12,6 +12,14 @@ plasma-pilot-cli input status
 
 The same diagnostic is available to MCP as `plasma.uinput_status`. It reports whether the daemon can open `/dev/uinput` read/write, whether the path exists and is a character device, file mode and owner ids when available, daemon effective uid/gid, and a short setup hint.
 
+To compare the supported input paths before relying on uinput, run:
+
+```bash
+plasma-pilot-cli input backends
+```
+
+The same aggregate probe is available to MCP as `plasma.input_backend_status`. It checks xdg-desktop-portal RemoteDesktop interface visibility, KDE portal service visibility, libei client metadata/socket hints, and uinput fallback availability without starting a portal consent flow or sending input.
+
 ## Optional Udev Rule
 
 The repository includes `udev/99-plasma-pilot-uinput.rules`:

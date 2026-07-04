@@ -18,9 +18,10 @@ use libplasma_pilot::{
     ActionResult, ActivateTabRequest, ActiveWindowGuard, BackendCapability, CapabilitySet,
     ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardText, CoordinateSpace,
     DaemonRequest, DaemonResponse, DesktopObservation, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, HealthStatus, JournalEntry, KeyComboRequest, KwinBridgeStatus,
-    MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton, PolicyStatus,
-    SafetyClass, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
+    FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus, JournalEntry,
+    KeyComboRequest, KwinBridgeStatus, LibeiStatus, MovePointerRequest, ObserveRequest,
+    PanicStopStatus, Point, PointerButton, PolicyStatus, RemoteDesktopPortalStatus, SafetyClass,
+    ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
     ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
     ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult,
     WindowGeometry, WindowInfo, current_egid, current_euid, default_journal_path,
@@ -457,6 +458,12 @@ fn handle_request(
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::InputBackendStatus => match input_backend_status() {
+            Ok(status) => DaemonResponse::InputBackendStatus(status),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::ListMonitors => match list_monitors() {
             Ok(monitors) => DaemonResponse::Monitors(monitors),
             Err(err) => DaemonResponse::Error {
@@ -763,6 +770,176 @@ fn uinput_setup_hint(available: bool, exists: bool, is_char_device: bool) -> Str
     "grant the daemon read/write access to /dev/uinput with the packaged udev rule, reload udev, add the user to the configured group, then restart the user session or service".to_string()
 }
 
+fn input_backend_status() -> Result<InputBackendStatus> {
+    let uinput = uinput_status()?;
+    let remote_desktop_portal = remote_desktop_portal_status();
+    let libei = libei_status();
+    let preferred_available_backend =
+        preferred_input_backend(&remote_desktop_portal, &libei, uinput.available);
+    let setup_hint = input_backend_setup_hint(
+        preferred_available_backend.as_deref(),
+        &remote_desktop_portal,
+        &libei,
+        uinput.available,
+    );
+
+    Ok(InputBackendStatus {
+        uinput_available: uinput.available,
+        remote_desktop_portal,
+        libei,
+        preferred_available_backend,
+        setup_hint,
+    })
+}
+
+fn remote_desktop_portal_status() -> RemoteDesktopPortalStatus {
+    let busctl_available = command_exists("busctl");
+    if !busctl_available {
+        return RemoteDesktopPortalStatus {
+            busctl_available,
+            portal_service_available: false,
+            remote_desktop_interface_available: false,
+            kde_portal_service_available: false,
+            setup_hint: remote_desktop_portal_setup_hint(false, false, false, false),
+        };
+    }
+
+    let service_list =
+        command_stdout("busctl", &["--user", "--no-pager", "--list"]).unwrap_or_default();
+    let portal_service_available = service_list.contains("org.freedesktop.portal.Desktop");
+    let kde_portal_service_available =
+        service_list.contains("org.freedesktop.impl.portal.desktop.kde");
+    let remote_desktop_interface_available = portal_service_available
+        && command_success(
+            "busctl",
+            &[
+                "--user",
+                "--no-pager",
+                "introspect",
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.RemoteDesktop",
+            ],
+        );
+
+    RemoteDesktopPortalStatus {
+        busctl_available,
+        portal_service_available,
+        remote_desktop_interface_available,
+        kde_portal_service_available,
+        setup_hint: remote_desktop_portal_setup_hint(
+            busctl_available,
+            portal_service_available,
+            remote_desktop_interface_available,
+            kde_portal_service_available,
+        ),
+    }
+}
+
+fn libei_status() -> LibeiStatus {
+    let pkg_config_available = command_exists("pkg-config");
+    let client_library_available =
+        pkg_config_available && command_success("pkg-config", &["--exists", "libei-1.0"]);
+    let socket_env_present = env::var_os("LIBEI_SOCKET").is_some();
+
+    LibeiStatus {
+        pkg_config_available,
+        client_library_available,
+        socket_env_present,
+        setup_hint: libei_setup_hint(
+            pkg_config_available,
+            client_library_available,
+            socket_env_present,
+        ),
+    }
+}
+
+fn preferred_input_backend(
+    remote_desktop_portal: &RemoteDesktopPortalStatus,
+    libei: &LibeiStatus,
+    uinput_available: bool,
+) -> Option<String> {
+    if remote_desktop_portal.remote_desktop_interface_available {
+        return Some("portal_remote_desktop".to_string());
+    }
+    if libei.socket_env_present || libei.client_library_available {
+        return Some("libei".to_string());
+    }
+    if uinput_available {
+        return Some("uinput".to_string());
+    }
+    None
+}
+
+fn input_backend_setup_hint(
+    preferred: Option<&str>,
+    remote_desktop_portal: &RemoteDesktopPortalStatus,
+    libei: &LibeiStatus,
+    uinput_available: bool,
+) -> String {
+    match preferred {
+        Some("portal_remote_desktop") => {
+            "prefer xdg-desktop-portal RemoteDesktop for consented input sessions; uinput remains fallback".to_string()
+        }
+        Some("libei") => {
+            "libei client support is visible; verify the compositor or portal grants an EIS connection before using it for control".to_string()
+        }
+        Some("uinput") => {
+            "only uinput is currently available; keep it behind policy, panic-stop, active-window guards, and journal checks".to_string()
+        }
+        _ if !remote_desktop_portal.busctl_available => {
+            "install busctl/systemd tools or run in a user session with DBus before probing portal RemoteDesktop; configure libei or uinput fallback as needed".to_string()
+        }
+        _ if !remote_desktop_portal.remote_desktop_interface_available
+            && !libei.client_library_available
+            && !libei.socket_env_present
+            && !uinput_available =>
+        {
+            "no input backend is currently available; configure portal RemoteDesktop/libei or install the uinput rule".to_string()
+        }
+        _ => "input backend state is partial; inspect individual portal, libei, and uinput fields".to_string(),
+    }
+}
+
+fn remote_desktop_portal_setup_hint(
+    busctl_available: bool,
+    portal_service_available: bool,
+    remote_desktop_interface_available: bool,
+    kde_portal_service_available: bool,
+) -> String {
+    if !busctl_available {
+        return "busctl is unavailable; cannot probe xdg-desktop-portal RemoteDesktop".to_string();
+    }
+    if !portal_service_available {
+        return "org.freedesktop.portal.Desktop is not visible on the user bus".to_string();
+    }
+    if !remote_desktop_interface_available {
+        return "portal service is visible, but org.freedesktop.portal.RemoteDesktop did not introspect successfully".to_string();
+    }
+    if !kde_portal_service_available {
+        return "RemoteDesktop portal is visible; KDE portal backend service was not listed"
+            .to_string();
+    }
+    "portal RemoteDesktop interface and KDE portal backend are visible".to_string()
+}
+
+fn libei_setup_hint(
+    pkg_config_available: bool,
+    client_library_available: bool,
+    socket_env_present: bool,
+) -> String {
+    if socket_env_present {
+        return "LIBEI_SOCKET is set; verify the socket belongs to the intended compositor or broker".to_string();
+    }
+    if client_library_available {
+        return "libei client library is available; an EIS connection still needs compositor or portal mediation".to_string();
+    }
+    if !pkg_config_available {
+        return "pkg-config is unavailable; cannot probe libei client library metadata".to_string();
+    }
+    "libei client library metadata was not found by pkg-config".to_string()
+}
+
 fn parse_bool_config_value(value: &str) -> Option<bool> {
     match value.to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" | "on" => Some(true),
@@ -872,6 +1049,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::PanicStopStatus
         | DaemonRequest::SetPanicStop(_)
         | DaemonRequest::UinputStatus
+        | DaemonRequest::InputBackendStatus
         | DaemonRequest::JournalTail(_) => SafetyClass::Policy,
         DaemonRequest::ListMonitors
         | DaemonRequest::ListWindows
@@ -942,6 +1120,24 @@ fn command_exists(command: &str) -> bool {
         let candidate = dir.join(command);
         candidate.is_file()
     })
+}
+
+fn command_success(command: &str, args: &[&str]) -> bool {
+    Command::new(command)
+        .args(args)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn command_stdout(command: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new(command)
+        .args(args)
+        .output()
+        .with_context(|| format!("run {command}"))?;
+    if !output.status.success() {
+        bail!("{command} exited with status {}", output.status);
+    }
+    String::from_utf8(output.stdout).with_context(|| format!("{command} stdout is not UTF-8"))
 }
 
 fn capture_screenshot(request: ScreenshotRequest) -> Result<ScreenshotInfo> {
@@ -2196,6 +2392,18 @@ fn summarize_response(response: &DaemonResponse) -> String {
                 .map(|mode| format!("{mode:o}"))
                 .unwrap_or_else(|| "unknown".to_string())
         ),
+        DaemonResponse::InputBackendStatus(status) => format!(
+            "input backends preferred={} portal_remote_desktop={} libei={} uinput={}",
+            status
+                .preferred_available_backend
+                .as_deref()
+                .unwrap_or("none"),
+            status
+                .remote_desktop_portal
+                .remote_desktop_interface_available,
+            status.libei.client_library_available || status.libei.socket_env_present,
+            status.uinput_available
+        ),
         DaemonResponse::Monitors(monitors) => format!("{} monitors", monitors.len()),
         DaemonResponse::Windows(windows) => format!("{} windows", windows.len()),
         DaemonResponse::Observation(observation) => format!(
@@ -2703,6 +2911,8 @@ mod tests {
         let policy = PolicyEngine::new(PolicyConfig::default());
         enforce_policy(&policy, &DaemonRequest::UinputStatus)
             .expect("uinput status is allowed as policy diagnostics");
+        enforce_policy(&policy, &DaemonRequest::InputBackendStatus)
+            .expect("input backend status is allowed as policy diagnostics");
     }
 
     #[test]
@@ -2716,6 +2926,51 @@ mod tests {
         assert!(
             uinput_setup_hint(false, true, true).contains("grant the daemon read/write access")
         );
+    }
+
+    #[test]
+    fn input_backend_preference_uses_portal_libei_then_uinput() {
+        let portal = remote_desktop_status(true);
+        let libei = libei_status_fixture(true, false);
+        assert_eq!(
+            preferred_input_backend(&portal, &libei, true).as_deref(),
+            Some("portal_remote_desktop")
+        );
+
+        let portal = remote_desktop_status(false);
+        assert_eq!(
+            preferred_input_backend(&portal, &libei, true).as_deref(),
+            Some("libei")
+        );
+
+        let libei = libei_status_fixture(false, false);
+        assert_eq!(
+            preferred_input_backend(&portal, &libei, true).as_deref(),
+            Some("uinput")
+        );
+        assert_eq!(preferred_input_backend(&portal, &libei, false), None);
+    }
+
+    #[test]
+    fn input_backend_setup_hints_report_missing_probe_paths() {
+        let portal = RemoteDesktopPortalStatus {
+            busctl_available: false,
+            portal_service_available: false,
+            remote_desktop_interface_available: false,
+            kde_portal_service_available: false,
+            setup_hint: String::new(),
+        };
+        let libei = libei_status_fixture(false, false);
+        let hint = input_backend_setup_hint(None, &portal, &libei, false);
+        assert!(hint.contains("busctl"));
+
+        assert!(remote_desktop_portal_setup_hint(false, false, false, false).contains("busctl"));
+        assert!(
+            remote_desktop_portal_setup_hint(true, true, false, true)
+                .contains("did not introspect")
+        );
+        assert!(libei_setup_hint(false, false, false).contains("pkg-config"));
+        assert!(libei_setup_hint(true, false, true).contains("LIBEI_SOCKET"));
     }
 
     #[test]
@@ -3379,6 +3634,28 @@ mod tests {
             logical_origin_x,
             logical_origin_y,
             transform: None,
+        }
+    }
+
+    fn remote_desktop_status(available: bool) -> RemoteDesktopPortalStatus {
+        RemoteDesktopPortalStatus {
+            busctl_available: true,
+            portal_service_available: available,
+            remote_desktop_interface_available: available,
+            kde_portal_service_available: available,
+            setup_hint: String::new(),
+        }
+    }
+
+    fn libei_status_fixture(
+        client_library_available: bool,
+        socket_env_present: bool,
+    ) -> LibeiStatus {
+        LibeiStatus {
+            pkg_config_available: client_library_available,
+            client_library_available,
+            socket_env_present,
+            setup_hint: String::new(),
         }
     }
 

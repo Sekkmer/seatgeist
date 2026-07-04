@@ -266,7 +266,10 @@ smoke-uinput-status:
 	fi
 	target/debug/plasma-pilot-cli --socket "$$socket" input status >"$$out"
 	jq -e '.type == "uinput_status" and (.data.available | type == "boolean") and (.data.setup_hint | type == "string")' "$$out" >/dev/null
+	target/debug/plasma-pilot-cli --socket "$$socket" input backends >"$$out"
+	jq -e '.type == "input_backend_status" and (.data.uinput_available | type == "boolean") and (.data.remote_desktop_portal.setup_hint | type == "string") and (.data.libei.setup_hint | type == "string")' "$$out" >/dev/null
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "uinput_status"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "input_backend_status"
 
 smoke-mcp:
 	set -euo pipefail
@@ -310,6 +313,7 @@ smoke-mcp:
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.panic_stop_disable")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.kwin_bridge_status")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.uinput_status")' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.input_backend_status")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.type_text")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.key_combo")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.move_pointer")' "$$out" >/dev/null

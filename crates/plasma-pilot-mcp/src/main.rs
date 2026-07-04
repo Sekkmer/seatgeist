@@ -237,6 +237,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         })),
         "plasma.kwin_bridge_status" => Ok(DaemonRequest::KwinBridgeStatus),
         "plasma.uinput_status" => Ok(DaemonRequest::UinputStatus),
+        "plasma.input_backend_status" => Ok(DaemonRequest::InputBackendStatus),
         "plasma.list_monitors" => Ok(DaemonRequest::ListMonitors),
         "plasma.list_windows" => Ok(DaemonRequest::ListWindows),
         "plasma.active_window" => Ok(DaemonRequest::ActiveWindow),
@@ -496,6 +497,18 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
                 .map(|mode| format!("{mode:o}"))
                 .unwrap_or_else(|| "unknown".to_string())
         ),
+        DaemonResponse::InputBackendStatus(status) => format!(
+            "input backends preferred={} portal_remote_desktop={} libei={} uinput={}",
+            status
+                .preferred_available_backend
+                .as_deref()
+                .unwrap_or("none"),
+            status
+                .remote_desktop_portal
+                .remote_desktop_interface_available,
+            status.libei.client_library_available || status.libei.socket_env_present,
+            status.uinput_available
+        ),
         DaemonResponse::Monitors(monitors) => format!("{} monitors", monitors.len()),
         DaemonResponse::Windows(windows) => format!("{} windows", windows.len()),
         DaemonResponse::Observation(observation) => format!(
@@ -602,6 +615,12 @@ fn tool_definitions() -> Vec<Value> {
             "plasma.uinput_status",
             "Uinput Status",
             "Report whether the daemon can open /dev/uinput for virtual keyboard and pointer fallback, with file metadata and setup hints.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.input_backend_status",
+            "Input Backend Status",
+            "Probe read-only input backend availability in priority order: xdg-desktop-portal RemoteDesktop, libei, then uinput fallback.",
             object_schema(vec![], vec![]),
         ),
         tool(
@@ -1331,6 +1350,11 @@ mod tests {
         assert!(
             tools
                 .iter()
+                .any(|tool| tool["name"] == "plasma.input_backend_status")
+        );
+        assert!(
+            tools
+                .iter()
                 .any(|tool| tool["name"] == "plasma.wait_for_change")
         );
         assert!(tools.iter().any(|tool| tool["name"] == "plasma.type_text"));
@@ -1614,6 +1638,15 @@ mod tests {
             daemon_request_for_tool("plasma.uinput_status", &json!({}))
                 .expect("uinput status maps"),
             DaemonRequest::UinputStatus
+        );
+    }
+
+    #[test]
+    fn maps_input_backend_status_tool() {
+        assert_eq!(
+            daemon_request_for_tool("plasma.input_backend_status", &json!({}))
+                .expect("input backend status maps"),
+            DaemonRequest::InputBackendStatus
         );
     }
 
