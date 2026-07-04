@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use libplasma_pilot::{MonitorInfo, PilotError};
+use libplasma_pilot::{CoordinateSpace, MonitorInfo, PilotError, WindowGeometry, WindowInfo};
 
 pub const BACKEND_NAME: &str = "kwin";
 
@@ -24,6 +24,205 @@ pub fn list_monitors() -> Result<Vec<MonitorInfo>> {
         PilotError::BackendUnavailable(format!("KWin supportInformation was not UTF-8: {err}"))
     })?;
     parse_support_info_monitors(&support_info)
+}
+
+pub fn list_windows() -> Result<Vec<WindowInfo>> {
+    let output = Command::new("qdbus6")
+        .args([
+            "--literal",
+            "org.kde.KWin",
+            "/WindowsRunner",
+            "org.kde.krunner1.Match",
+            "",
+        ])
+        .output()
+        .map_err(|err| PilotError::BackendUnavailable(format!("run qdbus6: {err}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(PilotError::BackendUnavailable(format!(
+            "qdbus6 KWin WindowsRunner Match exited with status {}: {stderr}",
+            output.status
+        )));
+    }
+
+    let literal = String::from_utf8(output.stdout).map_err(|err| {
+        PilotError::BackendUnavailable(format!("WindowsRunner output was not UTF-8: {err}"))
+    })?;
+    let mut windows = Vec::new();
+    for match_entry in parse_windows_runner_matches(&literal) {
+        windows.push(enrich_window(match_entry));
+    }
+    Ok(windows)
+}
+
+pub fn active_window() -> Result<Option<WindowInfo>> {
+    Err(PilotError::BackendUnavailable(
+        "active window requires the PlasmaPilot KWin script bridge".to_string(),
+    ))
+}
+
+fn enrich_window(match_entry: RunnerWindowMatch) -> WindowInfo {
+    let info = get_window_info(&match_entry.kwin_uuid).unwrap_or_default();
+    WindowInfo {
+        id: match_entry.kwin_uuid,
+        app_id: info
+            .desktop_file
+            .or(info.resource_class)
+            .or(Some(match_entry.icon_name)),
+        title: info.caption.unwrap_or(match_entry.title),
+        pid: None,
+        monitor_id: None,
+        geometry: info.geometry,
+    }
+}
+
+fn get_window_info(window_id: &str) -> Result<KwinWindowInfo> {
+    let output = Command::new("qdbus6")
+        .args([
+            "--literal",
+            "org.kde.KWin",
+            "/KWin",
+            "org.kde.KWin.getWindowInfo",
+            window_id,
+        ])
+        .output()
+        .map_err(|err| PilotError::BackendUnavailable(format!("run qdbus6: {err}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(PilotError::BackendUnavailable(format!(
+            "qdbus6 KWin getWindowInfo exited with status {}: {stderr}",
+            output.status
+        )));
+    }
+
+    let literal = String::from_utf8(output.stdout).map_err(|err| {
+        PilotError::BackendUnavailable(format!("getWindowInfo output was not UTF-8: {err}"))
+    })?;
+    Ok(parse_get_window_info(&literal))
+}
+
+pub fn parse_windows_runner_matches(literal: &str) -> Vec<RunnerWindowMatch> {
+    let mut matches = Vec::new();
+    let mut rest = literal;
+    while let Some(index) = rest.find("(sssida{sv})") {
+        rest = &rest[index + "(sssida{sv})".len()..];
+        let (Some((runner_id, after_id)), Some((title, after_title)), Some((icon, after_icon))) = (
+            parse_quoted(rest),
+            parse_quoted_after_first(rest),
+            parse_third_quoted(rest),
+        ) else {
+            break;
+        };
+        let _ = after_id;
+        let _ = after_title;
+        rest = after_icon;
+        matches.push(RunnerWindowMatch {
+            kwin_uuid: normalize_runner_window_id(&runner_id),
+            title,
+            icon_name: icon,
+        });
+    }
+    matches
+}
+
+fn parse_quoted_after_first(input: &str) -> Option<(String, &str)> {
+    let (_, rest) = parse_quoted(input)?;
+    parse_quoted(rest)
+}
+
+fn parse_third_quoted(input: &str) -> Option<(String, &str)> {
+    let (_, rest) = parse_quoted(input)?;
+    let (_, rest) = parse_quoted(rest)?;
+    parse_quoted(rest)
+}
+
+fn parse_quoted(input: &str) -> Option<(String, &str)> {
+    let start = input.find('"')?;
+    let mut value = String::new();
+    let mut escaped = false;
+    for (offset, character) in input[start + 1..].char_indices() {
+        if escaped {
+            value.push(character);
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if character == '"' {
+            let rest = &input[start + 1 + offset + character.len_utf8()..];
+            return Some((value, rest));
+        }
+        value.push(character);
+    }
+    None
+}
+
+fn normalize_runner_window_id(runner_id: &str) -> String {
+    runner_id
+        .strip_prefix("0_")
+        .unwrap_or(runner_id)
+        .to_string()
+}
+
+pub fn parse_get_window_info(literal: &str) -> KwinWindowInfo {
+    let caption = parse_variant_string(literal, "caption");
+    let desktop_file = parse_variant_string(literal, "desktopFile");
+    let resource_class = parse_variant_string(literal, "resourceClass");
+    let geometry = match (
+        parse_variant_f64(literal, "x"),
+        parse_variant_f64(literal, "y"),
+        parse_variant_f64(literal, "width"),
+        parse_variant_f64(literal, "height"),
+    ) {
+        (Some(x), Some(y), Some(width), Some(height)) => Some(WindowGeometry {
+            x: x.round() as i32,
+            y: y.round() as i32,
+            width: width.round().max(1.0) as u32,
+            height: height.round().max(1.0) as u32,
+            space: CoordinateSpace::LogicalPixel,
+        }),
+        _ => None,
+    };
+
+    KwinWindowInfo {
+        caption,
+        desktop_file,
+        resource_class,
+        geometry,
+    }
+}
+
+fn parse_variant_string(literal: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\" = [Variant(QString): ");
+    let start = literal.find(&needle)?;
+    parse_quoted(&literal[start + needle.len()..]).map(|(value, _)| value)
+}
+
+fn parse_variant_f64(literal: &str, key: &str) -> Option<f64> {
+    let needle = format!("\"{key}\" = [Variant(double): ");
+    let start = literal.find(&needle)? + needle.len();
+    let rest = &literal[start..];
+    let end = rest.find(']')?;
+    rest[..end].trim().parse().ok()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerWindowMatch {
+    pub kwin_uuid: String,
+    pub title: String,
+    pub icon_name: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KwinWindowInfo {
+    pub caption: Option<String>,
+    pub desktop_file: Option<String>,
+    pub resource_class: Option<String>,
+    pub geometry: Option<WindowGeometry>,
 }
 
 pub fn parse_support_info_monitors(support_info: &str) -> Result<Vec<MonitorInfo>> {
@@ -194,5 +393,38 @@ Compositing
         assert_eq!(monitors[0].physical_width, 7680);
         assert_eq!(monitors[0].physical_height, 4320);
         assert_eq!(monitors[0].scale_factor, 1.5);
+    }
+
+    #[test]
+    fn parses_windows_runner_matches() {
+        let literal = r#"[Argument: a(sssida{sv}) {[Argument: (sssida{sv}) "0_{bfa1f612-bb46-49de-b54e-8b89cd7e86b5}", "oxidentp : MainThread — Konsole", "utilities-terminal", 30, 0.7, [Argument: a{sv} {"subtext" = [Variant(QString): "Activate running window on Desktop 1"]}]], [Argument: (sssida{sv}) "0_{88ee4ade-8664-447b-8fe8-ca8a6e86e259}", "outfit.txt — Kate", "kate", 30, 0.5, [Argument: a{sv} {"subtext" = [Variant(QString): "Activate running window on Desktop 1"]}]]}]"#;
+
+        let windows = parse_windows_runner_matches(literal);
+        assert_eq!(windows.len(), 2);
+        assert_eq!(
+            windows[0].kwin_uuid,
+            "{bfa1f612-bb46-49de-b54e-8b89cd7e86b5}"
+        );
+        assert_eq!(windows[0].title, "oxidentp : MainThread — Konsole");
+        assert_eq!(windows[0].icon_name, "utilities-terminal");
+        assert_eq!(windows[1].title, "outfit.txt — Kate");
+    }
+
+    #[test]
+    fn parses_get_window_info_geometry() {
+        let literal = r#"[Argument: a{sv} {"caption" = [Variant(QString): "oxidentp : MainThread — Konsole"], "desktopFile" = [Variant(QString): "org.kde.konsole"], "resourceClass" = [Variant(QString): "org.kde.konsole"], "height" = [Variant(double): 2173.33], "width" = [Variant(double): 2087.33], "x" = [Variant(double): 1987.8], "y" = [Variant(double): 472.226]}]"#;
+
+        let info = parse_get_window_info(literal);
+        assert_eq!(
+            info.caption.as_deref(),
+            Some("oxidentp : MainThread — Konsole")
+        );
+        assert_eq!(info.desktop_file.as_deref(), Some("org.kde.konsole"));
+        let geometry = info.geometry.expect("geometry parsed");
+        assert_eq!(geometry.x, 1988);
+        assert_eq!(geometry.y, 472);
+        assert_eq!(geometry.width, 2087);
+        assert_eq!(geometry.height, 2173);
+        assert_eq!(geometry.space, CoordinateSpace::LogicalPixel);
     }
 }

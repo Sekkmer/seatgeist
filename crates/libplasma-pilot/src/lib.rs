@@ -10,5 +10,5 @@ pub use runtime::{current_euid, default_socket_path};
 pub use types::{
     AccessibilityAction, AccessibilityNode, BackendCapability, CoordinateSpace, MonitorInfo,
     Observation, PilotError, Point, PolicyDecision, SafetyClass, ScreenshotTarget,
-    ToolApprovalLevel, WindowId, WindowInfo,
+    ToolApprovalLevel, WindowGeometry, WindowId, WindowInfo,
 };

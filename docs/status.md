@@ -21,4 +21,7 @@ Phase 1 first slice is implemented:
 - `plasma-pilot-cli monitors` now reports KWin monitor metadata from `org.kde.KWin.supportInformation`; on this workstation it reports `HDMI-A-2` as 5120x2880 logical at scale 1.5, matching the 7680x4320 screenshot source.
 - Screenshot responses include the same monitor metadata when KWin responds.
 - `plasma-pilot-cli screenshot-tile` can crop a physical-pixel region from the full Spectacle capture and optionally downscale the tile. A host smoke captured a 1600x1200 tile at source origin 3200,1600 and wrote an 800x600 PNG with scale factors 0.5.
-- Input, AT-SPI, real MCP tools, portal/KWin-native capture backends, and journaling remain future work.
+- `plasma-pilot-cli windows` lists open windows through KWin's `WindowsRunner` and enriches each stable KWin window id through `org.kde.KWin.getWindowInfo` for title, app id, and logical geometry.
+- `plasma-pilot-cli active-window` is intentionally reported as unsupported until the PlasmaPilot KWin script bridge exists; KWin's interactive `queryWindowInfo` is not suitable for unattended active-window checks.
+- `make smoke-windows` validates window listing in a host KDE session and checks that `active-window` fails with the documented bridge requirement.
+- Input, active-window/focus control, AT-SPI, real MCP tools, portal/KWin-native capture backends, and journaling remain future work.

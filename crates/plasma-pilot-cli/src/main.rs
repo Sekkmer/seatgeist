@@ -109,8 +109,8 @@ fn main() -> Result<()> {
                 }),
             )?;
         }
-        Command::Windows => println!("window backend is not implemented yet"),
-        Command::ActiveWindow => println!("active-window backend is not implemented yet"),
+        Command::Windows => print_daemon_response(&socket, DaemonRequest::ListWindows)?,
+        Command::ActiveWindow => print_daemon_response(&socket, DaemonRequest::ActiveWindow)?,
         Command::Journal {
             command: JournalCommand::Tail,
         } => println!("journal backend is not implemented yet"),

@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::types::{
     BackendCapability, CoordinateSpace, MonitorInfo, Observation, SafetyClass, ToolApprovalLevel,
+    WindowInfo,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +75,8 @@ pub enum DaemonRequest {
     Capabilities,
     PolicyStatus,
     ListMonitors,
+    ListWindows,
+    ActiveWindow,
     Screenshot(ScreenshotRequest),
     ScreenshotTile(ScreenshotTileRequest),
 }
@@ -85,6 +88,8 @@ pub enum DaemonResponse {
     Capabilities(CapabilitySet),
     PolicyStatus(PolicyStatus),
     Monitors(Vec<MonitorInfo>),
+    Windows(Vec<WindowInfo>),
+    ActiveWindow(Option<WindowInfo>),
     Screenshot(ScreenshotInfo),
     Error { message: String },
 }
@@ -147,6 +152,13 @@ mod tests {
         let response = DaemonResponse::Monitors(Vec::new());
         let encoded = serde_json::to_string(&response).expect("monitor response serializes");
         assert_eq!(encoded, r#"{"type":"monitors","data":[]}"#);
+    }
+
+    #[test]
+    fn serializes_windows_response_with_type_tag() {
+        let response = DaemonResponse::Windows(Vec::new());
+        let encoded = serde_json::to_string(&response).expect("windows response serializes");
+        assert_eq!(encoded, r#"{"type":"windows","data":[]}"#);
     }
 
     #[test]

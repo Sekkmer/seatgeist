@@ -107,6 +107,18 @@ fn handle_request(request: DaemonRequest) -> DaemonResponse {
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::ListWindows => match list_windows() {
+            Ok(windows) => DaemonResponse::Windows(windows),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
+        DaemonRequest::ActiveWindow => match active_window() {
+            Ok(window) => DaemonResponse::ActiveWindow(window),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
         DaemonRequest::Screenshot(request) => match capture_screenshot(request) {
             Ok(info) => DaemonResponse::Screenshot(info),
             Err(err) => DaemonResponse::Error {
@@ -155,6 +167,7 @@ fn current_capabilities() -> Vec<BackendCapability> {
     }
     if command_exists("qdbus6") {
         capabilities.push(BackendCapability::MonitorMetadata);
+        capabilities.push(BackendCapability::WindowList);
     }
     capabilities
 }
@@ -302,6 +315,14 @@ fn capture_screenshot_tile(request: ScreenshotTileRequest) -> Result<ScreenshotI
 
 fn list_monitors() -> Result<Vec<libplasma_pilot::MonitorInfo>> {
     plasma_pilot_kwin::list_monitors().map_err(|err| anyhow::anyhow!(err))
+}
+
+fn list_windows() -> Result<Vec<libplasma_pilot::WindowInfo>> {
+    plasma_pilot_kwin::list_windows().map_err(|err| anyhow::anyhow!(err))
+}
+
+fn active_window() -> Result<Option<libplasma_pilot::WindowInfo>> {
+    plasma_pilot_kwin::active_window().map_err(|err| anyhow::anyhow!(err))
 }
 
 fn temporary_capture_path(output: &Path) -> PathBuf {
