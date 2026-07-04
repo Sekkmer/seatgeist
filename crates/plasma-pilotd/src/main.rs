@@ -246,6 +246,7 @@ struct DaemonConfigFile {
     daemon: Option<DaemonFileConfig>,
     policy: Option<PolicyFileConfig>,
     apps: Option<AppsFileConfig>,
+    safety: Option<SafetyFileConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -275,6 +276,16 @@ struct AppsFileConfig {
 struct AppPolicy {
     allow: Vec<String>,
     deny: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SafetyFileConfig {
+    require_focus_guard: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SafetySettings {
+    require_focus_guard: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -344,8 +355,17 @@ async fn main() -> Result<()> {
         args.allow_full_resolution_screenshot,
     );
     let app_policy = app_policy(file_config.apps.as_ref());
+    let safety_settings = safety_settings(file_config.safety.as_ref());
 
-    run(socket, journal, panic_stop_file, policy_config, app_policy).await
+    run(
+        socket,
+        journal,
+        panic_stop_file,
+        policy_config,
+        app_policy,
+        safety_settings,
+    )
+    .await
 }
 
 async fn run(
@@ -354,6 +374,7 @@ async fn run(
     panic_stop_path: PathBuf,
     policy_config: PolicyConfig,
     app_policy: AppPolicy,
+    safety_settings: SafetySettings,
 ) -> Result<()> {
     let journal = ActionJournal::new(journal_path);
     let panic_stop = PanicStopState::new(panic_stop_path);
@@ -367,6 +388,15 @@ async fn run(
         }
     };
     let kwin_bridge_registered = _kwin_bridge_connection.is_some();
+    let runtime = DaemonRuntime {
+        active_window_state,
+        kwin_bridge_registered,
+        journal,
+        panic_stop,
+        policy,
+        app_policy,
+        safety_settings,
+    };
 
     prepare_socket_path(&socket)?;
     let listener = UnixListener::bind(&socket)
@@ -379,23 +409,9 @@ async fn run(
 
     loop {
         let (stream, _addr) = listener.accept().await.context("accept client")?;
-        let active_window_state = active_window_state.clone();
-        let journal = journal.clone();
-        let panic_stop = panic_stop.clone();
-        let policy = policy.clone();
-        let app_policy = app_policy.clone();
+        let runtime = runtime.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_client(
-                stream,
-                active_window_state,
-                kwin_bridge_registered,
-                journal,
-                panic_stop,
-                policy,
-                app_policy,
-            )
-            .await
-            {
+            if let Err(err) = handle_client(stream, runtime).await {
                 warn!(error = %err, "client request failed");
             }
         });
@@ -426,15 +442,18 @@ async fn start_kwin_bridge(active_window_state: ActiveWindowState) -> Result<zbu
     Ok(connection)
 }
 
-async fn handle_client(
-    stream: UnixStream,
+#[derive(Debug, Clone)]
+struct DaemonRuntime {
     active_window_state: ActiveWindowState,
     kwin_bridge_registered: bool,
     journal: ActionJournal,
     panic_stop: PanicStopState,
     policy: PolicyEngine,
     app_policy: AppPolicy,
-) -> Result<()> {
+    safety_settings: SafetySettings,
+}
+
+async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()> {
     validate_peer_uid(&stream)?;
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
@@ -448,16 +467,9 @@ async fn handle_client(
 
     let request = serde_json::from_str::<DaemonRequest>(&line).context("parse daemon request")?;
     let method = request.method_name();
-    let response = handle_request(
-        request,
-        &active_window_state,
-        kwin_bridge_registered,
-        &journal,
-        &panic_stop,
-        &policy,
-        &app_policy,
-    );
-    journal
+    let response = handle_request(request, &runtime);
+    runtime
+        .journal
         .record(method, &response)
         .context("record request in action journal")?;
     let mut stream = reader.into_inner();
@@ -470,31 +482,30 @@ async fn handle_client(
     Ok(())
 }
 
-fn handle_request(
-    request: DaemonRequest,
-    active_window_state: &ActiveWindowState,
-    kwin_bridge_registered: bool,
-    journal: &ActionJournal,
-    panic_stop: &PanicStopState,
-    policy: &PolicyEngine,
-    app_policy: &AppPolicy,
-) -> DaemonResponse {
-    if let Err(err) = enforce_policy(policy, &request) {
+fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResponse {
+    if let Err(err) = enforce_policy(&runtime.policy, &request) {
         return DaemonResponse::Error {
             message: format_error_chain(&err),
         };
     }
-    if let Err(err) = enforce_panic_stop(panic_stop, &request) {
+    if let Err(err) = enforce_panic_stop(&runtime.panic_stop, &request) {
         return DaemonResponse::Error {
             message: format_error_chain(&err),
         };
     }
-    if let Err(err) = enforce_active_window_guard(active_window_state, &request) {
+    if let Err(err) = enforce_required_focus_guard(&runtime.safety_settings, &request) {
         return DaemonResponse::Error {
             message: format_error_chain(&err),
         };
     }
-    if let Err(err) = enforce_app_policy(active_window_state, app_policy, &request) {
+    if let Err(err) = enforce_active_window_guard(&runtime.active_window_state, &request) {
+        return DaemonResponse::Error {
+            message: format_error_chain(&err),
+        };
+    }
+    if let Err(err) =
+        enforce_app_policy(&runtime.active_window_state, &runtime.app_policy, &request)
+    {
         return DaemonResponse::Error {
             message: format_error_chain(&err),
         };
@@ -504,17 +515,19 @@ fn handle_request(
         DaemonRequest::Health => DaemonResponse::Health(health()),
         DaemonRequest::Capabilities => DaemonResponse::Capabilities(capabilities()),
         DaemonRequest::PolicyStatus => {
-            DaemonResponse::PolicyStatus(policy_status_from_config(policy.config()))
+            DaemonResponse::PolicyStatus(policy_status_from_config(runtime.policy.config()))
         }
-        DaemonRequest::PanicStopStatus => DaemonResponse::PanicStop(panic_stop.status()),
-        DaemonRequest::SetPanicStop(request) => match set_panic_stop(panic_stop, request) {
-            Ok(status) => DaemonResponse::PanicStop(status),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
-        },
+        DaemonRequest::PanicStopStatus => DaemonResponse::PanicStop(runtime.panic_stop.status()),
+        DaemonRequest::SetPanicStop(request) => {
+            match set_panic_stop(&runtime.panic_stop, request) {
+                Ok(status) => DaemonResponse::PanicStop(status),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
         DaemonRequest::KwinBridgeStatus => {
-            match kwin_bridge_status(active_window_state, kwin_bridge_registered) {
+            match kwin_bridge_status(&runtime.active_window_state, runtime.kwin_bridge_registered) {
                 Ok(status) => DaemonResponse::KwinBridgeStatus(status),
                 Err(err) => DaemonResponse::Error {
                     message: format_error_chain(&err),
@@ -551,18 +564,20 @@ fn handle_request(
                 message: format_error_chain(&err),
             },
         },
-        DaemonRequest::ActiveWindow => match active_window(active_window_state) {
+        DaemonRequest::ActiveWindow => match active_window(&runtime.active_window_state) {
             Ok(window) => DaemonResponse::ActiveWindow(window),
             Err(err) => DaemonResponse::Error {
                 message: format_error_chain(&err),
             },
         },
-        DaemonRequest::Observe(request) => match observe_desktop(request, active_window_state) {
-            Ok(observation) => DaemonResponse::Observation(Box::new(observation)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
-        },
+        DaemonRequest::Observe(request) => {
+            match observe_desktop(request, &runtime.active_window_state) {
+                Ok(observation) => DaemonResponse::Observation(Box::new(observation)),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
         DaemonRequest::Screenshot(request) => match capture_screenshot(request) {
             Ok(info) => DaemonResponse::Screenshot(info),
             Err(err) => DaemonResponse::Error {
@@ -674,8 +689,11 @@ fn handle_request(
             },
         },
         DaemonRequest::JournalTail(request) => {
-            match journal.tail_filtered(request.limit, request.method_filter.as_deref(), request.ok)
-            {
+            match runtime.journal.tail_filtered(
+                request.limit,
+                request.method_filter.as_deref(),
+                request.ok,
+            ) {
                 Ok(entries) => DaemonResponse::Journal(entries),
                 Err(err) => DaemonResponse::Error {
                     message: format_error_chain(&err),
@@ -823,6 +841,14 @@ fn normalize_app_policy_list(values: &[String]) -> Vec<String> {
         }
     }
     normalized
+}
+
+fn safety_settings(file_safety: Option<&SafetyFileConfig>) -> SafetySettings {
+    SafetySettings {
+        require_focus_guard: file_safety
+            .and_then(|safety| safety.require_focus_guard)
+            .unwrap_or(false),
+    }
 }
 
 fn kwin_bridge_status(
@@ -1153,6 +1179,25 @@ fn enforce_panic_stop(panic_stop: &PanicStopState, request: &DaemonRequest) -> R
         );
     }
     Ok(())
+}
+
+fn enforce_required_focus_guard(settings: &SafetySettings, request: &DaemonRequest) -> Result<()> {
+    if !settings.require_focus_guard {
+        return Ok(());
+    }
+    if !matches!(
+        safety_class_for_request(request),
+        SafetyClass::ControlPointer | SafetyClass::ControlKeyboard | SafetyClass::ControlSemantic
+    ) {
+        return Ok(());
+    }
+    if active_window_guard_for_request(request).is_some() {
+        return Ok(());
+    }
+    bail!(
+        "focus guard is required for {:?} by safety.require_focus_guard",
+        safety_class_for_request(request)
+    )
 }
 
 fn enforce_app_policy(
@@ -3464,6 +3509,57 @@ mod tests {
     }
 
     #[test]
+    fn safety_settings_from_config_defaults_focus_guard_to_false() {
+        assert!(!safety_settings(None).require_focus_guard);
+        assert!(
+            !safety_settings(Some(&SafetyFileConfig {
+                require_focus_guard: None,
+            }))
+            .require_focus_guard
+        );
+    }
+
+    #[test]
+    fn require_focus_guard_blocks_unguarded_control() {
+        let settings = SafetySettings {
+            require_focus_guard: true,
+        };
+
+        let err = enforce_required_focus_guard(
+            &settings,
+            &DaemonRequest::TypeText(TypeTextRequest {
+                text: "guarded only".to_string(),
+                guard: None,
+            }),
+        )
+        .expect_err("unguarded control is rejected");
+
+        assert!(err.to_string().contains("focus guard is required"));
+    }
+
+    #[test]
+    fn require_focus_guard_allows_guarded_control_and_observe() {
+        let settings = SafetySettings {
+            require_focus_guard: true,
+        };
+
+        enforce_required_focus_guard(&settings, &DaemonRequest::ListWindows)
+            .expect("observe requests do not need active-window guards");
+        enforce_required_focus_guard(
+            &settings,
+            &DaemonRequest::TypeText(TypeTextRequest {
+                text: "guarded only".to_string(),
+                guard: Some(ActiveWindowGuard {
+                    expected_window_id: None,
+                    expected_app_id: Some("org.kde.kate".to_string()),
+                    title_contains: None,
+                }),
+            }),
+        )
+        .expect("guarded control is accepted by require-focus-guard precheck");
+    }
+
+    #[test]
     fn parses_daemon_config_file() {
         let path = temp_test_path("daemon-config.toml");
         fs::write(
@@ -3484,6 +3580,9 @@ full_resolution_screenshot = "deny"
 [apps]
 allow = ["org.kde.kate"]
 deny = ["org.keepassxc.KeePassXC"]
+
+[safety]
+require_focus_guard = true
 "#,
         )
         .expect("config fixture is written");
@@ -3510,6 +3609,8 @@ deny = ["org.keepassxc.KeePassXC"]
             apps.deny.as_deref(),
             Some(&["org.keepassxc.KeePassXC".to_string()][..])
         );
+        let safety = config.safety.expect("safety section is present");
+        assert_eq!(safety.require_focus_guard, Some(true));
         fs::remove_file(&path).ok();
     }
 
