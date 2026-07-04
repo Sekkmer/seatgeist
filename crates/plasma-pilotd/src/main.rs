@@ -16,11 +16,11 @@ use image::{GenericImageView, Rgba, imageops::FilterType};
 use libplasma_pilot::{
     AccessibilityCopyTextRequest, AccessibilityCutTextRequest, AccessibilityDeleteTextRequest,
     AccessibilityFindRequest, AccessibilityInsertTextRequest, AccessibilityInvokeRequest,
-    AccessibilityPasteTextRequest, AccessibilitySetTextRequest, ActionResult, ActivateTabRequest,
-    ActiveWindowGuard, BackendCapability, CapabilitySet, ClickButtonRequest, ClickPointerRequest,
-    ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse,
-    DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus,
-    InputBackendStatus, JournalEntry, KeyComboRequest, KwinBridgeStatus, LibeiStatus,
+    AccessibilityPasteTextRequest, AccessibilitySetTextRequest, ActionResult, ActivateLinkRequest,
+    ActivateTabRequest, ActiveWindowGuard, BackendCapability, CapabilitySet, ClickButtonRequest,
+    ClickPointerRequest, ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest,
+    DaemonResponse, DesktopObservation, FocusWindowRequest, FocusedAccessibilityTreeRequest,
+    HealthStatus, InputBackendStatus, JournalEntry, KeyComboRequest, KwinBridgeStatus, LibeiStatus,
     MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton,
     PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
     PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus, SafetyClass, ScreenshotInfo,
@@ -757,6 +757,12 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
             },
         },
         DaemonRequest::ActivateTab(request) => match activate_tab(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
+        DaemonRequest::ActivateLink(request) => match activate_link(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
             Err(err) => DaemonResponse::Error {
                 message: format_error_chain(&err),
@@ -1500,6 +1506,7 @@ fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWin
         DaemonRequest::ClickButton(request) => request.guard.as_ref(),
         DaemonRequest::SetTextField(request) => request.guard.as_ref(),
         DaemonRequest::ActivateTab(request) => request.guard.as_ref(),
+        DaemonRequest::ActivateLink(request) => request.guard.as_ref(),
         DaemonRequest::ToggleCheck(request) => request.guard.as_ref(),
         DaemonRequest::SetValue(request) => request.guard.as_ref(),
         DaemonRequest::SelectMenu(request) => request.guard.as_ref(),
@@ -1586,6 +1593,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
             }
         }
         DaemonRequest::ActivateTab(_)
+        | DaemonRequest::ActivateLink(_)
         | DaemonRequest::ToggleCheck(_)
         | DaemonRequest::SetValue(_) => SafetyClass::ControlSemantic,
     }
@@ -2827,6 +2835,39 @@ fn activate_tab(request: ActivateTabRequest) -> Result<ActionResult> {
     })
 }
 
+fn activate_link(request: ActivateLinkRequest) -> Result<ActionResult> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        bail!("link name must be non-empty");
+    }
+    if request.max_nodes == 0 {
+        bail!("max_nodes must be greater than zero");
+    }
+
+    let matches = accessibility_find(AccessibilityFindRequest {
+        role: Some("link".to_string()),
+        name_contains: Some(name.to_string()),
+        app: request.app.clone(),
+        window_name_contains: request.window_name_contains.clone(),
+        depth: 0,
+        max_results: 10,
+        max_nodes: request.max_nodes,
+    })?;
+    let (target, action) = resolve_link_match(name, matches)?;
+    plasma_pilot_atspi::invoke(&target.id, action.clone()).map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "activated link name={} action={} node={}",
+            target.name.as_deref().unwrap_or(name),
+            action.as_str(),
+            target.id
+        )),
+    })
+}
+
 fn toggle_check(request: ToggleCheckRequest) -> Result<ActionResult> {
     let name = request.name.trim();
     if name.is_empty() {
@@ -3072,6 +3113,49 @@ fn resolve_tab_match(
     );
 }
 
+fn resolve_link_match(
+    name: &str,
+    matches: Vec<libplasma_pilot::AccessibilityNode>,
+) -> Result<(
+    libplasma_pilot::AccessibilityNode,
+    libplasma_pilot::AccessibilityAction,
+)> {
+    let mut viable = matches
+        .into_iter()
+        .filter(|node| !node.sensitive)
+        .filter(is_link_candidate)
+        .collect::<Vec<_>>();
+    if viable.is_empty() {
+        bail!("no non-sensitive activatable link matched name={name}");
+    }
+
+    let exact = viable
+        .iter()
+        .filter(|node| {
+            node.name
+                .as_deref()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !exact.is_empty() {
+        viable = exact;
+    }
+
+    if viable.len() == 1 {
+        let node = viable.remove(0);
+        let action = link_activation_action(&node)
+            .ok_or_else(|| anyhow::anyhow!("link has no press or select action"))?;
+        return Ok((node, action));
+    }
+
+    let choices = semantic_choice_summary(&viable);
+    bail!(
+        "ambiguous link match for name={name}: {} candidates; choices=[{choices}]",
+        viable.len()
+    );
+}
+
 fn resolve_check_match(
     name: &str,
     matches: Vec<libplasma_pilot::AccessibilityNode>,
@@ -3313,6 +3397,29 @@ fn is_check_candidate(node: &libplasma_pilot::AccessibilityNode) -> bool {
 }
 
 fn check_activation_action(
+    node: &libplasma_pilot::AccessibilityNode,
+) -> Option<libplasma_pilot::AccessibilityAction> {
+    if node
+        .actions
+        .contains(&libplasma_pilot::AccessibilityAction::Press)
+    {
+        Some(libplasma_pilot::AccessibilityAction::Press)
+    } else if node
+        .actions
+        .contains(&libplasma_pilot::AccessibilityAction::Select)
+    {
+        Some(libplasma_pilot::AccessibilityAction::Select)
+    } else {
+        None
+    }
+}
+
+fn is_link_candidate(node: &libplasma_pilot::AccessibilityNode) -> bool {
+    matches!(node.role.to_ascii_lowercase().as_str(), "link")
+        && link_activation_action(node).is_some()
+}
+
+fn link_activation_action(
     node: &libplasma_pilot::AccessibilityNode,
 ) -> Option<libplasma_pilot::AccessibilityAction> {
     if node
@@ -5372,6 +5479,23 @@ height = 40
     }
 
     #[test]
+    fn activate_link_is_control_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::ActivateLink(ActivateLinkRequest {
+                name: "Release notes".to_string(),
+                app: Some("firefox".to_string()),
+                window_name_contains: Some("docs".to_string()),
+                max_nodes: 256,
+                guard: None,
+            }),
+        )
+        .expect_err("activate link requires control approval by default");
+        assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
     fn toggle_check_is_control_policy() {
         let policy = PolicyEngine::new(PolicyConfig::default());
         let err = enforce_policy(
@@ -5592,6 +5716,47 @@ height = 40
         sensitive.sensitive = true;
         let err = resolve_tab_match("Security", vec![sensitive])
             .expect_err("sensitive tabs are not viable");
+        assert!(err.to_string().contains("no non-sensitive"));
+    }
+
+    #[test]
+    fn link_resolver_prefers_exact_match_and_press_action() {
+        let (target, action) = resolve_link_match(
+            "Release notes",
+            vec![
+                link_node("1", "Release notes archive"),
+                link_node("2", "Release notes"),
+            ],
+        )
+        .expect("exact link resolves");
+        assert_eq!(target.id, "2");
+        assert_eq!(action, libplasma_pilot::AccessibilityAction::Press);
+    }
+
+    #[test]
+    fn link_resolver_uses_select_when_press_is_unavailable() {
+        let (target, action) = resolve_link_match("Docs", vec![select_link_node("1", "Docs")])
+            .expect("selectable link resolves");
+        assert_eq!(target.id, "1");
+        assert_eq!(action, libplasma_pilot::AccessibilityAction::Select);
+    }
+
+    #[test]
+    fn link_resolver_refuses_ambiguous_matches() {
+        let err = resolve_link_match("Open", vec![link_node("1", "Open"), link_node("2", "Open")])
+            .expect_err("multiple exact links are ambiguous");
+        let err = err.to_string();
+        assert!(err.contains("ambiguous"));
+        assert!(err.contains("choices=[id=1 role=link name=Open actions=press"));
+        assert!(err.contains("id=2 role=link name=Open actions=press"));
+    }
+
+    #[test]
+    fn link_resolver_requires_non_sensitive_activatable_link() {
+        let mut sensitive = link_node("1", "Secret report");
+        sensitive.sensitive = true;
+        let err = resolve_link_match("Secret report", vec![sensitive])
+            .expect_err("sensitive links are not viable");
         assert!(err.to_string().contains("no non-sensitive"));
     }
 
@@ -5934,6 +6099,29 @@ height = 40
             actions: vec![libplasma_pilot::AccessibilityAction::Press],
             children: Vec::new(),
         }
+    }
+
+    fn link_node(id: &str, name: &str) -> libplasma_pilot::AccessibilityNode {
+        libplasma_pilot::AccessibilityNode {
+            id: id.to_string(),
+            role: "link".to_string(),
+            name: Some(name.to_string()),
+            value: None,
+            value_truncated: false,
+            sensitive: false,
+            states: Vec::new(),
+            bounds: None,
+            available_actions: vec!["press".to_string()],
+            actions: vec![libplasma_pilot::AccessibilityAction::Press],
+            children: Vec::new(),
+        }
+    }
+
+    fn select_link_node(id: &str, name: &str) -> libplasma_pilot::AccessibilityNode {
+        let mut node = link_node(id, name);
+        node.available_actions = vec!["select".to_string()];
+        node.actions = vec![libplasma_pilot::AccessibilityAction::Select];
+        node
     }
 
     fn check_node(id: &str, name: &str, checked: bool) -> libplasma_pilot::AccessibilityNode {

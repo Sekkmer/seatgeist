@@ -429,6 +429,16 @@ pub struct ActivateTabRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivateLinkRequest {
+    pub name: String,
+    pub app: Option<String>,
+    pub window_name_contains: Option<String>,
+    pub max_nodes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToggleCheckRequest {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -520,6 +530,7 @@ pub enum DaemonRequest {
     ClickButton(ClickButtonRequest),
     SetTextField(SetTextFieldRequest),
     ActivateTab(ActivateTabRequest),
+    ActivateLink(ActivateLinkRequest),
     ToggleCheck(ToggleCheckRequest),
     SetValue(SetValueRequest),
     SelectMenu(SelectMenuRequest),
@@ -565,6 +576,7 @@ impl DaemonRequest {
             Self::ClickButton(_) => "click_button",
             Self::SetTextField(_) => "set_text_field",
             Self::ActivateTab(_) => "activate_tab",
+            Self::ActivateLink(_) => "activate_link",
             Self::ToggleCheck(_) => "toggle_check",
             Self::SetValue(_) => "set_value",
             Self::SelectMenu(_) => "select_menu",
@@ -1341,6 +1353,21 @@ mod tests {
         assert!(encoded.contains(r#""name":"Volume""#));
         assert!(encoded.contains(r#""value":0.75"#));
         assert!(encoded.contains(r#""app":"settings""#));
+    }
+
+    #[test]
+    fn serializes_activate_link_request() {
+        let request = DaemonRequest::ActivateLink(ActivateLinkRequest {
+            name: "Release notes".to_string(),
+            app: Some("firefox".to_string()),
+            window_name_contains: Some("docs".to_string()),
+            max_nodes: 512,
+            guard: None,
+        });
+        let encoded = serde_json::to_string(&request).expect("activate link request serializes");
+        assert!(encoded.contains(r#""method":"activate_link""#));
+        assert!(encoded.contains(r#""name":"Release notes""#));
+        assert!(encoded.contains(r#""app":"firefox""#));
     }
 
     #[test]

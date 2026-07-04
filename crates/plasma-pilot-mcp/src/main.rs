@@ -10,15 +10,15 @@ use libplasma_pilot::{
     AccessibilityAction, AccessibilityCopyTextRequest, AccessibilityCutTextRequest,
     AccessibilityDeleteTextRequest, AccessibilityFindRequest, AccessibilityInsertTextRequest,
     AccessibilityInvokeRequest, AccessibilityPasteTextRequest, AccessibilitySetTextRequest,
-    ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest, ClickPointerRequest,
-    ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES,
-    DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
-    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest, DaemonResponse, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, MovePointerRequest,
-    ObserveRequest, Point, PointerButton, ScreenshotRequest, ScreenshotTileRequest,
-    ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
-    SetValueRequest, ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest,
-    default_socket_path,
+    ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest,
+    ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace,
+    DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
+    DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
+    DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
+    KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton, ScreenshotRequest,
+    ScreenshotTileRequest, ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest,
+    SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
+    WaitForChangeRequest, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -453,6 +453,16 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
             guard: active_window_guard(arguments)?,
         })),
         "plasma.activate_tab" => Ok(DaemonRequest::ActivateTab(ActivateTabRequest {
+            name: required_string(arguments, "name")?,
+            app: optional_string(arguments, "app")?,
+            window_name_contains: optional_string(arguments, "window_name_contains")?,
+            max_nodes: optional_u64(arguments, "max_nodes")?
+                .map(u64_to_usize)
+                .transpose()?
+                .unwrap_or(1024),
+            guard: active_window_guard(arguments)?,
+        })),
+        "plasma.activate_link" => Ok(DaemonRequest::ActivateLink(ActivateLinkRequest {
             name: required_string(arguments, "name")?,
             app: optional_string(arguments, "app")?,
             window_name_contains: optional_string(arguments, "window_name_contains")?,
@@ -999,6 +1009,32 @@ fn tool_definitions() -> Vec<Value> {
                     (
                         "name",
                         json!({"type": "string", "description": "Accessible tab name to match."}),
+                    ),
+                    (
+                        "app",
+                        json!({"type": "string", "description": "Optional application accessible-name guard."}),
+                    ),
+                    (
+                        "window_name_contains",
+                        json!({"type": "string", "description": "Optional containing frame/dialog/window accessible-name guard."}),
+                    ),
+                    (
+                        "max_nodes",
+                        json!({"type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum accessibility nodes to scan. Defaults to 1024."}),
+                    ),
+                ]),
+                vec!["name"],
+            ),
+        ),
+        tool(
+            "plasma.activate_link",
+            "Activate Link",
+            "Find a named non-sensitive AT-SPI link and activate it only when exactly one viable match is found. This is policy-gated semantic control.",
+            object_schema(
+                with_guard_properties(vec![
+                    (
+                        "name",
+                        json!({"type": "string", "description": "Accessible link name to match."}),
                     ),
                     (
                         "app",
@@ -1670,6 +1706,11 @@ mod tests {
         assert!(
             tools
                 .iter()
+                .any(|tool| tool["name"] == "plasma.activate_link")
+        );
+        assert!(
+            tools
+                .iter()
                 .any(|tool| tool["name"] == "plasma.toggle_check")
         );
         assert!(tools.iter().any(|tool| tool["name"] == "plasma.set_value"));
@@ -2027,6 +2068,30 @@ mod tests {
                 name: "General".to_string(),
                 app: Some("settings".to_string()),
                 window_name_contains: Some("preferences".to_string()),
+                max_nodes: 256,
+                guard: None,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_activate_link_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.activate_link",
+            &json!({
+                "name": "Release notes",
+                "app": "firefox",
+                "window_name_contains": "docs",
+                "max_nodes": 256
+            }),
+        )
+        .expect("activate link args map");
+        assert_eq!(
+            request,
+            DaemonRequest::ActivateLink(ActivateLinkRequest {
+                name: "Release notes".to_string(),
+                app: Some("firefox".to_string()),
+                window_name_contains: Some("docs".to_string()),
                 max_nodes: 256,
                 guard: None,
             })

@@ -242,6 +242,8 @@ smoke-atspi:
 	grep -q "policy" "$$out"
 	if target/debug/plasma-pilot-cli --socket "$$socket" semantic activate-tab --name General --max-nodes 128 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
 	grep -q "policy" "$$out"
+	if target/debug/plasma-pilot-cli --socket "$$socket" semantic activate-link --name Help --max-nodes 128 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
+	grep -q "policy" "$$out"
 	if target/debug/plasma-pilot-cli --socket "$$socket" semantic toggle-check --name Enable --max-nodes 128 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
 	grep -q "policy" "$$out"
 	if target/debug/plasma-pilot-cli --socket "$$socket" semantic set-value --name Volume --value 0.5 --max-nodes 128 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
@@ -260,6 +262,7 @@ smoke-atspi:
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "click_button"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "set_text_field"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "activate_tab"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "activate_link"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "toggle_check"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "set_value"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 20 | grep -q "select_menu"

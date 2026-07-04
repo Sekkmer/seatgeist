@@ -6,15 +6,15 @@ use libplasma_pilot::{
     AccessibilityAction, AccessibilityCopyTextRequest, AccessibilityCutTextRequest,
     AccessibilityDeleteTextRequest, AccessibilityFindRequest, AccessibilityInsertTextRequest,
     AccessibilityInvokeRequest, AccessibilityPasteTextRequest, AccessibilitySetTextRequest,
-    ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest, ClickPointerRequest,
-    ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES,
-    DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
-    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest, DaemonResponse, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, MovePointerRequest,
-    ObserveRequest, Point, PointerButton, ReplayTrace, ScreenshotRequest, ScreenshotTileRequest,
-    ScrollPointerRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
-    SetValueRequest, ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest,
-    default_socket_path,
+    ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest,
+    ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace,
+    DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
+    DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
+    DaemonResponse, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
+    KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton, ReplayTrace,
+    ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectMenuRequest,
+    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
+    WaitForChangeRequest, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -366,6 +366,22 @@ enum SemanticCommand {
         active_title_contains: Option<String>,
     },
     ActivateTab {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long)]
+        window_name_contains: Option<String>,
+        #[arg(long, default_value_t = 1024)]
+        max_nodes: usize,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
+    ActivateLink {
         #[arg(long)]
         name: String,
         #[arg(long)]
@@ -972,6 +988,31 @@ fn main() -> Result<()> {
         } => print_daemon_response(
             &socket,
             DaemonRequest::ActivateTab(ActivateTabRequest {
+                name,
+                app,
+                window_name_contains,
+                max_nodes,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
+        )?,
+        Command::Semantic {
+            command:
+                SemanticCommand::ActivateLink {
+                    name,
+                    app,
+                    window_name_contains,
+                    max_nodes,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::ActivateLink(ActivateLinkRequest {
                 name,
                 app,
                 window_name_contains,
