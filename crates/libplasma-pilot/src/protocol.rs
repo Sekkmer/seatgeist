@@ -31,10 +31,30 @@ pub struct PolicyStatus {
 pub struct ScreenshotInfo {
     pub path: PathBuf,
     pub backend: String,
-    pub width: Option<u32>,
-    pub height: Option<u32>,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub output_width: u32,
+    pub output_height: u32,
+    pub transform: ScreenshotTransform,
     pub coordinate_space: CoordinateSpace,
     pub monitors: Vec<MonitorInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScreenshotTransform {
+    pub source_coordinate_space: CoordinateSpace,
+    pub output_coordinate_space: CoordinateSpace,
+    pub source_origin_x: u32,
+    pub source_origin_y: u32,
+    pub scale_x: f64,
+    pub scale_y: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenshotRequest {
+    pub output: PathBuf,
+    pub max_edge: Option<u32>,
+    pub full_resolution: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,7 +63,7 @@ pub enum DaemonRequest {
     Health,
     Capabilities,
     PolicyStatus,
-    Screenshot { output: PathBuf },
+    Screenshot(ScreenshotRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -98,11 +118,14 @@ mod tests {
 
     #[test]
     fn serializes_screenshot_request_with_output_path() {
-        let request = DaemonRequest::Screenshot {
+        let request = DaemonRequest::Screenshot(ScreenshotRequest {
             output: PathBuf::from("/tmp/plasma-pilot.png"),
-        };
+            max_edge: Some(1600),
+            full_resolution: false,
+        });
         let encoded = serde_json::to_string(&request).expect("screenshot request serializes");
         assert!(encoded.contains(r#""method":"screenshot""#));
         assert!(encoded.contains(r#"/tmp/plasma-pilot.png"#));
+        assert!(encoded.contains(r#""max_edge":1600"#));
     }
 }

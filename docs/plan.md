@@ -779,12 +779,12 @@ Tasks:
 - Add `plasma-pilot-cli screenshot`.
 - Add default downscaled previews and explicit full-resolution capture.
 - Add tiled screenshots for 8K and multi-monitor workflows.
-- Add coordinate transform metadata for preview/crop/full-size mapping.
+- Add coordinate transform metadata for preview/crop/full-size mapping. Initial preview/full-size mapping is implemented with scale factors and source/output dimensions.
 
 Acceptance criteria:
 
 - CLI can capture current screen to PNG.
-- Screenshot response includes coordinate metadata.
+- Screenshot response includes coordinate metadata, source dimensions, output dimensions, and preview scale factors.
 - Multi-monitor metadata is correct or explicitly marked unsupported. Initial Spectacle backend returns an empty monitor list until KWin/portal metadata is wired.
 
 ### Phase 3: uinput keyboard and pointer control

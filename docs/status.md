@@ -15,5 +15,7 @@ Phase 1 first slice is implemented:
 - The daemon serves newline-delimited JSON requests for `health`, `capabilities`, and `policy_status`.
 - `plasma-pilot-cli doctor`, `capabilities`, and `policy-status` call the daemon over the Unix socket.
 - `make smoke` starts a temporary daemon, calls the CLI health/capability/policy commands, and verifies socket directory/socket modes.
-- The daemon and CLI can capture a full-screen PNG through Spectacle when run in the host KDE session. The smoke capture on this workstation returned a 7680x4320 PNG with `physical_pixel` coordinate metadata.
-- Input, KWin metadata, AT-SPI, real MCP tools, screenshot downscaling/tiling, and journaling remain future work.
+- The daemon and CLI can capture a full-screen PNG through Spectacle when run in the host KDE session. The smoke capture on this workstation returned a 7680x4320 source image.
+- Screenshot output now defaults to a bounded preview. On the 8K workstation, the default CLI screenshot produced a 1600x900 PNG with source/output dimensions and scale metadata; `--full-resolution` produced a 7680x4320 PNG with scale `1.0`.
+- Spectacle captures are serialized inside the daemon because concurrent Spectacle captures can race.
+- Input, KWin metadata, AT-SPI, real MCP tools, screenshot tiling, and journaling remain future work.

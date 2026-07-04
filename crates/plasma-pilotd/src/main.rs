@@ -3,21 +3,26 @@ use std::{
     os::unix::fs::{FileTypeExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
+    sync::{Mutex, OnceLock},
     thread,
     time::Duration,
 };
 
 use anyhow::{Context, Error, Result, bail};
 use clap::Parser;
+use image::imageops::FilterType;
 use libplasma_pilot::{
     BackendCapability, CapabilitySet, CoordinateSpace, DaemonRequest, DaemonResponse, HealthStatus,
-    PolicyStatus, ScreenshotInfo, ToolApprovalLevel, current_euid, default_socket_path,
+    PolicyStatus, ScreenshotInfo, ScreenshotRequest, ScreenshotTransform, ToolApprovalLevel,
+    current_euid, default_socket_path,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
 };
 use tracing::{error, info, warn};
+
+static SCREENSHOT_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Parser)]
 #[command(version, about = "PlasmaPilot local desktop-control daemon")]
@@ -96,7 +101,7 @@ fn handle_request(request: DaemonRequest) -> DaemonResponse {
         DaemonRequest::Health => DaemonResponse::Health(health()),
         DaemonRequest::Capabilities => DaemonResponse::Capabilities(capabilities()),
         DaemonRequest::PolicyStatus => DaemonResponse::PolicyStatus(policy_status()),
-        DaemonRequest::Screenshot { output } => match capture_screenshot(output) {
+        DaemonRequest::Screenshot(request) => match capture_screenshot(request) {
             Ok(info) => DaemonResponse::Screenshot(info),
             Err(err) => DaemonResponse::Error {
                 message: format_error_chain(&err),
@@ -150,32 +155,120 @@ fn command_exists(command: &str) -> bool {
     })
 }
 
-fn capture_screenshot(output: PathBuf) -> Result<ScreenshotInfo> {
-    prepare_screenshot_output(&output)?;
+fn capture_screenshot(request: ScreenshotRequest) -> Result<ScreenshotInfo> {
+    let _guard = SCREENSHOT_CAPTURE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| anyhow::anyhow!("screenshot capture lock is poisoned"))?;
+    if !request.full_resolution && request.max_edge == Some(0) {
+        bail!("max_edge must be greater than zero");
+    }
+    prepare_screenshot_output(&request.output)?;
     if !command_exists("spectacle") {
         bail!("spectacle command is not available for KDE screenshot capture");
     }
 
+    let capture_output = if request.full_resolution {
+        request.output.clone()
+    } else {
+        temporary_capture_path(&request.output)
+    };
+    prepare_screenshot_output(&capture_output)?;
+
     let status = Command::new("spectacle")
         .args(["-b", "-f", "-n", "-o"])
-        .arg(&output)
+        .arg(&capture_output)
         .status()
         .context("run spectacle screenshot backend")?;
     if !status.success() {
         bail!("spectacle screenshot backend exited with status {status}");
     }
 
-    let (width, height) = read_png_dimensions_with_retry(&output)
-        .with_context(|| format!("read screenshot dimensions from {}", output.display()))?;
+    let (source_width, source_height) = read_png_dimensions_with_retry(&capture_output)
+        .with_context(|| {
+            format!(
+                "read screenshot dimensions from {}",
+                capture_output.display()
+            )
+        })?;
+
+    let (output_width, output_height) = if request.full_resolution {
+        (source_width, source_height)
+    } else {
+        write_preview_or_copy(
+            &capture_output,
+            &request.output,
+            source_width,
+            source_height,
+            request.max_edge.unwrap_or(1600),
+        )?
+    };
+
+    if capture_output != request.output {
+        fs::remove_file(&capture_output).ok();
+    }
 
     Ok(ScreenshotInfo {
-        path: output,
+        path: request.output,
         backend: "spectacle".to_string(),
-        width: Some(width),
-        height: Some(height),
+        source_width,
+        source_height,
+        output_width,
+        output_height,
+        transform: ScreenshotTransform {
+            source_coordinate_space: CoordinateSpace::PhysicalPixel,
+            output_coordinate_space: CoordinateSpace::PhysicalPixel,
+            source_origin_x: 0,
+            source_origin_y: 0,
+            scale_x: f64::from(output_width) / f64::from(source_width),
+            scale_y: f64::from(output_height) / f64::from(source_height),
+        },
         coordinate_space: CoordinateSpace::PhysicalPixel,
         monitors: Vec::new(),
     })
+}
+
+fn temporary_capture_path(output: &Path) -> PathBuf {
+    let file_name = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("screenshot.png");
+    let temp_name = format!(".plasma-pilot-full-{}-{file_name}", std::process::id());
+    output.with_file_name(temp_name)
+}
+
+fn write_preview_or_copy(
+    source: &Path,
+    output: &Path,
+    source_width: u32,
+    source_height: u32,
+    max_edge: u32,
+) -> Result<(u32, u32)> {
+    if max_edge == 0 {
+        bail!("max_edge must be greater than zero");
+    }
+
+    let largest_edge = source_width.max(source_height);
+    if largest_edge <= max_edge {
+        fs::copy(source, output)
+            .with_context(|| format!("copy screenshot preview to {}", output.display()))?;
+        return Ok((source_width, source_height));
+    }
+
+    let scale = f64::from(max_edge) / f64::from(largest_edge);
+    let output_width = scaled_dimension(source_width, scale);
+    let output_height = scaled_dimension(source_height, scale);
+    let image =
+        image::open(source).with_context(|| format!("open screenshot {}", source.display()))?;
+    let resized = image.resize(output_width, output_height, FilterType::Lanczos3);
+    resized
+        .save(output)
+        .with_context(|| format!("write screenshot preview {}", output.display()))?;
+    Ok((output_width, output_height))
+}
+
+fn scaled_dimension(value: u32, scale: f64) -> u32 {
+    (f64::from(value) * scale).round().max(1.0) as u32
 }
 
 fn format_error_chain(err: &Error) -> String {

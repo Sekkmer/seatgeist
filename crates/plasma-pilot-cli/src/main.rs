@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use libplasma_pilot::{DaemonRequest, DaemonResponse, default_socket_path};
+use libplasma_pilot::{DaemonRequest, DaemonResponse, ScreenshotRequest, default_socket_path};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
@@ -24,6 +24,10 @@ enum Command {
     Screenshot {
         #[arg(long)]
         output: String,
+        #[arg(long, default_value_t = 1600)]
+        max_edge: u32,
+        #[arg(long)]
+        full_resolution: bool,
     },
     Windows,
     ActiveWindow,
@@ -49,12 +53,22 @@ fn main() -> Result<()> {
         Command::Doctor => print_daemon_response(&socket, DaemonRequest::Health)?,
         Command::Capabilities => print_daemon_response(&socket, DaemonRequest::Capabilities)?,
         Command::PolicyStatus => print_daemon_response(&socket, DaemonRequest::PolicyStatus)?,
-        Command::Screenshot { output } => {
+        Command::Screenshot {
+            output,
+            max_edge,
+            full_resolution,
+        } => {
             print_daemon_response(
                 &socket,
-                DaemonRequest::Screenshot {
+                DaemonRequest::Screenshot(ScreenshotRequest {
                     output: output.into(),
-                },
+                    max_edge: if full_resolution {
+                        None
+                    } else {
+                        Some(max_edge)
+                    },
+                    full_resolution,
+                }),
             )?;
         }
         Command::Windows => println!("window backend is not implemented yet"),

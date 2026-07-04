@@ -16,6 +16,7 @@ description = "KDE Plasma desktop-control substrate for Codex."
 anyhow = "1.0.100"
 async-trait = "0.1.88"
 clap = { version = "4.5.41", features = ["derive", "env"] }
+image = { version = "0.25.8", default-features = false, features = ["png"] }
 libplasma-pilot = { path = "crates/libplasma-pilot" }
 plasma-pilot-backend = { path = "crates/plasma-pilot-backend" }
 plasma-pilot-policy = { path = "crates/plasma-pilot-policy" }
