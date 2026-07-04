@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::types::{
     AccessibilityAction, AccessibilityNode, BackendCapability, CoordinateSpace, MonitorInfo,
-    Observation, SafetyClass, ToolApprovalLevel, WindowInfo,
+    Observation, Point, SafetyClass, ToolApprovalLevel, WindowInfo,
 };
 
 pub const DEFAULT_CLIPBOARD_MAX_BYTES: usize = 64 * 1024;
@@ -60,6 +60,19 @@ pub struct ScreenshotTransform {
     pub source_origin_y: u32,
     pub scale_x: f64,
     pub scale_y: f64,
+}
+
+impl ScreenshotTransform {
+    pub fn output_to_source_point(&self, output_x: f64, output_y: f64) -> Option<Point> {
+        if self.scale_x <= 0.0 || self.scale_y <= 0.0 {
+            return None;
+        }
+        Some(Point {
+            x: f64::from(self.source_origin_x) + output_x / self.scale_x,
+            y: f64::from(self.source_origin_y) + output_y / self.scale_y,
+            space: self.source_coordinate_space,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -338,6 +351,58 @@ mod tests {
     }
 
     #[test]
+    fn screenshot_transform_maps_8k_preview_to_source_pixels() {
+        let transform = ScreenshotTransform {
+            source_coordinate_space: CoordinateSpace::PhysicalPixel,
+            output_coordinate_space: CoordinateSpace::PhysicalPixel,
+            source_origin_x: 0,
+            source_origin_y: 0,
+            scale_x: 1600.0 / 7680.0,
+            scale_y: 900.0 / 4320.0,
+        };
+
+        let point = transform
+            .output_to_source_point(800.0, 450.0)
+            .expect("positive scale maps output point");
+        assert_close(point.x, 3840.0);
+        assert_close(point.y, 2160.0);
+        assert_eq!(point.space, CoordinateSpace::PhysicalPixel);
+    }
+
+    #[test]
+    fn screenshot_transform_maps_tile_preview_to_source_pixels() {
+        let transform = ScreenshotTransform {
+            source_coordinate_space: CoordinateSpace::PhysicalPixel,
+            output_coordinate_space: CoordinateSpace::PhysicalPixel,
+            source_origin_x: 3200,
+            source_origin_y: 1600,
+            scale_x: 0.5,
+            scale_y: 0.5,
+        };
+
+        let point = transform
+            .output_to_source_point(400.0, 300.0)
+            .expect("positive scale maps output point");
+        assert_close(point.x, 4000.0);
+        assert_close(point.y, 2200.0);
+        assert_eq!(point.space, CoordinateSpace::PhysicalPixel);
+    }
+
+    #[test]
+    fn screenshot_transform_rejects_zero_scale_mapping() {
+        let transform = ScreenshotTransform {
+            source_coordinate_space: CoordinateSpace::PhysicalPixel,
+            output_coordinate_space: CoordinateSpace::PhysicalPixel,
+            source_origin_x: 0,
+            source_origin_y: 0,
+            scale_x: 0.0,
+            scale_y: 1.0,
+        };
+
+        assert_eq!(transform.output_to_source_point(1.0, 1.0), None);
+    }
+
+    #[test]
     fn serializes_journal_tail_request() {
         let request = DaemonRequest::JournalTail(JournalTailRequest { limit: 10 });
         let encoded = serde_json::to_string(&request).expect("journal request serializes");
@@ -513,6 +578,13 @@ mod tests {
                 .parse::<AccessibilityAction>()
                 .expect("hyphenated set-text parses"),
             AccessibilityAction::SetText
+        );
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 0.001,
+            "expected {actual} to be close to {expected}"
         );
     }
 }
