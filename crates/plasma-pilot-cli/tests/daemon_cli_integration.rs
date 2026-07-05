@@ -9,8 +9,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 use libplasma_pilot::{
     BackendCapability, CapabilitySet, ClipboardGetRequest, DaemonRequest, DaemonResponse,
-    DesktopSessionStatus, HealthStatus, JournalEntry, PanicStopStatus, PolicyStatus, ReplayTrace,
-    SafetyStatus, ToolApprovalLevel, TraceJsonExpectation, TraceStep, UinputStatus,
+    DesktopSessionStatus, HealthStatus, JournalEntry, PanicStopStatus, PolicyStatus,
+    RemoteDesktopEisSessionStatus, ReplayTrace, SafetyStatus, ToolApprovalLevel,
+    TraceJsonExpectation, TraceStep, UinputStatus,
 };
 use std::os::unix::fs::PermissionsExt;
 
@@ -202,6 +203,46 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
         );
     }
     assert!(!status.setup_hint.is_empty());
+
+    let eis_session_status = daemon.cli_json(&["input", "remote-desktop-eis-session-status"])?;
+    assert_eq!(
+        eis_session_status,
+        DaemonResponse::RemoteDesktopEisSessionStatus(RemoteDesktopEisSessionStatus {
+            active: false,
+            runtime_connected: false,
+            bound_capabilities: vec![],
+            resumed_device_count: 0,
+            selected_devices: vec![],
+            clipboard_enabled: false,
+            restore_token: None,
+            session_handle: None,
+            create_request_path: None,
+            select_request_path: None,
+            start_request_path: None,
+            setup_hint:
+                "no stored portal RemoteDesktop EIS session; start one before selecting portal/libei execution"
+                    .to_string(),
+        })
+    );
+
+    let stopped_eis_session = daemon.cli_json(&["input", "remote-desktop-eis-stop"])?;
+    assert_eq!(
+        stopped_eis_session,
+        DaemonResponse::RemoteDesktopEisSessionStatus(RemoteDesktopEisSessionStatus {
+            active: false,
+            runtime_connected: false,
+            bound_capabilities: vec![],
+            resumed_device_count: 0,
+            selected_devices: vec![],
+            clipboard_enabled: false,
+            restore_token: None,
+            session_handle: None,
+            create_request_path: None,
+            select_request_path: None,
+            start_request_path: None,
+            setup_hint: "no stored portal RemoteDesktop EIS session was active".to_string(),
+        })
+    );
 
     let capture_backends = daemon.cli_json(&["capture-backends"])?;
     let DaemonResponse::CaptureBackendStatus(status) = capture_backends else {

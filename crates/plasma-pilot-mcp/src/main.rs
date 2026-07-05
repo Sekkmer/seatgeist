@@ -246,44 +246,19 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         "plasma.kwin_bridge_status" => Ok(DaemonRequest::KwinBridgeStatus),
         "plasma.uinput_status" => Ok(DaemonRequest::UinputStatus),
         "plasma.input_backend_status" => Ok(DaemonRequest::InputBackendStatus),
-        "plasma.remote_desktop_session_probe" => {
-            let keyboard = optional_bool(arguments, "keyboard")?;
-            let pointer = optional_bool(arguments, "pointer")?;
-            let touchscreen = optional_bool(arguments, "touchscreen")?.unwrap_or(false);
-            let any_device = keyboard.is_some() || pointer.is_some() || touchscreen;
-            Ok(DaemonRequest::RemoteDesktopSessionProbe(
-                RemoteDesktopSessionProbeRequest {
-                    keyboard: keyboard.unwrap_or(!any_device),
-                    pointer: pointer.unwrap_or(!any_device),
-                    touchscreen,
-                    restore_token: optional_string(arguments, "restore_token")?,
-                    persist_mode: optional_remote_desktop_persist_mode(arguments, "persist_mode")?,
-                    parent_window: optional_string(arguments, "parent_window")?,
-                    timeout_ms: optional_u64(arguments, "timeout_ms")?
-                        .unwrap_or(DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS),
-                    guard: active_window_guard(arguments)?,
-                },
-            ))
+        "plasma.remote_desktop_session_probe" => Ok(DaemonRequest::RemoteDesktopSessionProbe(
+            remote_desktop_session_request(arguments)?,
+        )),
+        "plasma.remote_desktop_eis_probe" => Ok(DaemonRequest::RemoteDesktopEisProbe(
+            remote_desktop_session_request(arguments)?,
+        )),
+        "plasma.remote_desktop_eis_start" => Ok(DaemonRequest::RemoteDesktopEisStart(
+            remote_desktop_session_request(arguments)?,
+        )),
+        "plasma.remote_desktop_eis_session_status" => {
+            Ok(DaemonRequest::RemoteDesktopEisSessionStatus)
         }
-        "plasma.remote_desktop_eis_probe" => {
-            let keyboard = optional_bool(arguments, "keyboard")?;
-            let pointer = optional_bool(arguments, "pointer")?;
-            let touchscreen = optional_bool(arguments, "touchscreen")?.unwrap_or(false);
-            let any_device = keyboard.is_some() || pointer.is_some() || touchscreen;
-            Ok(DaemonRequest::RemoteDesktopEisProbe(
-                RemoteDesktopSessionProbeRequest {
-                    keyboard: keyboard.unwrap_or(!any_device),
-                    pointer: pointer.unwrap_or(!any_device),
-                    touchscreen,
-                    restore_token: optional_string(arguments, "restore_token")?,
-                    persist_mode: optional_remote_desktop_persist_mode(arguments, "persist_mode")?,
-                    parent_window: optional_string(arguments, "parent_window")?,
-                    timeout_ms: optional_u64(arguments, "timeout_ms")?
-                        .unwrap_or(DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS),
-                    guard: active_window_guard(arguments)?,
-                },
-            ))
-        }
+        "plasma.remote_desktop_eis_stop" => Ok(DaemonRequest::RemoteDesktopEisStop),
         "plasma.capture_backend_status" => Ok(DaemonRequest::CaptureBackendStatus),
         "plasma.pointer_calibration" => Ok(DaemonRequest::PointerCalibration),
         "plasma.list_monitors" => Ok(DaemonRequest::ListMonitors),
@@ -1033,6 +1008,68 @@ fn tool_definitions() -> Vec<Value> {
                 ],
                 vec![],
             ),
+        ),
+        tool(
+            "plasma.remote_desktop_eis_start",
+            "RemoteDesktop EIS Session Start",
+            "Explicitly request and retain a daemon-owned xdg-desktop-portal RemoteDesktop EIS session. This is policy-gated control, may open a portal dialog, and still sends no input by itself.",
+            object_schema(
+                vec![
+                    (
+                        "keyboard",
+                        json!({"type": "boolean", "description": "Request keyboard control permission. Defaults to true when no device flags are supplied."}),
+                    ),
+                    (
+                        "pointer",
+                        json!({"type": "boolean", "description": "Request pointer control permission. Defaults to true when no device flags are supplied."}),
+                    ),
+                    (
+                        "touchscreen",
+                        json!({"type": "boolean", "description": "Request touchscreen control permission. Defaults to false."}),
+                    ),
+                    (
+                        "restore_token",
+                        json!({"type": "string", "description": "Optional single-use portal restore token from a previous started session."}),
+                    ),
+                    (
+                        "persist_mode",
+                        json!({"type": "string", "enum": ["do_not_persist", "application_lifetime", "explicitly_revoked"], "description": "Requested portal permission persistence mode."}),
+                    ),
+                    (
+                        "parent_window",
+                        json!({"type": "string", "description": "Optional portal parent window identifier."}),
+                    ),
+                    (
+                        "timeout_ms",
+                        json!({"type": "integer", "minimum": 1, "maximum": 300000, "description": "Maximum time to wait for each portal interaction. Defaults to 120000."}),
+                    ),
+                    (
+                        "expected_active_window",
+                        json!({"type": "string", "description": "Optional active-window id guard checked before opening the portal interaction."}),
+                    ),
+                    (
+                        "expected_active_app",
+                        json!({"type": "string", "description": "Optional active app id guard checked before opening the portal interaction."}),
+                    ),
+                    (
+                        "active_title_contains",
+                        json!({"type": "string", "description": "Optional active-window title substring guard checked before opening the portal interaction."}),
+                    ),
+                ],
+                vec![],
+            ),
+        ),
+        tool(
+            "plasma.remote_desktop_eis_session_status",
+            "RemoteDesktop EIS Session Status",
+            "Report whether the daemon currently holds a RemoteDesktop EIS session, compact runtime readiness metadata, and selected devices. This does not open a portal dialog or send input.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.remote_desktop_eis_stop",
+            "RemoteDesktop EIS Session Stop",
+            "Drop the daemon-owned RemoteDesktop EIS session if one exists. This is journaled and sends no input.",
+            object_schema(vec![], vec![]),
         ),
         tool(
             "plasma.capture_backend_status",
@@ -2072,6 +2109,24 @@ fn optional_remote_desktop_persist_mode(
         .transpose()
 }
 
+fn remote_desktop_session_request(arguments: &Value) -> Result<RemoteDesktopSessionProbeRequest> {
+    let keyboard = optional_bool(arguments, "keyboard")?;
+    let pointer = optional_bool(arguments, "pointer")?;
+    let touchscreen = optional_bool(arguments, "touchscreen")?.unwrap_or(false);
+    let any_device = keyboard.is_some() || pointer.is_some() || touchscreen;
+    Ok(RemoteDesktopSessionProbeRequest {
+        keyboard: keyboard.unwrap_or(!any_device),
+        pointer: pointer.unwrap_or(!any_device),
+        touchscreen,
+        restore_token: optional_string(arguments, "restore_token")?,
+        persist_mode: optional_remote_desktop_persist_mode(arguments, "persist_mode")?,
+        parent_window: optional_string(arguments, "parent_window")?,
+        timeout_ms: optional_u64(arguments, "timeout_ms")?
+            .unwrap_or(DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS),
+        guard: active_window_guard(arguments)?,
+    })
+}
+
 fn required_string_array(arguments: &Value, key: &str) -> Result<Vec<String>> {
     let array = arguments
         .get(key)
@@ -2286,6 +2341,31 @@ mod tests {
         assert!(remote_desktop_eis_text.contains("fd_closed=true"));
         assert!(remote_desktop_eis_text.contains("transient_closed=true"));
 
+        let remote_desktop_eis_status_text = compact_tool_text(
+            "plasma.remote_desktop_eis_session_status",
+            &DaemonResponse::RemoteDesktopEisSessionStatus(
+                libplasma_pilot::RemoteDesktopEisSessionStatus {
+                    active: true,
+                    runtime_connected: true,
+                    bound_capabilities: vec!["text".to_string(), "pointer".to_string()],
+                    resumed_device_count: 2,
+                    selected_devices: vec!["keyboard".to_string()],
+                    clipboard_enabled: false,
+                    restore_token: None,
+                    session_handle: None,
+                    create_request_path: None,
+                    select_request_path: None,
+                    start_request_path: None,
+                    setup_hint: "stored session".to_string(),
+                },
+            ),
+        );
+        assert!(remote_desktop_eis_status_text.contains("active=true"));
+        assert!(remote_desktop_eis_status_text.contains("runtime_connected=true"));
+        assert!(remote_desktop_eis_status_text.contains("bound=text+pointer"));
+        assert!(remote_desktop_eis_status_text.contains("resumed_devices=2"));
+        assert!(remote_desktop_eis_status_text.contains("selected=keyboard"));
+
         let capture_text = compact_tool_text(
             "plasma.capture_backend_status",
             &DaemonResponse::CaptureBackendStatus(CaptureBackendStatus {
@@ -2378,6 +2458,21 @@ mod tests {
             tools
                 .iter()
                 .any(|tool| tool["name"] == "plasma.remote_desktop_eis_probe")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.remote_desktop_eis_start")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.remote_desktop_eis_session_status")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.remote_desktop_eis_stop")
         );
         assert!(
             tools
@@ -2957,6 +3052,66 @@ mod tests {
                     title_contains: Some("scratch".to_string()),
                 }),
             })
+        );
+    }
+
+    #[test]
+    fn maps_remote_desktop_eis_session_lifecycle_tools() {
+        assert_eq!(
+            daemon_request_for_tool("plasma.remote_desktop_eis_start", &json!({}))
+                .expect("default remote desktop EIS session start maps"),
+            DaemonRequest::RemoteDesktopEisStart(RemoteDesktopSessionProbeRequest {
+                keyboard: true,
+                pointer: true,
+                touchscreen: false,
+                restore_token: None,
+                persist_mode: None,
+                parent_window: None,
+                timeout_ms: DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS,
+                guard: None,
+            })
+        );
+
+        assert_eq!(
+            daemon_request_for_tool(
+                "plasma.remote_desktop_eis_start",
+                &json!({
+                    "keyboard": false,
+                    "pointer": true,
+                    "touchscreen": false,
+                    "persist_mode": "application_lifetime",
+                    "restore_token": "restore_once",
+                    "parent_window": "wayland:app-window",
+                    "timeout_ms": 45000,
+                    "expected_active_window": "window-1"
+                }),
+            )
+            .expect("remote desktop EIS session start maps"),
+            DaemonRequest::RemoteDesktopEisStart(RemoteDesktopSessionProbeRequest {
+                keyboard: false,
+                pointer: true,
+                touchscreen: false,
+                restore_token: Some("restore_once".to_string()),
+                persist_mode: Some(RemoteDesktopPersistMode::ApplicationLifetime),
+                parent_window: Some("wayland:app-window".to_string()),
+                timeout_ms: 45_000,
+                guard: Some(ActiveWindowGuard {
+                    expected_window_id: Some("window-1".to_string()),
+                    expected_app_id: None,
+                    title_contains: None,
+                }),
+            })
+        );
+
+        assert_eq!(
+            daemon_request_for_tool("plasma.remote_desktop_eis_session_status", &json!({}))
+                .expect("remote desktop EIS session status maps"),
+            DaemonRequest::RemoteDesktopEisSessionStatus
+        );
+        assert_eq!(
+            daemon_request_for_tool("plasma.remote_desktop_eis_stop", &json!({}))
+                .expect("remote desktop EIS session stop maps"),
+            DaemonRequest::RemoteDesktopEisStop
         );
     }
 
