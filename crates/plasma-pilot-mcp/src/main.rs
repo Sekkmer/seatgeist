@@ -668,7 +668,8 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
                 .unwrap_or_else(|| "unknown".to_string())
         ),
         DaemonResponse::InputBackendStatus(status) => format!(
-            "input backends preferred={} implemented={} portal_remote_desktop={} libei={} uinput={}",
+            "input backends configured={} preferred={} implemented={} portal_remote_desktop={} libei={} uinput={}",
+            status.configured_backend,
             status
                 .preferred_available_backend
                 .as_deref()
@@ -2012,11 +2013,13 @@ mod tests {
                     socket_env_present: false,
                     setup_hint: "libei visible".to_string(),
                 },
+                configured_backend: "portal_remote_desktop".to_string(),
                 preferred_available_backend: Some("portal_remote_desktop".to_string()),
                 implemented_available_backend: Some("uinput".to_string()),
                 setup_hint: "portal visible, uinput implemented".to_string(),
             }),
         );
+        assert!(input_text.contains("configured=portal_remote_desktop"));
         assert!(input_text.contains("preferred=portal_remote_desktop"));
         assert!(input_text.contains("implemented=uinput"));
 

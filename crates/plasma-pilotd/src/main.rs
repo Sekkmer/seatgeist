@@ -12,7 +12,7 @@ use std::{
 };
 
 use anyhow::{Context, Error, Result, bail};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use image::{GenericImageView, Rgba, imageops::FilterType};
 use libplasma_pilot::{
     AccessibilityCopyTextRequest, AccessibilityCutTextRequest, AccessibilityDeleteTextRequest,
@@ -440,6 +440,7 @@ impl From<KwinActiveWindowGeometry> for WindowGeometry {
 #[derive(Debug, Default, Deserialize)]
 struct DaemonConfigFile {
     daemon: Option<DaemonFileConfig>,
+    backends: Option<BackendFileConfig>,
     policy: Option<PolicyFileConfig>,
     apps: Option<AppsFileConfig>,
     safety: Option<SafetyFileConfig>,
@@ -451,6 +452,33 @@ struct DaemonFileConfig {
     journal: Option<String>,
     panic_stop_file: Option<String>,
     approval_file: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BackendFileConfig {
+    input: Option<InputBackendPreference>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+#[value(rename_all = "snake_case")]
+enum InputBackendPreference {
+    #[default]
+    Auto,
+    PortalRemoteDesktop,
+    Libei,
+    Uinput,
+}
+
+impl InputBackendPreference {
+    fn status_name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::PortalRemoteDesktop => "portal_remote_desktop",
+            Self::Libei => "libei",
+            Self::Uinput => "uinput",
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -535,6 +563,9 @@ struct Args {
     #[arg(long, env = "PLASMA_PILOT_APPROVAL_FILE")]
     approval_file: Option<PathBuf>,
 
+    #[arg(long, env = "PLASMA_PILOT_INPUT_BACKEND", value_enum)]
+    input_backend: Option<InputBackendPreference>,
+
     #[arg(long, env = "PLASMA_PILOT_ALLOW_CONTROL")]
     allow_control: bool,
 
@@ -553,13 +584,23 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
 
-    if args.print_capabilities {
-        println!("{}", serde_json::to_string_pretty(&capabilities())?);
-        return Ok(());
-    }
-
     let file_config = load_daemon_config(args.config.as_deref())?;
     let daemon_file_config = file_config.daemon.as_ref();
+    let input_backend_preference = input_backend_preference(
+        args.input_backend,
+        file_config
+            .backends
+            .as_ref()
+            .and_then(|config| config.input),
+    );
+
+    if args.print_capabilities {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&capabilities(input_backend_preference))?
+        );
+        return Ok(());
+    }
 
     let socket = configured_path(
         args.socket,
@@ -584,7 +625,6 @@ async fn main() -> Result<()> {
         daemon_file_config.and_then(|config| config.approval_file.as_deref()),
     )
     .context("resolve daemon approval file path")?;
-
     let policy_config = policy_config(
         file_config.policy.as_ref(),
         args.allow_control,
@@ -595,19 +635,20 @@ async fn main() -> Result<()> {
     let safety_settings =
         safety_settings(file_config.safety.as_ref()).context("resolve safety settings")?;
 
-    run(
+    run(RunSettings {
         socket,
-        journal,
-        panic_stop_file,
-        approval_file,
+        journal_path: journal,
+        panic_stop_path: panic_stop_file,
+        approval_file_path: approval_file,
         policy_config,
         app_policy,
         safety_settings,
-    )
+        input_backend_preference,
+    })
     .await
 }
 
-async fn run(
+struct RunSettings {
     socket: PathBuf,
     journal_path: PathBuf,
     panic_stop_path: PathBuf,
@@ -615,7 +656,20 @@ async fn run(
     policy_config: PolicyConfig,
     app_policy: AppPolicy,
     safety_settings: SafetySettings,
-) -> Result<()> {
+    input_backend_preference: InputBackendPreference,
+}
+
+async fn run(settings: RunSettings) -> Result<()> {
+    let RunSettings {
+        socket,
+        journal_path,
+        panic_stop_path,
+        approval_file_path,
+        policy_config,
+        app_policy,
+        safety_settings,
+        input_backend_preference,
+    } = settings;
     let journal = ActionJournal::new(journal_path);
     let panic_stop = PanicStopState::new(panic_stop_path);
     let approval_store = ApprovalStore::new(approval_file_path);
@@ -641,6 +695,7 @@ async fn run(
         policy,
         app_policy,
         safety_settings,
+        input_backend_preference,
     };
 
     prepare_socket_path(&socket)?;
@@ -698,6 +753,7 @@ struct DaemonRuntime {
     policy: PolicyEngine,
     app_policy: AppPolicy,
     safety_settings: SafetySettings,
+    input_backend_preference: InputBackendPreference,
 }
 
 async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()> {
@@ -828,7 +884,9 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
 
     match request {
         DaemonRequest::Health => DaemonResponse::Health(health()),
-        DaemonRequest::Capabilities => DaemonResponse::Capabilities(capabilities()),
+        DaemonRequest::Capabilities => {
+            DaemonResponse::Capabilities(capabilities(runtime.input_backend_preference))
+        }
         DaemonRequest::PolicyStatus => {
             DaemonResponse::PolicyStatus(policy_status_from_config(runtime.policy.config()))
         }
@@ -864,12 +922,14 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 message: format_error_chain(&err),
             },
         },
-        DaemonRequest::InputBackendStatus => match input_backend_status() {
-            Ok(status) => DaemonResponse::InputBackendStatus(status),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
-        },
+        DaemonRequest::InputBackendStatus => {
+            match input_backend_status(runtime.input_backend_preference) {
+                Ok(status) => DaemonResponse::InputBackendStatus(status),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
         DaemonRequest::CaptureBackendStatus => {
             DaemonResponse::CaptureBackendStatus(capture_backend_status())
         }
@@ -1029,20 +1089,28 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 },
             }
         }
-        DaemonRequest::TypeText(request) => match type_text(request) {
-            Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
-        },
-        DaemonRequest::KeyCombo(request) => match key_combo(request) {
-            Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
-        },
+        DaemonRequest::TypeText(request) => {
+            match type_text(request, runtime.input_backend_preference) {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
+        DaemonRequest::KeyCombo(request) => {
+            match key_combo(request, runtime.input_backend_preference) {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
         DaemonRequest::MovePointer(request) => {
-            match move_pointer(request, &runtime.active_window_state) {
+            match move_pointer(
+                request,
+                &runtime.active_window_state,
+                runtime.input_backend_preference,
+            ) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => DaemonResponse::Error {
                     message: format_error_chain(&err),
@@ -1050,7 +1118,11 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
             }
         }
         DaemonRequest::ClickPointer(request) => {
-            match click_pointer(request, &runtime.active_window_state) {
+            match click_pointer(
+                request,
+                &runtime.active_window_state,
+                runtime.input_backend_preference,
+            ) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => DaemonResponse::Error {
                     message: format_error_chain(&err),
@@ -1058,19 +1130,25 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
             }
         }
         DaemonRequest::DragPointer(request) => {
-            match drag_pointer(request, &runtime.active_window_state) {
+            match drag_pointer(
+                request,
+                &runtime.active_window_state,
+                runtime.input_backend_preference,
+            ) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => DaemonResponse::Error {
                     message: format_error_chain(&err),
                 },
             }
         }
-        DaemonRequest::ScrollPointer(request) => match scroll_pointer(request) {
-            Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
-        },
+        DaemonRequest::ScrollPointer(request) => {
+            match scroll_pointer(request, runtime.input_backend_preference) {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
         DaemonRequest::ClickButton(request) => match click_button(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
             Err(err) => DaemonResponse::Error {
@@ -1154,9 +1232,9 @@ fn health() -> HealthStatus {
     }
 }
 
-fn capabilities() -> CapabilitySet {
+fn capabilities(input_backend_preference: InputBackendPreference) -> CapabilitySet {
     CapabilitySet {
-        capabilities: current_capabilities(),
+        capabilities: current_capabilities(input_backend_preference),
     }
 }
 
@@ -1300,6 +1378,13 @@ fn configured_optional_path(
         return Ok(Some(path));
     }
     config_path.map(expand_config_path).transpose()
+}
+
+fn input_backend_preference(
+    cli_backend: Option<InputBackendPreference>,
+    config_backend: Option<InputBackendPreference>,
+) -> InputBackendPreference {
+    cli_backend.or(config_backend).unwrap_or_default()
 }
 
 fn expand_config_path(value: &str) -> Result<PathBuf> {
@@ -1574,14 +1659,15 @@ fn uinput_setup_hint(available: bool, exists: bool, is_char_device: bool) -> Str
     "grant the daemon read/write access to /dev/uinput with the packaged udev rule, reload udev, add the user to the configured group, then restart the user session or service".to_string()
 }
 
-fn input_backend_status() -> Result<InputBackendStatus> {
+fn input_backend_status(preference: InputBackendPreference) -> Result<InputBackendStatus> {
     let uinput = uinput_status()?;
     let remote_desktop_portal = remote_desktop_portal_status();
     let libei = libei_status();
     let preferred_available_backend =
         preferred_input_backend(&remote_desktop_portal, &libei, uinput.available);
-    let implemented_available_backend = implemented_input_backend(uinput.available);
+    let implemented_available_backend = implemented_input_backend(preference, uinput.available);
     let setup_hint = input_backend_setup_hint(
+        preference,
         preferred_available_backend.as_deref(),
         implemented_available_backend.as_deref(),
         &remote_desktop_portal,
@@ -1593,6 +1679,7 @@ fn input_backend_status() -> Result<InputBackendStatus> {
         uinput_available: uinput.available,
         remote_desktop_portal,
         libei,
+        configured_backend: preference.status_name().to_string(),
         preferred_available_backend,
         implemented_available_backend,
         setup_hint,
@@ -1908,17 +1995,48 @@ fn preferred_input_backend(
     None
 }
 
-fn implemented_input_backend(uinput_available: bool) -> Option<String> {
-    uinput_available.then(|| "uinput".to_string())
+fn implemented_input_backend(
+    preference: InputBackendPreference,
+    uinput_available: bool,
+) -> Option<String> {
+    match preference {
+        InputBackendPreference::Auto | InputBackendPreference::Uinput => {
+            uinput_available.then(|| "uinput".to_string())
+        }
+        InputBackendPreference::PortalRemoteDesktop | InputBackendPreference::Libei => None,
+    }
 }
 
 fn input_backend_setup_hint(
+    preference: InputBackendPreference,
     preferred: Option<&str>,
     implemented: Option<&str>,
     remote_desktop_portal: &RemoteDesktopPortalStatus,
     libei: &LibeiStatus,
     uinput_available: bool,
 ) -> String {
+    match preference {
+        InputBackendPreference::PortalRemoteDesktop => {
+            if remote_desktop_portal.remote_desktop_interface_available {
+                return "configured input backend portal_remote_desktop is visible, but execution is not implemented yet; configure input = \"auto\" or \"uinput\" for current control".to_string();
+            }
+            return "configured input backend portal_remote_desktop is not visible on the user bus and execution is not implemented yet; configure input = \"auto\" or \"uinput\" for current control".to_string();
+        }
+        InputBackendPreference::Libei => {
+            if libei.socket_env_present || libei.client_library_available {
+                return "configured input backend libei is visible, but EIS execution is not implemented yet; configure input = \"auto\" or \"uinput\" for current control".to_string();
+            }
+            return "configured input backend libei is not visible and EIS execution is not implemented yet; configure input = \"auto\" or \"uinput\" for current control".to_string();
+        }
+        InputBackendPreference::Uinput if implemented == Some("uinput") => {
+            return "configured input backend uinput is available; keep it behind policy, panic-stop, active-window guards, and journal checks".to_string();
+        }
+        InputBackendPreference::Uinput => {
+            return "configured input backend uinput is unavailable; install the uinput rule or configure input = \"auto\" after another backend lands".to_string();
+        }
+        InputBackendPreference::Auto => {}
+    }
+
     match (preferred, implemented) {
         (Some("portal_remote_desktop"), Some("uinput")) => {
             "portal RemoteDesktop is visible, but implemented input control currently uses uinput until portal session handling lands".to_string()
@@ -1946,6 +2064,22 @@ fn input_backend_setup_hint(
             "no input backend is currently available; configure portal RemoteDesktop/libei or install the uinput rule".to_string()
         }
         _ => "input backend state is partial; inspect individual portal, libei, and uinput fields".to_string(),
+    }
+}
+
+fn ensure_executable_input_backend(preference: InputBackendPreference) -> Result<()> {
+    match preference {
+        InputBackendPreference::Auto | InputBackendPreference::Uinput => Ok(()),
+        InputBackendPreference::PortalRemoteDesktop => {
+            bail!(
+                "configured input backend portal_remote_desktop is not implemented for execution yet; configure input = \"auto\" or \"uinput\" for current control"
+            )
+        }
+        InputBackendPreference::Libei => {
+            bail!(
+                "configured input backend libei is not implemented for execution yet; configure input = \"auto\" or \"uinput\" for current control"
+            )
+        }
     }
 }
 
@@ -2453,7 +2587,9 @@ fn set_panic_stop(
     panic_stop.set_enabled(request.enabled)
 }
 
-fn current_capabilities() -> Vec<BackendCapability> {
+fn current_capabilities(
+    input_backend_preference: InputBackendPreference,
+) -> Vec<BackendCapability> {
     let mut capabilities = vec![
         BackendCapability::DaemonHealth,
         BackendCapability::DaemonPolicyStatus,
@@ -2471,7 +2607,9 @@ fn current_capabilities() -> Vec<BackendCapability> {
     if clipboard_read_backend().is_some() && clipboard_write_backend().is_some() {
         capabilities.push(BackendCapability::ClipboardText);
     }
-    if plasma_pilot_uinput::available() {
+    if implemented_input_backend(input_backend_preference, plasma_pilot_uinput::available())
+        .is_some()
+    {
         capabilities.push(BackendCapability::KeyboardInput);
         capabilities.push(BackendCapability::PointerInput);
     }
@@ -3433,13 +3571,17 @@ fn accessibility_set_selection(request: AccessibilitySetSelectionRequest) -> Res
     })
 }
 
-fn type_text(request: TypeTextRequest) -> Result<ActionResult> {
+fn type_text(
+    request: TypeTextRequest,
+    input_backend_preference: InputBackendPreference,
+) -> Result<ActionResult> {
     if request.text.is_empty() {
         bail!("text must be non-empty");
     }
     if request.text.chars().count() > 8192 {
         bail!("text must be at most 8192 characters");
     }
+    ensure_executable_input_backend(input_backend_preference)?;
     plasma_pilot_uinput::type_text(&request.text).map_err(|err| anyhow::anyhow!(err))?;
     Ok(ActionResult {
         id: Uuid::new_v4(),
@@ -3452,10 +3594,14 @@ fn type_text(request: TypeTextRequest) -> Result<ActionResult> {
     })
 }
 
-fn key_combo(request: KeyComboRequest) -> Result<ActionResult> {
+fn key_combo(
+    request: KeyComboRequest,
+    input_backend_preference: InputBackendPreference,
+) -> Result<ActionResult> {
     if request.combo.trim().is_empty() {
         bail!("combo must be non-empty");
     }
+    ensure_executable_input_backend(input_backend_preference)?;
     let key_count =
         plasma_pilot_uinput::key_combo(&request.combo).map_err(|err| anyhow::anyhow!(err))?;
     Ok(ActionResult {
@@ -3544,7 +3690,9 @@ fn pointer_monitor_calibrations(
 fn move_pointer(
     request: MovePointerRequest,
     active_window_state: &ActiveWindowState,
+    input_backend_preference: InputBackendPreference,
 ) -> Result<ActionResult> {
+    ensure_executable_input_backend(input_backend_preference)?;
     let (point, bounds) = resolve_pointer_point(request.point, active_window_state)?;
     plasma_pilot_uinput::move_pointer(point.x, point.y, bounds)
         .map_err(|err| anyhow::anyhow!(err))?;
@@ -3562,10 +3710,12 @@ fn move_pointer(
 fn click_pointer(
     request: ClickPointerRequest,
     active_window_state: &ActiveWindowState,
+    input_backend_preference: InputBackendPreference,
 ) -> Result<ActionResult> {
     if request.clicks == 0 || request.clicks > 2 {
         bail!("clicks must be 1 or 2");
     }
+    ensure_executable_input_backend(input_backend_preference)?;
     let (point, bounds) = resolve_pointer_point(request.point, active_window_state)?;
     plasma_pilot_uinput::click_pointer(
         point.x,
@@ -3589,6 +3739,7 @@ fn click_pointer(
 fn drag_pointer(
     request: DragPointerRequest,
     active_window_state: &ActiveWindowState,
+    input_backend_preference: InputBackendPreference,
 ) -> Result<ActionResult> {
     if request.duration_ms > 10_000 {
         bail!("duration_ms must be at most 10000");
@@ -3600,6 +3751,7 @@ fn drag_pointer(
             request.to.space
         );
     }
+    ensure_executable_input_backend(input_backend_preference)?;
     let (from, bounds) = resolve_pointer_point(request.from, active_window_state)?;
     let (to, to_bounds) = resolve_pointer_point(request.to, active_window_state)?;
     if bounds != to_bounds {
@@ -3626,10 +3778,14 @@ fn drag_pointer(
     })
 }
 
-fn scroll_pointer(request: ScrollPointerRequest) -> Result<ActionResult> {
+fn scroll_pointer(
+    request: ScrollPointerRequest,
+    input_backend_preference: InputBackendPreference,
+) -> Result<ActionResult> {
     if request.vertical == 0 && request.horizontal == 0 {
         bail!("scroll request must include a non-zero delta");
     }
+    ensure_executable_input_backend(input_backend_preference)?;
     let bounds = physical_pointer_bounds()?;
     plasma_pilot_uinput::scroll_pointer(request.vertical, request.horizontal, bounds)
         .map_err(|err| anyhow::anyhow!(err))?;
@@ -5103,7 +5259,8 @@ fn summarize_response(response: &DaemonResponse) -> String {
                 .unwrap_or_else(|| "unknown".to_string())
         ),
         DaemonResponse::InputBackendStatus(status) => format!(
-            "input backends preferred={} implemented={} portal_remote_desktop={} libei={} uinput={}",
+            "input backends configured={} preferred={} implemented={} portal_remote_desktop={} libei={} uinput={}",
+            status.configured_backend,
             status
                 .preferred_available_backend
                 .as_deref()
@@ -5687,6 +5844,37 @@ mod tests {
         assert_eq!(
             config.default_full_resolution_screenshot,
             ToolApprovalLevel::Allow
+        );
+    }
+
+    #[test]
+    fn input_backend_preference_uses_cli_then_config_then_auto() {
+        assert_eq!(
+            input_backend_preference(None, None),
+            InputBackendPreference::Auto
+        );
+        assert_eq!(
+            input_backend_preference(None, Some(InputBackendPreference::Uinput)),
+            InputBackendPreference::Uinput
+        );
+        assert_eq!(
+            input_backend_preference(
+                Some(InputBackendPreference::Libei),
+                Some(InputBackendPreference::Uinput),
+            ),
+            InputBackendPreference::Libei
+        );
+
+        let config: DaemonConfigFile = toml::from_str(
+            r#"
+            [backends]
+            input = "portal_remote_desktop"
+            "#,
+        )
+        .expect("backend config parses");
+        assert_eq!(
+            config.backends.and_then(|backends| backends.input),
+            Some(InputBackendPreference::PortalRemoteDesktop)
         );
     }
 
@@ -6799,8 +6987,26 @@ height = 40
             Some("uinput")
         );
         assert_eq!(preferred_input_backend(&portal, &libei, false), None);
-        assert_eq!(implemented_input_backend(true).as_deref(), Some("uinput"));
-        assert_eq!(implemented_input_backend(false), None);
+        assert_eq!(
+            implemented_input_backend(InputBackendPreference::Auto, true).as_deref(),
+            Some("uinput")
+        );
+        assert_eq!(
+            implemented_input_backend(InputBackendPreference::Uinput, true).as_deref(),
+            Some("uinput")
+        );
+        assert_eq!(
+            implemented_input_backend(InputBackendPreference::PortalRemoteDesktop, true),
+            None
+        );
+        assert_eq!(
+            implemented_input_backend(InputBackendPreference::Libei, true),
+            None
+        );
+        assert_eq!(
+            implemented_input_backend(InputBackendPreference::Auto, false),
+            None
+        );
     }
 
     #[test]
@@ -6813,10 +7019,18 @@ height = 40
             setup_hint: String::new(),
         };
         let libei = libei_status_fixture(false, false);
-        let hint = input_backend_setup_hint(None, None, &portal, &libei, false);
+        let hint = input_backend_setup_hint(
+            InputBackendPreference::Auto,
+            None,
+            None,
+            &portal,
+            &libei,
+            false,
+        );
         assert!(hint.contains("busctl"));
 
         let visible_portal_hint = input_backend_setup_hint(
+            InputBackendPreference::Auto,
             Some("portal_remote_desktop"),
             None,
             &remote_desktop_status(true),
@@ -6825,6 +7039,26 @@ height = 40
         );
         assert!(visible_portal_hint.contains("does not yet execute RemoteDesktop"));
 
+        let configured_portal_hint = input_backend_setup_hint(
+            InputBackendPreference::PortalRemoteDesktop,
+            Some("portal_remote_desktop"),
+            None,
+            &remote_desktop_status(true),
+            &libei,
+            true,
+        );
+        assert!(configured_portal_hint.contains("configured input backend"));
+
+        let configured_uinput_hint = input_backend_setup_hint(
+            InputBackendPreference::Uinput,
+            Some("portal_remote_desktop"),
+            Some("uinput"),
+            &remote_desktop_status(true),
+            &libei,
+            true,
+        );
+        assert!(configured_uinput_hint.contains("configured input backend uinput is available"));
+
         assert!(remote_desktop_portal_setup_hint(false, false, false, false).contains("busctl"));
         assert!(
             remote_desktop_portal_setup_hint(true, true, false, true)
@@ -6832,6 +7066,38 @@ height = 40
         );
         assert!(libei_setup_hint(false, false, false).contains("pkg-config"));
         assert!(libei_setup_hint(true, false, true).contains("LIBEI_SOCKET"));
+    }
+
+    #[test]
+    fn explicit_unimplemented_input_backends_fail_closed_before_execution() {
+        ensure_executable_input_backend(InputBackendPreference::Auto)
+            .expect("auto currently executes through uinput when available");
+        ensure_executable_input_backend(InputBackendPreference::Uinput)
+            .expect("explicit uinput currently executes through uinput when available");
+
+        let err = ensure_executable_input_backend(InputBackendPreference::PortalRemoteDesktop)
+            .expect_err("portal execution is not implemented yet");
+        assert!(err.to_string().contains("portal_remote_desktop"));
+
+        let err = ensure_executable_input_backend(InputBackendPreference::Libei)
+            .expect_err("libei execution is not implemented yet");
+        assert!(err.to_string().contains("libei"));
+    }
+
+    #[test]
+    fn unimplemented_input_backend_selection_removes_raw_input_capabilities() {
+        let capabilities = current_capabilities(InputBackendPreference::PortalRemoteDesktop);
+
+        assert!(
+            !capabilities
+                .iter()
+                .any(|capability| capability == &BackendCapability::KeyboardInput)
+        );
+        assert!(
+            !capabilities
+                .iter()
+                .any(|capability| capability == &BackendCapability::PointerInput)
+        );
     }
 
     #[test]

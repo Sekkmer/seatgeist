@@ -100,6 +100,7 @@ pub struct InputBackendStatus {
     pub uinput_available: bool,
     pub remote_desktop_portal: RemoteDesktopPortalStatus,
     pub libei: LibeiStatus,
+    pub configured_backend: String,
     pub preferred_available_backend: Option<String>,
     pub implemented_available_backend: Option<String>,
     pub setup_hint: String,
@@ -1263,12 +1264,14 @@ mod tests {
                 socket_env_present: false,
                 setup_hint: "libei client library is available".to_string(),
             },
+            configured_backend: "portal_remote_desktop".to_string(),
             preferred_available_backend: Some("portal_remote_desktop".to_string()),
             implemented_available_backend: Some("uinput".to_string()),
             setup_hint: "prefer portal RemoteDesktop/libei before uinput".to_string(),
         });
         let encoded = serde_json::to_string(&response).expect("input backend status serializes");
         assert!(encoded.contains(r#""type":"input_backend_status""#));
+        assert!(encoded.contains(r#""configured_backend":"portal_remote_desktop""#));
         assert!(encoded.contains(r#""preferred_available_backend":"portal_remote_desktop""#));
         assert!(encoded.contains(r#""implemented_available_backend":"uinput""#));
         assert_eq!(response.response_type(), "input_backend_status");

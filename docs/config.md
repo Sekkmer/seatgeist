@@ -17,6 +17,9 @@ journal = "$XDG_STATE_HOME/plasma-pilot/journal.jsonl"
 panic_stop_file = "$XDG_RUNTIME_DIR/plasma-pilot/panic-stop"
 approval_file = "$XDG_RUNTIME_DIR/plasma-pilot/approvals.jsonl"
 
+[backends]
+input = "auto"
+
 [policy]
 default_observe = "allow"
 default_control = "prompt"
@@ -65,6 +68,8 @@ plasma-pilot-cli approve --safety-class control-semantic --method focus_window -
 The default CLI approval-file path is `$XDG_RUNTIME_DIR/plasma-pilot/approvals.jsonl`; the daemon only reads it when explicitly configured to do so. Grant records include `safety_class`, `method`, `expires_unix_ms`, and optional `reason`; `method = "*"` is supported for deliberate class-wide local grants. A matching grant only satisfies a prompt decision. Explicit `deny`, app policy, panic-stop, human-input pause, active-window guard checks, and backend validation still run.
 
 Explicit local approval flags such as `--allow-control`, `--allow-clipboard-read`, and `--allow-full-resolution-screenshot` still override file policy defaults for that daemon run. Prefer short-lived approval-file grants for narrow local use.
+
+`[backends].input` controls the requested raw keyboard/pointer backend and can be `auto`, `uinput`, `portal_remote_desktop`, or `libei`. `--input-backend` / `PLASMA_PILOT_INPUT_BACKEND` override the config file. Current executable control remains `uinput`; selecting `portal_remote_desktop` or `libei` makes input status report the requested backend but raw keyboard/pointer execution fails closed until those executors are implemented. Use `plasma-pilot-cli input backends` or MCP `plasma.input_backend_status` to see `configured_backend`, `preferred_available_backend`, `implemented_available_backend`, and setup hints.
 
 `[policy].destructive_actions` applies after ordinary control policy for requests marked destructive and for obvious destructive labels in high-level semantic controls, such as delete, remove, discard, quit, shutdown, and restart. The default is `prompt`, which requires a matching approval-file grant or explicit local allow policy.
 
