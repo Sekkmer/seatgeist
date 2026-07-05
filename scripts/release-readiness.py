@@ -164,23 +164,57 @@ def newest_matching(prefix: str) -> Path | None:
     return matches[0] if matches else None
 
 
+def load_eval_evidence(path: Path | None, expected_case: str) -> tuple[bool, str]:
+    if path is None:
+        return False, "missing evidence directory"
+    evidence_path = path / "evidence.json"
+    if not evidence_path.is_file():
+        return False, f"missing evidence: {rel(evidence_path)}"
+    try:
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as err:
+        return False, f"invalid evidence JSON: {rel(evidence_path)}: {err}"
+    if not isinstance(evidence, dict):
+        return False, f"evidence is not an object: {rel(evidence_path)}"
+    if evidence.get("type") != "seatgeist_eval_evidence":
+        return False, f"wrong evidence type: {rel(evidence_path)}"
+    if evidence.get("case") != expected_case:
+        return False, f"wrong evidence case in {rel(evidence_path)}: {evidence.get('case')}"
+    if evidence.get("status") != "passed":
+        return False, f"evidence did not pass: {rel(evidence_path)} status={evidence.get('status')}"
+    git_value = evidence.get("git")
+    return True, f"{rel(evidence_path)} git={git_value}"
+
+
 def check_live_eval_evidence() -> Check:
     required = {
-        "KWrite/Kate input": ROOT / "target" / "seatgeist-gui-input-smoke",
-        "KCalc visual input": ROOT / "target" / "seatgeist-gui-calculator-smoke",
-        "Firefox localhost button": ROOT / "target" / "seatgeist-gui-browser-smoke",
-        "portal Screenshot": newest_matching("portal-screenshot"),
-        "RemoteDesktop probe": newest_matching("remote-desktop-probe"),
-        "retained RemoteDesktop EIS session": newest_matching("remote-desktop-eis-session"),
+        "KWrite/Kate input": (ROOT / "target" / "seatgeist-gui-input-smoke", "text-editor-input"),
+        "KCalc visual input": (ROOT / "target" / "seatgeist-gui-calculator-smoke", "kcalc-visual"),
+        "Firefox localhost button": (
+            ROOT / "target" / "seatgeist-gui-browser-smoke",
+            "firefox-localhost-button",
+        ),
+        "portal Screenshot": (newest_matching("portal-screenshot"), "portal-screenshot"),
+        "RemoteDesktop probe": (newest_matching("remote-desktop-probe"), "remote-desktop-probe"),
+        "retained RemoteDesktop EIS session": (
+            newest_matching("remote-desktop-eis-session"),
+            "remote-desktop-eis-session",
+        ),
     }
-    missing = [name for name, path in required.items() if path is None or not path.exists()]
-    evidence = [f"{name}: {rel(path)}" for name, path in required.items() if path is not None and path.exists()]
-    if missing:
+    failures = []
+    evidence = []
+    for name, (path, expected_case) in required.items():
+        ok, detail = load_eval_evidence(path, expected_case)
+        if ok:
+            evidence.append(f"{name}: {detail}")
+        else:
+            failures.append(f"{name}: {detail}")
+    if failures:
         return Check(
             "live_eval_evidence",
             False,
             "opt-in live KDE eval evidence is incomplete",
-            [f"missing: {name}" for name in missing] + evidence,
+            failures + evidence,
         )
     return Check("live_eval_evidence", True, "opt-in live KDE eval evidence exists", evidence)
 

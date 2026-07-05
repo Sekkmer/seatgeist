@@ -146,10 +146,23 @@ def main() -> None:
         "release_artifacts",
         "release_signatures",
         "live_eval_evidence",
+        "seatgeist_eval_evidence",
+        "evidence.json",
         "latest release manifest is stale for the current commit",
         "--strict",
     ]:
         require_contains("scripts/release-readiness.py", readiness, needle)
+
+    eval_evidence = require_executable("scripts/write-eval-evidence.py")
+    for needle in [
+        "seatgeist_eval_evidence",
+        "evidence.json",
+        "write-eval-evidence",
+        "--run-dir",
+        "--case",
+        "--kind",
+    ]:
+        require_contains("scripts/write-eval-evidence.py", eval_evidence, needle)
 
     checklist = read("docs/release-checklist.md")
     require_contains(

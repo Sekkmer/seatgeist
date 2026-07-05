@@ -2,7 +2,7 @@
 
 This checklist defines the minimum evidence required before calling a public release ready. It is intentionally stricter than the local development tracker because public users need repeatable install, safety, and troubleshooting paths.
 
-Run `make release-readiness` to summarize current blockers from local repo metadata, generated release artifacts, signatures, and opt-in live eval evidence. For a release cut, run `scripts/release-readiness.py --strict` after the checklist items below are complete.
+Run `make release-readiness` to summarize current blockers from local repo metadata, generated release artifacts, signatures, and opt-in live eval evidence. Live eval evidence must include a matching `evidence.json` pass record written by the eval scripts, not only loose artifact files. For a release cut, run `scripts/release-readiness.py --strict` after the checklist items below are complete.
 
 ## Release Blocking Evidence
 
@@ -31,7 +31,7 @@ The CI workflow runs only safe, non-opt-in gates. It does not send real desktop 
 2. Update this checklist and `docs/tracker.md` with current release evidence.
 3. Run `make release-readiness` to capture the current blocker list before release work.
 4. Run `make verify` locally.
-5. Run each opt-in live eval intentionally on the supported KDE Plasma 6 Wayland workstation and save the artifact paths or summaries.
+5. Run each opt-in live eval intentionally on the supported KDE Plasma 6 Wayland workstation and keep the generated `evidence.json` records.
 6. Create a signed release tag.
 7. Build and verify local release artifacts with `make verify-release-artifacts`.
 8. Verify a clean extraction/install smoke from the binary/plugin archive with `make verify-release-install`.

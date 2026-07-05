@@ -255,4 +255,5 @@ grep -q "click_pointer" "$journal_tail_json"
 grep -q "type_text" "$journal_tail_json"
 grep -q "key_combo" "$journal_tail_json"
 
+scripts/write-eval-evidence.py --run-dir "$run_dir" --case "text-editor-input" --kind "local-input"
 echo "GUI input smoke passed with $editor_name; artifacts are in $run_dir"

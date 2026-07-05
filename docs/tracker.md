@@ -1,5 +1,7 @@
 # Seatgeist Tracker
 
+Board name: `Seatgeist Tracker`. This replaces the original `plasma-pilot` project board name now that the public project identity is backend-neutral.
+
 Legend:
 
 - `[x]` done and covered by repo evidence.
@@ -101,7 +103,7 @@ Current full-project estimate: `[~]` about one third complete. This estimate use
 - [x] `make smoke-trace-replay` explicitly validates and replays the checked-in trace categories, including semantic denials.
 - [x] Safe GUI evals cover status, session preflight, observe, AT-SPI diagnostics, denial paths, clipboard status/denial, KWin bridge status, keymap status, full-resolution denial, and control safety.
 - [~] Opt-in GUI evals exist for KWrite/Kate, KCalc, Firefox localhost button, portal Screenshot, RemoteDesktop probe, and retained RemoteDesktop EIS session.
-- [~] Manual KDE Plasma 6 Wayland eval suite is useful but not complete enough to call v0.1 done.
+- [~] Manual KDE Plasma 6 Wayland eval suite is useful and now writes explicit pass evidence records, but broader repeated passes are still required before v0.1 is complete.
 - [~] Public release checklist, external CI, dual license files, local Seatgeist binary/plugin plus source release packaging, artifact verification, clean-install validation, optional GPG signing targets, and a release-readiness blocker audit exist; public uploads and signed release tags are not done.
 
 ## v0.1 Definition Of Done

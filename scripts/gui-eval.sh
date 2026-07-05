@@ -48,6 +48,7 @@ config_file="$run_dir/config.toml"
 kwin_bridge_lock_file="$run_root/kwin-bridge-dbus.lock"
 kwin_bridge_lock_fd=""
 pid=""
+evidence_status="passed"
 
 emit_failure_diagnostics() {
 	local status="$1"
@@ -73,6 +74,11 @@ cleanup() {
 		wait "$pid" 2>/dev/null || true
 	fi
 	rm -rf "$socket_dir"
+}
+
+skip_eval() {
+	evidence_status="skipped"
+	echo "SKIP $*"
 }
 
 on_exit() {
@@ -277,7 +283,7 @@ eval_a11y_focused_tree() {
 	cli atspi quality-status >"$run_dir/a11y-focused-tree-quality.json"
 	jq -e '.type == "accessibility_quality_status"' "$run_dir/a11y-focused-tree-quality.json" >/dev/null
 	if ! jq -e '.data.atspi_available == true and .data.focused_node_present == true' "$run_dir/a11y-focused-tree-quality.json" >/dev/null; then
-		echo "SKIP a11y-focused-tree: focused AT-SPI tree is unavailable"
+		skip_eval "a11y-focused-tree: focused AT-SPI tree is unavailable"
 		return 0
 	fi
 
@@ -301,7 +307,7 @@ eval_a11y_find() {
 	cli atspi quality-status >"$run_dir/a11y-find-quality.json"
 	jq -e '.type == "accessibility_quality_status"' "$run_dir/a11y-find-quality.json" >/dev/null
 	if ! jq -e '.data.atspi_available == true' "$run_dir/a11y-find-quality.json" >/dev/null; then
-		echo "SKIP a11y-find: AT-SPI is unavailable"
+		skip_eval "a11y-find: AT-SPI is unavailable"
 		return 0
 	fi
 
@@ -309,7 +315,7 @@ eval_a11y_find() {
 		cli journal tail --limit 20 --method accessibility_find --ok false >"$run_dir/a11y-find-unavailable-journal.json"
 		if grep -Eq 'AccessibilityUnavailable|backend unavailable' "$run_dir/a11y-find.stderr" \
 			&& jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .ok == false and (.summary | contains("AccessibilityUnavailable")))' "$run_dir/a11y-find-unavailable-journal.json" >/dev/null; then
-			echo "SKIP a11y-find: AT-SPI find is unavailable"
+			skip_eval "a11y-find: AT-SPI find is unavailable"
 			return 0
 		fi
 		cat "$run_dir/a11y-find.stderr" >&2
@@ -336,7 +342,7 @@ eval_a11y_text_attributes() {
 	cli atspi quality-status >"$run_dir/a11y-text-attributes-quality.json"
 	jq -e '.type == "accessibility_quality_status"' "$run_dir/a11y-text-attributes-quality.json" >/dev/null
 	if ! jq -e '.data.atspi_available == true' "$run_dir/a11y-text-attributes-quality.json" >/dev/null; then
-		echo "SKIP a11y-text-attributes: AT-SPI is unavailable"
+		skip_eval "a11y-text-attributes: AT-SPI is unavailable"
 		return 0
 	fi
 
@@ -344,7 +350,7 @@ eval_a11y_text_attributes() {
 		cli journal tail --limit 20 --method accessibility_find --ok false >"$run_dir/a11y-text-attributes-find-unavailable-journal.json"
 		if grep -Eq 'AccessibilityUnavailable|backend unavailable' "$run_dir/a11y-text-attributes-find.stderr" \
 			&& jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .ok == false and (.summary | contains("AccessibilityUnavailable")))' "$run_dir/a11y-text-attributes-find-unavailable-journal.json" >/dev/null; then
-			echo "SKIP a11y-text-attributes: AT-SPI find is unavailable"
+			skip_eval "a11y-text-attributes: AT-SPI find is unavailable"
 			return 0
 		fi
 		cat "$run_dir/a11y-text-attributes-find.stderr" >&2
@@ -353,7 +359,7 @@ eval_a11y_text_attributes() {
 	jq -e '.type == "accessibility_matches" and (.data | type == "array")' "$run_dir/a11y-text-attributes-find.json" >/dev/null
 	local node_id
 	if ! node_id="$(jq -er '.data[0].id // empty' "$run_dir/a11y-text-attributes-find.json")"; then
-		echo "SKIP a11y-text-attributes: no text node found"
+		skip_eval "a11y-text-attributes: no text node found"
 		return 0
 	fi
 
@@ -361,7 +367,7 @@ eval_a11y_text_attributes() {
 		cli journal tail --limit 20 --method accessibility_text_attributes --ok false >"$run_dir/a11y-text-attributes-unavailable-journal.json"
 		if grep -Eq 'AccessibilityUnavailable|backend unavailable' "$run_dir/a11y-text-attributes.stderr" \
 			&& jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .ok == false and (.summary | contains("AccessibilityUnavailable")))' "$run_dir/a11y-text-attributes-unavailable-journal.json" >/dev/null; then
-			echo "SKIP a11y-text-attributes: AT-SPI text attributes are unavailable"
+			skip_eval "a11y-text-attributes: AT-SPI text attributes are unavailable"
 			return 0
 		fi
 		cat "$run_dir/a11y-text-attributes.stderr" >&2
@@ -536,7 +542,7 @@ skip_portal_screenshot_cancel() {
 	local eval_name="$1"
 	local err_file="$2"
 	if portal_screenshot_cancelled "$err_file" && [[ "${SEATGEIST_PORTAL_SCREENSHOT_STRICT:-0}" != "1" ]]; then
-		echo "SKIP $eval_name: portal cancelled or ended the request without a screenshot"
+		skip_eval "$eval_name: portal cancelled or ended the request without a screenshot"
 		return 0
 	fi
 	return 1
@@ -621,7 +627,7 @@ eval_keymap_status() {
 
 eval_screenshot_preview() {
 	if ! command -v spectacle >/dev/null 2>&1; then
-		echo "SKIP screenshot-preview: spectacle is not available"
+		skip_eval "screenshot-preview: spectacle is not available"
 		return 0
 	fi
 	if ! cli screenshot --output "$run_dir/preview.png" >"$run_dir/screenshot-preview.json" 2>"$run_dir/screenshot-preview.err"; then
@@ -644,7 +650,7 @@ eval_screenshot_preview() {
 
 eval_screenshot_coordinate_map() {
 	if ! command -v spectacle >/dev/null 2>&1; then
-		echo "SKIP screenshot-coordinate-map: spectacle is not available"
+		skip_eval "screenshot-coordinate-map: spectacle is not available"
 		return 0
 	fi
 	if ! cli screenshot --output "$run_dir/coordinate-map.png" >"$run_dir/screenshot-coordinate-map.json" 2>"$run_dir/screenshot-coordinate-map.err"; then
@@ -685,7 +691,7 @@ eval_screenshot_coordinate_map() {
 
 eval_screenshot_config_bounds() {
 	if ! command -v spectacle >/dev/null 2>&1; then
-		echo "SKIP screenshot-config-bounds: spectacle is not available"
+		skip_eval "screenshot-config-bounds: spectacle is not available"
 		return 0
 	fi
 	cli safety-status >"$run_dir/screenshot-config-safety.json"
@@ -745,7 +751,7 @@ eval_screenshot_config_bounds() {
 eval_journal_artifacts() {
 	cli capture-backends >"$run_dir/journal-artifacts-capture-backends.json"
 	if ! jq -e '.type == "capture_backend_status" and (.data.implemented_available_backend | type == "string")' "$run_dir/journal-artifacts-capture-backends.json" >/dev/null; then
-		echo "SKIP journal-artifacts: no screenshot backend is available"
+		skip_eval "journal-artifacts: no screenshot backend is available"
 		return 0
 	fi
 
@@ -798,7 +804,7 @@ eval_journal_artifacts() {
 eval_portal_screenshot() {
 	cli capture-backends >"$run_dir/portal-capture-backends.json"
 	if ! jq -e '.type == "capture_backend_status" and .data.screenshot_portal.screenshot_interface_available == true' "$run_dir/portal-capture-backends.json" >/dev/null; then
-		echo "SKIP portal-screenshot: xdg-desktop-portal Screenshot interface is not visible"
+		skip_eval "portal-screenshot: xdg-desktop-portal Screenshot interface is not visible"
 		return 0
 	fi
 	if ! jq -e '.data.implemented_available_backend == "portal_screenshot"' "$run_dir/portal-capture-backends.json" >/dev/null; then
@@ -809,7 +815,7 @@ eval_portal_screenshot() {
 
 	if ! cli screenshot --output "$run_dir/portal-screenshot.png" >"$run_dir/portal-screenshot.json" 2>"$run_dir/portal-screenshot.err"; then
 		if portal_screenshot_cancelled "$run_dir/portal-screenshot.err" && [[ "${SEATGEIST_PORTAL_SCREENSHOT_STRICT:-0}" != "1" ]]; then
-			echo "SKIP portal-screenshot: portal cancelled or ended the request without a screenshot"
+			skip_eval "portal-screenshot: portal cancelled or ended the request without a screenshot"
 			return 0
 		fi
 		cat "$run_dir/portal-screenshot.err" >&2
@@ -846,7 +852,7 @@ eval_portal_screenshot() {
 		--width "$tile_width" \
 		--height "$tile_height" >"$run_dir/portal-screenshot-tile.json" 2>"$run_dir/portal-screenshot-tile.err"; then
 		if portal_screenshot_cancelled "$run_dir/portal-screenshot-tile.err" && [[ "${SEATGEIST_PORTAL_SCREENSHOT_STRICT:-0}" != "1" ]]; then
-			echo "SKIP portal-screenshot tile: portal cancelled or ended the tile source request without a screenshot"
+			skip_eval "portal-screenshot tile: portal cancelled or ended the tile source request without a screenshot"
 			return 0
 		fi
 		cat "$run_dir/portal-screenshot-tile.err" >&2
@@ -872,7 +878,7 @@ eval_portal_screenshot() {
 eval_remote_desktop_probe() {
 	cli input backends >"$run_dir/remote-desktop-backends.json"
 	if ! jq -e '.type == "input_backend_status" and .data.remote_desktop_portal.remote_desktop_interface_available == true' "$run_dir/remote-desktop-backends.json" >/dev/null; then
-		echo "SKIP remote-desktop-probe: xdg-desktop-portal RemoteDesktop interface is not visible"
+		skip_eval "remote-desktop-probe: xdg-desktop-portal RemoteDesktop interface is not visible"
 		return 0
 	fi
 
@@ -880,7 +886,7 @@ eval_remote_desktop_probe() {
 	active_title="$(jq -r '.data.title // empty' "$run_dir/remote-desktop-active-window.json" 2>/dev/null || true)"
 	active_id="$(jq -r '.data.id // empty' "$run_dir/remote-desktop-active-window.json" 2>/dev/null || true)"
 	if [[ -z "$active_title" && -z "$active_id" ]]; then
-		echo "SKIP remote-desktop-probe: active-window guard metadata is unavailable"
+		skip_eval "remote-desktop-probe: active-window guard metadata is unavailable"
 		return 0
 	fi
 
@@ -920,7 +926,7 @@ eval_remote_desktop_probe() {
 eval_remote_desktop_eis_session() {
 	cli input backends >"$run_dir/remote-desktop-eis-backends-before.json"
 	if ! jq -e '.type == "input_backend_status" and .data.remote_desktop_portal.remote_desktop_interface_available == true' "$run_dir/remote-desktop-eis-backends-before.json" >/dev/null; then
-		echo "SKIP remote-desktop-eis-session: xdg-desktop-portal RemoteDesktop interface is not visible"
+		skip_eval "remote-desktop-eis-session: xdg-desktop-portal RemoteDesktop interface is not visible"
 		return 0
 	fi
 
@@ -928,7 +934,7 @@ eval_remote_desktop_eis_session() {
 	active_title="$(jq -r '.data.title // empty' "$run_dir/remote-desktop-eis-active-window.json" 2>/dev/null || true)"
 	active_id="$(jq -r '.data.id // empty' "$run_dir/remote-desktop-eis-active-window.json" 2>/dev/null || true)"
 	if [[ -z "$active_title" && -z "$active_id" ]]; then
-		echo "SKIP remote-desktop-eis-session: active-window guard metadata is unavailable"
+		skip_eval "remote-desktop-eis-session: active-window guard metadata is unavailable"
 		return 0
 	fi
 
@@ -973,7 +979,7 @@ eval_remote_desktop_eis_session() {
 			cat "$run_dir/remote-desktop-eis-start.json" >&2
 			exit 1
 		fi
-		echo "SKIP remote-desktop-eis-session: portal cancelled or ended before a stored EIS session was active"
+		skip_eval "remote-desktop-eis-session: portal cancelled or ended before a stored EIS session was active"
 		cli input remote-desktop-eis-stop >"$run_dir/remote-desktop-eis-stop-after-cancel.json"
 		return 0
 	fi
@@ -1082,7 +1088,7 @@ eval_control_safety() {
 		fi
 		grep -q "active-window guard failed" "$run_dir/guard-denied.txt"
 	else
-		echo "SKIP active-window guard denial: KWin active-window bridge has not reported yet"
+		skip_eval "active-window guard denial: KWin active-window bridge has not reported yet"
 	fi
 
 	cli panic-stop enable >"$run_dir/panic-stop-enabled.json"
@@ -1136,5 +1142,6 @@ fi
 
 cli journal tail --limit 20 >"$run_dir/journal-tail.json"
 jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/journal-tail.json" >/dev/null
+scripts/write-eval-evidence.py --run-dir "$run_dir" --case "$case_name" --kind "safe-gui" --status "$evidence_status"
 echo "GUI eval $case_name passed; artifacts are in $run_dir"
 echo "Latest GUI eval artifacts symlink: $latest_link"

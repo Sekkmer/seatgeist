@@ -214,7 +214,9 @@ else
 fi
 
 if [[ -s "$screenshot_png" ]]; then
+	scripts/write-eval-evidence.py --run-dir "$run_dir" --case "kcalc-visual" --kind "visual"
 	echo "KCalc GUI smoke passed; visual artifact is $screenshot_png"
 else
+	scripts/write-eval-evidence.py --run-dir "$run_dir" --case "kcalc-visual" --kind "visual"
 	echo "KCalc GUI smoke passed; screenshot artifact was skipped"
 fi
