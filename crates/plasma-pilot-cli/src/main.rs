@@ -24,7 +24,7 @@ use libplasma_pilot::{
     ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest,
     SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest,
     ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest, default_approval_file_path,
-    default_socket_path,
+    default_screenshot_dir_path, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -52,7 +52,7 @@ enum Command {
     Monitors,
     Screenshot {
         #[arg(long)]
-        output: String,
+        output: Option<PathBuf>,
         #[arg(long)]
         max_edge: Option<u32>,
         #[arg(long)]
@@ -60,7 +60,7 @@ enum Command {
     },
     ScreenshotTile {
         #[arg(long)]
-        output: String,
+        output: Option<PathBuf>,
         #[arg(long)]
         x: u32,
         #[arg(long)]
@@ -82,7 +82,7 @@ enum Command {
     },
     WaitForChange {
         #[arg(long)]
-        output: String,
+        output: Option<PathBuf>,
         #[arg(long)]
         max_edge: Option<u32>,
         #[arg(long, default_value_t = DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS)]
@@ -699,10 +699,11 @@ fn main() -> Result<()> {
             max_edge,
             full_resolution,
         } => {
+            let output = screenshot_output_or_default(output, "screenshot")?;
             print_daemon_response(
                 &socket,
                 DaemonRequest::Screenshot(ScreenshotRequest {
-                    output: output.into(),
+                    output,
                     max_edge: if full_resolution { None } else { max_edge },
                     full_resolution,
                 }),
@@ -716,10 +717,11 @@ fn main() -> Result<()> {
             height,
             max_edge,
         } => {
+            let output = screenshot_output_or_default(output, "tile")?;
             print_daemon_response(
                 &socket,
                 DaemonRequest::ScreenshotTile(ScreenshotTileRequest {
-                    output: output.into(),
+                    output,
                     x,
                     y,
                     width,
@@ -751,7 +753,7 @@ fn main() -> Result<()> {
         } => print_daemon_response(
             &socket,
             DaemonRequest::WaitForChange(WaitForChangeRequest {
-                output: output.into(),
+                output: screenshot_output_or_default(output, "wait-for-change")?,
                 max_edge,
                 timeout_ms,
                 interval_ms,
@@ -2140,4 +2142,38 @@ fn send_request(socket: &PathBuf, request: DaemonRequest) -> Result<DaemonRespon
         .read_line(&mut response_line)
         .context("read daemon response")?;
     serde_json::from_str(&response_line).context("parse daemon response")
+}
+
+fn screenshot_output_or_default(output: Option<PathBuf>, kind: &str) -> Result<PathBuf> {
+    if let Some(output) = output {
+        return Ok(output);
+    }
+
+    let dir = default_screenshot_dir_path().context("resolve default screenshot directory")?;
+    let unix_time_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_millis();
+    Ok(default_screenshot_output_path(&dir, kind, unix_time_ms))
+}
+
+fn default_screenshot_output_path(dir: &Path, kind: &str, unix_time_ms: u128) -> PathBuf {
+    dir.join(format!("{unix_time_ms}-{kind}.png"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_screenshot_output_path_uses_runtime_screenshot_dir() {
+        assert_eq!(
+            default_screenshot_output_path(
+                Path::new("/run/user/1000/plasma-pilot/screenshots"),
+                "tile",
+                42,
+            ),
+            PathBuf::from("/run/user/1000/plasma-pilot/screenshots/42-tile.png")
+        );
+    }
 }

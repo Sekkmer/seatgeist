@@ -235,7 +235,7 @@ Required subcommands:
 ```bash
 plasma-pilot-cli doctor
 plasma-pilot-cli capabilities
-plasma-pilot-cli screenshot --output /tmp/screen.png
+plasma-pilot-cli screenshot [--output /tmp/screen.png]
 plasma-pilot-cli windows
 plasma-pilot-cli active-window
 plasma-pilot-cli focus --window <id>
@@ -818,7 +818,7 @@ Tasks:
 - Prefer a backend that works on Plasma 6 without manual prompts once trusted/configured.
 - Add fallback backend using command-line tools if needed.
 - Return monitor geometry and scale info. Initial implementation parses KWin support information.
-- Save screenshots to `$XDG_RUNTIME_DIR/plasma-pilot/screenshots/`.
+- [x] Save screenshots to `$XDG_RUNTIME_DIR/plasma-pilot/screenshots/` by default. Current status: direct CLI `screenshot`, `screenshot-tile`, and `wait-for-change` commands accept explicit `--output` paths, but when omitted they write timestamped PNGs under the PlasmaPilot runtime screenshot directory.
 - Add `plasma-pilot-cli screenshot`.
 - [x] Add default downscaled previews and explicit full-resolution capture. Current status: bounded previews are observe-class, while direct and observe-attached full-resolution screenshot requests are classified separately and prompt by default until the daemon is started with explicit full-resolution screenshot approval.
 - Add tiled screenshots for 8K and multi-monitor workflows. Initial implementation supports physical-pixel tile crops with max-edge downscaling.

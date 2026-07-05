@@ -17,6 +17,7 @@ Phase 1 first slice is implemented:
 - `make smoke` starts a temporary daemon, calls the CLI health/capability/policy commands, and verifies socket directory/socket modes.
 - The daemon and CLI can capture a full-screen PNG through Spectacle when run in the host KDE session. The smoke capture on this workstation returned a 7680x4320 source image.
 - Screenshot output now defaults to a bounded preview. On the 8K workstation, the default CLI screenshot produced a 1600x900 PNG with source/output dimensions and scale metadata. Full-resolution screenshot requests are explicit and policy-gated separately; they prompt/fail closed by default until the daemon is started with full-resolution screenshot approval.
+- Direct CLI screenshot commands now have a safe default output location: `plasma-pilot-cli screenshot`, `screenshot-tile`, and `wait-for-change` write timestamped PNGs under `$XDG_RUNTIME_DIR/plasma-pilot/screenshots/` or the daemon-compatible `/run/user/<uid>/plasma-pilot/screenshots/` fallback when `--output` is omitted.
 - Spectacle captures are serialized inside the daemon because concurrent Spectacle captures can race.
 - `plasma-pilot-cli monitors` now reports KWin monitor metadata from `org.kde.KWin.supportInformation`; on this workstation it reports `HDMI-A-2` as 5120x2880 logical at scale 1.5, matching the 7680x4320 screenshot source.
 - Screenshot responses include the same monitor metadata when KWin responds.
