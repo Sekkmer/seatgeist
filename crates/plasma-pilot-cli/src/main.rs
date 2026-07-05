@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     fs::OpenOptions,
     path::{Path, PathBuf},
@@ -1450,7 +1451,22 @@ fn validate_trace(trace: &ReplayTrace) -> Result<()> {
     if trace.steps.is_empty() {
         bail!("trace must contain at least one step");
     }
+    let mut labels = BTreeSet::new();
     for (index, step) in trace.steps.iter().enumerate() {
+        if let Some(label) = step.label.as_deref() {
+            if label.trim().is_empty() {
+                bail!(
+                    "trace {} label must not be empty",
+                    trace_step_context(index, step)
+                );
+            }
+            if !labels.insert(label) {
+                bail!(
+                    "trace {} duplicates label {label:?}",
+                    trace_step_context(index, step)
+                );
+            }
+        }
         if let Some(expected) = &step.expect_response_type
             && !known_response_types().contains(&expected.as_str())
         {

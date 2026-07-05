@@ -662,6 +662,97 @@ fn cli_validate_rejects_unknown_expected_response_type() -> Result<()> {
 }
 
 #[test]
+fn cli_validate_rejects_blank_and_duplicate_labels() -> Result<()> {
+    let root = unique_temp_dir();
+    fs::create_dir_all(&root).context("create integration temp dir")?;
+
+    let blank_label_trace = root.join("blank-label-trace.json");
+    let trace = ReplayTrace {
+        version: 1,
+        description: Some("blank label trace".to_string()),
+        steps: vec![TraceStep {
+            label: Some("   ".to_string()),
+            request: DaemonRequest::Health,
+            expect_response_type: Some("health".to_string()),
+            expect_ok: Some(true),
+            expect_error_contains: None,
+            expect_json: Vec::new(),
+        }],
+    };
+    fs::write(
+        &blank_label_trace,
+        serde_json::to_string_pretty(&trace).context("serialize bad trace")?,
+    )
+    .context("write bad trace file")?;
+
+    let trace_arg = blank_label_trace.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+        .args(["trace", "validate", "--file", &trace_arg])
+        .output()
+        .context("run plasma-pilot-cli trace validate")?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("trace step 0"),
+        "stderr did not include trace step context: {stderr}"
+    );
+    assert!(
+        stderr.contains("label must not be empty"),
+        "stderr did not include blank label detail: {stderr}"
+    );
+
+    let duplicate_label_trace = root.join("duplicate-label-trace.json");
+    let trace = ReplayTrace {
+        version: 1,
+        description: Some("duplicate label trace".to_string()),
+        steps: vec![
+            TraceStep {
+                label: Some("duplicate".to_string()),
+                request: DaemonRequest::Health,
+                expect_response_type: Some("health".to_string()),
+                expect_ok: Some(true),
+                expect_error_contains: None,
+                expect_json: Vec::new(),
+            },
+            TraceStep {
+                label: Some("duplicate".to_string()),
+                request: DaemonRequest::PolicyStatus,
+                expect_response_type: Some("policy_status".to_string()),
+                expect_ok: Some(true),
+                expect_error_contains: None,
+                expect_json: Vec::new(),
+            },
+        ],
+    };
+    fs::write(
+        &duplicate_label_trace,
+        serde_json::to_string_pretty(&trace).context("serialize bad trace")?,
+    )
+    .context("write bad trace file")?;
+
+    let trace_arg = duplicate_label_trace.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+        .args(["trace", "validate", "--file", &trace_arg])
+        .output()
+        .context("run plasma-pilot-cli trace validate")?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(r#"trace step 1 label="duplicate" method=policy_status"#),
+        "stderr did not include trace step context: {stderr}"
+    );
+    assert!(
+        stderr.contains(r#"duplicates label "duplicate""#),
+        "stderr did not include duplicate label detail: {stderr}"
+    );
+
+    fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+#[test]
 fn cli_validate_rejects_contradictory_error_expectations() -> Result<()> {
     let root = unique_temp_dir();
     fs::create_dir_all(&root).context("create integration temp dir")?;
