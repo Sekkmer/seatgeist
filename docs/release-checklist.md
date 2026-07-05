@@ -2,7 +2,7 @@
 
 This checklist defines the minimum evidence required before calling a public release ready. It is intentionally stricter than the local development tracker because public users need repeatable install, safety, and troubleshooting paths.
 
-Run `make release-readiness` to summarize current blockers from local repo metadata, generated release artifacts, public-name collision evidence, signatures, and opt-in live eval evidence. Run `make release-external-preflight` for a focused read-only report of public/operator prerequisites such as final public URLs, signed tags, live eval evidence, and upload-ready signed artifacts. Live eval evidence must include a matching current-commit `evidence.json` pass record written by the eval scripts, not only loose artifact files. For a release cut, run `scripts/release-readiness.py --strict` and `scripts/release-external-preflight.py --strict` after the checklist items below are complete.
+Run `make release-readiness` to summarize current blockers from local repo metadata, generated release artifacts, public-name collision evidence, signatures, and opt-in live eval evidence. Run `make release-external-preflight` for a focused read-only report of public/operator prerequisites such as final public URLs, the local Codex plugin install, signed tags, live eval evidence, and upload-ready signed artifacts. Live eval evidence must include a matching current-commit `evidence.json` pass record written by the eval scripts, not only loose artifact files. For a release cut, run `scripts/release-readiness.py --strict` and `scripts/release-external-preflight.py --strict` after the checklist items below are complete.
 
 ## Release Blocking Evidence
 
@@ -34,7 +34,7 @@ The CI workflow runs only safe, non-opt-in gates. It does not send real desktop 
 3. Run `make check-public-name` and review the generated exact-name collision report.
 4. Run `make release-readiness` to capture the current blocker list before release work.
 5. Run `make verify` locally.
-6. Run `make check-local-codex-install` on the target operator account after installing or refreshing the local Codex plugin.
+6. Run `make check-local-codex-install` on the target operator account after installing or refreshing the local Codex plugin; `make release-external-preflight` also reports this check as `local_codex_install`.
 7. Run `SEATGEIST_RELEASE_LIVE_EVALS_APPROVED=1 make release-live-evals` intentionally on the supported KDE Plasma 6 Wayland workstation and keep the generated `evidence.json` records. This target may open desktop apps, show portal consent dialogs, and send scoped input through Seatgeist policy gates.
 8. Create a signed release tag.
 9. Build and verify local release artifacts with `make verify-release-artifacts`.

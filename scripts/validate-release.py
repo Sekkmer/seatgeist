@@ -101,6 +101,8 @@ def main() -> None:
         "seatgeist-panic-stop-hotkey",
         "MANIFEST.json",
         "git ls-files -z",
+        "find \"$stage\" \"$plugin_stage\" -type d -name __pycache__",
+        "-name '*.pyc'",
         "plugin_archive=",
         "plugin_checksum=",
         "source_archive=",
@@ -118,6 +120,9 @@ def main() -> None:
         "verify_bundle(bundle, manifest)",
         "verify_plugin(plugin, manifest)",
         "verify_source(source, manifest)",
+        "reject_python_cache_members",
+        "__pycache__",
+        ".pyc",
         "crates/seatgeistd/src/main.rs",
         "plugin/.mcp.json",
         ".agents/plugins/marketplace.json",
@@ -260,10 +265,13 @@ def main() -> None:
     for needle in [
         "release_external_preflight",
         "public_metadata",
+        "local_codex_install",
         "signed_release_tag",
         "signed_release_artifacts",
         "live_eval_evidence",
         "name_collision_report",
+        "scripts/check-local-codex-install.py",
+        "make check-local-codex-install",
         "SEATGEIST_RELEASE_LIVE_EVALS_APPROVED=1 make release-live-evals",
         "git tag -s v0.1.0",
         "--strict",
@@ -363,6 +371,11 @@ def main() -> None:
         "docs/release-checklist.md",
         checklist,
         "Run `make release-external-preflight`",
+    )
+    require_contains(
+        "docs/release-checklist.md",
+        checklist,
+        "`make release-external-preflight` also reports this check as `local_codex_install`",
     )
     require_contains(
         "docs/release-checklist.md",

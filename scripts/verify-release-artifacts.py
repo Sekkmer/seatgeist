@@ -105,9 +105,23 @@ def require_members(path: Path, names: set[str], members: list[str]) -> None:
         fail(f"{path} is missing archive members: {', '.join(missing)}")
 
 
+def reject_python_cache_members(path: Path, names: set[str]) -> None:
+    forbidden = [
+        name
+        for name in names
+        if "/__pycache__/" in name
+        or name.endswith("/__pycache__")
+        or name.endswith(".pyc")
+        or name.endswith(".pyo")
+    ]
+    if forbidden:
+        fail(f"{path} contains generated Python cache files: {forbidden[:3]}")
+
+
 def verify_bundle(bundle: Path, manifest: dict[str, Any]) -> None:
     package = require_string(manifest, "package", "manifest")
     names = tar_names(bundle)
+    reject_python_cache_members(bundle, names)
     prefix = f"{package}/"
     require_members(
         bundle,
@@ -145,6 +159,7 @@ def verify_plugin(plugin: Path, manifest: dict[str, Any]) -> None:
     git = require_string(manifest, "git", "manifest")
     plugin_name = f"seatgeist-{version}-{git}-plugin"
     names = tar_names(plugin)
+    reject_python_cache_members(plugin, names)
     prefix = f"{plugin_name}/"
     require_members(
         plugin,
@@ -179,6 +194,7 @@ def verify_source(source: Path, manifest: dict[str, Any]) -> None:
     git = require_string(manifest, "git", "manifest")
     source_name = f"seatgeist-{version}-{git}-source"
     names = tar_names(source)
+    reject_python_cache_members(source, names)
     prefix = f"{source_name}/"
     require_members(
         source,

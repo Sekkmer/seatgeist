@@ -212,12 +212,76 @@ def check_name_collision(report: dict[str, Any]) -> Check:
     )
 
 
+def check_local_codex_install() -> Check:
+    result = run(["scripts/check-local-codex-install.py", "--json"])
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        return Check(
+            "local_codex_install",
+            False,
+            "local Codex Seatgeist plugin install preflight failed",
+            [detail] if detail else ["scripts/check-local-codex-install.py --json failed"],
+            "Run make check-local-codex-install and repair the reported Codex config, plugin cache, or launcher path.",
+        )
+    try:
+        report = json.loads(result.stdout)
+    except json.JSONDecodeError as err:
+        return Check(
+            "local_codex_install",
+            False,
+            "local Codex install preflight returned invalid JSON",
+            [str(err)],
+            "Run make check-local-codex-install and inspect its text output.",
+        )
+    if not isinstance(report, dict):
+        return Check(
+            "local_codex_install",
+            False,
+            "local Codex install preflight returned the wrong JSON shape",
+            [],
+            "Run make check-local-codex-install and inspect its text output.",
+        )
+    checks = report.get("checks")
+    evidence = [
+        f"codex_home={report.get('codex_home')}",
+        f"blockers={report.get('blocker_count')}",
+        f"warnings={report.get('warning_count')}",
+    ]
+    if isinstance(checks, list):
+        for item in checks:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            ok = item.get("ok")
+            summary = item.get("summary")
+            if name in {
+                "marketplace_source",
+                "plugin_enabled",
+                "installed_plugin_cache",
+                "binary_seatgeist-mcp",
+                "binary_seatgeist-cli",
+                "binary_seatgeistd",
+            }:
+                evidence.append(f"{name}: {'ok' if ok else 'not ok'}: {summary}")
+    ok = bool(report.get("ok"))
+    return Check(
+        "local_codex_install",
+        ok,
+        "local Codex Seatgeist plugin install is usable"
+        if ok
+        else "local Codex Seatgeist plugin install has blockers",
+        evidence,
+        "Run make check-local-codex-install and repair the reported Codex config, plugin cache, or launcher path.",
+    )
+
+
 def build_report() -> dict[str, Any]:
     current_git = git(["rev-parse", "--short=12", "HEAD"])
     readiness = release_readiness()
     checks = [
         check_public_metadata(),
         check_name_collision(readiness),
+        check_local_codex_install(),
         check_live_eval_evidence(readiness),
         check_signed_tag(current_git),
         check_release_artifact_upload_plan(readiness),

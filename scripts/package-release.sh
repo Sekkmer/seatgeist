@@ -62,6 +62,8 @@ cp Cargo.toml Cargo.lock Makefile LICENSE-MIT LICENSE-APACHE "$stage/"
 
 mkdir -p "$plugin_stage"
 cp -a plugin/. "$plugin_stage/"
+find "$stage" "$plugin_stage" -type d -name __pycache__ -prune -exec rm -rf {} +
+find "$stage" "$plugin_stage" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 cat >"$plugin_stage/MANIFEST.json" <<EOF
 {
   "name": "Seatgeist Codex Plugin",
