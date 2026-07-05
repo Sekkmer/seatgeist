@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
 	cat <<'USAGE'
-Usage: scripts/gui-eval.sh [all|status|observe|clipboard-denied|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|portal-screenshot|remote-desktop-probe|remote-desktop-eis-session|full-resolution-denied|control-safety]
+Usage: scripts/gui-eval.sh [all|status|observe|clipboard-denied|keymap-status|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|portal-screenshot|remote-desktop-probe|remote-desktop-eis-session|full-resolution-denied|control-safety]
 
 Runs opt-in local GUI evals against a private PlasmaPilot daemon socket.
 The default `all` set avoids control actions. `control-safety` starts a private
@@ -19,7 +19,7 @@ if [[ "$case_name" == "--help" || "$case_name" == "-h" ]]; then
 fi
 
 case "$case_name" in
-	all | status | observe | clipboard-denied | screenshot-preview | screenshot-coordinate-map | screenshot-config-bounds | portal-screenshot | remote-desktop-probe | remote-desktop-eis-session | full-resolution-denied | control-safety) ;;
+	all | status | observe | clipboard-denied | keymap-status | screenshot-preview | screenshot-coordinate-map | screenshot-config-bounds | portal-screenshot | remote-desktop-probe | remote-desktop-eis-session | full-resolution-denied | control-safety) ;;
 	*)
 		usage >&2
 		exit 2
@@ -143,6 +143,50 @@ eval_clipboard_denied() {
 		exit 1
 	fi
 	grep -qi "policy" "$run_dir/clipboard-denied.txt"
+}
+
+eval_keymap_status() {
+	cli input backends >"$run_dir/keymap-status.json"
+	jq -e '
+		.type == "input_backend_status"
+		and (.data.eis_keymap.source | type == "string")
+		and (.data.eis_keymap.setup_hint | type == "string")
+		and (
+			.data.eis_keymap.source == "config"
+			or .data.eis_keymap.source == "kde_current_layout"
+			or .data.eis_keymap.source == "kde_kxkbrc"
+			or .data.eis_keymap.source == "xkbcommon_default"
+		)
+	' "$run_dir/keymap-status.json" >/dev/null
+
+	if command -v qdbus6 >/dev/null 2>&1; then
+		if qdbus6 org.kde.keyboard /Layouts org.kde.KeyboardLayouts.getCurrentLayout >"$run_dir/keymap-current-layout.txt" 2>/dev/null \
+			|| qdbus6 org.kde.keyboard /Layouts getCurrentLayout >"$run_dir/keymap-current-layout.txt" 2>/dev/null; then
+			current_layout="$(tr -d '\r\n' <"$run_dir/keymap-current-layout.txt" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+			if [[ -n "$current_layout" ]]; then
+				jq -e --arg current_layout "$current_layout" '
+					.data.eis_keymap.source == "kde_current_layout"
+					and .data.eis_keymap.kde_current_layout == $current_layout
+					and (.data.eis_keymap.layout | type == "string")
+				' "$run_dir/keymap-status.json" >/dev/null
+			fi
+		fi
+	fi
+
+	if command -v kreadconfig6 >/dev/null 2>&1; then
+		if kreadconfig6 --file kxkbrc --group Layout --key LayoutList >"$run_dir/keymap-layout-list.txt" 2>/dev/null; then
+			layout_list="$(tr -d '\r\n' <"$run_dir/keymap-layout-list.txt" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+			if [[ -n "$layout_list" ]]; then
+				jq -e --arg layout_list "$layout_list" '
+					.data.eis_keymap.kde_config_layouts == $layout_list
+					or .data.eis_keymap.source == "kde_current_layout"
+				' "$run_dir/keymap-status.json" >/dev/null
+			fi
+		fi
+	fi
+
+	cli journal tail --limit 20 --method input_backend_status --ok true >"$run_dir/keymap-status-journal.json"
+	jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/keymap-status-journal.json" >/dev/null
 }
 
 eval_screenshot_preview() {
@@ -556,6 +600,7 @@ run_case() {
 		status) eval_status ;;
 		observe) eval_observe ;;
 		clipboard-denied) eval_clipboard_denied ;;
+		keymap-status) eval_keymap_status ;;
 		screenshot-preview) eval_screenshot_preview ;;
 		screenshot-coordinate-map) eval_screenshot_coordinate_map ;;
 		screenshot-config-bounds) eval_screenshot_config_bounds ;;
@@ -568,7 +613,7 @@ run_case() {
 }
 
 if [[ "$case_name" == "all" ]]; then
-	for eval_name in status observe clipboard-denied screenshot-preview screenshot-coordinate-map screenshot-config-bounds full-resolution-denied; do
+	for eval_name in status observe clipboard-denied keymap-status screenshot-preview screenshot-coordinate-map screenshot-config-bounds full-resolution-denied; do
 		run_case "$eval_name"
 	done
 else
