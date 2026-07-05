@@ -19,6 +19,7 @@ clap.workspace = true
 image.workspace = true
 libplasma-pilot.workspace = true
 plasma-pilot-atspi.workspace = true
+plasma-pilot-eis.workspace = true
 plasma-pilot-policy.workspace = true
 plasma-pilot-kwin.workspace = true
 plasma-pilot-portal.workspace = true

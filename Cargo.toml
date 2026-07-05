@@ -21,6 +21,7 @@ libc = "0.2.186"
 libplasma-pilot = { path = "crates/libplasma-pilot" }
 plasma-pilot-backend = { path = "crates/plasma-pilot-backend" }
 plasma-pilot-atspi = { path = "crates/plasma-pilot-atspi" }
+plasma-pilot-eis = { path = "crates/plasma-pilot-eis" }
 plasma-pilot-kwin = { path = "crates/plasma-pilot-kwin" }
 plasma-pilot-policy = { path = "crates/plasma-pilot-policy" }
 plasma-pilot-portal = { path = "crates/plasma-pilot-portal" }

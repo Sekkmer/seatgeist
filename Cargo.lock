@@ -665,6 +665,7 @@ dependencies = [
  "image",
  "libplasma-pilot",
  "plasma-pilot-atspi",
+ "plasma-pilot-eis",
  "plasma-pilot-kwin",
  "plasma-pilot-policy",
  "plasma-pilot-portal",

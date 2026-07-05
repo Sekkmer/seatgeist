@@ -2326,6 +2326,8 @@ trait InputExecutionBackend {
 
 struct UinputInputExecutionBackend;
 
+const EIS_PLAN_SEQUENCE: u32 = 1;
+
 impl InputExecutionBackend for UinputInputExecutionBackend {
     fn name(&self) -> &'static str {
         "uinput"
@@ -2392,6 +2394,87 @@ impl InputExecutionBackend for UinputInputExecutionBackend {
     }
 }
 
+struct EisPlanningInputExecutionBackend {
+    backend_name: &'static str,
+}
+
+impl EisPlanningInputExecutionBackend {
+    fn fail_closed_with_plan(&self, plan: plasma_pilot_eis::EisActionPlan) -> Result<()> {
+        bail!(
+            "configured input backend {} built an EIS action plan requiring {:?} across {} events, but no live consented EIS session/device executor is wired yet; use remote_desktop_eis_probe to validate handoff, or configure input = \"auto\" or \"uinput\" for current control",
+            self.backend_name,
+            plan.required_capabilities,
+            plan.events.len()
+        )
+    }
+}
+
+impl InputExecutionBackend for EisPlanningInputExecutionBackend {
+    fn name(&self) -> &'static str {
+        self.backend_name
+    }
+
+    fn type_text(&self, text: &str) -> Result<()> {
+        let plan = plasma_pilot_eis::plan_text_utf8(EIS_PLAN_SEQUENCE, text)
+            .map_err(|err| anyhow::anyhow!(err))?;
+        self.fail_closed_with_plan(plan)
+    }
+
+    fn key_combo(&self, _combo: &str) -> Result<usize> {
+        bail!(
+            "configured input backend {} has no EIS key-combo planner yet; keymap-aware routing must land before EIS keyboard shortcuts are enabled",
+            self.backend_name
+        )
+    }
+
+    fn move_pointer(
+        &self,
+        point: Point,
+        _bounds: plasma_pilot_uinput::PointerBounds,
+    ) -> Result<()> {
+        let plan = plasma_pilot_eis::plan_pointer_move_absolute(EIS_PLAN_SEQUENCE, point);
+        self.fail_closed_with_plan(plan)
+    }
+
+    fn click_pointer(
+        &self,
+        point: Point,
+        _bounds: plasma_pilot_uinput::PointerBounds,
+        button: PointerButton,
+        clicks: u8,
+    ) -> Result<()> {
+        let plan =
+            plasma_pilot_eis::plan_pointer_click_absolute(EIS_PLAN_SEQUENCE, point, button, clicks)
+                .map_err(|err| anyhow::anyhow!(err))?;
+        self.fail_closed_with_plan(plan)
+    }
+
+    fn drag_pointer(
+        &self,
+        from: Point,
+        to: Point,
+        _bounds: plasma_pilot_uinput::PointerBounds,
+        button: PointerButton,
+        _duration_ms: u64,
+    ) -> Result<()> {
+        let plan =
+            plasma_pilot_eis::plan_pointer_drag_absolute(EIS_PLAN_SEQUENCE, from, to, button);
+        self.fail_closed_with_plan(plan)
+    }
+
+    fn scroll_pointer(
+        &self,
+        vertical: i32,
+        horizontal: i32,
+        _bounds: plasma_pilot_uinput::PointerBounds,
+    ) -> Result<()> {
+        let plan =
+            plasma_pilot_eis::plan_pointer_scroll_discrete(EIS_PLAN_SEQUENCE, vertical, horizontal)
+                .map_err(|err| anyhow::anyhow!(err))?;
+        self.fail_closed_with_plan(plan)
+    }
+}
+
 fn input_execution_backend(
     preference: InputBackendPreference,
 ) -> Result<Box<dyn InputExecutionBackend>> {
@@ -2400,15 +2483,13 @@ fn input_execution_backend(
             Ok(Box::new(UinputInputExecutionBackend))
         }
         InputBackendPreference::PortalRemoteDesktop => {
-            bail!(
-                "configured input backend portal_remote_desktop has no input executor yet; use remote_desktop_eis_probe to validate consent/EIS, or configure input = \"auto\" or \"uinput\" for current control"
-            )
+            Ok(Box::new(EisPlanningInputExecutionBackend {
+                backend_name: "portal_remote_desktop",
+            }))
         }
-        InputBackendPreference::Libei => {
-            bail!(
-                "configured input backend libei has no input executor yet; use remote_desktop_eis_probe to validate EIS handoff where available, or configure input = \"auto\" or \"uinput\" for current control"
-            )
-        }
+        InputBackendPreference::Libei => Ok(Box::new(EisPlanningInputExecutionBackend {
+            backend_name: "libei",
+        })),
     }
 }
 
@@ -7554,21 +7635,67 @@ height = 40
             "uinput"
         );
 
-        let portal_result = input_execution_backend(InputBackendPreference::PortalRemoteDesktop);
-        assert!(portal_result.is_err());
-        let err = portal_result
-            .err()
-            .expect("portal execution has no input executor yet");
-        assert!(err.to_string().contains("portal_remote_desktop"));
-        assert!(err.to_string().contains("remote_desktop_eis_probe"));
+        assert_eq!(
+            input_execution_backend(InputBackendPreference::PortalRemoteDesktop)
+                .expect("explicit portal backend has an EIS planning executor")
+                .name(),
+            "portal_remote_desktop"
+        );
+        assert_eq!(
+            input_execution_backend(InputBackendPreference::Libei)
+                .expect("explicit libei backend has an EIS planning executor")
+                .name(),
+            "libei"
+        );
+    }
 
-        let libei_result = input_execution_backend(InputBackendPreference::Libei);
-        assert!(libei_result.is_err());
-        let err = libei_result
-            .err()
-            .expect("libei execution has no input executor yet");
-        assert!(err.to_string().contains("libei"));
-        assert!(err.to_string().contains("remote_desktop_eis_probe"));
+    #[test]
+    fn explicit_eis_backends_build_action_plans_then_fail_closed() {
+        let libei = input_execution_backend(InputBackendPreference::Libei)
+            .expect("libei backend has a planning executor");
+        let err = libei
+            .type_text("hello")
+            .expect_err("libei text planning still fails before execution");
+        let err = err.to_string();
+        assert!(err.contains("libei"));
+        assert!(err.contains("Text"));
+        assert!(err.contains("4 events"));
+        assert!(err.contains("no live consented EIS session/device executor"));
+
+        let portal = input_execution_backend(InputBackendPreference::PortalRemoteDesktop)
+            .expect("portal backend has a planning executor");
+        let err = portal
+            .click_pointer(
+                Point {
+                    x: 25.0,
+                    y: 50.0,
+                    space: CoordinateSpace::PhysicalPixel,
+                },
+                plasma_pilot_uinput::PointerBounds {
+                    min_x: 0,
+                    min_y: 0,
+                    width: 100,
+                    height: 100,
+                },
+                PointerButton::Left,
+                1,
+            )
+            .expect_err("portal EIS pointer planning still fails before execution");
+        let err = err.to_string();
+        assert!(err.contains("portal_remote_desktop"));
+        assert!(err.contains("PointerAbsolute"));
+        assert!(err.contains("Button"));
+        assert!(err.contains("no live consented EIS session/device executor"));
+    }
+
+    #[test]
+    fn explicit_eis_key_combos_fail_until_keymap_planning_lands() {
+        let libei = input_execution_backend(InputBackendPreference::Libei)
+            .expect("libei backend has a planning executor");
+        let err = libei
+            .key_combo("Ctrl+L")
+            .expect_err("EIS key combo support is not implemented yet");
+        assert!(err.to_string().contains("keymap-aware"));
     }
 
     #[test]
