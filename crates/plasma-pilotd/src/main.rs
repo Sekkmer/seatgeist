@@ -20,10 +20,10 @@ use libplasma_pilot::{
     ActionResult, ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard, BackendCapability,
     CapabilitySet, CaptureBackendStatus, ClickButtonRequest, ClickPointerRequest,
     ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse,
-    DesktopObservation, DragPointerRequest, FocusTextFieldRequest, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus, JournalEntry,
-    JournalWindowContext, KeyComboRequest, KwinBridgeStatus, KwinMetadataStatus, LibeiStatus,
-    MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton,
+    DesktopObservation, DesktopSessionStatus, DragPointerRequest, FocusTextFieldRequest,
+    FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus,
+    JournalEntry, JournalWindowContext, KeyComboRequest, KwinBridgeStatus, KwinMetadataStatus,
+    LibeiStatus, MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton,
     PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
     PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus, SafetyClass, SafetyStatus,
     ScreenshotInfo, ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest,
@@ -773,6 +773,9 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::DesktopSessionStatus => {
+            DaemonResponse::DesktopSessionStatus(desktop_session_status_from_env(std::env::vars()))
+        }
         DaemonRequest::PanicStopStatus => DaemonResponse::PanicStop(runtime.panic_stop.status()),
         DaemonRequest::SetPanicStop(request) => {
             match set_panic_stop(&runtime.panic_stop, request) {
@@ -1099,6 +1102,75 @@ fn safety_status(settings: &SafetySettings) -> Result<SafetyStatus> {
         human_input_signal_age_ms,
         screenshot_redaction_count: settings.screenshot_redactions.len(),
     })
+}
+
+fn desktop_session_status_from_env<I, K, V>(vars: I) -> DesktopSessionStatus
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<str>,
+    V: Into<String>,
+{
+    let vars = vars
+        .into_iter()
+        .map(|(key, value)| (key.as_ref().to_string(), value.into()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut status = DesktopSessionStatus {
+        xdg_session_type: clean_env_value(vars.get("XDG_SESSION_TYPE")),
+        xdg_current_desktop: clean_env_value(vars.get("XDG_CURRENT_DESKTOP")),
+        desktop_session: clean_env_value(vars.get("DESKTOP_SESSION")),
+        kde_full_session: clean_env_value(vars.get("KDE_FULL_SESSION")),
+        kde_session_version: clean_env_value(vars.get("KDE_SESSION_VERSION")),
+        wayland_display: clean_env_value(vars.get("WAYLAND_DISPLAY")),
+        display: clean_env_value(vars.get("DISPLAY")),
+        dbus_session_bus_address_present: clean_env_value(vars.get("DBUS_SESSION_BUS_ADDRESS"))
+            .is_some(),
+        xdg_runtime_dir_present: clean_env_value(vars.get("XDG_RUNTIME_DIR")).is_some(),
+        setup_hint: String::new(),
+    };
+    status.setup_hint = desktop_session_setup_hint(&status);
+    status
+}
+
+fn clean_env_value(value: Option<&String>) -> Option<String> {
+    value
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn desktop_session_setup_hint(status: &DesktopSessionStatus) -> String {
+    if !status.dbus_session_bus_address_present {
+        return "DBUS_SESSION_BUS_ADDRESS is not present; PlasmaPilot DBus, portal, KWin, and AT-SPI probes need a user session bus".to_string();
+    }
+    if !status.xdg_runtime_dir_present {
+        return "XDG_RUNTIME_DIR is not present; daemon socket, portal sessions, and Wayland runtime files need a user runtime directory".to_string();
+    }
+    let desktop = status
+        .xdg_current_desktop
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let is_kde = desktop.contains("kde")
+        || status.kde_full_session.as_deref() == Some("true")
+        || status.kde_session_version.as_deref() == Some("6");
+    if !is_kde {
+        return "session bus and runtime directory are present, but KDE Plasma was not detected; KWin-specific tools may be unavailable".to_string();
+    }
+    match status.xdg_session_type.as_deref() {
+        Some("wayland") if status.wayland_display.is_some() => {
+            "KDE Wayland session detected; prefer portal/KWin/AT-SPI diagnostics before uinput fallback".to_string()
+        }
+        Some("wayland") => {
+            "KDE Wayland session type detected, but WAYLAND_DISPLAY is missing; portal/KWin control may fail until the daemon inherits the session environment".to_string()
+        }
+        Some("x11") => {
+            "KDE X11 session detected; PlasmaPilot targets KDE Wayland first, so Wayland portal/libei diagnostics may be unavailable".to_string()
+        }
+        Some(other) => format!(
+            "KDE session detected with XDG_SESSION_TYPE={other}; verify portal, KWin, and input backend diagnostics before control"
+        ),
+        None => "KDE session detected, but XDG_SESSION_TYPE is missing; verify portal, KWin, and input backend diagnostics before control".to_string(),
+    }
 }
 
 fn load_daemon_config(explicit_path: Option<&Path>) -> Result<DaemonConfigFile> {
@@ -2065,6 +2137,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::Capabilities
         | DaemonRequest::PolicyStatus
         | DaemonRequest::SafetyStatus
+        | DaemonRequest::DesktopSessionStatus
         | DaemonRequest::PanicStopStatus
         | DaemonRequest::SetPanicStop(_)
         | DaemonRequest::UinputStatus
@@ -4676,6 +4749,13 @@ fn summarize_response(response: &DaemonResponse) -> String {
             status.human_input_signal_fresh,
             status.screenshot_redaction_count
         ),
+        DaemonResponse::DesktopSessionStatus(status) => format!(
+            "desktop session type={} desktop={} dbus={} runtime={}",
+            status.xdg_session_type.as_deref().unwrap_or("unknown"),
+            status.xdg_current_desktop.as_deref().unwrap_or("unknown"),
+            status.dbus_session_bus_address_present,
+            status.xdg_runtime_dir_present
+        ),
         DaemonResponse::PanicStop(status) => format!(
             "panic-stop enabled={} path={}",
             status.enabled,
@@ -6154,6 +6234,56 @@ height = 40
             .expect("capture backend status is allowed as policy diagnostics");
         enforce_policy(&policy, &DaemonRequest::PointerCalibration)
             .expect("pointer calibration is allowed as policy diagnostics");
+        enforce_policy(&policy, &DaemonRequest::DesktopSessionStatus)
+            .expect("desktop session status is allowed as policy diagnostics");
+    }
+
+    #[test]
+    fn desktop_session_status_detects_kde_wayland() {
+        let status = desktop_session_status_from_env([
+            ("XDG_SESSION_TYPE", "wayland"),
+            ("XDG_CURRENT_DESKTOP", "KDE"),
+            ("DESKTOP_SESSION", "plasma"),
+            ("KDE_FULL_SESSION", "true"),
+            ("KDE_SESSION_VERSION", "6"),
+            ("WAYLAND_DISPLAY", "wayland-0"),
+            ("DISPLAY", ":0"),
+            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
+            ("XDG_RUNTIME_DIR", "/run/user/1000"),
+        ]);
+
+        assert_eq!(status.xdg_session_type.as_deref(), Some("wayland"));
+        assert_eq!(status.xdg_current_desktop.as_deref(), Some("KDE"));
+        assert!(status.dbus_session_bus_address_present);
+        assert!(status.xdg_runtime_dir_present);
+        assert!(status.setup_hint.contains("KDE Wayland"));
+    }
+
+    #[test]
+    fn desktop_session_status_reports_missing_bus_first() {
+        let status = desktop_session_status_from_env([
+            ("XDG_SESSION_TYPE", "wayland"),
+            ("XDG_CURRENT_DESKTOP", "KDE"),
+            ("XDG_RUNTIME_DIR", "/run/user/1000"),
+        ]);
+
+        assert!(!status.dbus_session_bus_address_present);
+        assert!(status.xdg_runtime_dir_present);
+        assert!(status.setup_hint.contains("DBUS_SESSION_BUS_ADDRESS"));
+    }
+
+    #[test]
+    fn desktop_session_status_reports_non_kde_session() {
+        let status = desktop_session_status_from_env([
+            ("XDG_SESSION_TYPE", "wayland"),
+            ("XDG_CURRENT_DESKTOP", "GNOME"),
+            ("WAYLAND_DISPLAY", "wayland-0"),
+            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
+            ("XDG_RUNTIME_DIR", "/run/user/1000"),
+        ]);
+
+        assert_eq!(status.xdg_current_desktop.as_deref(), Some("GNOME"));
+        assert!(status.setup_hint.contains("KDE Plasma was not detected"));
     }
 
     #[test]

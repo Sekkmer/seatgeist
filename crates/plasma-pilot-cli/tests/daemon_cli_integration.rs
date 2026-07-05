@@ -8,9 +8,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use libplasma_pilot::{
-    BackendCapability, CapabilitySet, DaemonRequest, DaemonResponse, HealthStatus, JournalEntry,
-    PanicStopStatus, PolicyStatus, ReplayTrace, SafetyStatus, ToolApprovalLevel, TraceStep,
-    UinputStatus,
+    BackendCapability, CapabilitySet, DaemonRequest, DaemonResponse, DesktopSessionStatus,
+    HealthStatus, JournalEntry, PanicStopStatus, PolicyStatus, ReplayTrace, SafetyStatus,
+    ToolApprovalLevel, TraceStep, UinputStatus,
 };
 use std::os::unix::fs::PermissionsExt;
 
@@ -136,6 +136,14 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
         })
     );
 
+    let desktop_session = daemon.cli_json(&["desktop-session-status"])?;
+    let DaemonResponse::DesktopSessionStatus(DesktopSessionStatus { setup_hint, .. }) =
+        desktop_session
+    else {
+        bail!("expected desktop session status response, got {desktop_session:?}");
+    };
+    assert!(!setup_hint.is_empty());
+
     let uinput = daemon.cli_json(&["input", "status"])?;
     let DaemonResponse::UinputStatus(UinputStatus {
         path, setup_hint, ..
@@ -174,6 +182,7 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
             "capabilities",
             "policy_status",
             "safety_status",
+            "desktop_session_status",
             "uinput_status",
             "input_backend_status",
             "capture_backend_status",

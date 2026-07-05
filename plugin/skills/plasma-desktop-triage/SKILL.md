@@ -7,7 +7,7 @@ Start with `doctor`, `capabilities`, window state, active-window state, journal 
 
 Workflow:
 
-1. Call `plasma.health`, `plasma.capabilities`, `plasma.policy_status`, and `plasma.safety_status` first.
+1. Call `plasma.health`, `plasma.capabilities`, `plasma.policy_status`, `plasma.safety_status`, and `plasma.desktop_session_status` first.
 2. Use `plasma.kwin_bridge_status`, `plasma.list_monitors`, `plasma.list_windows`, and `plasma.active_window` for KWin/window issues.
 3. Use `plasma.uinput_status`, `plasma.input_backend_status`, and `plasma.pointer_calibration` for keyboard, pointer, uinput, portal, libei, or 8K coordinate issues.
 4. Use `plasma.capture_backend_status` for display/capture backend issues before requesting any screenshot.

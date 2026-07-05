@@ -233,6 +233,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         "plasma.capabilities" => Ok(DaemonRequest::Capabilities),
         "plasma.policy_status" => Ok(DaemonRequest::PolicyStatus),
         "plasma.safety_status" => Ok(DaemonRequest::SafetyStatus),
+        "plasma.desktop_session_status" => Ok(DaemonRequest::DesktopSessionStatus),
         "plasma.panic_stop_status" => Ok(DaemonRequest::PanicStopStatus),
         "plasma.panic_stop_enable" => Ok(DaemonRequest::SetPanicStop(SetPanicStopRequest {
             enabled: true,
@@ -610,6 +611,16 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status.human_input_quiet_ms,
             status.screenshot_redaction_count
         ),
+        DaemonResponse::DesktopSessionStatus(status) => format!(
+            "desktop session type={} desktop={} kde={} wayland={} display={} dbus={} runtime={}",
+            status.xdg_session_type.as_deref().unwrap_or("unknown"),
+            status.xdg_current_desktop.as_deref().unwrap_or("unknown"),
+            status.kde_session_version.as_deref().unwrap_or("unknown"),
+            status.wayland_display.as_deref().unwrap_or("none"),
+            status.display.as_deref().unwrap_or("none"),
+            status.dbus_session_bus_address_present,
+            status.xdg_runtime_dir_present
+        ),
         DaemonResponse::PanicStop(status) => format!(
             "panic-stop enabled={} path={}",
             status.enabled,
@@ -759,6 +770,12 @@ fn tool_definitions() -> Vec<Value> {
             "plasma.safety_status",
             "Safety Status",
             "Read active daemon safety gates such as focus guards, human-input pause, and screenshot redaction count.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.desktop_session_status",
+            "Desktop Session Status",
+            "Report sanitized KDE/Wayland/session environment diagnostics for portal, KWin, DBus, and runtime troubleshooting.",
             object_schema(vec![], vec![]),
         ),
         tool(
@@ -1920,6 +1937,11 @@ mod tests {
         assert!(
             tools
                 .iter()
+                .any(|tool| tool["name"] == "plasma.desktop_session_status")
+        );
+        assert!(
+            tools
+                .iter()
                 .any(|tool| tool["name"] == "plasma.panic_stop_enable")
         );
         assert!(
@@ -2293,6 +2315,11 @@ mod tests {
             daemon_request_for_tool("plasma.safety_status", &json!({}))
                 .expect("safety status maps"),
             DaemonRequest::SafetyStatus
+        );
+        assert_eq!(
+            daemon_request_for_tool("plasma.desktop_session_status", &json!({}))
+                .expect("desktop session status maps"),
+            DaemonRequest::DesktopSessionStatus
         );
         assert_eq!(
             daemon_request_for_tool("plasma.panic_stop_status", &json!({}))

@@ -42,6 +42,7 @@ enum Command {
     Capabilities,
     PolicyStatus,
     SafetyStatus,
+    DesktopSessionStatus,
     KwinBridgeStatus,
     CaptureBackends,
     Monitors,
@@ -575,6 +576,9 @@ fn main() -> Result<()> {
         Command::Capabilities => print_daemon_response(&socket, DaemonRequest::Capabilities)?,
         Command::PolicyStatus => print_daemon_response(&socket, DaemonRequest::PolicyStatus)?,
         Command::SafetyStatus => print_daemon_response(&socket, DaemonRequest::SafetyStatus)?,
+        Command::DesktopSessionStatus => {
+            print_daemon_response(&socket, DaemonRequest::DesktopSessionStatus)?;
+        }
         Command::KwinBridgeStatus => {
             print_daemon_response(&socket, DaemonRequest::KwinBridgeStatus)?;
         }

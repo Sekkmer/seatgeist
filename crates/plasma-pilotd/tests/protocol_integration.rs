@@ -10,9 +10,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use libplasma_pilot::{
-    CapabilitySet, DaemonRequest, DaemonResponse, HealthStatus, JournalEntry, JournalTailRequest,
-    PanicStopStatus, PolicyStatus, SafetyStatus, SetPanicStopRequest, ToolApprovalLevel,
-    UinputStatus,
+    CapabilitySet, DaemonRequest, DaemonResponse, DesktopSessionStatus, HealthStatus, JournalEntry,
+    JournalTailRequest, PanicStopStatus, PolicyStatus, SafetyStatus, SetPanicStopRequest,
+    ToolApprovalLevel, UinputStatus,
 };
 
 struct DaemonFixture {
@@ -186,6 +186,14 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
         })
     );
 
+    let desktop_session = daemon.request(&DaemonRequest::DesktopSessionStatus)?;
+    let DaemonResponse::DesktopSessionStatus(DesktopSessionStatus { setup_hint, .. }) =
+        desktop_session
+    else {
+        bail!("expected desktop session status response, got {desktop_session:?}");
+    };
+    assert!(!setup_hint.is_empty());
+
     let panic_stop = daemon.request(&DaemonRequest::PanicStopStatus)?;
     let DaemonResponse::PanicStop(PanicStopStatus { enabled, path }) = panic_stop else {
         bail!("expected panic-stop response, got {panic_stop:?}");
@@ -239,7 +247,7 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
     assert!(!path.exists());
 
     let journal = daemon.request(&DaemonRequest::JournalTail(JournalTailRequest {
-        limit: 10,
+        limit: 11,
         method_filter: None,
         ok: None,
     }))?;
@@ -253,6 +261,7 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
             "policy_status",
             "capabilities",
             "safety_status",
+            "desktop_session_status",
             "panic_stop_status",
             "uinput_status",
             "input_backend_status",

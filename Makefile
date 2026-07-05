@@ -48,6 +48,7 @@ smoke:
 	cargo run -p plasma-pilot-cli -- --socket "$$socket" doctor
 	cargo run -p plasma-pilot-cli -- --socket "$$socket" capabilities
 	cargo run -p plasma-pilot-cli -- --socket "$$socket" policy-status
+	cargo run -p plasma-pilot-cli -- --socket "$$socket" desktop-session-status
 	cargo run -p plasma-pilot-cli -- --socket "$$socket" journal tail --limit 10
 	test "$$(stat -c '%a' target/plasma-pilot-smoke)" = "700"
 	test "$$(stat -c '%a' "$$socket")" = "600"
@@ -413,6 +414,7 @@ smoke-mcp:
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.list_windows")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.clipboard_get_text")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.clipboard_set_text")' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.desktop_session_status")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.panic_stop_status")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.panic_stop_enable")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.panic_stop_disable")' "$$out" >/dev/null

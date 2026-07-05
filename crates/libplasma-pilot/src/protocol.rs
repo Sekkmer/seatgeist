@@ -48,6 +48,20 @@ pub struct SafetyStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopSessionStatus {
+    pub xdg_session_type: Option<String>,
+    pub xdg_current_desktop: Option<String>,
+    pub desktop_session: Option<String>,
+    pub kde_full_session: Option<String>,
+    pub kde_session_version: Option<String>,
+    pub wayland_display: Option<String>,
+    pub display: Option<String>,
+    pub dbus_session_bus_address_present: bool,
+    pub xdg_runtime_dir_present: bool,
+    pub setup_hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PanicStopStatus {
     pub enabled: bool,
     pub path: PathBuf,
@@ -613,6 +627,7 @@ pub enum DaemonRequest {
     Capabilities,
     PolicyStatus,
     SafetyStatus,
+    DesktopSessionStatus,
     PanicStopStatus,
     SetPanicStop(SetPanicStopRequest),
     KwinBridgeStatus,
@@ -665,6 +680,7 @@ impl DaemonRequest {
             Self::Capabilities => "capabilities",
             Self::PolicyStatus => "policy_status",
             Self::SafetyStatus => "safety_status",
+            Self::DesktopSessionStatus => "desktop_session_status",
             Self::PanicStopStatus => "panic_stop_status",
             Self::SetPanicStop(_) => "set_panic_stop",
             Self::KwinBridgeStatus => "kwin_bridge_status",
@@ -719,6 +735,7 @@ pub enum DaemonResponse {
     Capabilities(CapabilitySet),
     PolicyStatus(PolicyStatus),
     SafetyStatus(SafetyStatus),
+    DesktopSessionStatus(DesktopSessionStatus),
     PanicStop(PanicStopStatus),
     KwinBridgeStatus(KwinBridgeStatus),
     UinputStatus(UinputStatus),
@@ -747,6 +764,7 @@ impl DaemonResponse {
             Self::Capabilities(_) => "capabilities",
             Self::PolicyStatus(_) => "policy_status",
             Self::SafetyStatus(_) => "safety_status",
+            Self::DesktopSessionStatus(_) => "desktop_session_status",
             Self::PanicStop(_) => "panic_stop",
             Self::KwinBridgeStatus(_) => "kwin_bridge_status",
             Self::UinputStatus(_) => "uinput_status",
@@ -1210,6 +1228,32 @@ mod tests {
         assert!(encoded.contains(r#""type":"input_backend_status""#));
         assert!(encoded.contains(r#""preferred_available_backend":"portal_remote_desktop""#));
         assert_eq!(response.response_type(), "input_backend_status");
+    }
+
+    #[test]
+    fn serializes_desktop_session_status() {
+        let request = DaemonRequest::DesktopSessionStatus;
+        assert_eq!(
+            serde_json::to_string(&request).expect("desktop session status request serializes"),
+            r#"{"method":"desktop_session_status"}"#
+        );
+
+        let response = DaemonResponse::DesktopSessionStatus(DesktopSessionStatus {
+            xdg_session_type: Some("wayland".to_string()),
+            xdg_current_desktop: Some("KDE".to_string()),
+            desktop_session: Some("plasma".to_string()),
+            kde_full_session: Some("true".to_string()),
+            kde_session_version: Some("6".to_string()),
+            wayland_display: Some("wayland-0".to_string()),
+            display: Some(":0".to_string()),
+            dbus_session_bus_address_present: true,
+            xdg_runtime_dir_present: true,
+            setup_hint: "KDE Wayland session detected".to_string(),
+        });
+        let encoded = serde_json::to_string(&response).expect("desktop status serializes");
+        assert!(encoded.contains(r#""type":"desktop_session_status""#));
+        assert!(encoded.contains(r#""xdg_session_type":"wayland""#));
+        assert_eq!(response.response_type(), "desktop_session_status");
     }
 
     #[test]
