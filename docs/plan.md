@@ -8,6 +8,8 @@ Language preference: Rust-first, with minimal C++/KWin/Qt code only where KDE in
 
 Checklist tracker: `docs/tracker.md` records done, partial, and remaining work using `[x]`, `[~]`, and `[ ]` against the full PlasmaPilot project scope.
 
+Release checklist: `docs/release-checklist.md` records public-release blocking evidence, CI scope, and release-cut steps.
+
 ## 1. One-sentence goal
 
 Build **PlasmaPilot**, a local Linux/KDE desktop-control substrate that lets Codex CLI safely observe and operate the user’s KDE Plasma desktop through a Codex plugin, MCP tools, skills, hooks, a CLI, and a privileged local daemon.
@@ -1115,6 +1117,7 @@ cargo check --workspace
 - [x] Implement Phase 1.
 - [x] Implement Phase 2.
 - [x] Implement Phase 3. Current status: keyboard and pointer command paths including bounded pointer drag, uinput setup diagnostics/docs, portal/libei input backend probes, pointer calibration diagnostics, and guarded KWrite GUI input smoke exist.
+- [~] Add release hardening. Current status: GitHub Actions runs the safe `make verify` gate on push and pull requests, and `docs/release-checklist.md` records public-release blockers. Versioned artifacts, final public metadata, and broader manual release evidence remain incomplete.
 
 ## 20. Definition of done for v0.1
 

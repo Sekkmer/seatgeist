@@ -96,12 +96,13 @@ Current full-project estimate: `[~]` about one third complete. This estimate use
 ## Evals And Regression Gates
 
 - [x] `make verify` runs formatting, check, tests, clippy, plugin/install validation, trace validation, smoke tests, MCP smoke, and safe GUI evals.
+- [x] GitHub Actions CI runs the safe verification gate on push and pull requests.
 - [x] Checked-in replay traces cover status, journal filters, protected policy denials, semantic denials, raw input denials, and panic-stop transitions.
 - [x] `make smoke-trace-replay` explicitly validates and replays the checked-in trace categories, including semantic denials.
 - [x] Safe GUI evals cover status, session preflight, observe, AT-SPI diagnostics, denial paths, clipboard status/denial, KWin bridge status, keymap status, full-resolution denial, and control safety.
 - [~] Opt-in GUI evals exist for KWrite/Kate, KCalc, Firefox localhost button, portal Screenshot, RemoteDesktop probe, and retained RemoteDesktop EIS session.
 - [~] Manual KDE Plasma 6 Wayland eval suite is useful but not complete enough to call v0.1 done.
-- [ ] Public release checklist, versioned release artifacts, and external CI are not done.
+- [~] Public release checklist and external CI exist; versioned release artifacts are not done.
 
 ## v0.1 Definition Of Done
 

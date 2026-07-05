@@ -2,6 +2,8 @@
 
 Checklist tracker: `docs/tracker.md` records done, partial, and remaining work using `[x]`, `[~]`, and `[ ]` against the full PlasmaPilot project scope.
 
+Release checklist: `docs/release-checklist.md` records public-release blocking evidence, CI scope, and release-cut steps.
+
 ## 2026-07-04
 
 Phase 0 scaffold is present:
@@ -129,6 +131,7 @@ Phase 1 first slice is implemented:
 - `plasma-pilot-portal` now codifies the official xdg-desktop-portal Screenshot request contract as a tested crate boundary: service/object/interface constants, handle-token validation, expected and returned Request object paths, Response signal match rules, response-code handling, screenshot URI extraction, file URI decoding, a transport trait that drives the request lifecycle, and a zbus execution path used by the daemon for full-screen portal screenshots.
 - `plasma-pilot-cli input pointer-calibration`, MCP `plasma.pointer_calibration`, and `make smoke-pointer-calibration` now provide safe pointer calibration diagnostics without moving the pointer. The response reports physical-pixel bounds derived from KWin monitor metadata, per-monitor physical origins, and representative top-left/center/bottom-right sample points for guarded GUI smoke. This safe calibration smoke is included in `make verify`.
 - `docs/arch-kde-install.md` now provides the consolidated Arch Linux + KDE Plasma 6 operator install runbook, including package prerequisites, binary installation, user service setup, KWin bridge enablement, safe diagnostics, optional uinput, Codex plugin validation, approval flow, and troubleshooting.
+- `.github/workflows/ci.yml` now runs the safe `make verify` gate on push and pull requests with the linked libei/xkbcommon development packages installed, and `docs/release-checklist.md` records the public-release blockers that remain after CI.
 - `make smoke-gui-input` now validates real policy-gated uinput control in a disposable KWrite/Kate document. It starts a private daemon with an approval file, grants only the focus, click, type, and save methods it uses, focuses the test window through KWin, requires an active-window guard, maps a safe window point to physical pixels through pointer calibration, clicks, types a sentinel, saves, verifies file content, and checks the journal.
 - The host GUI smoke exposed and fixed the initial keyboard mapping bug where text typing assumed evdev letter codes were contiguous; the uinput backend now uses explicit US evdev letter mappings.
 - AT-SPI run-attribute mutation if a supported interface is identified, KWin-native capture backends, broader live KDE evals, and portal clipboard integration if a stable interface appears remain future work.
