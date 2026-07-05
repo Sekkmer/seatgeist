@@ -70,5 +70,13 @@ pub trait AccessibilityBackend: Send + Sync {
     async fn copy_text(&self, node_id: &str, start_offset: i32, end_offset: i32) -> Result<()>;
     async fn cut_text(&self, node_id: &str, start_offset: i32, end_offset: i32) -> Result<()>;
     async fn paste_text(&self, node_id: &str, offset: i32) -> Result<()>;
+    async fn set_caret(&self, node_id: &str, offset: i32) -> Result<()>;
+    async fn set_selection(
+        &self,
+        node_id: &str,
+        selection_num: i32,
+        start_offset: i32,
+        end_offset: i32,
+    ) -> Result<()>;
     async fn set_value(&self, node_id: &str, value: f64) -> Result<()>;
 }

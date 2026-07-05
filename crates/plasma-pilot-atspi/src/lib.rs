@@ -187,6 +187,34 @@ pub fn paste_text(node_id: &str, offset: i32) -> Result<()> {
     bus.paste_text(&node, offset)
 }
 
+pub fn set_caret(node_id: &str, offset: i32) -> Result<()> {
+    if offset < 0 {
+        return Err(PilotError::InvalidRequest(
+            "offset must be greater than or equal to zero".to_string(),
+        ));
+    }
+    let node = parse_node_id(node_id)?;
+    let bus = AtspiBus::connect()?;
+    bus.set_caret(&node, offset)
+}
+
+pub fn set_selection(
+    node_id: &str,
+    selection_num: i32,
+    start_offset: i32,
+    end_offset: i32,
+) -> Result<()> {
+    if selection_num < 0 {
+        return Err(PilotError::InvalidRequest(
+            "selection_num must be greater than or equal to zero".to_string(),
+        ));
+    }
+    validate_text_range(start_offset, end_offset)?;
+    let node = parse_node_id(node_id)?;
+    let bus = AtspiBus::connect()?;
+    bus.set_selection(&node, selection_num, start_offset, end_offset)
+}
+
 pub fn set_current_value(node_id: &str, value: f64) -> Result<()> {
     if !value.is_finite() {
         return Err(PilotError::InvalidRequest(
@@ -739,6 +767,70 @@ impl AtspiBus {
                 "AT-SPI PasteText returned false".to_string(),
             ))
         }
+    }
+
+    fn set_caret(&self, node: &AtspiRef, offset: i32) -> Result<()> {
+        self.ensure_text_control_node(node, "set caret")?;
+        let offset = offset.to_string();
+        let output = self.call_with_args(
+            &node.service,
+            &node.path,
+            ATSPI_TEXT,
+            "SetCaretOffset",
+            &["i", &offset],
+        )?;
+        if parse_bool_value(&output)? {
+            Ok(())
+        } else {
+            Err(PilotError::BackendUnavailable(
+                "AT-SPI SetCaretOffset returned false".to_string(),
+            ))
+        }
+    }
+
+    fn set_selection(
+        &self,
+        node: &AtspiRef,
+        selection_num: i32,
+        start_offset: i32,
+        end_offset: i32,
+    ) -> Result<()> {
+        self.ensure_text_control_node(node, "set selection")?;
+        let selection_num = selection_num.to_string();
+        let start = start_offset.to_string();
+        let end = end_offset.to_string();
+        let output = self.call_with_args(
+            &node.service,
+            &node.path,
+            ATSPI_TEXT,
+            "SetSelection",
+            &["iii", &selection_num, &start, &end],
+        )?;
+        if parse_bool_value(&output)? {
+            Ok(())
+        } else {
+            Err(PilotError::BackendUnavailable(
+                "AT-SPI SetSelection returned false".to_string(),
+            ))
+        }
+    }
+
+    fn ensure_text_control_node(&self, node: &AtspiRef, action: &str) -> Result<()> {
+        let role = self
+            .role_name(node)
+            .unwrap_or_else(|_| "unknown".to_string());
+        if is_sensitive_role(&role) {
+            return Err(PilotError::PolicyDenied(format!(
+                "refusing to {action} on sensitive accessibility node"
+            )));
+        }
+        let interfaces = self.interfaces(node)?;
+        if !interfaces.iter().any(|interface| interface == ATSPI_TEXT) {
+            return Err(PilotError::InvalidRequest(
+                "node does not expose org.a11y.atspi.Text".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     fn set_current_value(&self, node: &AtspiRef, value: f64) -> Result<()> {
@@ -1358,6 +1450,15 @@ mod tests {
         let long = "x".repeat(DEFAULT_SET_TEXT_MAX_CHARS + 1);
         let err = validate_set_text(&long).expect_err("long text is rejected");
         assert!(err.to_string().contains("character limit"));
+    }
+
+    #[test]
+    fn validates_text_range_for_selection() {
+        validate_text_range(0, 1).expect("valid range passes");
+        let err = validate_text_range(-1, 1).expect_err("negative start is invalid");
+        assert!(err.to_string().contains("start_offset"));
+        let err = validate_text_range(2, 2).expect_err("empty range is invalid");
+        assert!(err.to_string().contains("end_offset"));
     }
 
     #[test]

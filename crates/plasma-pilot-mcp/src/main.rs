@@ -9,7 +9,8 @@ use clap::Parser;
 use libplasma_pilot::{
     AccessibilityAction, AccessibilityCopyTextRequest, AccessibilityCutTextRequest,
     AccessibilityDeleteTextRequest, AccessibilityFindRequest, AccessibilityInsertTextRequest,
-    AccessibilityInvokeRequest, AccessibilityPasteTextRequest, AccessibilitySetTextRequest,
+    AccessibilityInvokeRequest, AccessibilityPasteTextRequest, AccessibilitySetCaretRequest,
+    AccessibilitySetSelectionRequest, AccessibilitySetTextRequest,
     AccessibilityTextAttributesRequest, ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard,
     ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest,
     CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
@@ -402,6 +403,22 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
             AccessibilityPasteTextRequest {
                 node_id: required_string(arguments, "node_id")?,
                 offset: required_i32(arguments, "offset")?,
+                guard: active_window_guard(arguments)?,
+            },
+        )),
+        "plasma.a11y_set_caret" => Ok(DaemonRequest::AccessibilitySetCaret(
+            AccessibilitySetCaretRequest {
+                node_id: required_string(arguments, "node_id")?,
+                offset: required_i32(arguments, "offset")?,
+                guard: active_window_guard(arguments)?,
+            },
+        )),
+        "plasma.a11y_set_selection" => Ok(DaemonRequest::AccessibilitySetSelection(
+            AccessibilitySetSelectionRequest {
+                node_id: required_string(arguments, "node_id")?,
+                selection_num: optional_i32(arguments, "selection_num")?.unwrap_or(0),
+                start_offset: required_i32(arguments, "start_offset")?,
+                end_offset: required_i32(arguments, "end_offset")?,
                 guard: active_window_guard(arguments)?,
             },
         )),
@@ -1597,6 +1614,50 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "plasma.a11y_set_caret",
+            "Set Accessibility Caret",
+            "Move the caret to a character offset on a non-sensitive AT-SPI Text node. This is policy-gated semantic control and summaries report offset only.",
+            object_schema(
+                with_guard_properties(vec![
+                    (
+                        "node_id",
+                        json!({"type": "string", "description": "AT-SPI node id from a previous accessibility result."}),
+                    ),
+                    (
+                        "offset",
+                        json!({"type": "integer", "minimum": 0, "description": "Character offset for the caret."}),
+                    ),
+                ]),
+                vec!["node_id", "offset"],
+            ),
+        ),
+        tool(
+            "plasma.a11y_set_selection",
+            "Set Accessibility Selection",
+            "Set an existing text selection range on a non-sensitive AT-SPI Text node. This is policy-gated semantic control and summaries report the selection index and offsets only.",
+            object_schema(
+                with_guard_properties(vec![
+                    (
+                        "node_id",
+                        json!({"type": "string", "description": "AT-SPI node id from a previous accessibility result."}),
+                    ),
+                    (
+                        "selection_num",
+                        json!({"type": "integer", "minimum": 0, "description": "Zero-based text selection index. Defaults to 0."}),
+                    ),
+                    (
+                        "start_offset",
+                        json!({"type": "integer", "minimum": 0, "description": "Starting character offset for the selection."}),
+                    ),
+                    (
+                        "end_offset",
+                        json!({"type": "integer", "minimum": 1, "description": "First character offset past the selected range."}),
+                    ),
+                ]),
+                vec!["node_id", "start_offset", "end_offset"],
+            ),
+        ),
+        tool(
             "plasma.journal_tail",
             "Journal Tail",
             "Read recent compact daemon journal entries.",
@@ -2092,6 +2153,16 @@ mod tests {
             tools
                 .iter()
                 .any(|tool| tool["name"] == "plasma.a11y_paste_text")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.a11y_set_caret")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.a11y_set_selection")
         );
     }
 
@@ -2957,6 +3028,54 @@ mod tests {
             DaemonRequest::AccessibilityPasteText(AccessibilityPasteTextRequest {
                 node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
                 offset: 5,
+                guard: None,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_accessibility_set_caret_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.a11y_set_caret",
+            &json!({
+                "node_id": "atspi://:1.42/org/a11y/atspi/accessible/7",
+                "offset": 5,
+                "expected_active_app": "org.kde.kate"
+            }),
+        )
+        .expect("a11y set-caret args map");
+        assert_eq!(
+            request,
+            DaemonRequest::AccessibilitySetCaret(AccessibilitySetCaretRequest {
+                node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                offset: 5,
+                guard: Some(ActiveWindowGuard {
+                    expected_window_id: None,
+                    expected_app_id: Some("org.kde.kate".to_string()),
+                    title_contains: None,
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn maps_accessibility_set_selection_arguments() {
+        let request = daemon_request_for_tool(
+            "plasma.a11y_set_selection",
+            &json!({
+                "node_id": "atspi://:1.42/org/a11y/atspi/accessible/7",
+                "start_offset": 2,
+                "end_offset": 8
+            }),
+        )
+        .expect("a11y set-selection args map");
+        assert_eq!(
+            request,
+            DaemonRequest::AccessibilitySetSelection(AccessibilitySetSelectionRequest {
+                node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                selection_num: 0,
+                start_offset: 2,
+                end_offset: 8,
                 guard: None,
             })
         );

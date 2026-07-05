@@ -11,7 +11,8 @@ use clap::{Parser, Subcommand};
 use libplasma_pilot::{
     AccessibilityAction, AccessibilityCopyTextRequest, AccessibilityCutTextRequest,
     AccessibilityDeleteTextRequest, AccessibilityFindRequest, AccessibilityInsertTextRequest,
-    AccessibilityInvokeRequest, AccessibilityPasteTextRequest, AccessibilitySetTextRequest,
+    AccessibilityInvokeRequest, AccessibilityPasteTextRequest, AccessibilitySetCaretRequest,
+    AccessibilitySetSelectionRequest, AccessibilitySetTextRequest,
     AccessibilityTextAttributesRequest, ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard,
     ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest,
     CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
@@ -371,6 +372,34 @@ enum AtspiCommand {
         node: String,
         #[arg(long)]
         offset: i32,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
+    SetCaret {
+        #[arg(long)]
+        node: String,
+        #[arg(long)]
+        offset: i32,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
+    SetSelection {
+        #[arg(long)]
+        node: String,
+        #[arg(long, default_value_t = 0)]
+        selection_num: i32,
+        #[arg(long)]
+        start_offset: i32,
+        #[arg(long)]
+        end_offset: i32,
         #[arg(long)]
         expected_active_window: Option<String>,
         #[arg(long)]
@@ -1056,6 +1085,52 @@ fn main() -> Result<()> {
             DaemonRequest::AccessibilityPasteText(AccessibilityPasteTextRequest {
                 node_id: node,
                 offset,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
+        )?,
+        Command::Atspi {
+            command:
+                AtspiCommand::SetCaret {
+                    node,
+                    offset,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::AccessibilitySetCaret(AccessibilitySetCaretRequest {
+                node_id: node,
+                offset,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
+        )?,
+        Command::Atspi {
+            command:
+                AtspiCommand::SetSelection {
+                    node,
+                    selection_num,
+                    start_offset,
+                    end_offset,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::AccessibilitySetSelection(AccessibilitySetSelectionRequest {
+                node_id: node,
+                selection_num,
+                start_offset,
+                end_offset,
                 guard: active_window_guard(
                     expected_active_window,
                     expected_active_app,

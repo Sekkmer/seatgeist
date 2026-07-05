@@ -342,6 +342,20 @@ pub struct MockAccessibilityTextPaste {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MockAccessibilityCaretSet {
+    pub node_id: String,
+    pub offset: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MockAccessibilitySelectionSet {
+    pub node_id: String,
+    pub selection_num: i32,
+    pub start_offset: i32,
+    pub end_offset: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MockAccessibilityTextAttributesRequest {
     pub node_id: String,
     pub offset: i32,
@@ -368,6 +382,8 @@ pub struct MockAccessibilityBackend {
     text_copies: Arc<Mutex<Vec<MockAccessibilityTextCopy>>>,
     text_cuts: Arc<Mutex<Vec<MockAccessibilityTextCut>>>,
     text_pastes: Arc<Mutex<Vec<MockAccessibilityTextPaste>>>,
+    caret_sets: Arc<Mutex<Vec<MockAccessibilityCaretSet>>>,
+    selection_sets: Arc<Mutex<Vec<MockAccessibilitySelectionSet>>>,
     value_sets: Arc<Mutex<Vec<MockAccessibilityValueSet>>>,
 }
 
@@ -386,6 +402,8 @@ impl MockAccessibilityBackend {
             text_copies: Arc::new(Mutex::new(Vec::new())),
             text_cuts: Arc::new(Mutex::new(Vec::new())),
             text_pastes: Arc::new(Mutex::new(Vec::new())),
+            caret_sets: Arc::new(Mutex::new(Vec::new())),
+            selection_sets: Arc::new(Mutex::new(Vec::new())),
             value_sets: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -434,6 +452,14 @@ impl MockAccessibilityBackend {
 
     pub fn text_pastes(&self) -> Result<Vec<MockAccessibilityTextPaste>> {
         Ok(lock(&self.text_pastes)?.clone())
+    }
+
+    pub fn caret_sets(&self) -> Result<Vec<MockAccessibilityCaretSet>> {
+        Ok(lock(&self.caret_sets)?.clone())
+    }
+
+    pub fn selection_sets(&self) -> Result<Vec<MockAccessibilitySelectionSet>> {
+        Ok(lock(&self.selection_sets)?.clone())
     }
 
     pub fn value_sets(&self) -> Result<Vec<MockAccessibilityValueSet>> {
@@ -528,6 +554,30 @@ impl AccessibilityBackend for MockAccessibilityBackend {
         lock(&self.text_pastes)?.push(MockAccessibilityTextPaste {
             node_id: node_id.to_string(),
             offset,
+        });
+        Ok(())
+    }
+
+    async fn set_caret(&self, node_id: &str, offset: i32) -> Result<()> {
+        lock(&self.caret_sets)?.push(MockAccessibilityCaretSet {
+            node_id: node_id.to_string(),
+            offset,
+        });
+        Ok(())
+    }
+
+    async fn set_selection(
+        &self,
+        node_id: &str,
+        selection_num: i32,
+        start_offset: i32,
+        end_offset: i32,
+    ) -> Result<()> {
+        lock(&self.selection_sets)?.push(MockAccessibilitySelectionSet {
+            node_id: node_id.to_string(),
+            selection_num,
+            start_offset,
+            end_offset,
         });
         Ok(())
     }
@@ -696,6 +746,10 @@ mod tests {
         backend.copy_text("atspi://sample/text", 2, 4).await?;
         backend.cut_text("atspi://sample/text", 3, 5).await?;
         backend.paste_text("atspi://sample/text", 4).await?;
+        backend.set_caret("atspi://sample/text", 6).await?;
+        backend
+            .set_selection("atspi://sample/text", 0, 2, 6)
+            .await?;
         backend.set_value("atspi://sample/value", 0.75).await?;
         assert_eq!(
             backend.invocations()?,
@@ -748,6 +802,22 @@ mod tests {
             vec![MockAccessibilityTextPaste {
                 node_id: "atspi://sample/text".to_string(),
                 offset: 4,
+            }]
+        );
+        assert_eq!(
+            backend.caret_sets()?,
+            vec![MockAccessibilityCaretSet {
+                node_id: "atspi://sample/text".to_string(),
+                offset: 6,
+            }]
+        );
+        assert_eq!(
+            backend.selection_sets()?,
+            vec![MockAccessibilitySelectionSet {
+                node_id: "atspi://sample/text".to_string(),
+                selection_num: 0,
+                start_offset: 2,
+                end_offset: 6,
             }]
         );
         assert_eq!(

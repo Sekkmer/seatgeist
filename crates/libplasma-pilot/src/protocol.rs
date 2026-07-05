@@ -458,6 +458,24 @@ pub struct AccessibilityPasteTextRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessibilitySetCaretRequest {
+    pub node_id: String,
+    pub offset: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessibilitySetSelectionRequest {
+    pub node_id: String,
+    pub selection_num: i32,
+    pub start_offset: i32,
+    pub end_offset: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActiveWindowGuard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_window_id: Option<String>,
@@ -666,6 +684,8 @@ pub enum DaemonRequest {
     AccessibilityCopyText(AccessibilityCopyTextRequest),
     AccessibilityCutText(AccessibilityCutTextRequest),
     AccessibilityPasteText(AccessibilityPasteTextRequest),
+    AccessibilitySetCaret(AccessibilitySetCaretRequest),
+    AccessibilitySetSelection(AccessibilitySetSelectionRequest),
     TypeText(TypeTextRequest),
     KeyCombo(KeyComboRequest),
     MovePointer(MovePointerRequest),
@@ -719,6 +739,8 @@ impl DaemonRequest {
             Self::AccessibilityCopyText(_) => "accessibility_copy_text",
             Self::AccessibilityCutText(_) => "accessibility_cut_text",
             Self::AccessibilityPasteText(_) => "accessibility_paste_text",
+            Self::AccessibilitySetCaret(_) => "accessibility_set_caret",
+            Self::AccessibilitySetSelection(_) => "accessibility_set_selection",
             Self::TypeText(_) => "type_text",
             Self::KeyCombo(_) => "key_combo",
             Self::MovePointer(_) => "move_pointer",
@@ -1608,6 +1630,37 @@ mod tests {
         assert_eq!(
             encoded,
             r#"{"method":"accessibility_paste_text","node_id":"atspi://:1.42/org/a11y/atspi/accessible/7","offset":5}"#
+        );
+    }
+
+    #[test]
+    fn serializes_accessibility_set_caret_request() {
+        let request = DaemonRequest::AccessibilitySetCaret(AccessibilitySetCaretRequest {
+            node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+            offset: 5,
+            guard: None,
+        });
+        let encoded = serde_json::to_string(&request).expect("a11y set-caret request serializes");
+        assert_eq!(
+            encoded,
+            r#"{"method":"accessibility_set_caret","node_id":"atspi://:1.42/org/a11y/atspi/accessible/7","offset":5}"#
+        );
+    }
+
+    #[test]
+    fn serializes_accessibility_set_selection_request() {
+        let request = DaemonRequest::AccessibilitySetSelection(AccessibilitySetSelectionRequest {
+            node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+            selection_num: 0,
+            start_offset: 2,
+            end_offset: 8,
+            guard: None,
+        });
+        let encoded =
+            serde_json::to_string(&request).expect("a11y set-selection request serializes");
+        assert_eq!(
+            encoded,
+            r#"{"method":"accessibility_set_selection","node_id":"atspi://:1.42/org/a11y/atspi/accessible/7","selection_num":0,"start_offset":2,"end_offset":8}"#
         );
     }
 

@@ -486,6 +486,8 @@ pilot.a11y_delete_text(node_id, start_offset, end_offset, guard?)
 pilot.a11y_copy_text(node_id, start_offset, end_offset, guard?)
 pilot.a11y_cut_text(node_id, start_offset, end_offset, guard?)
 pilot.a11y_paste_text(node_id, offset, guard?)
+pilot.a11y_set_caret(node_id, offset, guard?)
+pilot.a11y_set_selection(node_id, selection_num?, start_offset, end_offset, guard?)
 ```
 
 These should be added after the pixel/control MVP is stable.
@@ -953,6 +955,8 @@ Tasks:
 - [x] Implement copy text where `org.a11y.atspi.EditableText` is supported. Current status: CLI/MCP expose policy-gated `a11y_copy_text` with active-window guards, range validation, and offset-only summaries; PlasmaPilot does not read copied clipboard contents.
 - [x] Implement cut text where `org.a11y.atspi.EditableText` is supported. Current status: CLI/MCP expose policy-gated `a11y_cut_text` with active-window guards, range validation, and offset-only summaries; PlasmaPilot does not read cut clipboard contents.
 - [x] Implement paste text where `org.a11y.atspi.EditableText` is supported. Current status: CLI/MCP expose policy-gated `a11y_paste_text` with active-window guards, offset validation, and offset-only summaries; PlasmaPilot does not read clipboard contents for this operation.
+- [x] Implement caret movement where `org.a11y.atspi.Text` is supported. Current status: CLI/MCP expose policy-gated `a11y_set_caret` with active-window guards, offset validation, and offset-only summaries.
+- [x] Implement text selection updates where `org.a11y.atspi.Text` is supported. Current status: CLI/MCP expose policy-gated `a11y_set_selection` for an existing selection index with active-window guards, range validation, and selection-index/offset-only summaries.
 - [x] Add secret/password-field detection.
 
 Acceptance criteria:
@@ -991,7 +995,7 @@ Goal: prevent regressions and measure usefulness.
 
 Tasks:
 
-- Add mock backends for unit tests. Current status: `plasma-pilot-testkit` provides deterministic screen, window, input, clipboard, and accessibility mocks with call recording; the screen mock covers raw and scaled screenshots, the input mock covers move, click point/button/count, drag, scroll, text, and key-combo events, and the accessibility mock covers focused-tree reads, find requests, text-attribute requests, invoke calls, set-text calls, insert-text calls, delete-text calls, copy-text calls, cut-text calls, paste-text calls, and numeric set-value calls.
+- Add mock backends for unit tests. Current status: `plasma-pilot-testkit` provides deterministic screen, window, input, clipboard, and accessibility mocks with call recording; the screen mock covers raw and scaled screenshots, the input mock covers move, click point/button/count, drag, scroll, text, and key-combo events, and the accessibility mock covers focused-tree reads, find requests, text-attribute requests, invoke calls, set-text calls, insert-text calls, delete-text calls, copy-text calls, cut-text calls, paste-text calls, caret-set calls, selection-set calls, and numeric set-value calls.
 - Add integration tests for CLI, MCP, and daemon protocol. Current status: daemon core protocol, low-risk CLI status commands, approval writing, trace validation/replay, panic-stop toggling, desktop-independent AT-SPI text-attribute CLI validation, and real MCP stdio initialize/tool-call/journal behavior have Rust integration tests; GUI/desktop CLI coverage remains in smoke targets. `make validate-traces` uses `plasma-pilot-cli trace validate --dir examples/traces` to validate every checked-in replay trace without a daemon. `make smoke-trace-replay` validates the checked-in status-only, deny-by-default policy, input-denial, and panic-stop traces without a daemon, then replays the trace directory against a private daemon and verifies aggregate trace output plus journal evidence; it is part of `make verify`. `make smoke-mcp` validates the current AT-SPI MCP tool list, including text attributes and offset-edit operations, and checks daemon-backed MCP tool error propagation for text-attribute validation.
 - Add session preflight diagnostics for real KDE troubleshooting. Current status: `plasma-pilot-cli desktop-session-status` and MCP `plasma.desktop_session_status` report sanitized KDE/Wayland/session environment facts, including DBus and runtime-directory presence as booleans, so portal, KWin, AT-SPI, and daemon environment issues can be diagnosed before attempting control. Daemon capabilities advertise this as `daemon_desktop_session_status`.
 - Add optional local GUI eval scripts. Current status: `scripts/gui-eval.sh` runs current non-control evals for daemon status, observe, default clipboard-read denial, bounded screenshot preview metadata, screenshot preview coordinate mapping, configured screenshot preview/tile safety bounds, full-resolution screenshot policy denial, and journal output; failures print the artifact directory, daemon log tail, journal tail, and artifact file list before daemon cleanup. `scripts/gui-eval.sh control-safety` and `make gui-eval-control-safety` start a private daemon with a method-scoped approval-file grant and verify active-window guard denial plus panic-stop denial before backend control can execute; the control-safety eval is part of `make verify`.

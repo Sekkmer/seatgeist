@@ -247,6 +247,10 @@ smoke-atspi:
 	grep -q "policy" "$$out"
 	if target/debug/plasma-pilot-cli --socket "$$socket" atspi paste-text --node atspi://:1.42/org/a11y/atspi/accessible/7 --offset 0 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
 	grep -q "policy" "$$out"
+	if target/debug/plasma-pilot-cli --socket "$$socket" atspi set-caret --node atspi://:1.42/org/a11y/atspi/accessible/7 --offset 0 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
+	grep -q "policy" "$$out"
+	if target/debug/plasma-pilot-cli --socket "$$socket" atspi set-selection --node atspi://:1.42/org/a11y/atspi/accessible/7 --start-offset 0 --end-offset 1 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
+	grep -q "policy" "$$out"
 	if target/debug/plasma-pilot-cli --socket "$$socket" atspi text-attributes --node "" --offset 0 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
 	grep -q "node_id must be non-empty" "$$out"
 	if target/debug/plasma-pilot-cli --socket "$$socket" semantic click-button --name OK --max-nodes 128 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
@@ -276,6 +280,8 @@ smoke-atspi:
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "accessibility_copy_text"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "accessibility_cut_text"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "accessibility_paste_text"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "accessibility_set_caret"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "accessibility_set_selection"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "accessibility_text_attributes"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "click_button"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "set_text_field"
@@ -486,6 +492,8 @@ smoke-mcp:
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_copy_text")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_cut_text")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_paste_text")' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_set_caret")' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.a11y_set_selection")' "$$out" >/dev/null
 	jq -e 'select(.id == 3) | .result.isError == false and .result.structuredContent.type == "health"' "$$out" >/dev/null
 	jq -e 'select(.id == 4) | .result.isError == false and .result.structuredContent.type == "observation"' "$$out" >/dev/null
 	jq -e 'select(.id == 5) | .result.isError == true and .result.structuredContent.type == "error" and (.result.structuredContent.data.message | contains("invalid AT-SPI node id")) and (.result.content[0].text | contains("invalid AT-SPI node id"))' "$$out" >/dev/null

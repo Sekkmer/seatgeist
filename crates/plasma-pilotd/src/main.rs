@@ -17,14 +17,15 @@ use image::{GenericImageView, Rgba, imageops::FilterType};
 use libplasma_pilot::{
     AccessibilityCopyTextRequest, AccessibilityCutTextRequest, AccessibilityDeleteTextRequest,
     AccessibilityFindRequest, AccessibilityInsertTextRequest, AccessibilityInvokeRequest,
-    AccessibilityPasteTextRequest, AccessibilitySetTextRequest, AccessibilityTextAttributesRequest,
-    ActionResult, ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard, BackendCapability,
-    CapabilitySet, CaptureBackendStatus, ClickButtonRequest, ClickPointerRequest,
-    ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse,
-    DesktopObservation, DesktopSessionStatus, DragPointerRequest, FocusTextFieldRequest,
-    FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus,
-    JournalEntry, JournalWindowContext, KeyComboRequest, KwinBridgeStatus, KwinMetadataStatus,
-    LibeiStatus, MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton,
+    AccessibilityPasteTextRequest, AccessibilitySetCaretRequest, AccessibilitySetSelectionRequest,
+    AccessibilitySetTextRequest, AccessibilityTextAttributesRequest, ActionResult,
+    ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard, BackendCapability, CapabilitySet,
+    CaptureBackendStatus, ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest,
+    ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse, DesktopObservation,
+    DesktopSessionStatus, DragPointerRequest, FocusTextFieldRequest, FocusWindowRequest,
+    FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus, JournalEntry,
+    JournalWindowContext, KeyComboRequest, KwinBridgeStatus, KwinMetadataStatus, LibeiStatus,
+    MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton,
     PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
     PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus, SafetyClass, SafetyStatus,
     ScreenshotInfo, ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest,
@@ -1011,6 +1012,20 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::AccessibilitySetCaret(request) => match accessibility_set_caret(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
+        DaemonRequest::AccessibilitySetSelection(request) => {
+            match accessibility_set_selection(request) {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
         DaemonRequest::TypeText(request) => match type_text(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
             Err(err) => DaemonResponse::Error {
@@ -2208,6 +2223,8 @@ fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWin
         DaemonRequest::AccessibilityCopyText(request) => request.guard.as_ref(),
         DaemonRequest::AccessibilityCutText(request) => request.guard.as_ref(),
         DaemonRequest::AccessibilityPasteText(request) => request.guard.as_ref(),
+        DaemonRequest::AccessibilitySetCaret(request) => request.guard.as_ref(),
+        DaemonRequest::AccessibilitySetSelection(request) => request.guard.as_ref(),
         DaemonRequest::TypeText(request) => request.guard.as_ref(),
         DaemonRequest::KeyCombo(request) => request.guard.as_ref(),
         DaemonRequest::MovePointer(request) => request.guard.as_ref(),
@@ -2281,7 +2298,9 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::AccessibilityDeleteText(_)
         | DaemonRequest::AccessibilityCopyText(_)
         | DaemonRequest::AccessibilityCutText(_)
-        | DaemonRequest::AccessibilityPasteText(_) => SafetyClass::ControlSemantic,
+        | DaemonRequest::AccessibilityPasteText(_)
+        | DaemonRequest::AccessibilitySetCaret(_)
+        | DaemonRequest::AccessibilitySetSelection(_) => SafetyClass::ControlSemantic,
         DaemonRequest::AccessibilityInvoke(request) => {
             if request.destructive {
                 SafetyClass::DestructiveAction
@@ -3211,6 +3230,57 @@ fn accessibility_paste_text(request: AccessibilityPasteTextRequest) -> Result<Ac
         message: Some(format!(
             "pasted accessibility clipboard text offset={} node={}",
             request.offset, request.node_id
+        )),
+    })
+}
+
+fn accessibility_set_caret(request: AccessibilitySetCaretRequest) -> Result<ActionResult> {
+    if request.node_id.trim().is_empty() {
+        bail!("node_id must be non-empty");
+    }
+    if request.offset < 0 {
+        bail!("offset must be greater than or equal to zero");
+    }
+    plasma_pilot_atspi::set_caret(&request.node_id, request.offset)
+        .map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "set accessibility caret offset={} node={}",
+            request.offset, request.node_id
+        )),
+    })
+}
+
+fn accessibility_set_selection(request: AccessibilitySetSelectionRequest) -> Result<ActionResult> {
+    if request.node_id.trim().is_empty() {
+        bail!("node_id must be non-empty");
+    }
+    if request.selection_num < 0 {
+        bail!("selection_num must be greater than or equal to zero");
+    }
+    if request.start_offset < 0 {
+        bail!("start_offset must be greater than or equal to zero");
+    }
+    if request.end_offset <= request.start_offset {
+        bail!("end_offset must be greater than start_offset");
+    }
+    plasma_pilot_atspi::set_selection(
+        &request.node_id,
+        request.selection_num,
+        request.start_offset,
+        request.end_offset,
+    )
+    .map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "set accessibility selection index={} range={}..{} node={}",
+            request.selection_num, request.start_offset, request.end_offset, request.node_id
         )),
     })
 }
@@ -7043,6 +7113,38 @@ height = 40
             }),
         )
         .expect_err("accessibility paste-text requires control approval by default");
+        assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
+    fn accessibility_set_caret_is_control_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::AccessibilitySetCaret(AccessibilitySetCaretRequest {
+                node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                offset: 5,
+                guard: None,
+            }),
+        )
+        .expect_err("accessibility set-caret requires control approval by default");
+        assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
+    fn accessibility_set_selection_is_control_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::AccessibilitySetSelection(AccessibilitySetSelectionRequest {
+                node_id: "atspi://:1.42/org/a11y/atspi/accessible/7".to_string(),
+                selection_num: 0,
+                start_offset: 2,
+                end_offset: 8,
+                guard: None,
+            }),
+        )
+        .expect_err("accessibility set-selection requires control approval by default");
         assert!(err.to_string().contains("ControlSemantic"));
     }
 
