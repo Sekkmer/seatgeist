@@ -24,7 +24,7 @@ use libplasma_pilot::{
     ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest,
     SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest,
     ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest, default_approval_file_path,
-    default_screenshot_dir_path, default_socket_path,
+    default_screenshot_output_path, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -2149,31 +2149,5 @@ fn screenshot_output_or_default(output: Option<PathBuf>, kind: &str) -> Result<P
         return Ok(output);
     }
 
-    let dir = default_screenshot_dir_path().context("resolve default screenshot directory")?;
-    let unix_time_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock is before Unix epoch")?
-        .as_millis();
-    Ok(default_screenshot_output_path(&dir, kind, unix_time_ms))
-}
-
-fn default_screenshot_output_path(dir: &Path, kind: &str, unix_time_ms: u128) -> PathBuf {
-    dir.join(format!("{unix_time_ms}-{kind}.png"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_screenshot_output_path_uses_runtime_screenshot_dir() {
-        assert_eq!(
-            default_screenshot_output_path(
-                Path::new("/run/user/1000/plasma-pilot/screenshots"),
-                "tile",
-                42,
-            ),
-            PathBuf::from("/run/user/1000/plasma-pilot/screenshots/42-tile.png")
-        );
-    }
+    default_screenshot_output_path(kind).context("resolve default screenshot output path")
 }

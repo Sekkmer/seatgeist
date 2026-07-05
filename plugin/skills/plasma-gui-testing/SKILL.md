@@ -13,7 +13,7 @@ Workflow:
 4. Use `plasma.focus_window` with an active-window guard before interacting with the app under test.
 5. Prefer `plasma.a11y_find`, `plasma.a11y_text_attributes`, `plasma.click_button`, `plasma.focus_text_field`, `plasma.set_text_field`, `plasma.select_menu`, `plasma.select_item`, `plasma.activate_tab`, `plasma.activate_link`, `plasma.toggle_check`, and `plasma.set_value` for repeatable UI operations; use `plasma.a11y_insert_text`, `plasma.a11y_delete_text`, `plasma.a11y_copy_text`, `plasma.a11y_cut_text`, `plasma.a11y_paste_text`, `plasma.a11y_set_caret`, or `plasma.a11y_set_selection` only for known non-sensitive text-node offset editing.
 6. Use `plasma.pointer_calibration` plus guarded `plasma.click_pointer` or `plasma.drag_pointer` only when semantic access is unavailable.
-7. Use `plasma.wait_for_change` after actions that should visibly update the UI.
+7. Use `plasma.wait_for_change` after actions that should visibly update the UI, omitting `output` for the runtime screenshot directory unless a task-specific artifact path is needed.
 8. Save repro artifacts under the repo test/evidence path when the task calls for evidence.
 9. Convert the reproduction into a deterministic unit, integration, Playwright, or smoke test once the behavior is understood.
 10. Mark destructive UI actions with `destructive=true`; default destructive policy fails closed unless the daemon is explicitly configured to allow them.

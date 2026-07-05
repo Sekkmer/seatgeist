@@ -1,6 +1,7 @@
 use std::{
     env, fs, io,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 pub fn current_euid() -> io::Result<u32> {
@@ -76,6 +77,19 @@ pub fn default_screenshot_dir_path() -> io::Result<PathBuf> {
     Ok(runtime_dir.join("plasma-pilot").join("screenshots"))
 }
 
+pub fn default_screenshot_output_path(kind: &str) -> io::Result<PathBuf> {
+    let dir = default_screenshot_dir_path()?;
+    let unix_time_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
+        .as_millis();
+    Ok(default_screenshot_output_path_at(&dir, kind, unix_time_ms))
+}
+
+pub fn default_screenshot_output_path_at(dir: &Path, kind: &str, unix_time_ms: u128) -> PathBuf {
+    dir.join(format!("{unix_time_ms}-{kind}.png"))
+}
+
 pub fn parent_dir(path: &Path) -> io::Result<&Path> {
     path.parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "socket path has no parent"))
@@ -111,5 +125,17 @@ mod tests {
     fn parses_effective_gid() {
         let status = "Name:\tplasma-pilotd\nGid:\t1000\t1002\t1000\t1000\n";
         assert_eq!(parse_egid_from_proc_status(status), Some(1002));
+    }
+
+    #[test]
+    fn builds_default_screenshot_output_path() {
+        assert_eq!(
+            default_screenshot_output_path_at(
+                Path::new("/run/user/1000/plasma-pilot/screenshots"),
+                "tile",
+                42,
+            ),
+            PathBuf::from("/run/user/1000/plasma-pilot/screenshots/42-tile.png")
+        );
     }
 }

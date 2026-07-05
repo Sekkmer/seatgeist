@@ -21,7 +21,7 @@ use libplasma_pilot::{
     RemoteDesktopPersistMode, RemoteDesktopSessionProbeRequest, ScreenshotRequest,
     ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
     SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
-    WaitForChangeRequest, default_socket_path,
+    WaitForChangeRequest, default_screenshot_output_path, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -283,14 +283,14 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
             ok: optional_bool(arguments, "ok")?,
         })),
         "plasma.screenshot" => Ok(DaemonRequest::Screenshot(ScreenshotRequest {
-            output: required_string(arguments, "output")?.into(),
+            output: optional_output_path(arguments, "output", "screenshot")?,
             max_edge: optional_u64(arguments, "max_edge")?
                 .map(u64_to_u32)
                 .transpose()?,
             full_resolution: optional_bool(arguments, "full_resolution")?.unwrap_or(false),
         })),
         "plasma.screenshot_tile" => Ok(DaemonRequest::ScreenshotTile(ScreenshotTileRequest {
-            output: required_string(arguments, "output")?.into(),
+            output: optional_output_path(arguments, "output", "tile")?,
             x: required_u32(arguments, "x")?,
             y: required_u32(arguments, "y")?,
             width: required_u32(arguments, "width")?,
@@ -300,7 +300,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 .transpose()?,
         })),
         "plasma.wait_for_change" => Ok(DaemonRequest::WaitForChange(WaitForChangeRequest {
-            output: required_string(arguments, "output")?.into(),
+            output: optional_output_path(arguments, "output", "wait-for-change")?,
             max_edge: optional_u64(arguments, "max_edge")?
                 .map(u64_to_u32)
                 .transpose()?,
@@ -1133,7 +1133,7 @@ fn tool_definitions() -> Vec<Value> {
                 vec![
                     (
                         "output",
-                        json!({"type": "string", "description": "PNG output path on the local filesystem."}),
+                        json!({"type": "string", "description": "Optional PNG output path on the local filesystem. When omitted, PlasmaPilot writes a timestamped PNG under the runtime screenshot directory."}),
                     ),
                     (
                         "max_edge",
@@ -1144,7 +1144,7 @@ fn tool_definitions() -> Vec<Value> {
                         json!({"type": "boolean", "description": "Capture the source image without downscaling. This is policy-gated separately and prompts by default."}),
                     ),
                 ],
-                vec!["output"],
+                vec![],
             ),
         ),
         tool(
@@ -1155,7 +1155,7 @@ fn tool_definitions() -> Vec<Value> {
                 vec![
                     (
                         "output",
-                        json!({"type": "string", "description": "PNG output path on the local filesystem."}),
+                        json!({"type": "string", "description": "Optional PNG output path on the local filesystem. When omitted, PlasmaPilot writes a timestamped PNG under the runtime screenshot directory."}),
                     ),
                     ("x", json!({"type": "integer", "minimum": 0})),
                     ("y", json!({"type": "integer", "minimum": 0})),
@@ -1166,7 +1166,7 @@ fn tool_definitions() -> Vec<Value> {
                         json!({"type": "integer", "minimum": 1, "description": "Output max edge in pixels. Defaults to the daemon safety config."}),
                     ),
                 ],
-                vec!["output", "x", "y", "width", "height"],
+                vec!["x", "y", "width", "height"],
             ),
         ),
         tool(
@@ -1177,7 +1177,7 @@ fn tool_definitions() -> Vec<Value> {
                 vec![
                     (
                         "output",
-                        json!({"type": "string", "description": "PNG output path for the latest bounded screenshot."}),
+                        json!({"type": "string", "description": "Optional PNG output path for the latest bounded screenshot. When omitted, PlasmaPilot writes a timestamped PNG under the runtime screenshot directory."}),
                     ),
                     (
                         "max_edge",
@@ -1196,7 +1196,7 @@ fn tool_definitions() -> Vec<Value> {
                         json!({"type": "number", "exclusiveMinimum": 0.0, "maximum": 1.0, "description": "Normalized RGB delta threshold. Defaults to 0.01."}),
                     ),
                 ],
-                vec!["output"],
+                vec![],
             ),
         ),
         tool(
@@ -1987,6 +1987,14 @@ fn required_string(arguments: &Value, key: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("argument '{key}' is required and must be a non-empty string"))
 }
 
+fn optional_output_path(arguments: &Value, key: &str, kind: &str) -> Result<PathBuf> {
+    match optional_string(arguments, key)? {
+        Some(output) => Ok(output.into()),
+        None => default_screenshot_output_path(kind)
+            .with_context(|| format!("resolve default screenshot output path for {kind}")),
+    }
+}
+
 fn required_u32(arguments: &Value, key: &str) -> Result<u32> {
     let value = arguments
         .get(key)
@@ -2175,6 +2183,7 @@ mod tests {
         XkbKeymapStatus,
     };
     use libplasma_pilot::{ScreenshotInfo, ScreenshotTransform, WaitForChangeResult};
+    use std::path::Path;
 
     #[test]
     fn initialize_advertises_tools_capability() {
@@ -2622,6 +2631,28 @@ mod tests {
     }
 
     #[test]
+    fn screenshot_output_is_optional_in_tool_schemas() {
+        let tools = tool_definitions();
+        for name in [
+            "plasma.screenshot",
+            "plasma.screenshot_tile",
+            "plasma.wait_for_change",
+        ] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .expect("tool is listed");
+            let required = tool["inputSchema"]["required"]
+                .as_array()
+                .expect("required list is present");
+            assert!(
+                !required.iter().any(|field| field == "output"),
+                "{name} should not require output"
+            );
+        }
+    }
+
+    #[test]
     fn maps_screenshot_tile_arguments() {
         let request = daemon_request_for_tool(
             "plasma.screenshot_tile",
@@ -2646,6 +2677,45 @@ mod tests {
                 max_edge: Some(320),
             })
         );
+    }
+
+    #[test]
+    fn omitted_screenshot_outputs_use_runtime_defaults() {
+        let request =
+            daemon_request_for_tool("plasma.screenshot", &json!({})).expect("screenshot args map");
+        assert!(matches!(request, DaemonRequest::Screenshot(_)));
+        if let DaemonRequest::Screenshot(request) = request {
+            assert_default_screenshot_path(&request.output, "screenshot");
+            assert_eq!(request.max_edge, None);
+            assert!(!request.full_resolution);
+        }
+
+        let request = daemon_request_for_tool(
+            "plasma.screenshot_tile",
+            &json!({
+                "x": 10,
+                "y": 20,
+                "width": 640,
+                "height": 480
+            }),
+        )
+        .expect("tile args map");
+        assert!(matches!(request, DaemonRequest::ScreenshotTile(_)));
+        if let DaemonRequest::ScreenshotTile(request) = request {
+            assert_default_screenshot_path(&request.output, "tile");
+            assert_eq!(request.max_edge, None);
+        }
+
+        let request =
+            daemon_request_for_tool("plasma.wait_for_change", &json!({})).expect("wait args map");
+        assert!(matches!(request, DaemonRequest::WaitForChange(_)));
+        if let DaemonRequest::WaitForChange(request) = request {
+            assert_default_screenshot_path(&request.output, "wait-for-change");
+            assert_eq!(request.max_edge, None);
+            assert_eq!(request.timeout_ms, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS);
+            assert_eq!(request.interval_ms, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS);
+            assert_eq!(request.threshold, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD);
+        }
     }
 
     #[test]
@@ -3733,6 +3803,27 @@ mod tests {
         let result = tool_result_from_daemon("plasma.focus_window", &response);
         assert_eq!(result["isError"], true);
         assert_eq!(result["content"][0]["text"], "policy denied");
+    }
+
+    fn assert_default_screenshot_path(path: &Path, kind: &str) {
+        let file_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .expect("path has UTF-8 file name");
+        assert!(
+            file_name.ends_with(&format!("-{kind}.png")),
+            "unexpected default screenshot file name: {file_name}"
+        );
+        assert_eq!(
+            path.parent().and_then(|value| value.file_name()),
+            Some(std::ffi::OsStr::new("screenshots"))
+        );
+        assert_eq!(
+            path.parent()
+                .and_then(|value| value.parent())
+                .and_then(|value| value.file_name()),
+            Some(std::ffi::OsStr::new("plasma-pilot"))
+        );
     }
 
     fn sample_screenshot_info(backend: &str) -> ScreenshotInfo {
