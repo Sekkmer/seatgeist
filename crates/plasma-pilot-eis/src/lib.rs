@@ -413,6 +413,7 @@ pub enum EisEvent {
     Frame,
     PointerMotionAbsolute { x: f64, y: f64 },
     KeyboardKey { keycode: u32, is_press: bool },
+    TextKeysym { keysym: u32, is_press: bool },
     Button { button: u32, is_press: bool },
     ScrollDiscrete { x: i32, y: i32 },
     ScrollStop { stop_x: bool, stop_y: bool },
@@ -427,6 +428,10 @@ pub enum EisPlanError {
     InvalidClickCount,
     #[error("key combo must contain at least one key")]
     EmptyKeyCombo,
+    #[error("keysym text must contain at least one keysym")]
+    EmptyKeysymText,
+    #[error("character {character:?} does not map to an XKB keysym")]
+    UnmappedKeysym { character: char },
     #[error("scroll request must include a non-zero delta")]
     EmptyScroll,
 }
@@ -543,6 +548,7 @@ pub trait EisEventSink {
         keycode: u32,
         is_press: bool,
     ) -> std::result::Result<(), Self::Error>;
+    fn text_keysym(&mut self, keysym: u32, is_press: bool) -> std::result::Result<(), Self::Error>;
     fn button(&mut self, button: u32, is_press: bool) -> std::result::Result<(), Self::Error>;
     fn scroll_discrete(&mut self, x: i32, y: i32) -> std::result::Result<(), Self::Error>;
     fn scroll_stop(&mut self, stop_x: bool, stop_y: bool) -> std::result::Result<(), Self::Error>;
@@ -565,6 +571,7 @@ where
             EisEvent::KeyboardKey { keycode, is_press } => {
                 sink.keyboard_key(*keycode, *is_press)?
             }
+            EisEvent::TextKeysym { keysym, is_press } => sink.text_keysym(*keysym, *is_press)?,
             EisEvent::Button { button, is_press } => sink.button(*button, *is_press)?,
             EisEvent::ScrollDiscrete { x, y } => sink.scroll_discrete(*x, *y)?,
             EisEvent::ScrollStop { stop_x, stop_y } => sink.scroll_stop(*stop_x, *stop_y)?,
@@ -645,6 +652,7 @@ unsafe extern "C" {
     fn ei_device_frame(device: *mut EiDevice, time: u64);
     fn ei_device_pointer_motion_absolute(device: *mut EiDevice, x: f64, y: f64);
     fn ei_device_keyboard_key(device: *mut EiDevice, keycode: u32, is_press: bool);
+    fn ei_device_text_keysym(device: *mut EiDevice, keysym: u32, is_press: bool);
     fn ei_device_button_button(device: *mut EiDevice, button: u32, is_press: bool);
     fn ei_device_scroll_discrete(device: *mut EiDevice, x: i32, y: i32);
     fn ei_device_scroll_stop(device: *mut EiDevice, stop_x: bool, stop_y: bool);
@@ -653,6 +661,11 @@ unsafe extern "C" {
         text: *const libc::c_char,
         length: usize,
     );
+}
+
+#[link(name = "xkbcommon")]
+unsafe extern "C" {
+    fn xkb_utf32_to_keysym(ucs: u32) -> u32;
 }
 
 struct RetainedLibeiDevice {
@@ -1123,6 +1136,12 @@ impl EisEventSink for LibeiDeviceSink<'_> {
         Ok(())
     }
 
+    fn text_keysym(&mut self, keysym: u32, is_press: bool) -> std::result::Result<(), Self::Error> {
+        // SAFETY: `device` is guaranteed valid by `from_raw` for this sink's lifetime.
+        unsafe { ei_device_text_keysym(self.device.as_ptr(), keysym, is_press) };
+        Ok(())
+    }
+
     fn button(&mut self, button: u32, is_press: bool) -> std::result::Result<(), Self::Error> {
         // SAFETY: `device` is guaranteed valid by `from_raw` for this sink's lifetime.
         unsafe { ei_device_button_button(self.device.as_ptr(), button, is_press) };
@@ -1171,6 +1190,52 @@ pub fn plan_text_utf8(sequence: u32, text: impl Into<String>) -> Result<EisActio
             EisEvent::Frame,
             EisEvent::StopEmulating,
         ],
+    })
+}
+
+pub fn unicode_char_to_keysym(character: char) -> Result<u32> {
+    // SAFETY: `xkb_utf32_to_keysym` is a pure conversion for one Unicode scalar value.
+    let keysym = unsafe { xkb_utf32_to_keysym(u32::from(character)) };
+    if keysym == 0 {
+        return Err(EisPlanError::UnmappedKeysym { character });
+    }
+    Ok(keysym)
+}
+
+pub fn plan_text_as_keysyms(sequence: u32, text: &str) -> Result<EisActionPlan> {
+    if text.is_empty() {
+        return Err(EisPlanError::EmptyKeysymText);
+    }
+    let keysyms = text
+        .chars()
+        .map(unicode_char_to_keysym)
+        .collect::<Result<Vec<_>>>()?;
+    plan_text_keysyms(sequence, &keysyms)
+}
+
+pub fn plan_text_keysyms(sequence: u32, keysyms: &[u32]) -> Result<EisActionPlan> {
+    if keysyms.is_empty() {
+        return Err(EisPlanError::EmptyKeysymText);
+    }
+
+    let mut events = Vec::with_capacity(keysyms.len() * 3 + 2);
+    events.push(EisEvent::StartEmulating { sequence });
+    for keysym in keysyms {
+        events.push(EisEvent::TextKeysym {
+            keysym: *keysym,
+            is_press: true,
+        });
+        events.push(EisEvent::TextKeysym {
+            keysym: *keysym,
+            is_press: false,
+        });
+        events.push(EisEvent::Frame);
+    }
+    events.push(EisEvent::StopEmulating);
+
+    Ok(EisActionPlan {
+        required_capabilities: vec![EisCapability::Text],
+        events,
     })
 }
 
@@ -1442,6 +1507,15 @@ mod tests {
             Ok(())
         }
 
+        fn text_keysym(
+            &mut self,
+            keysym: u32,
+            is_press: bool,
+        ) -> std::result::Result<(), Self::Error> {
+            self.calls.push(format!("keysym:{keysym}:{is_press}"));
+            Ok(())
+        }
+
         fn button(&mut self, button: u32, is_press: bool) -> std::result::Result<(), Self::Error> {
             self.calls.push(format!("button:{button}:{is_press}"));
             Ok(())
@@ -1502,6 +1576,14 @@ mod tests {
         fn keyboard_key(
             &mut self,
             _keycode: u32,
+            _is_press: bool,
+        ) -> std::result::Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn text_keysym(
+            &mut self,
+            _keysym: u32,
             _is_press: bool,
         ) -> std::result::Result<(), Self::Error> {
             Ok(())
@@ -2036,6 +2118,79 @@ mod tests {
     }
 
     #[test]
+    fn plans_xkb_text_keysyms_with_press_release_frames() {
+        let plan = plan_text_keysyms(7, &[0x61, 0x20ac]).expect("keysym plan");
+
+        assert_eq!(plan.required_capabilities, vec![EisCapability::Text]);
+        assert_eq!(
+            plan.events,
+            vec![
+                EisEvent::StartEmulating { sequence: 7 },
+                EisEvent::TextKeysym {
+                    keysym: 0x61,
+                    is_press: true,
+                },
+                EisEvent::TextKeysym {
+                    keysym: 0x61,
+                    is_press: false,
+                },
+                EisEvent::Frame,
+                EisEvent::TextKeysym {
+                    keysym: 0x20ac,
+                    is_press: true,
+                },
+                EisEvent::TextKeysym {
+                    keysym: 0x20ac,
+                    is_press: false,
+                },
+                EisEvent::Frame,
+                EisEvent::StopEmulating,
+            ]
+        );
+        assert_eq!(
+            plan_text_keysyms(1, &[]),
+            Err(EisPlanError::EmptyKeysymText)
+        );
+    }
+
+    #[test]
+    fn maps_unicode_text_to_xkb_keysyms() {
+        assert_eq!(unicode_char_to_keysym('a').expect("ascii keysym"), 0x61);
+        assert_eq!(unicode_char_to_keysym('€').expect("euro keysym"), 0x20ac);
+
+        let plan = plan_text_as_keysyms(9, "a€").expect("text maps to keysyms");
+        assert!(matches!(
+            plan.events.as_slice(),
+            [
+                EisEvent::StartEmulating { sequence: 9 },
+                EisEvent::TextKeysym {
+                    keysym: 0x61,
+                    is_press: true,
+                },
+                EisEvent::TextKeysym {
+                    keysym: 0x61,
+                    is_press: false,
+                },
+                EisEvent::Frame,
+                EisEvent::TextKeysym {
+                    keysym: 0x20ac,
+                    is_press: true,
+                },
+                EisEvent::TextKeysym {
+                    keysym: 0x20ac,
+                    is_press: false,
+                },
+                EisEvent::Frame,
+                EisEvent::StopEmulating,
+            ]
+        ));
+        assert_eq!(
+            plan_text_as_keysyms(1, ""),
+            Err(EisPlanError::EmptyKeysymText)
+        );
+    }
+
+    #[test]
     fn plans_key_combo_with_evdev_codes() {
         let plan = plan_key_combo_evdev(8, &[29, 42, 38]).expect("key combo plan");
 
@@ -2205,6 +2360,25 @@ mod tests {
                 "button:272:true",
                 "frame",
                 "button:272:false",
+                "frame",
+                "stop",
+            ]
+        );
+    }
+
+    #[test]
+    fn applies_keysym_plan_to_sender_sink_in_order() {
+        let plan = plan_text_keysyms(43, &[0x61]).expect("keysym plan");
+        let mut sink = RecordingSink::default();
+
+        apply_plan_to_sink(&plan, &mut sink).expect("apply keysym plan");
+
+        assert_eq!(
+            sink.calls,
+            vec![
+                "start:43",
+                "keysym:97:true",
+                "keysym:97:false",
                 "frame",
                 "stop",
             ]
