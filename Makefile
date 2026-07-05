@@ -168,8 +168,9 @@ smoke-clipboard:
 	previous_json="target/plasma-pilot-clipboard-previous.json"
 	previous_text="target/plasma-pilot-clipboard-previous.txt"
 	current_json="target/plasma-pilot-clipboard-current.json"
+	status_json="target/plasma-pilot-clipboard-status.json"
 	set_result="target/plasma-pilot-clipboard-set.json"
-	rm -rf /tmp/plasma-pilot-clipboard-smoke target/plasma-pilot-clipboard-smoke "$$log" "$$journal" "$$previous_json" "$$previous_text" "$$current_json" "$$set_result"
+	rm -rf /tmp/plasma-pilot-clipboard-smoke target/plasma-pilot-clipboard-smoke "$$log" "$$journal" "$$previous_json" "$$previous_text" "$$current_json" "$$status_json" "$$set_result"
 	cargo build -p plasma-pilotd -p plasma-pilot-cli
 	target/debug/plasma-pilotd --socket "$$socket" --journal "$$journal" --approval-file "$$approval_file" >"$$log" 2>&1 &
 	pid=$$!
@@ -179,7 +180,7 @@ smoke-clipboard:
 		fi
 		kill "$$pid" 2>/dev/null || true
 		wait "$$pid" 2>/dev/null || true
-		rm -f "$$previous_json" "$$previous_text" "$$current_json" "$$set_result"
+		rm -f "$$previous_json" "$$previous_text" "$$current_json" "$$status_json" "$$set_result"
 	}
 	trap cleanup EXIT
 	for _ in {1..50}; do
@@ -194,6 +195,8 @@ smoke-clipboard:
 	fi
 	target/debug/plasma-pilot-cli --socket "$$socket" approve --approval-file "$$approval_file" --safety-class clipboard-read --method clipboard_get --ttl-ms 60000 --reason "smoke-clipboard read" >/dev/null
 	test "$$(stat -c '%a' "$$approval_file")" = "600"
+	target/debug/plasma-pilot-cli --socket "$$socket" clipboard status >"$$status_json"
+	jq -e '.type == "clipboard_backend_status" and (.data.read_backend == null or (.data.read_backend | type == "string")) and (.data.write_backend == null or (.data.write_backend | type == "string")) and (.data.setup_hint | type == "string")' "$$status_json" >/dev/null
 	if target/debug/plasma-pilot-cli --socket "$$socket" clipboard get >"$$previous_json" 2>/dev/null; then
 		jq -r '.data.text' "$$previous_json" >"$$previous_text"
 	fi
@@ -397,7 +400,7 @@ smoke-trace-replay:
 	rm -rf /tmp/plasma-pilot-trace-smoke "$$log" "$$journal" "$$validate_out" "$$replay_out" "$$denied_capture"
 	cargo build -p plasma-pilotd -p plasma-pilot-cli
 	target/debug/plasma-pilot-cli trace validate --dir examples/traces >"$$validate_out"
-	jq -e '.type == "trace_validation_set" and .trace_count >= 5 and .step_count >= 33 and any(.traces[]; (.file | endswith("status-smoke.json")) and .step_count == 11 and any(.steps[]; .method == "safety_status" and .expect_json_count == 1) and any(.steps[]; .method == "kwin_bridge_status") and any(.steps[]; .method == "uinput_status") and any(.steps[]; .method == "capture_backend_status") and any(.steps[]; .method == "input_backend_status") and any(.steps[]; .method == "remote_desktop_eis_session_status") and any(.steps[]; .method == "remote_desktop_eis_stop")) and any(.traces[]; (.file | endswith("journal-tail-smoke.json")) and .step_count == 3 and any(.steps[]; .method == "journal_tail" and .expect_json_count == 8)) and any(.traces[]; (.file | endswith("policy-denials-smoke.json")) and .step_count == 5 and all(.steps[]; .expect_response_type == "error" and .expect_ok == false and (.expect_error_contains | type == "string")) and any(.steps[]; .method == "accessibility_set_caret") and any(.steps[]; .method == "accessibility_set_selection")) and any(.traces[]; (.file | endswith("input-denials-smoke.json")) and .step_count == 9 and all(.steps[]; .expect_response_type == "error" and .expect_ok == false and (.expect_error_contains | test("Control(Keyboard|Pointer)"))) and any(.steps[]; .method == "remote_desktop_session_probe") and any(.steps[]; .method == "remote_desktop_eis_probe") and any(.steps[]; .method == "remote_desktop_eis_start")) and any(.traces[]; (.file | endswith("panic-stop-smoke.json")) and .step_count == 5 and all(.steps[]; .expect_json_count == 1))' "$$validate_out" >/dev/null
+	jq -e '.type == "trace_validation_set" and .trace_count >= 5 and .step_count >= 34 and any(.traces[]; (.file | endswith("status-smoke.json")) and .step_count == 12 and any(.steps[]; .method == "safety_status" and .expect_json_count == 1) and any(.steps[]; .method == "kwin_bridge_status") and any(.steps[]; .method == "uinput_status") and any(.steps[]; .method == "capture_backend_status") and any(.steps[]; .method == "clipboard_backend_status" and .expect_json_count == 4) and any(.steps[]; .method == "input_backend_status") and any(.steps[]; .method == "remote_desktop_eis_session_status") and any(.steps[]; .method == "remote_desktop_eis_stop")) and any(.traces[]; (.file | endswith("journal-tail-smoke.json")) and .step_count == 3 and any(.steps[]; .method == "journal_tail" and .expect_json_count == 8)) and any(.traces[]; (.file | endswith("policy-denials-smoke.json")) and .step_count == 5 and all(.steps[]; .expect_response_type == "error" and .expect_ok == false and (.expect_error_contains | type == "string")) and any(.steps[]; .method == "accessibility_set_caret") and any(.steps[]; .method == "accessibility_set_selection")) and any(.traces[]; (.file | endswith("input-denials-smoke.json")) and .step_count == 9 and all(.steps[]; .expect_response_type == "error" and .expect_ok == false and (.expect_error_contains | test("Control(Keyboard|Pointer)"))) and any(.steps[]; .method == "remote_desktop_session_probe") and any(.steps[]; .method == "remote_desktop_eis_probe") and any(.steps[]; .method == "remote_desktop_eis_start")) and any(.traces[]; (.file | endswith("panic-stop-smoke.json")) and .step_count == 5 and all(.steps[]; .expect_json_count == 1))' "$$validate_out" >/dev/null
 	target/debug/plasma-pilotd --socket "$$socket" --journal "$$journal" >"$$log" 2>&1 &
 	pid=$$!
 	cleanup() {
@@ -417,7 +420,7 @@ smoke-trace-replay:
 		exit 1
 	fi
 	target/debug/plasma-pilot-cli --socket "$$socket" trace replay --dir examples/traces >"$$replay_out"
-	jq -e '.type == "trace_replay_set" and .trace_count >= 5 and .step_count >= 33 and any(.traces[]; (.file | endswith("status-smoke.json")) and (.steps | length) == 11 and all(.steps[]; .ok == true) and any(.steps[]; .method == "safety_status") and any(.steps[]; .method == "kwin_bridge_status") and any(.steps[]; .method == "uinput_status") and any(.steps[]; .method == "capture_backend_status") and any(.steps[]; .method == "input_backend_status") and any(.steps[]; .method == "remote_desktop_eis_session_status") and any(.steps[]; .method == "remote_desktop_eis_stop")) and any(.traces[]; (.file | endswith("journal-tail-smoke.json")) and (.steps | length) == 3 and all(.steps[]; .ok == true) and any(.steps[]; .method == "journal_tail" and .response_type == "journal")) and any(.traces[]; (.file | endswith("policy-denials-smoke.json")) and (.steps | length) == 5 and all(.steps[]; .response_type == "error" and .ok == false) and any(.steps[]; .method == "focus_window") and any(.steps[]; .method == "accessibility_set_caret") and any(.steps[]; .method == "accessibility_set_selection")) and any(.traces[]; (.file | endswith("input-denials-smoke.json")) and (.steps | length) == 9 and all(.steps[]; .response_type == "error" and .ok == false) and any(.steps[]; .method == "type_text") and any(.steps[]; .method == "click_pointer") and any(.steps[]; .method == "remote_desktop_session_probe") and any(.steps[]; .method == "remote_desktop_eis_probe") and any(.steps[]; .method == "remote_desktop_eis_start")) and any(.traces[]; (.file | endswith("panic-stop-smoke.json")) and (.steps | length) == 5 and all(.steps[]; .response_type == "panic_stop" and .ok == true) and any(.steps[]; .method == "set_panic_stop"))' "$$replay_out" >/dev/null
+	jq -e '.type == "trace_replay_set" and .trace_count >= 5 and .step_count >= 34 and any(.traces[]; (.file | endswith("status-smoke.json")) and (.steps | length) == 12 and all(.steps[]; .ok == true) and any(.steps[]; .method == "safety_status") and any(.steps[]; .method == "kwin_bridge_status") and any(.steps[]; .method == "uinput_status") and any(.steps[]; .method == "capture_backend_status") and any(.steps[]; .method == "clipboard_backend_status" and .response_type == "clipboard_backend_status") and any(.steps[]; .method == "input_backend_status") and any(.steps[]; .method == "remote_desktop_eis_session_status") and any(.steps[]; .method == "remote_desktop_eis_stop")) and any(.traces[]; (.file | endswith("journal-tail-smoke.json")) and (.steps | length) == 3 and all(.steps[]; .ok == true) and any(.steps[]; .method == "journal_tail" and .response_type == "journal")) and any(.traces[]; (.file | endswith("policy-denials-smoke.json")) and (.steps | length) == 5 and all(.steps[]; .response_type == "error" and .ok == false) and any(.steps[]; .method == "focus_window") and any(.steps[]; .method == "accessibility_set_caret") and any(.steps[]; .method == "accessibility_set_selection")) and any(.traces[]; (.file | endswith("input-denials-smoke.json")) and (.steps | length) == 9 and all(.steps[]; .response_type == "error" and .ok == false) and any(.steps[]; .method == "type_text") and any(.steps[]; .method == "click_pointer") and any(.steps[]; .method == "remote_desktop_session_probe") and any(.steps[]; .method == "remote_desktop_eis_probe") and any(.steps[]; .method == "remote_desktop_eis_start")) and any(.traces[]; (.file | endswith("panic-stop-smoke.json")) and (.steps | length) == 5 and all(.steps[]; .response_type == "panic_stop" and .ok == true) and any(.steps[]; .method == "set_panic_stop"))' "$$replay_out" >/dev/null
 	test ! -e "$$denied_capture"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 --method safety_status --ok true | jq -e '.type == "journal" and (.data | length) >= 1' >/dev/null
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 --ok false | jq -e '.type == "journal" and (.data | length) >= 3' >/dev/null
@@ -462,6 +465,7 @@ smoke-mcp:
 	test "$$(wc -l <"$$out")" = "5"
 	jq -e 'select(.id == 1) | .result.capabilities.tools.listChanged == false' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.list_windows")' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.clipboard_status")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.clipboard_get_text")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.clipboard_set_text")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.desktop_session_status")' "$$out" >/dev/null

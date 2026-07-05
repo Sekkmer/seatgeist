@@ -22,23 +22,23 @@ use libplasma_pilot::{
     AccessibilityPasteTextRequest, AccessibilitySetCaretRequest, AccessibilitySetSelectionRequest,
     AccessibilitySetTextRequest, AccessibilityTextAttributesRequest, ActionResult,
     ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard, BackendCapability, CapabilitySet,
-    CaptureBackendStatus, ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest,
-    ClipboardText, CoordinateSpace, DaemonClientIdentity, DaemonRequest, DaemonRequestEnvelope,
-    DaemonResponse, DesktopObservation, DesktopSessionStatus, DragPointerRequest,
-    FocusTextFieldRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus,
-    InputBackendStatus, JournalArtifactContext, JournalClientContext, JournalControlContext,
-    JournalEntry, JournalRequestedTarget, JournalWindowContext, KeyComboRequest, KwinBridgeStatus,
-    KwinMetadataStatus, LibeiStatus, MovePointerRequest, ObserveRequest, PanicStopStatus, Point,
-    PointerButton, PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
-    PointerPhysicalBounds, PolicyStatus, RemoteDesktopEisProbe, RemoteDesktopEisSessionStatus,
-    RemoteDesktopPersistMode, RemoteDesktopPortalStatus, RemoteDesktopSessionProbe,
-    RemoteDesktopSessionProbeRequest, SafetyClass, SafetyStatus, ScreenshotInfo,
-    ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
-    ScrollPointerRequest, SelectItemRequest, SelectMenuRequest, SetPanicStopRequest,
-    SetTextFieldRequest, SetValueRequest, SpectacleStatus, ToggleCheckRequest, ToolApprovalLevel,
-    TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult, WindowGeometry,
-    WindowInfo, XkbKeymapStatus, current_egid, current_euid, default_journal_path,
-    default_panic_stop_path, default_socket_path,
+    CaptureBackendStatus, ClickButtonRequest, ClickPointerRequest, ClipboardBackendStatus,
+    ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonClientIdentity, DaemonRequest,
+    DaemonRequestEnvelope, DaemonResponse, DesktopObservation, DesktopSessionStatus,
+    DragPointerRequest, FocusTextFieldRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest,
+    HealthStatus, InputBackendStatus, JournalArtifactContext, JournalClientContext,
+    JournalControlContext, JournalEntry, JournalRequestedTarget, JournalWindowContext,
+    KeyComboRequest, KwinBridgeStatus, KwinMetadataStatus, LibeiStatus, MovePointerRequest,
+    ObserveRequest, PanicStopStatus, Point, PointerButton, PointerCalibrationPoint,
+    PointerCalibrationStatus, PointerMonitorCalibration, PointerPhysicalBounds, PolicyStatus,
+    RemoteDesktopEisProbe, RemoteDesktopEisSessionStatus, RemoteDesktopPersistMode,
+    RemoteDesktopPortalStatus, RemoteDesktopSessionProbe, RemoteDesktopSessionProbeRequest,
+    SafetyClass, SafetyStatus, ScreenshotInfo, ScreenshotPortalStatus, ScreenshotRequest,
+    ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest, SelectItemRequest,
+    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, SpectacleStatus,
+    ToggleCheckRequest, ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest,
+    WaitForChangeResult, WindowGeometry, WindowInfo, XkbKeymapStatus, current_egid, current_euid,
+    default_journal_path, default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -1640,6 +1640,9 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                     message: format_error_chain(&err),
                 },
             }
+        }
+        DaemonRequest::ClipboardBackendStatus => {
+            DaemonResponse::ClipboardBackendStatus(clipboard_backend_status())
         }
         DaemonRequest::ClipboardGet(request) => match clipboard_get_text(request) {
             Ok(text) => DaemonResponse::ClipboardText(text),
@@ -4260,6 +4263,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::RemoteDesktopEisStop
         | DaemonRequest::CaptureBackendStatus
         | DaemonRequest::PointerCalibration
+        | DaemonRequest::ClipboardBackendStatus
         | DaemonRequest::JournalTail(_) => SafetyClass::Policy,
         DaemonRequest::ListMonitors
         | DaemonRequest::ListWindows
@@ -5064,6 +5068,63 @@ fn clipboard_get_text(request: ClipboardGetRequest) -> Result<ClipboardText> {
         request.max_bytes,
         backend.name().to_string(),
     ))
+}
+
+fn clipboard_backend_status() -> ClipboardBackendStatus {
+    let wl_paste_available = command_exists("wl-paste");
+    let wl_copy_available = command_exists("wl-copy");
+    let kde_klipper_available = kde_klipper_available();
+    let read_backend =
+        clipboard_read_backend_from_availability(wl_paste_available, kde_klipper_available)
+            .map(|backend| backend.name().to_string());
+    let write_backend =
+        clipboard_write_backend_from_availability(wl_copy_available, kde_klipper_available)
+            .map(|backend| backend.name().to_string());
+    let setup_hint = clipboard_backend_setup_hint(
+        read_backend.as_deref(),
+        write_backend.as_deref(),
+        wl_paste_available,
+        wl_copy_available,
+        kde_klipper_available,
+    );
+
+    ClipboardBackendStatus {
+        wl_paste_available,
+        wl_copy_available,
+        kde_klipper_available,
+        read_backend,
+        write_backend,
+        setup_hint,
+    }
+}
+
+fn clipboard_backend_setup_hint(
+    read_backend: Option<&str>,
+    write_backend: Option<&str>,
+    wl_paste_available: bool,
+    wl_copy_available: bool,
+    kde_klipper_available: bool,
+) -> String {
+    match (read_backend, write_backend) {
+        (Some(read), Some(write)) if read == write => {
+            format!("clipboard text read/write backends are available through {read}")
+        }
+        (Some(read), Some(write)) => {
+            format!("clipboard text read backend={read} write backend={write}")
+        }
+        (Some(read), None) => {
+            format!("clipboard text read backend={read}; install wl-copy or enable KDE Klipper DBus for writes")
+        }
+        (None, Some(write)) => {
+            format!("clipboard text write backend={write}; install wl-paste or enable KDE Klipper DBus for reads")
+        }
+        (None, None) if !wl_paste_available && !wl_copy_available && !kde_klipper_available => {
+            "no clipboard text backend is available; install wl-clipboard or run inside a KDE session with Klipper DBus".to_string()
+        }
+        (None, None) => {
+            "clipboard backend probes are partially visible but no complete text read/write path is available".to_string()
+        }
+    }
 }
 
 fn clipboard_get_text_wl() -> Result<String> {
@@ -7348,6 +7409,14 @@ fn summarize_response(response: &DaemonResponse) -> String {
             result.threshold,
             result.screenshot.backend,
             result.screenshot.path.display()
+        ),
+        DaemonResponse::ClipboardBackendStatus(status) => format!(
+            "clipboard backends read={} write={} wl_paste={} wl_copy={} kde_klipper={}",
+            status.read_backend.as_deref().unwrap_or("none"),
+            status.write_backend.as_deref().unwrap_or("none"),
+            status.wl_paste_available,
+            status.wl_copy_available,
+            status.kde_klipper_available
         ),
         DaemonResponse::ClipboardText(text) => format!(
             "clipboard text length={} truncated={} original_bytes={} backend={}",
@@ -11506,6 +11575,23 @@ height = 40
             clipboard_write_backend_from_availability(false, false),
             None
         );
+    }
+
+    #[test]
+    fn clipboard_status_setup_hint_reports_backend_shape() {
+        let hint = clipboard_backend_setup_hint(
+            Some("wl-clipboard"),
+            Some("kde-klipper"),
+            true,
+            false,
+            true,
+        );
+        assert!(hint.contains("read backend=wl-clipboard"));
+        assert!(hint.contains("write backend=kde-klipper"));
+
+        let missing = clipboard_backend_setup_hint(None, None, false, false, false);
+        assert!(missing.contains("no clipboard text backend"));
+        assert!(missing.contains("wl-clipboard"));
     }
 
     #[test]

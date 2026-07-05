@@ -119,6 +119,32 @@
       ]
     },
     {
+      "label": "clipboard-backend-status",
+      "request": {
+        "method": "clipboard_backend_status"
+      },
+      "expect_response_type": "clipboard_backend_status",
+      "expect_ok": true,
+      "expect_json": [
+        {
+          "pointer": "/data/wl_paste_available",
+          "value_type": "boolean"
+        },
+        {
+          "pointer": "/data/wl_copy_available",
+          "value_type": "boolean"
+        },
+        {
+          "pointer": "/data/kde_klipper_available",
+          "value_type": "boolean"
+        },
+        {
+          "pointer": "/data/setup_hint",
+          "value_type": "string"
+        }
+      ]
+    },
+    {
       "label": "input-backend-keymap-status",
       "request": {
         "method": "input_backend_status"

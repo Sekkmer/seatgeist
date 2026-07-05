@@ -536,6 +536,16 @@ pub struct ClipboardText {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipboardBackendStatus {
+    pub wl_paste_available: bool,
+    pub wl_copy_available: bool,
+    pub kde_klipper_available: bool,
+    pub read_backend: Option<String>,
+    pub write_backend: Option<String>,
+    pub setup_hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClipboardGetRequest {
     pub max_bytes: Option<usize>,
 }
@@ -874,6 +884,7 @@ pub enum DaemonRequest {
     Screenshot(ScreenshotRequest),
     ScreenshotTile(ScreenshotTileRequest),
     WaitForChange(WaitForChangeRequest),
+    ClipboardBackendStatus,
     ClipboardGet(ClipboardGetRequest),
     ClipboardSet(ClipboardSetRequest),
     FocusedAccessibilityTree(FocusedAccessibilityTreeRequest),
@@ -934,6 +945,7 @@ impl DaemonRequest {
             Self::Screenshot(_) => "screenshot",
             Self::ScreenshotTile(_) => "screenshot_tile",
             Self::WaitForChange(_) => "wait_for_change",
+            Self::ClipboardBackendStatus => "clipboard_backend_status",
             Self::ClipboardGet(_) => "clipboard_get",
             Self::ClipboardSet(_) => "clipboard_set",
             Self::FocusedAccessibilityTree(_) => "focused_accessibility_tree",
@@ -992,6 +1004,7 @@ pub enum DaemonResponse {
     Observation(Box<DesktopObservation>),
     Screenshot(ScreenshotInfo),
     WaitForChange(Box<WaitForChangeResult>),
+    ClipboardBackendStatus(ClipboardBackendStatus),
     ClipboardText(ClipboardText),
     AccessibilityTree(Option<AccessibilityNode>),
     AccessibilityMatches(Vec<AccessibilityNode>),
@@ -1024,6 +1037,7 @@ impl DaemonResponse {
             Self::Observation(_) => "observation",
             Self::Screenshot(_) => "screenshot",
             Self::WaitForChange(_) => "wait_for_change",
+            Self::ClipboardBackendStatus(_) => "clipboard_backend_status",
             Self::ClipboardText(_) => "clipboard_text",
             Self::AccessibilityTree(_) => "accessibility_tree",
             Self::AccessibilityMatches(_) => "accessibility_matches",
@@ -1903,6 +1917,10 @@ mod tests {
 
     #[test]
     fn serializes_clipboard_requests() {
+        let status = DaemonRequest::ClipboardBackendStatus;
+        let encoded = serde_json::to_string(&status).expect("clipboard status request serializes");
+        assert_eq!(encoded, r#"{"method":"clipboard_backend_status"}"#);
+
         let get = DaemonRequest::ClipboardGet(ClipboardGetRequest {
             max_bytes: Some(DEFAULT_CLIPBOARD_MAX_BYTES),
         });
@@ -1924,6 +1942,21 @@ mod tests {
         let encoded = serde_json::to_string(&response).expect("clipboard response serializes");
         assert!(encoded.contains(r#""type":"clipboard_text""#));
         assert!(encoded.contains(r#""backend":"wl-clipboard""#));
+
+        let response = DaemonResponse::ClipboardBackendStatus(ClipboardBackendStatus {
+            wl_paste_available: true,
+            wl_copy_available: false,
+            kde_klipper_available: true,
+            read_backend: Some("wl-clipboard".to_string()),
+            write_backend: Some("kde-klipper".to_string()),
+            setup_hint: "clipboard text read/write backends are available".to_string(),
+        });
+        let encoded =
+            serde_json::to_string(&response).expect("clipboard status response serializes");
+        assert!(encoded.contains(r#""type":"clipboard_backend_status""#));
+        assert!(encoded.contains(r#""wl_paste_available":true"#));
+        assert!(encoded.contains(r#""write_backend":"kde-klipper""#));
+        assert_eq!(response.response_type(), "clipboard_backend_status");
     }
 
     #[test]

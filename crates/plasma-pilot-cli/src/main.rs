@@ -151,6 +151,7 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum ClipboardCommand {
+    Status,
     Get {
         #[arg(long, default_value_t = DEFAULT_CLIPBOARD_MAX_BYTES)]
         max_bytes: usize,
@@ -789,6 +790,9 @@ fn main() -> Result<()> {
                 max_bytes: if full { None } else { Some(max_bytes) },
             }),
         )?,
+        Command::Clipboard {
+            command: ClipboardCommand::Status,
+        } => print_daemon_response(&socket, DaemonRequest::ClipboardBackendStatus)?,
         Command::Clipboard {
             command: ClipboardCommand::Set { text },
         } => print_daemon_response(
@@ -2110,6 +2114,7 @@ fn known_response_types() -> &'static [&'static str] {
         "observation",
         "screenshot",
         "wait_for_change",
+        "clipboard_backend_status",
         "clipboard_text",
         "accessibility_tree",
         "accessibility_matches",

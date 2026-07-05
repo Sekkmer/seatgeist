@@ -458,11 +458,17 @@ fn cli_replays_trace_against_real_daemon() -> Result<()> {
         "capture_backend_status"
     );
     assert_eq!(report["steps"][7]["ok"], true);
-    assert_eq!(report["steps"][8]["method"], "input_backend_status");
-    assert_eq!(report["steps"][8]["response_type"], "input_backend_status");
+    assert_eq!(report["steps"][8]["method"], "clipboard_backend_status");
+    assert_eq!(
+        report["steps"][8]["response_type"],
+        "clipboard_backend_status"
+    );
     assert_eq!(report["steps"][8]["ok"], true);
+    assert_eq!(report["steps"][9]["method"], "input_backend_status");
+    assert_eq!(report["steps"][9]["response_type"], "input_backend_status");
+    assert_eq!(report["steps"][9]["ok"], true);
 
-    let journal = daemon.cli_json(&["journal", "tail", "--limit", "10"])?;
+    let journal = daemon.cli_json(&["journal", "tail", "--limit", "12"])?;
     let DaemonResponse::Journal(entries) = journal else {
         bail!("expected journal response, got {journal:?}");
     };
@@ -476,6 +482,7 @@ fn cli_replays_trace_against_real_daemon() -> Result<()> {
             "kwin_bridge_status",
             "uinput_status",
             "capture_backend_status",
+            "clipboard_backend_status",
             "input_backend_status",
         ],
     );
@@ -794,7 +801,7 @@ fn cli_validates_trace_without_daemon() -> Result<()> {
         serde_json::from_slice(&output.stdout).context("parse trace validation report")?;
     assert_eq!(report["type"], "trace_validation");
     assert_eq!(report["trace_version"], 1);
-    assert_eq!(report["step_count"], 11);
+    assert_eq!(report["step_count"], 12);
     assert_eq!(report["steps"][0]["label"], "health");
     assert_eq!(report["steps"][0]["method"], "health");
     assert_eq!(report["steps"][0]["expect_response_type"], "health");
@@ -807,13 +814,15 @@ fn cli_validates_trace_without_daemon() -> Result<()> {
     assert_eq!(report["steps"][6]["expect_json_count"], 2);
     assert_eq!(report["steps"][7]["method"], "capture_backend_status");
     assert_eq!(report["steps"][7]["expect_json_count"], 4);
-    assert_eq!(report["steps"][8]["method"], "input_backend_status");
-    assert_eq!(report["steps"][8]["expect_json_count"], 3);
+    assert_eq!(report["steps"][8]["method"], "clipboard_backend_status");
+    assert_eq!(report["steps"][8]["expect_json_count"], 4);
+    assert_eq!(report["steps"][9]["method"], "input_backend_status");
+    assert_eq!(report["steps"][9]["expect_json_count"], 3);
     assert_eq!(
-        report["steps"][9]["method"],
+        report["steps"][10]["method"],
         "remote_desktop_eis_session_status"
     );
-    assert_eq!(report["steps"][10]["method"], "remote_desktop_eis_stop");
+    assert_eq!(report["steps"][11]["method"], "remote_desktop_eis_stop");
     Ok(())
 }
 

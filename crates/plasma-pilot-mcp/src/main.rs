@@ -323,6 +323,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
             threshold: optional_f64(arguments, "threshold")?
                 .unwrap_or(DEFAULT_WAIT_FOR_CHANGE_THRESHOLD),
         })),
+        "plasma.clipboard_status" => Ok(DaemonRequest::ClipboardBackendStatus),
         "plasma.clipboard_get_text" => {
             let full = optional_bool(arguments, "full")?.unwrap_or(false);
             Ok(DaemonRequest::ClipboardGet(ClipboardGetRequest {
@@ -822,6 +823,14 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             result.threshold,
             result.screenshot.backend,
             result.screenshot.path.display()
+        ),
+        DaemonResponse::ClipboardBackendStatus(status) => format!(
+            "clipboard backends read={} write={} wl_paste={} wl_copy={} kde_klipper={}",
+            status.read_backend.as_deref().unwrap_or("none"),
+            status.write_backend.as_deref().unwrap_or("none"),
+            status.wl_paste_available,
+            status.wl_copy_available,
+            status.kde_klipper_available
         ),
         DaemonResponse::ClipboardText(text) => format!(
             "clipboard text length={} truncated={} original_bytes={} backend={}",
@@ -1611,6 +1620,12 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "plasma.clipboard_status",
+            "Clipboard Status",
+            "Report available clipboard text read/write backends and setup hints without reading clipboard contents.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
             "plasma.clipboard_get_text",
             "Clipboard Get Text",
             "Read UTF-8 text from the Wayland clipboard. This is policy-gated and bounded by default.",
@@ -2191,9 +2206,9 @@ fn i64_to_i32(value: i64) -> Result<i32> {
 mod tests {
     use super::*;
     use libplasma_pilot::{
-        CaptureBackendStatus, InputBackendStatus, KwinMetadataStatus, LibeiStatus,
-        RemoteDesktopPortalStatus, SafetyStatus, ScreenshotPortalStatus, SpectacleStatus,
-        XkbKeymapStatus,
+        CaptureBackendStatus, ClipboardBackendStatus, InputBackendStatus, KwinMetadataStatus,
+        LibeiStatus, RemoteDesktopPortalStatus, SafetyStatus, ScreenshotPortalStatus,
+        SpectacleStatus, XkbKeymapStatus,
     };
     use libplasma_pilot::{ScreenshotInfo, ScreenshotTransform, WaitForChangeResult};
     use std::path::Path;
@@ -2434,6 +2449,22 @@ mod tests {
         );
         assert!(capture_text.contains("preferred=portal_screenshot"));
         assert!(capture_text.contains("implemented=spectacle"));
+
+        let clipboard_text = compact_tool_text(
+            "plasma.clipboard_status",
+            &DaemonResponse::ClipboardBackendStatus(ClipboardBackendStatus {
+                wl_paste_available: true,
+                wl_copy_available: false,
+                kde_klipper_available: true,
+                read_backend: Some("wl-clipboard".to_string()),
+                write_backend: Some("kde-klipper".to_string()),
+                setup_hint: "clipboard text read backend=wl-clipboard write backend=kde-klipper"
+                    .to_string(),
+            }),
+        );
+        assert!(clipboard_text.contains("read=wl-clipboard"));
+        assert!(clipboard_text.contains("write=kde-klipper"));
+        assert!(clipboard_text.contains("wl_paste=true"));
     }
 
     #[test]
@@ -2596,6 +2627,11 @@ mod tests {
             tools
                 .iter()
                 .any(|tool| tool["name"] == "plasma.clipboard_get_text")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.clipboard_status")
         );
         assert!(
             tools
@@ -3469,6 +3505,13 @@ mod tests {
                 text: "copy this".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn maps_clipboard_status_tool() {
+        let request = daemon_request_for_tool("plasma.clipboard_status", &json!({}))
+            .expect("clipboard status maps");
+        assert_eq!(request, DaemonRequest::ClipboardBackendStatus);
     }
 
     #[test]
