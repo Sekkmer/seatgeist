@@ -230,6 +230,8 @@ def main() -> None:
         "live_eval_evidence",
         "seatgeist_eval_evidence",
         "evidence.json",
+        "evidence is stale",
+        "current-commit opt-in live KDE eval evidence exists",
         "latest release manifest is stale for the current commit",
         "--json",
         "--strict",
