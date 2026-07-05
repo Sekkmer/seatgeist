@@ -12,7 +12,7 @@ Run `make release-readiness` to summarize current blockers from local repo metad
 - [x] Arch Linux/KDE Plasma 6 operator installation docs exist.
 - [x] Plugin manifest, MCP config, skills, and hook assets validate locally.
 - [~] Manual KDE Plasma 6 Wayland evals exist, but broader repeated passes are still required before a public v0.1 release.
-- [~] Versioned local release artifact packaging, verification, and optional GPG signing exist through `make verify-release-artifacts`, `make sign-release-artifacts`, and `make verify-release-signatures`; public uploads and signed release tags are not done yet.
+- [~] Versioned local release artifact packaging, verification, clean-install validation, and optional GPG signing exist through `make verify-release-artifacts`, `make verify-release-install`, `make sign-release-artifacts`, and `make verify-release-signatures`; public uploads and signed release tags are not done yet.
 - [ ] Add real public repository metadata before publishing, replacing placeholder `example.invalid` Cargo package URLs.
 - [x] Final license files match the workspace `MIT OR Apache-2.0` declaration.
 - [x] Public project name and package/binary prefixes are `Seatgeist` / `seatgeist-*`.
@@ -34,8 +34,9 @@ The CI workflow runs only safe, non-opt-in gates. It does not send real desktop 
 5. Run each opt-in live eval intentionally on the supported KDE Plasma 6 Wayland workstation and save the artifact paths or summaries.
 6. Create a signed release tag.
 7. Build and verify local release artifacts with `make verify-release-artifacts`.
-8. Sign the generated artifacts with `SEATGEIST_RELEASE_SIGNING_KEY=<key> make sign-release-artifacts`, then run `make verify-release-signatures`.
-9. Run `scripts/release-readiness.py --strict`; it must report no blockers before upload.
-10. Upload the generated Seatgeist binary/plugin tarball, source tarball, manifest, checksums, detached signatures, and signature checksum manifest from `target/seatgeist-release/`.
-11. Publish checksums and signatures for every uploaded artifact.
-12. Verify a clean install from the released artifacts, not from the working tree.
+8. Verify a clean extraction/install smoke from the binary/plugin archive with `make verify-release-install`.
+9. Sign the generated artifacts with `SEATGEIST_RELEASE_SIGNING_KEY=<key> make sign-release-artifacts`, then run `make verify-release-signatures`.
+10. Run `scripts/release-readiness.py --strict`; it must report no blockers before upload.
+11. Upload the generated Seatgeist binary/plugin tarball, source tarball, manifest, checksums, detached signatures, and signature checksum manifest from `target/seatgeist-release/`.
+12. Publish checksums and signatures for every uploaded artifact.
+13. Verify a clean install from the released artifacts on a separate release-test checkout or machine, not from the working tree.

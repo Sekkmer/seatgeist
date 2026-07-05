@@ -102,7 +102,7 @@ Current full-project estimate: `[~]` about one third complete. This estimate use
 - [x] Safe GUI evals cover status, session preflight, observe, AT-SPI diagnostics, denial paths, clipboard status/denial, KWin bridge status, keymap status, full-resolution denial, and control safety.
 - [~] Opt-in GUI evals exist for KWrite/Kate, KCalc, Firefox localhost button, portal Screenshot, RemoteDesktop probe, and retained RemoteDesktop EIS session.
 - [~] Manual KDE Plasma 6 Wayland eval suite is useful but not complete enough to call v0.1 done.
-- [~] Public release checklist, external CI, dual license files, local Seatgeist binary/plugin plus source release packaging, verification, optional GPG signing targets, and a release-readiness blocker audit exist; public uploads and signed release tags are not done.
+- [~] Public release checklist, external CI, dual license files, local Seatgeist binary/plugin plus source release packaging, artifact verification, clean-install validation, optional GPG signing targets, and a release-readiness blocker audit exist; public uploads and signed release tags are not done.
 
 ## v0.1 Definition Of Done
 

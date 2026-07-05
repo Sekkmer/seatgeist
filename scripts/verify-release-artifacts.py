@@ -154,6 +154,7 @@ def verify_source(source: Path, manifest: dict[str, Any]) -> None:
             f"{prefix}plugin/.mcp.json",
             f"{prefix}scripts/package-release.sh",
             f"{prefix}scripts/verify-release-artifacts.py",
+            f"{prefix}scripts/verify-release-install.sh",
             f"{prefix}scripts/sign-release-artifacts.sh",
             f"{prefix}scripts/verify-release-signatures.sh",
             f"{prefix}scripts/release-readiness.py",
