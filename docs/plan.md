@@ -29,6 +29,7 @@ The plan was checked on 2026-07-04 against current public documentation:
 - KDE developer docs: KWin scripts are installable with `kpackagetool6 --type=KWin/Script`, enabled through `kwriteconfig6`, and can manipulate windows through the KWin scripting API. Sources: <https://develop.kde.org/docs/plasma/kwin/> and <https://develop.kde.org/docs/plasma/kwin/api/>
 - KDE developer docs: D-Bus is a common KDE/freedesktop IPC layer and underpins portals and many desktop services. Source: <https://develop.kde.org/docs/features/d-bus/introduction_to_dbus/>
 - XDG Desktop Portal docs: ScreenCast and RemoteDesktop portals expose monitor/window capture and keyboard/pointer/touchscreen remote-desktop sessions. Sources: <https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html> and <https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop.html>
+- XDG Desktop Portal docs: the Screenshot portal exposes `Screenshot(parent_window, options) -> handle`, where completion is delivered through the shared Request `Response(response, results)` signal and successful results include a screenshot `uri`. Sources: <https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Screenshot.html> and <https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Request.html>
 - freedesktop/libei docs: libei is a Wayland-oriented emulated-input protocol with client/server separation over Unix sockets. Source: <https://libinput.pages.freedesktop.org/libei/>
 - Linux kernel docs: uinput lets a userspace process create virtual input devices by writing to `/dev/uinput`; this is a viable privileged fallback, but it should not be the only Wayland plan. Source: <https://docs.kernel.org/input/uinput.html>
 - AT-SPI2 docs: AT-SPI is a D-Bus protocol used by toolkit widgets to expose content to assistive technologies. Source: <https://www.freedesktop.org/wiki/Accessibility/AT-SPI2/>
@@ -132,6 +133,7 @@ Create this initial layout:
 │   ├── plasma-pilot-backend/
 │   ├── plasma-pilot-atspi/
 │   ├── plasma-pilot-kwin/
+│   ├── plasma-pilot-portal/
 │   └── plasma-pilot-testkit/
 ├── plugin/
 │   ├── .codex-plugin/
@@ -293,10 +295,11 @@ Responsibilities:
 
 ### 8.8 `plasma-pilot-portal`
 
-Future crate for xdg-desktop-portal integration if it becomes large enough to split from `plasma-pilot-backend`.
+Crate for xdg-desktop-portal integration contracts and future portal execution backends.
 
 Responsibilities:
 
+- Screenshot portal request contracts: bus name, object path, method/interface names, handle-token validation, expected Request object paths, Response signal match rules, response-code handling, screenshot URI extraction, and file URI decoding.
 - ScreenCast portal session setup and monitor/window stream metadata.
 - RemoteDesktop portal keyboard/pointer/touchscreen session setup.
 - Permission/session lifecycle reporting.
@@ -819,7 +822,7 @@ Tasks:
 - [x] Add default downscaled previews and explicit full-resolution capture. Current status: bounded previews are observe-class, while direct and observe-attached full-resolution screenshot requests are classified separately and prompt by default until the daemon is started with explicit full-resolution screenshot approval.
 - Add tiled screenshots for 8K and multi-monitor workflows. Initial implementation supports physical-pixel tile crops with max-edge downscaling.
 - Add coordinate transform metadata for preview/crop/full-size mapping. Initial preview/full-size mapping is implemented with scale factors and source/output dimensions.
-- [x] Add safe capture backend diagnostics before implementing portal/KWin-native capture. Current status: `plasma-pilot-cli capture-backends`, MCP `plasma.capture_backend_status`, and `make smoke-capture-backends` probe xdg-desktop-portal Screenshot/ScreenCast interface visibility, KWin supportInformation metadata availability, and Spectacle fallback availability without starting a portal session or capturing pixels. Status responses distinguish the preferred visible backend from the currently implemented capture backend, which is still Spectacle until portal request handling lands.
+- [x] Add safe capture backend diagnostics before implementing portal/KWin-native capture. Current status: `plasma-pilot-cli capture-backends`, MCP `plasma.capture_backend_status`, and `make smoke-capture-backends` probe xdg-desktop-portal Screenshot/ScreenCast interface visibility, KWin supportInformation metadata availability, and Spectacle fallback availability without starting a portal session or capturing pixels. Status responses distinguish the preferred visible backend from the currently implemented capture backend, which is still Spectacle until portal request handling lands. `plasma-pilot-portal` now codifies the official Screenshot method contract: `org.freedesktop.portal.Desktop` at `/org/freedesktop/portal/desktop`, the `org.freedesktop.portal.Screenshot.Screenshot(parent_window, options) -> handle` call, Request handle-token/path rules, Request `Response(response, results)` completion, and the screenshot `uri` result.
 
 Acceptance criteria:
 

@@ -622,6 +622,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "plasma-pilot-portal"
+version = "0.1.0"
+
+[[package]]
 name = "plasma-pilot-testkit"
 version = "0.1.0"
 dependencies = [
