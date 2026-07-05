@@ -1,6 +1,8 @@
 use std::{
     collections::VecDeque,
-    env, fs,
+    env,
+    fmt::Display,
+    fs,
     fs::OpenOptions,
     io::Write,
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
@@ -1910,6 +1912,24 @@ impl<S: plasma_pilot_eis::EisEventSource> DaemonPortalEisSession<S> {
     }
 }
 
+// Production request routing constructs this after long-lived portal EIS
+// session storage lands; tests exercise the ready-session execution path now.
+#[allow(dead_code)]
+impl<S> DaemonPortalEisSession<S>
+where
+    S: plasma_pilot_eis::EisEventSource + plasma_pilot_eis::EisSelectedDeviceExecutor,
+    S::Error: Display,
+{
+    fn execute_ready_plan(
+        &mut self,
+        plan: &plasma_pilot_eis::EisActionPlan,
+    ) -> Result<plasma_pilot_eis::EisExecutedPlan> {
+        self.runtime
+            .execute_ready_plan(plan)
+            .map_err(|err| anyhow::anyhow!("{err}"))
+    }
+}
+
 fn remote_desktop_probe_setup(
     request: RemoteDesktopSessionProbeRequest,
 ) -> Result<(
@@ -2410,18 +2430,22 @@ fn input_backend_setup_hint(
 
 trait InputExecutionBackend {
     fn name(&self) -> &'static str;
-    fn type_text(&self, text: &str) -> Result<()>;
-    fn key_combo(&self, combo: &str) -> Result<usize>;
-    fn move_pointer(&self, point: Point, bounds: plasma_pilot_uinput::PointerBounds) -> Result<()>;
+    fn type_text(&mut self, text: &str) -> Result<()>;
+    fn key_combo(&mut self, combo: &str) -> Result<usize>;
+    fn move_pointer(
+        &mut self,
+        point: Point,
+        bounds: plasma_pilot_uinput::PointerBounds,
+    ) -> Result<()>;
     fn click_pointer(
-        &self,
+        &mut self,
         point: Point,
         bounds: plasma_pilot_uinput::PointerBounds,
         button: PointerButton,
         clicks: u8,
     ) -> Result<()>;
     fn drag_pointer(
-        &self,
+        &mut self,
         from: Point,
         to: Point,
         bounds: plasma_pilot_uinput::PointerBounds,
@@ -2429,7 +2453,7 @@ trait InputExecutionBackend {
         duration_ms: u64,
     ) -> Result<()>;
     fn scroll_pointer(
-        &self,
+        &mut self,
         vertical: i32,
         horizontal: i32,
         bounds: plasma_pilot_uinput::PointerBounds,
@@ -2445,21 +2469,25 @@ impl InputExecutionBackend for UinputInputExecutionBackend {
         "uinput"
     }
 
-    fn type_text(&self, text: &str) -> Result<()> {
+    fn type_text(&mut self, text: &str) -> Result<()> {
         plasma_pilot_uinput::type_text(text).map_err(|err| anyhow::anyhow!(err))
     }
 
-    fn key_combo(&self, combo: &str) -> Result<usize> {
+    fn key_combo(&mut self, combo: &str) -> Result<usize> {
         plasma_pilot_uinput::key_combo(combo).map_err(|err| anyhow::anyhow!(err))
     }
 
-    fn move_pointer(&self, point: Point, bounds: plasma_pilot_uinput::PointerBounds) -> Result<()> {
+    fn move_pointer(
+        &mut self,
+        point: Point,
+        bounds: plasma_pilot_uinput::PointerBounds,
+    ) -> Result<()> {
         plasma_pilot_uinput::move_pointer(point.x, point.y, bounds)
             .map_err(|err| anyhow::anyhow!(err))
     }
 
     fn click_pointer(
-        &self,
+        &mut self,
         point: Point,
         bounds: plasma_pilot_uinput::PointerBounds,
         button: PointerButton,
@@ -2476,7 +2504,7 @@ impl InputExecutionBackend for UinputInputExecutionBackend {
     }
 
     fn drag_pointer(
-        &self,
+        &mut self,
         from: Point,
         to: Point,
         bounds: plasma_pilot_uinput::PointerBounds,
@@ -2496,7 +2524,7 @@ impl InputExecutionBackend for UinputInputExecutionBackend {
     }
 
     fn scroll_pointer(
-        &self,
+        &mut self,
         vertical: i32,
         horizontal: i32,
         bounds: plasma_pilot_uinput::PointerBounds,
@@ -2526,13 +2554,13 @@ impl InputExecutionBackend for EisPlanningInputExecutionBackend {
         self.backend_name
     }
 
-    fn type_text(&self, text: &str) -> Result<()> {
+    fn type_text(&mut self, text: &str) -> Result<()> {
         let plan = plasma_pilot_eis::plan_text_utf8(EIS_PLAN_SEQUENCE, text)
             .map_err(|err| anyhow::anyhow!(err))?;
         self.fail_closed_with_plan(plan)
     }
 
-    fn key_combo(&self, _combo: &str) -> Result<usize> {
+    fn key_combo(&mut self, _combo: &str) -> Result<usize> {
         bail!(
             "configured input backend {} has no EIS key-combo planner yet; keymap-aware routing must land before EIS keyboard shortcuts are enabled",
             self.backend_name
@@ -2540,7 +2568,7 @@ impl InputExecutionBackend for EisPlanningInputExecutionBackend {
     }
 
     fn move_pointer(
-        &self,
+        &mut self,
         point: Point,
         _bounds: plasma_pilot_uinput::PointerBounds,
     ) -> Result<()> {
@@ -2549,7 +2577,7 @@ impl InputExecutionBackend for EisPlanningInputExecutionBackend {
     }
 
     fn click_pointer(
-        &self,
+        &mut self,
         point: Point,
         _bounds: plasma_pilot_uinput::PointerBounds,
         button: PointerButton,
@@ -2562,7 +2590,7 @@ impl InputExecutionBackend for EisPlanningInputExecutionBackend {
     }
 
     fn drag_pointer(
-        &self,
+        &mut self,
         from: Point,
         to: Point,
         _bounds: plasma_pilot_uinput::PointerBounds,
@@ -2575,7 +2603,7 @@ impl InputExecutionBackend for EisPlanningInputExecutionBackend {
     }
 
     fn scroll_pointer(
-        &self,
+        &mut self,
         vertical: i32,
         horizontal: i32,
         _bounds: plasma_pilot_uinput::PointerBounds,
@@ -2584,6 +2612,101 @@ impl InputExecutionBackend for EisPlanningInputExecutionBackend {
             plasma_pilot_eis::plan_pointer_scroll_discrete(EIS_PLAN_SEQUENCE, vertical, horizontal)
                 .map_err(|err| anyhow::anyhow!(err))?;
         self.fail_closed_with_plan(plan)
+    }
+}
+
+// Production request routing constructs this after long-lived portal EIS
+// session storage lands; tests exercise the ready-session execution path now.
+#[allow(dead_code)]
+struct EisSessionInputExecutionBackend<'a, S> {
+    backend_name: &'static str,
+    session: &'a mut DaemonPortalEisSession<S>,
+}
+
+#[allow(dead_code)]
+impl<S> EisSessionInputExecutionBackend<'_, S>
+where
+    S: plasma_pilot_eis::EisEventSource + plasma_pilot_eis::EisSelectedDeviceExecutor,
+    S::Error: Display,
+{
+    fn execute_plan(&mut self, plan: plasma_pilot_eis::EisActionPlan) -> Result<()> {
+        self.session.execute_ready_plan(&plan)?;
+        Ok(())
+    }
+}
+
+impl<S> InputExecutionBackend for EisSessionInputExecutionBackend<'_, S>
+where
+    S: plasma_pilot_eis::EisEventSource + plasma_pilot_eis::EisSelectedDeviceExecutor,
+    S::Error: Display,
+{
+    fn name(&self) -> &'static str {
+        self.backend_name
+    }
+
+    fn type_text(&mut self, text: &str) -> Result<()> {
+        let plan = plasma_pilot_eis::plan_text_utf8(EIS_PLAN_SEQUENCE, text)
+            .map_err(|err| anyhow::anyhow!(err))?;
+        self.execute_plan(plan)
+    }
+
+    fn key_combo(&mut self, _combo: &str) -> Result<usize> {
+        bail!(
+            "configured input backend {} has no EIS key-combo planner yet; keymap-aware routing must land before EIS keyboard shortcuts are enabled",
+            self.backend_name
+        )
+    }
+
+    fn move_pointer(
+        &mut self,
+        point: Point,
+        _bounds: plasma_pilot_uinput::PointerBounds,
+    ) -> Result<()> {
+        self.execute_plan(plasma_pilot_eis::plan_pointer_move_absolute(
+            EIS_PLAN_SEQUENCE,
+            point,
+        ))
+    }
+
+    fn click_pointer(
+        &mut self,
+        point: Point,
+        _bounds: plasma_pilot_uinput::PointerBounds,
+        button: PointerButton,
+        clicks: u8,
+    ) -> Result<()> {
+        let plan =
+            plasma_pilot_eis::plan_pointer_click_absolute(EIS_PLAN_SEQUENCE, point, button, clicks)
+                .map_err(|err| anyhow::anyhow!(err))?;
+        self.execute_plan(plan)
+    }
+
+    fn drag_pointer(
+        &mut self,
+        from: Point,
+        to: Point,
+        _bounds: plasma_pilot_uinput::PointerBounds,
+        button: PointerButton,
+        _duration_ms: u64,
+    ) -> Result<()> {
+        self.execute_plan(plasma_pilot_eis::plan_pointer_drag_absolute(
+            EIS_PLAN_SEQUENCE,
+            from,
+            to,
+            button,
+        ))
+    }
+
+    fn scroll_pointer(
+        &mut self,
+        vertical: i32,
+        horizontal: i32,
+        _bounds: plasma_pilot_uinput::PointerBounds,
+    ) -> Result<()> {
+        let plan =
+            plasma_pilot_eis::plan_pointer_scroll_discrete(EIS_PLAN_SEQUENCE, vertical, horizontal)
+                .map_err(|err| anyhow::anyhow!(err))?;
+        self.execute_plan(plan)
     }
 }
 
@@ -4113,7 +4236,7 @@ fn type_text(
     if request.text.chars().count() > 8192 {
         bail!("text must be at most 8192 characters");
     }
-    let backend = input_execution_backend(input_backend_preference)?;
+    let mut backend = input_execution_backend(input_backend_preference)?;
     backend.type_text(&request.text)?;
     Ok(ActionResult {
         id: Uuid::new_v4(),
@@ -4134,7 +4257,7 @@ fn key_combo(
     if request.combo.trim().is_empty() {
         bail!("combo must be non-empty");
     }
-    let backend = input_execution_backend(input_backend_preference)?;
+    let mut backend = input_execution_backend(input_backend_preference)?;
     let key_count = backend.key_combo(&request.combo)?;
     Ok(ActionResult {
         id: Uuid::new_v4(),
@@ -4227,7 +4350,7 @@ fn move_pointer(
     active_window_state: &ActiveWindowState,
     input_backend_preference: InputBackendPreference,
 ) -> Result<ActionResult> {
-    let backend = input_execution_backend(input_backend_preference)?;
+    let mut backend = input_execution_backend(input_backend_preference)?;
     let (point, bounds) = resolve_pointer_point(request.point, active_window_state)?;
     backend.move_pointer(point, bounds)?;
     Ok(ActionResult {
@@ -4252,7 +4375,7 @@ fn click_pointer(
     if request.clicks == 0 || request.clicks > 2 {
         bail!("clicks must be 1 or 2");
     }
-    let backend = input_execution_backend(input_backend_preference)?;
+    let mut backend = input_execution_backend(input_backend_preference)?;
     let (point, bounds) = resolve_pointer_point(request.point, active_window_state)?;
     backend.click_pointer(point, bounds, request.button, request.clicks)?;
     Ok(ActionResult {
@@ -4286,7 +4409,7 @@ fn drag_pointer(
             request.to.space
         );
     }
-    let backend = input_execution_backend(input_backend_preference)?;
+    let mut backend = input_execution_backend(input_backend_preference)?;
     let (from, bounds) = resolve_pointer_point(request.from, active_window_state)?;
     let (to, to_bounds) = resolve_pointer_point(request.to, active_window_state)?;
     if bounds != to_bounds {
@@ -4318,7 +4441,7 @@ fn scroll_pointer(
     if request.vertical == 0 && request.horizontal == 0 {
         bail!("scroll request must include a non-zero delta");
     }
-    let backend = input_execution_backend(input_backend_preference)?;
+    let mut backend = input_execution_backend(input_backend_preference)?;
     let bounds = physical_pointer_bounds()?;
     backend.scroll_pointer(request.vertical, request.horizontal, bounds)?;
     Ok(ActionResult {
@@ -6067,6 +6190,28 @@ mod tests {
         event_fd: RawFd,
         pending_batches: VecDeque<Vec<plasma_pilot_eis::LibeiEventSnapshot>>,
         plan_batches: VecDeque<Vec<plasma_pilot_eis::LibeiEventSnapshot>>,
+        executed_plans: Vec<MockEisExecutedPlan>,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct MockEisExecutedPlan {
+        selection: plasma_pilot_eis::EisDeviceSelection,
+        events: Vec<plasma_pilot_eis::EisEvent>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum MockEisExecutionError {
+        RejectedDevice,
+    }
+
+    impl Display for MockEisExecutionError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::RejectedDevice => {
+                    write!(formatter, "mock EIS executor rejected selected device")
+                }
+            }
+        }
     }
 
     impl MockEisSource {
@@ -6093,6 +6238,25 @@ mod tests {
             _plan: &plasma_pilot_eis::EisActionPlan,
         ) -> Vec<plasma_pilot_eis::LibeiEventSnapshot> {
             self.plan_batches.pop_front().unwrap_or_default()
+        }
+    }
+
+    impl plasma_pilot_eis::EisSelectedDeviceExecutor for MockEisSource {
+        type Error = MockEisExecutionError;
+
+        fn apply_plan_to_selected_device(
+            &mut self,
+            selection: &plasma_pilot_eis::EisDeviceSelection,
+            plan: &plasma_pilot_eis::EisActionPlan,
+        ) -> std::result::Result<(), Self::Error> {
+            if selection.device_id == "rejected" {
+                return Err(MockEisExecutionError::RejectedDevice);
+            }
+            self.executed_plans.push(MockEisExecutedPlan {
+                selection: selection.clone(),
+                events: plan.events.clone(),
+            });
+            Ok(())
         }
     }
 
@@ -7709,6 +7873,94 @@ height = 40
     }
 
     #[test]
+    fn eis_session_input_backend_executes_ready_text_plan() {
+        let mut source = MockEisSource::default();
+        source.push_plan(vec![
+            plasma_pilot_eis::LibeiEventSnapshot::Connect,
+            plasma_pilot_eis::LibeiEventSnapshot::SeatAdded {
+                capabilities: vec![plasma_pilot_eis::EisCapability::Text],
+                bound_capabilities: vec![plasma_pilot_eis::EisCapability::Text],
+            },
+            plasma_pilot_eis::LibeiEventSnapshot::DeviceResumed(plasma_pilot_eis::EisDeviceInfo {
+                id: "text-device".to_string(),
+                name: Some("Text Device".to_string()),
+                kind: plasma_pilot_eis::EisDeviceKind::Virtual,
+                resumed: true,
+                capabilities: vec![plasma_pilot_eis::EisCapability::Text],
+                regions: Vec::new(),
+            }),
+        ]);
+        let runtime = plasma_pilot_eis::EisSessionRuntime::new(source);
+        let mut session = DaemonPortalEisSession::from_runtime(
+            portal_session_start_fixture(),
+            "/org/freedesktop/portal/desktop/session/1/session".to_string(),
+            runtime,
+        );
+
+        {
+            let mut backend = EisSessionInputExecutionBackend {
+                backend_name: "portal_remote_desktop",
+                session: &mut session,
+            };
+            backend
+                .type_text("hello")
+                .expect("ready EIS text execution");
+        }
+
+        assert_eq!(session.runtime.source().executed_plans.len(), 1);
+        let executed = &session.runtime.source().executed_plans[0];
+        assert_eq!(
+            executed.selection,
+            plasma_pilot_eis::EisDeviceSelection {
+                device_id: "text-device".to_string(),
+                device_name: Some("Text Device".to_string()),
+                matched_region: None,
+            }
+        );
+        assert!(matches!(
+            executed.events.as_slice(),
+            [
+                plasma_pilot_eis::EisEvent::StartEmulating { .. },
+                plasma_pilot_eis::EisEvent::TextUtf8 { .. },
+                plasma_pilot_eis::EisEvent::Frame,
+                plasma_pilot_eis::EisEvent::StopEmulating,
+            ]
+        ));
+    }
+
+    #[test]
+    fn eis_session_input_backend_fails_without_ready_device() {
+        let mut source = MockEisSource::default();
+        source.push_plan(vec![
+            plasma_pilot_eis::LibeiEventSnapshot::Connect,
+            plasma_pilot_eis::LibeiEventSnapshot::SeatAdded {
+                capabilities: vec![plasma_pilot_eis::EisCapability::Text],
+                bound_capabilities: vec![plasma_pilot_eis::EisCapability::Text],
+            },
+        ]);
+        let runtime = plasma_pilot_eis::EisSessionRuntime::new(source);
+        let mut session = DaemonPortalEisSession::from_runtime(
+            portal_session_start_fixture(),
+            "/org/freedesktop/portal/desktop/session/1/session".to_string(),
+            runtime,
+        );
+
+        let mut backend = EisSessionInputExecutionBackend {
+            backend_name: "portal_remote_desktop",
+            session: &mut session,
+        };
+        let err = backend
+            .type_text("hello")
+            .expect_err("EIS execution must require a ready selected device");
+
+        assert!(
+            err.to_string()
+                .contains("no resumed EIS device provides the required capabilities")
+        );
+        assert!(session.runtime.source().executed_plans.is_empty());
+    }
+
+    #[test]
     fn eis_capability_names_are_compact_and_stable() {
         assert_eq!(
             eis_capability_names(&[
@@ -7920,7 +8172,7 @@ height = 40
 
     #[test]
     fn explicit_eis_backends_build_action_plans_then_fail_closed() {
-        let libei = input_execution_backend(InputBackendPreference::Libei)
+        let mut libei = input_execution_backend(InputBackendPreference::Libei)
             .expect("libei backend has a planning executor");
         let err = libei
             .type_text("hello")
@@ -7931,7 +8183,7 @@ height = 40
         assert!(err.contains("4 events"));
         assert!(err.contains("no live consented EIS session/device executor"));
 
-        let portal = input_execution_backend(InputBackendPreference::PortalRemoteDesktop)
+        let mut portal = input_execution_backend(InputBackendPreference::PortalRemoteDesktop)
             .expect("portal backend has a planning executor");
         let err = portal
             .click_pointer(
@@ -7959,7 +8211,7 @@ height = 40
 
     #[test]
     fn explicit_eis_key_combos_fail_until_keymap_planning_lands() {
-        let libei = input_execution_backend(InputBackendPreference::Libei)
+        let mut libei = input_execution_backend(InputBackendPreference::Libei)
             .expect("libei backend has a planning executor");
         let err = libei
             .key_combo("Ctrl+L")
