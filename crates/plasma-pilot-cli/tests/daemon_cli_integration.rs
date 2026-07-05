@@ -809,7 +809,7 @@ fn cli_validates_trace_without_daemon() -> Result<()> {
     assert_eq!(report["steps"][3]["expect_json_count"], 1);
     assert_eq!(report["steps"][4]["method"], "desktop_session_status");
     assert_eq!(report["steps"][5]["method"], "kwin_bridge_status");
-    assert_eq!(report["steps"][5]["expect_json_count"], 4);
+    assert_eq!(report["steps"][5]["expect_json_count"], 6);
     assert_eq!(report["steps"][6]["method"], "uinput_status");
     assert_eq!(report["steps"][6]["expect_json_count"], 2);
     assert_eq!(report["steps"][7]["method"], "capture_backend_status");

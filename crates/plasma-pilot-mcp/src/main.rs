@@ -676,9 +676,11 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status.path.display()
         ),
         DaemonResponse::KwinBridgeStatus(status) => format!(
-            "kwin bridge dbus={} update_seen={} installed={} enabled={}",
+            "kwin bridge dbus={} active_update_seen={} window_list_update_seen={} window_count={} installed={} enabled={}",
             status.dbus_service_registered,
             status.active_window_update_seen,
+            status.window_list_update_seen,
+            status.window_count,
             status.package_installed,
             status
                 .script_enabled
@@ -918,7 +920,7 @@ fn tool_definitions() -> Vec<Value> {
         tool(
             "plasma.kwin_bridge_status",
             "KWin Bridge Status",
-            "Report daemon DBus receiver state, latest active-window bridge update state, and user-local KWin script install/config status.",
+            "Report daemon DBus receiver state, latest active-window and window-list bridge update state, and user-local KWin script install/config status.",
             object_schema(vec![], vec![]),
         ),
         tool(

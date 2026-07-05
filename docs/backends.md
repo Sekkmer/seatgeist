@@ -36,7 +36,7 @@ The repository includes `kwin/plasma-pilot-bridge`, a packaged KWin script that 
 
 The active-window payload is compact JSON containing active state, stable KWin window id, title, app id, pid, and logical window geometry. The window-list payload contains a compact `windows` array with the same non-active window fields. The daemon keeps the latest updates in memory, serves active-window state through `plasma-pilot-cli active-window`, and merges bridge window-list metadata into `plasma-pilot-cli windows`/MCP `plasma.list_windows` while preserving the `WindowsRunner` fallback.
 
-`plasma-pilot-cli kwin-bridge-status` and MCP `plasma.kwin_bridge_status` report the daemon DBus receiver state, whether the script has published an update, and the user-local package/config paths checked for persistent installation.
+`plasma-pilot-cli kwin-bridge-status` and MCP `plasma.kwin_bridge_status` report the daemon DBus receiver state, active-window update state, window-list update state, latest bridge window count, and the user-local package/config paths checked for persistent installation.
 
 Install or update the script explicitly with:
 

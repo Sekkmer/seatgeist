@@ -239,6 +239,8 @@ eval_kwin_bridge_status() {
 		.type == "kwin_bridge_status"
 		and (.data.dbus_service_registered | type == "boolean")
 		and (.data.active_window_update_seen | type == "boolean")
+		and (.data.window_list_update_seen | type == "boolean")
+		and (.data.window_count | type == "number")
 		and (.data.package_installed | type == "boolean")
 		and (
 			(.data.script_enabled | type == "boolean")

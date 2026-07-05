@@ -65,6 +65,14 @@
           "value_type": "boolean"
         },
         {
+          "pointer": "/data/window_list_update_seen",
+          "value_type": "boolean"
+        },
+        {
+          "pointer": "/data/window_count",
+          "value_type": "number"
+        },
+        {
           "pointer": "/data/package_installed",
           "value_type": "boolean"
         },

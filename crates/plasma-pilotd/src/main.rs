@@ -1600,7 +1600,11 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
             }
         }
         DaemonRequest::KwinBridgeStatus => {
-            match kwin_bridge_status(&runtime.active_window_state, runtime.kwin_bridge_registered) {
+            match kwin_bridge_status(
+                &runtime.active_window_state,
+                &runtime.window_list_state,
+                runtime.kwin_bridge_registered,
+            ) {
                 Ok(status) => DaemonResponse::KwinBridgeStatus(status),
                 Err(err) => DaemonResponse::Error {
                     message: format_error_chain(&err),
@@ -2519,11 +2523,15 @@ fn redact_regions(values: &[RedactRegionFileConfig]) -> Vec<RedactRegion> {
 
 fn kwin_bridge_status(
     active_window_state: &ActiveWindowState,
+    window_list_state: &WindowListState,
     dbus_service_registered: bool,
 ) -> Result<KwinBridgeStatus> {
     let active_window_snapshot = active_window_state.snapshot()?;
     let active_window_update_seen = active_window_snapshot.is_some();
     let active_window = active_window_snapshot.flatten();
+    let window_list_snapshot = window_list_state.snapshot()?;
+    let window_list_update_seen = window_list_snapshot.is_some();
+    let window_count = window_list_snapshot.map_or(0, |windows| windows.len());
     let package_dir = xdg_data_home().join("kwin/scripts/plasma-pilot-bridge");
     let config_path = xdg_config_home().join("kwinrc");
     let script_enabled = read_kwin_bridge_enabled(&config_path)?;
@@ -2531,6 +2539,8 @@ fn kwin_bridge_status(
     Ok(KwinBridgeStatus {
         dbus_service_registered,
         active_window_update_seen,
+        window_list_update_seen,
+        window_count,
         active_window,
         package_installed: package_dir.join("metadata.json").is_file(),
         package_dir,
@@ -7435,9 +7445,11 @@ fn summarize_response(response: &DaemonResponse) -> String {
             status.path.display()
         ),
         DaemonResponse::KwinBridgeStatus(status) => format!(
-            "kwin bridge dbus={} update_seen={} installed={} enabled={}",
+            "kwin bridge dbus={} active_update_seen={} window_list_update_seen={} window_count={} installed={} enabled={}",
             status.dbus_service_registered,
             status.active_window_update_seen,
+            status.window_list_update_seen,
+            status.window_count,
             status.package_installed,
             status
                 .script_enabled
@@ -9690,6 +9702,31 @@ height = 40
             parse_kwin_bridge_enabled("[Plugins]\nunrelated=true\n"),
             None
         );
+    }
+
+    #[test]
+    fn kwin_bridge_status_reports_window_list_snapshot() {
+        let active_window_state = ActiveWindowState::default();
+        let window_list_state = WindowListState::default();
+        window_list_state
+            .update_from_payload(
+                r#"{
+                    "windows": [
+                        {"id": "window-1", "title": "One", "app_id": "org.example.One"},
+                        {"id": "window-2", "title": "Two", "app_id": "org.example.Two"}
+                    ]
+                }"#,
+            )
+            .expect("window list payload updates state");
+
+        let status = kwin_bridge_status(&active_window_state, &window_list_state, true)
+            .expect("bridge status succeeds");
+
+        assert!(status.dbus_service_registered);
+        assert!(!status.active_window_update_seen);
+        assert!(status.window_list_update_seen);
+        assert_eq!(status.window_count, 2);
+        assert!(status.active_window.is_none());
     }
 
     #[test]

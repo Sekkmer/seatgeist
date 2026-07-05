@@ -77,6 +77,8 @@ pub struct PanicStopStatus {
 pub struct KwinBridgeStatus {
     pub dbus_service_registered: bool,
     pub active_window_update_seen: bool,
+    pub window_list_update_seen: bool,
+    pub window_count: usize,
     pub active_window: Option<WindowInfo>,
     pub package_dir: PathBuf,
     pub package_installed: bool,
@@ -1487,6 +1489,8 @@ mod tests {
         let response = DaemonResponse::KwinBridgeStatus(KwinBridgeStatus {
             dbus_service_registered: true,
             active_window_update_seen: false,
+            window_list_update_seen: false,
+            window_count: 0,
             active_window: None,
             package_dir: PathBuf::from("/home/user/.local/share/kwin/scripts/plasma-pilot-bridge"),
             package_installed: true,
