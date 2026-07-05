@@ -604,6 +604,77 @@ fn cli_replays_policy_denial_trace_against_real_daemon() -> Result<()> {
 }
 
 #[test]
+fn cli_replays_semantic_denial_trace_against_real_daemon() -> Result<()> {
+    let daemon = DaemonFixture::start()?;
+    let trace_path = workspace_root().join("examples/traces/semantic-denials-smoke.json");
+    let trace: ReplayTrace = serde_json::from_str(
+        &fs::read_to_string(&trace_path)
+            .context("read checked-in semantic denial trace fixture")?,
+    )
+    .context("parse checked-in semantic denial trace fixture")?;
+    assert_eq!(trace.version, 1);
+    assert_eq!(trace.steps.len(), 9);
+    assert!(
+        trace
+            .steps
+            .iter()
+            .all(|step| step.expect_response_type.as_deref() == Some("error"))
+    );
+
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let report = daemon.cli_value(&["trace", "replay", "--file", &trace_arg])?;
+    assert_eq!(report["type"], "trace_replay");
+    assert_eq!(report["trace_version"], 1);
+    let steps = report["steps"]
+        .as_array()
+        .context("trace report steps are an array")?;
+    assert_eq!(steps.len(), trace.steps.len());
+    assert!(steps.iter().all(|step| step["response_type"] == "error"
+        && step["ok"] == false
+        && step["error_kind"] == "policy_prompt_required"));
+    assert_eq!(steps[0]["method"], "click_button");
+    assert_eq!(steps[1]["method"], "set_text_field");
+    assert_eq!(steps[2]["method"], "focus_text_field");
+    assert_eq!(steps[3]["method"], "activate_tab");
+    assert_eq!(steps[4]["method"], "activate_link");
+    assert_eq!(steps[5]["method"], "toggle_check");
+    assert_eq!(steps[6]["method"], "set_value");
+    assert_eq!(steps[7]["method"], "select_item");
+    assert_eq!(steps[8]["method"], "select_menu");
+
+    let journal = daemon.cli_json(&["journal", "tail", "--limit", "20", "--ok", "false"])?;
+    let DaemonResponse::Journal(entries) = journal else {
+        bail!("expected journal response, got {journal:?}");
+    };
+    assert_methods(
+        &entries,
+        &[
+            "click_button",
+            "set_text_field",
+            "focus_text_field",
+            "activate_tab",
+            "activate_link",
+            "toggle_check",
+            "set_value",
+            "select_item",
+            "select_menu",
+        ],
+    );
+    assert!(entries.iter().all(|entry| !entry.ok));
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.safety_class == Some(libplasma_pilot::SafetyClass::ControlSemantic))
+    );
+    let journal_json = serde_json::to_string(&entries).context("serialize semantic journal")?;
+    assert!(
+        !journal_json.contains("plasma-pilot-should-not-set"),
+        "semantic denial journal must not echo requested text: {journal_json}"
+    );
+    Ok(())
+}
+
+#[test]
 fn cli_replays_input_denial_trace_against_real_daemon() -> Result<()> {
     let daemon = DaemonFixture::start()?;
     let trace_path = workspace_root().join("examples/traces/input-denials-smoke.json");
@@ -1199,6 +1270,47 @@ fn cli_validates_policy_denial_trace_expectations() -> Result<()> {
         "policy prompt required for ControlSemantic"
     );
     assert_eq!(report["steps"][4]["expect_json_count"], 1);
+    Ok(())
+}
+
+#[test]
+fn cli_validates_semantic_denial_trace_expectations() -> Result<()> {
+    let trace_path = workspace_root().join("examples/traces/semantic-denials-smoke.json");
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+        .args(["trace", "validate", "--file", &trace_arg])
+        .output()
+        .context("run plasma-pilot-cli trace validate")?;
+    require_success(&["trace", "validate"], &output)?;
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("parse trace validation report")?;
+    assert_eq!(report["type"], "trace_validation");
+    assert_eq!(report["step_count"], 9);
+    assert_eq!(report["steps"][0]["method"], "click_button");
+    assert_eq!(
+        report["steps"][0]["expect_error_contains"],
+        "policy prompt required for ControlSemantic"
+    );
+    assert_eq!(report["steps"][0]["expect_json_count"], 1);
+    assert_eq!(report["steps"][1]["method"], "set_text_field");
+    assert_eq!(report["steps"][2]["method"], "focus_text_field");
+    assert_eq!(report["steps"][3]["method"], "activate_tab");
+    assert_eq!(report["steps"][4]["method"], "activate_link");
+    assert_eq!(report["steps"][5]["method"], "toggle_check");
+    assert_eq!(report["steps"][6]["method"], "set_value");
+    assert_eq!(report["steps"][7]["method"], "select_item");
+    assert_eq!(report["steps"][8]["method"], "select_menu");
+    assert!(
+        report["steps"]
+            .as_array()
+            .context("trace validation steps are an array")?
+            .iter()
+            .all(|step| step["expect_response_type"] == "error"
+                && step["expect_ok"] == false
+                && step["expect_error_contains"] == "policy prompt required for ControlSemantic"
+                && step["expect_json_count"] == 1)
+    );
     Ok(())
 }
 

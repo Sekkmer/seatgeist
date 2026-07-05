@@ -1,0 +1,183 @@
+{
+  "version": 1,
+  "description": "Safe deny-by-default replay trace for verifying high-level semantic control actions fail closed before AT-SPI backend side effects.",
+  "steps": [
+    {
+      "label": "click-button-denied",
+      "request": {
+        "method": "click_button",
+        "name": "OK",
+        "app": null,
+        "window_name_contains": null,
+        "max_nodes": 128
+      },
+      "expect_response_type": "error",
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlSemantic",
+      "expect_json": [
+        {
+          "pointer": "/data/kind",
+          "equals": "policy_prompt_required"
+        }
+      ]
+    },
+    {
+      "label": "set-text-field-denied",
+      "request": {
+        "method": "set_text_field",
+        "name": "Search",
+        "text": "plasma-pilot-should-not-set",
+        "app": null,
+        "window_name_contains": null,
+        "max_nodes": 128
+      },
+      "expect_response_type": "error",
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlSemantic",
+      "expect_json": [
+        {
+          "pointer": "/data/kind",
+          "equals": "policy_prompt_required"
+        }
+      ]
+    },
+    {
+      "label": "focus-text-field-denied",
+      "request": {
+        "method": "focus_text_field",
+        "name": "Search",
+        "app": null,
+        "window_name_contains": null,
+        "max_nodes": 128
+      },
+      "expect_response_type": "error",
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlSemantic",
+      "expect_json": [
+        {
+          "pointer": "/data/kind",
+          "equals": "policy_prompt_required"
+        }
+      ]
+    },
+    {
+      "label": "activate-tab-denied",
+      "request": {
+        "method": "activate_tab",
+        "name": "General",
+        "app": null,
+        "window_name_contains": null,
+        "max_nodes": 128
+      },
+      "expect_response_type": "error",
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlSemantic",
+      "expect_json": [
+        {
+          "pointer": "/data/kind",
+          "equals": "policy_prompt_required"
+        }
+      ]
+    },
+    {
+      "label": "activate-link-denied",
+      "request": {
+        "method": "activate_link",
+        "name": "Help",
+        "app": null,
+        "window_name_contains": null,
+        "max_nodes": 128
+      },
+      "expect_response_type": "error",
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlSemantic",
+      "expect_json": [
+        {
+          "pointer": "/data/kind",
+          "equals": "policy_prompt_required"
+        }
+      ]
+    },
+    {
+      "label": "toggle-check-denied",
+      "request": {
+        "method": "toggle_check",
+        "name": "Enable feature",
+        "checked": true,
+        "app": null,
+        "window_name_contains": null,
+        "max_nodes": 128
+      },
+      "expect_response_type": "error",
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlSemantic",
+      "expect_json": [
+        {
+          "pointer": "/data/kind",
+          "equals": "policy_prompt_required"
+        }
+      ]
+    },
+    {
+      "label": "set-value-denied",
+      "request": {
+        "method": "set_value",
+        "name": "Volume",
+        "value": 0.75,
+        "app": null,
+        "window_name_contains": null,
+        "max_nodes": 128
+      },
+      "expect_response_type": "error",
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlSemantic",
+      "expect_json": [
+        {
+          "pointer": "/data/kind",
+          "equals": "policy_prompt_required"
+        }
+      ]
+    },
+    {
+      "label": "select-item-denied",
+      "request": {
+        "method": "select_item",
+        "name": "Printer",
+        "app": null,
+        "window_name_contains": null,
+        "max_nodes": 128
+      },
+      "expect_response_type": "error",
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlSemantic",
+      "expect_json": [
+        {
+          "pointer": "/data/kind",
+          "equals": "policy_prompt_required"
+        }
+      ]
+    },
+    {
+      "label": "select-menu-denied",
+      "request": {
+        "method": "select_menu",
+        "path": [
+          "File",
+          "Open"
+        ],
+        "app": null,
+        "window_name_contains": null,
+        "max_nodes": 128
+      },
+      "expect_response_type": "error",
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlSemantic",
+      "expect_json": [
+        {
+          "pointer": "/data/kind",
+          "equals": "policy_prompt_required"
+        }
+      ]
+    }
+  ]
+}
