@@ -42,6 +42,56 @@ impl DaemonFixture {
         })
     }
 
+    fn start_with_config(config_contents: &str) -> Result<Self> {
+        Self::start_with_config_and_env(config_contents, &[])
+    }
+
+    fn start_with_config_and_env(
+        config_contents: &str,
+        env_overrides: &[(&str, &str)],
+    ) -> Result<Self> {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).context("create integration temp dir")?;
+        let socket = root.join("configured.sock");
+        let journal = root.join("configured-journal.jsonl");
+        let panic_stop = root.join("configured-panic-stop");
+        let config = root.join("config.toml");
+        let empty_bin = root.join("empty-bin");
+        fs::create_dir_all(&empty_bin).context("create empty PATH fixture")?;
+        fs::write(
+            &config,
+            config_contents
+                .replace("__ROOT__", &root.display().to_string())
+                .replace("__EMPTY_BIN__", &empty_bin.display().to_string())
+                .replace("__SOCKET__", &socket.display().to_string())
+                .replace("__JOURNAL__", &journal.display().to_string())
+                .replace("__PANIC_STOP__", &panic_stop.display().to_string()),
+        )
+        .context("write daemon config fixture")?;
+
+        let mut command = Command::new(daemon_binary()?);
+        command
+            .arg("--config")
+            .arg(&config)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        for (key, value) in env_overrides {
+            command.env(
+                key,
+                value
+                    .replace("__ROOT__", &root.display().to_string())
+                    .replace("__EMPTY_BIN__", &empty_bin.display().to_string()),
+            );
+        }
+        let child = command.spawn().context("spawn configured plasma-pilotd")?;
+        wait_for_socket(&socket)?;
+        Ok(Self {
+            child,
+            socket,
+            root,
+        })
+    }
+
     fn run_mcp(&self, requests: &[Value]) -> Result<Vec<Value>> {
         let mut child = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-mcp"))
             .arg("--stdio")
@@ -185,11 +235,187 @@ fn mcp_stdio_talks_to_real_daemon_and_reports_tool_errors() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn mcp_stdio_reports_configured_denial_kinds() -> Result<()> {
+    let focus_guard = DaemonFixture::start_with_config(
+        r#"
+[daemon]
+socket = "__SOCKET__"
+journal = "__JOURNAL__"
+panic_stop_file = "__PANIC_STOP__"
+
+[policy]
+default_control = "allow"
+
+[safety]
+require_focus_guard = true
+"#,
+    )?;
+    assert_mcp_error_kind(
+        &focus_guard,
+        "plasma.type_text",
+        json!({
+            "text": "blocked-before-input"
+        }),
+        "focus_guard",
+        "focus guard is required",
+    )?;
+
+    let human_pause = DaemonFixture::start_with_config(
+        r#"
+[daemon]
+socket = "__SOCKET__"
+journal = "__JOURNAL__"
+panic_stop_file = "__PANIC_STOP__"
+
+[policy]
+default_control = "allow"
+
+[safety]
+require_focus_guard = false
+pause_on_human_input = true
+human_input_activity_file = "__ROOT__/human-input-active"
+human_input_quiet_ms = 60000
+"#,
+    )?;
+    fs::write(human_pause.root.join("human-input-active"), "activity")
+        .context("write fresh human input activity signal")?;
+    assert_mcp_error_kind(
+        &human_pause,
+        "plasma.type_text",
+        json!({
+            "text": "blocked-before-input"
+        }),
+        "human_input_pause",
+        "human input activity signal is fresh",
+    )?;
+
+    let app_policy = DaemonFixture::start_with_config(
+        r#"
+[daemon]
+socket = "__SOCKET__"
+journal = "__JOURNAL__"
+panic_stop_file = "__PANIC_STOP__"
+
+[policy]
+default_control = "allow"
+
+[apps]
+allow = ["org.kde.kate"]
+
+[safety]
+require_focus_guard = false
+"#,
+    )?;
+    assert_mcp_error_kind(
+        &app_policy,
+        "plasma.type_text",
+        json!({
+            "text": "blocked-before-input"
+        }),
+        "app_denied",
+        "app policy could not read active window",
+    )?;
+
+    let portal_unavailable = DaemonFixture::start_with_config_and_env(
+        r#"
+[daemon]
+socket = "__SOCKET__"
+journal = "__JOURNAL__"
+panic_stop_file = "__PANIC_STOP__"
+
+[policy]
+default_control = "allow"
+
+[safety]
+require_focus_guard = false
+"#,
+        &[("PATH", "__EMPTY_BIN__")],
+    )?;
+    assert_mcp_error_kind(
+        &portal_unavailable,
+        "plasma.remote_desktop_session_probe",
+        json!({
+            "keyboard": true,
+            "pointer": true,
+            "touchscreen": false,
+            "timeout_ms": 1000
+        }),
+        "portal_unavailable",
+        "xdg-desktop-portal RemoteDesktop is not available",
+    )?;
+
+    let accessibility = DaemonFixture::start()?;
+    assert_mcp_error_kind(
+        &accessibility,
+        "plasma.a11y_text_attributes",
+        json!({
+            "node_id": "invalid-atspi-node",
+            "offset": 0
+        }),
+        "accessibility_unavailable",
+        "invalid AT-SPI node id",
+    )?;
+
+    Ok(())
+}
+
 fn assert_tool_present(tools: &[Value], expected_name: &str) {
     assert!(
         tools.iter().any(|tool| tool["name"] == expected_name),
         "tools/list missing {expected_name}: {tools:?}"
     );
+}
+
+fn assert_mcp_error_kind(
+    daemon: &DaemonFixture,
+    tool_name: &str,
+    arguments: Value,
+    expected_kind: &str,
+    expected_message: &str,
+) -> Result<()> {
+    let responses = daemon.run_mcp(&[
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments
+            }
+        }),
+    ])?;
+
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[1]["id"], 2);
+    let result = &responses[1]["result"];
+    assert_eq!(result["isError"], true);
+    assert_eq!(result["structuredContent"]["type"], "error");
+    assert_eq!(
+        result["structuredContent"]["data"]["kind"], expected_kind,
+        "unexpected MCP error kind for {tool_name}: {result:?}"
+    );
+    assert!(
+        result["structuredContent"]["data"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(expected_message),
+        "unexpected MCP error message for {tool_name}: {result:?}"
+    );
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(expected_message),
+        "unexpected MCP compact error text for {tool_name}: {result:?}"
+    );
+    Ok(())
 }
 
 fn parse_json_lines(stdout: &[u8]) -> Result<Vec<Value>> {
