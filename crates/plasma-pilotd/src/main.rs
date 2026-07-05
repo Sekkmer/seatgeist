@@ -48,6 +48,8 @@ const SEMANTIC_CHOICE_LIMIT: usize = 5;
 const DEFAULT_REQUIRE_FOCUS_GUARD: bool = true;
 const DEFAULT_HUMAN_INPUT_QUIET_MS: u64 = 1500;
 const DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE: u32 = 120;
+const DEFAULT_PREVIEW_MAX_EDGE: u32 = 1600;
+const DEFAULT_TILE_MAX_EDGE: u32 = 1600;
 const CONTROL_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
@@ -480,6 +482,8 @@ struct SafetyFileConfig {
     human_input_activity_file: Option<String>,
     human_input_quiet_ms: Option<u64>,
     control_rate_limit_per_minute: Option<u32>,
+    preview_max_edge: Option<u32>,
+    tile_max_edge: Option<u32>,
     redact_regions: Option<Vec<RedactRegionFileConfig>>,
 }
 
@@ -498,6 +502,8 @@ struct SafetySettings {
     human_input_activity_file: Option<PathBuf>,
     human_input_quiet_ms: u64,
     control_rate_limit_per_minute: Option<u32>,
+    preview_max_edge: u32,
+    tile_max_edge: u32,
     screenshot_redactions: Vec<RedactRegion>,
 }
 
@@ -902,7 +908,7 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
             }
         }
         DaemonRequest::Screenshot(request) => {
-            match capture_screenshot(request, &runtime.safety_settings.screenshot_redactions) {
+            match capture_screenshot(request, &runtime.safety_settings) {
                 Ok(info) => DaemonResponse::Screenshot(info),
                 Err(err) => DaemonResponse::Error {
                     message: format_error_chain(&err),
@@ -910,7 +916,7 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
             }
         }
         DaemonRequest::ScreenshotTile(request) => {
-            match capture_screenshot_tile(request, &runtime.safety_settings.screenshot_redactions) {
+            match capture_screenshot_tile(request, &runtime.safety_settings) {
                 Ok(info) => DaemonResponse::Screenshot(info),
                 Err(err) => DaemonResponse::Error {
                     message: format_error_chain(&err),
@@ -918,7 +924,7 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
             }
         }
         DaemonRequest::WaitForChange(request) => {
-            match wait_for_change(request, &runtime.safety_settings.screenshot_redactions) {
+            match wait_for_change(request, &runtime.safety_settings) {
                 Ok(result) => DaemonResponse::WaitForChange(Box::new(result)),
                 Err(err) => DaemonResponse::Error {
                     message: format_error_chain(&err),
@@ -1158,6 +1164,8 @@ fn safety_status(settings: &SafetySettings) -> Result<SafetyStatus> {
         human_input_signal_fresh,
         human_input_signal_age_ms,
         control_rate_limit_per_minute: settings.control_rate_limit_per_minute,
+        preview_max_edge: settings.preview_max_edge,
+        tile_max_edge: settings.tile_max_edge,
         screenshot_redaction_count: settings.screenshot_redactions.len(),
     })
 }
@@ -1389,8 +1397,26 @@ fn safety_settings(file_safety: Option<&SafetyFileConfig>) -> Result<SafetySetti
             .and_then(|safety| safety.control_rate_limit_per_minute)
             .map(|limit| if limit == 0 { None } else { Some(limit) })
             .unwrap_or(Some(DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE)),
+        preview_max_edge: configured_positive_u32(
+            file_safety.and_then(|safety| safety.preview_max_edge),
+            DEFAULT_PREVIEW_MAX_EDGE,
+            "safety.preview_max_edge",
+        )?,
+        tile_max_edge: configured_positive_u32(
+            file_safety.and_then(|safety| safety.tile_max_edge),
+            DEFAULT_TILE_MAX_EDGE,
+            "safety.tile_max_edge",
+        )?,
         screenshot_redactions,
     })
+}
+
+fn configured_positive_u32(value: Option<u32>, default: u32, name: &str) -> Result<u32> {
+    match value {
+        Some(0) => bail!("{name} must be greater than zero"),
+        Some(value) => Ok(value),
+        None => Ok(default),
+    }
 }
 
 fn default_human_input_activity_path() -> Result<PathBuf> {
@@ -2431,7 +2457,7 @@ fn command_stdout(command: &str, args: &[&str]) -> Result<String> {
 
 fn capture_screenshot(
     request: ScreenshotRequest,
-    redactions: &[RedactRegion],
+    safety_settings: &SafetySettings,
 ) -> Result<ScreenshotInfo> {
     let _guard = SCREENSHOT_CAPTURE_LOCK
         .get_or_init(|| Mutex::new(()))
@@ -2477,7 +2503,7 @@ fn capture_screenshot(
             &request.output,
             source_width,
             source_height,
-            request.max_edge.unwrap_or(1600),
+            request.max_edge.unwrap_or(safety_settings.preview_max_edge),
         )?
     };
 
@@ -2501,7 +2527,7 @@ fn capture_screenshot(
         coordinate_space: CoordinateSpace::PhysicalPixel,
         monitors,
     };
-    apply_screenshot_redactions(&info, redactions)?;
+    apply_screenshot_redactions(&info, &safety_settings.screenshot_redactions)?;
 
     if capture_output != info.path {
         fs::remove_file(&capture_output).ok();
@@ -2512,7 +2538,7 @@ fn capture_screenshot(
 
 fn capture_screenshot_tile(
     request: ScreenshotTileRequest,
-    redactions: &[RedactRegion],
+    safety_settings: &SafetySettings,
 ) -> Result<ScreenshotInfo> {
     let _guard = SCREENSHOT_CAPTURE_LOCK
         .get_or_init(|| Mutex::new(()))
@@ -2543,8 +2569,11 @@ fn capture_screenshot_tile(
             )
         })?;
     validate_tile_bounds(&request, source_width, source_height)?;
-    let (output_width, output_height) =
-        write_tile_preview(&capture_output, &request, request.max_edge.unwrap_or(1600))?;
+    let (output_width, output_height) = write_tile_preview(
+        &capture_output,
+        &request,
+        request.max_edge.unwrap_or(safety_settings.tile_max_edge),
+    )?;
 
     let monitors = list_monitors().unwrap_or_default();
 
@@ -2566,7 +2595,7 @@ fn capture_screenshot_tile(
         coordinate_space: CoordinateSpace::PhysicalPixel,
         monitors,
     };
-    apply_screenshot_redactions(&info, redactions)?;
+    apply_screenshot_redactions(&info, &safety_settings.screenshot_redactions)?;
 
     fs::remove_file(&capture_output).ok();
     Ok(info)
@@ -2574,7 +2603,7 @@ fn capture_screenshot_tile(
 
 fn wait_for_change(
     request: WaitForChangeRequest,
-    redactions: &[RedactRegion],
+    safety_settings: &SafetySettings,
 ) -> Result<WaitForChangeResult> {
     validate_wait_for_change_request(&request)?;
     let timeout = Duration::from_millis(request.timeout_ms);
@@ -2582,11 +2611,11 @@ fn wait_for_change(
     let started = Instant::now();
     let screenshot_request = || ScreenshotRequest {
         output: request.output.clone(),
-        max_edge: request.max_edge.or(Some(1600)),
+        max_edge: request.max_edge.or(Some(safety_settings.preview_max_edge)),
         full_resolution: false,
     };
 
-    let baseline_info = capture_screenshot(screenshot_request(), redactions)?;
+    let baseline_info = capture_screenshot(screenshot_request(), safety_settings)?;
     let baseline = read_image_sample(&baseline_info.path)?;
     let mut final_info = baseline_info;
     let mut captures = 1;
@@ -2596,7 +2625,7 @@ fn wait_for_change(
     while started.elapsed() < timeout {
         let remaining = timeout.saturating_sub(started.elapsed());
         thread::sleep(interval.min(remaining));
-        final_info = capture_screenshot(screenshot_request(), redactions)?;
+        final_info = capture_screenshot(screenshot_request(), safety_settings)?;
         captures += 1;
 
         let candidate = read_image_sample(&final_info.path)?;
@@ -2777,10 +2806,7 @@ fn observe_desktop(
     let active_window =
         active_window_with_monitors(active_window_state, &monitors).unwrap_or_default();
     let screenshot = match request.screenshot {
-        Some(request) => Some(capture_screenshot(
-            request,
-            &safety_settings.screenshot_redactions,
-        )?),
+        Some(request) => Some(capture_screenshot(request, safety_settings)?),
         None => None,
     };
 
@@ -4814,7 +4840,7 @@ fn summarize_response(response: &DaemonResponse) -> String {
         }
         DaemonResponse::PolicyStatus(_) => "policy status".to_string(),
         DaemonResponse::SafetyStatus(status) => format!(
-            "safety focus_guard={} human_pause={} human_fresh={} control_rate_limit_per_minute={} redactions={}",
+            "safety focus_guard={} human_pause={} human_fresh={} control_rate_limit_per_minute={} preview_max_edge={} tile_max_edge={} redactions={}",
             status.require_focus_guard,
             status.pause_on_human_input,
             status.human_input_signal_fresh,
@@ -4822,6 +4848,8 @@ fn summarize_response(response: &DaemonResponse) -> String {
                 .control_rate_limit_per_minute
                 .map(|limit| limit.to_string())
                 .unwrap_or_else(|| "disabled".to_string()),
+            status.preview_max_edge,
+            status.tile_max_edge,
             status.screenshot_redaction_count
         ),
         DaemonResponse::DesktopSessionStatus(status) => format!(
@@ -5527,6 +5555,8 @@ mod tests {
                 human_input_activity_file: None,
                 human_input_quiet_ms: None,
                 control_rate_limit_per_minute: None,
+                preview_max_edge: None,
+                tile_max_edge: None,
                 redact_regions: None,
             }))
             .expect("empty safety config resolves")
@@ -5539,6 +5569,8 @@ mod tests {
                 human_input_activity_file: None,
                 human_input_quiet_ms: None,
                 control_rate_limit_per_minute: None,
+                preview_max_edge: None,
+                tile_max_edge: None,
                 redact_regions: None,
             }))
             .expect("explicit focus guard opt-out resolves")
@@ -5554,6 +5586,8 @@ mod tests {
             human_input_activity_file: None,
             human_input_quiet_ms: None,
             control_rate_limit_per_minute: None,
+            preview_max_edge: None,
+            tile_max_edge: None,
             redact_regions: Some(vec![
                 RedactRegionFileConfig {
                     x: 10,
@@ -5593,6 +5627,8 @@ mod tests {
             human_input_activity_file: Some(path_text.clone()),
             human_input_quiet_ms: Some(2500),
             control_rate_limit_per_minute: None,
+            preview_max_edge: None,
+            tile_max_edge: None,
             redact_regions: None,
         }))
         .expect("human input pause settings resolve");
@@ -5620,6 +5656,8 @@ mod tests {
             human_input_activity_file: None,
             human_input_quiet_ms: None,
             control_rate_limit_per_minute: Some(0),
+            preview_max_edge: None,
+            tile_max_edge: None,
             redact_regions: None,
         }))
         .expect("disabled rate-limit setting resolves");
@@ -5631,10 +5669,67 @@ mod tests {
             human_input_activity_file: None,
             human_input_quiet_ms: None,
             control_rate_limit_per_minute: Some(3),
+            preview_max_edge: None,
+            tile_max_edge: None,
             redact_regions: None,
         }))
         .expect("custom rate-limit setting resolves");
         assert_eq!(custom.control_rate_limit_per_minute, Some(3));
+    }
+
+    #[test]
+    fn safety_settings_from_config_resolves_screenshot_max_edges() {
+        let defaults = safety_settings(None).expect("default safety settings resolve");
+        assert_eq!(defaults.preview_max_edge, DEFAULT_PREVIEW_MAX_EDGE);
+        assert_eq!(defaults.tile_max_edge, DEFAULT_TILE_MAX_EDGE);
+
+        let custom = safety_settings(Some(&SafetyFileConfig {
+            require_focus_guard: None,
+            pause_on_human_input: None,
+            human_input_activity_file: None,
+            human_input_quiet_ms: None,
+            control_rate_limit_per_minute: None,
+            preview_max_edge: Some(1200),
+            tile_max_edge: Some(2400),
+            redact_regions: None,
+        }))
+        .expect("custom screenshot max-edge settings resolve");
+        assert_eq!(custom.preview_max_edge, 1200);
+        assert_eq!(custom.tile_max_edge, 2400);
+
+        let preview_err = safety_settings(Some(&SafetyFileConfig {
+            require_focus_guard: None,
+            pause_on_human_input: None,
+            human_input_activity_file: None,
+            human_input_quiet_ms: None,
+            control_rate_limit_per_minute: None,
+            preview_max_edge: Some(0),
+            tile_max_edge: None,
+            redact_regions: None,
+        }))
+        .expect_err("zero preview max edge is rejected");
+        assert!(
+            preview_err
+                .to_string()
+                .contains("safety.preview_max_edge must be greater than zero")
+        );
+
+        let tile_err = safety_settings(Some(&SafetyFileConfig {
+            require_focus_guard: None,
+            pause_on_human_input: None,
+            human_input_activity_file: None,
+            human_input_quiet_ms: None,
+            control_rate_limit_per_minute: None,
+            preview_max_edge: None,
+            tile_max_edge: Some(0),
+            redact_regions: None,
+        }))
+        .expect_err("zero tile max edge is rejected");
+        assert!(
+            tile_err
+                .to_string()
+                .contains("safety.tile_max_edge must be greater than zero")
+        );
     }
 
     #[test]
@@ -5777,6 +5872,8 @@ mod tests {
             human_input_activity_file: None,
             human_input_quiet_ms: DEFAULT_HUMAN_INPUT_QUIET_MS,
             control_rate_limit_per_minute: Some(DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE),
+            preview_max_edge: DEFAULT_PREVIEW_MAX_EDGE,
+            tile_max_edge: DEFAULT_TILE_MAX_EDGE,
             screenshot_redactions: Vec::new(),
         };
 
@@ -5800,6 +5897,8 @@ mod tests {
             human_input_activity_file: None,
             human_input_quiet_ms: DEFAULT_HUMAN_INPUT_QUIET_MS,
             control_rate_limit_per_minute: Some(DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE),
+            preview_max_edge: DEFAULT_PREVIEW_MAX_EDGE,
+            tile_max_edge: DEFAULT_TILE_MAX_EDGE,
             screenshot_redactions: Vec::new(),
         };
 
@@ -5847,6 +5946,8 @@ mod tests {
             human_input_activity_file: None,
             human_input_quiet_ms: DEFAULT_HUMAN_INPUT_QUIET_MS,
             control_rate_limit_per_minute: Some(DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE),
+            preview_max_edge: DEFAULT_PREVIEW_MAX_EDGE,
+            tile_max_edge: DEFAULT_TILE_MAX_EDGE,
             screenshot_redactions: Vec::new(),
         };
 
@@ -5876,6 +5977,8 @@ mod tests {
             human_input_activity_file: Some(path.clone()),
             human_input_quiet_ms: 60_000,
             control_rate_limit_per_minute: Some(DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE),
+            preview_max_edge: DEFAULT_PREVIEW_MAX_EDGE,
+            tile_max_edge: DEFAULT_TILE_MAX_EDGE,
             screenshot_redactions: Vec::new(),
         };
 
@@ -5904,6 +6007,8 @@ mod tests {
             human_input_activity_file: Some(missing_path),
             human_input_quiet_ms: 60_000,
             control_rate_limit_per_minute: Some(DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE),
+            preview_max_edge: DEFAULT_PREVIEW_MAX_EDGE,
+            tile_max_edge: DEFAULT_TILE_MAX_EDGE,
             screenshot_redactions: Vec::new(),
         };
         enforce_human_input_pause(&settings, &DaemonRequest::ListWindows)
@@ -5925,6 +6030,8 @@ mod tests {
             human_input_activity_file: Some(path.clone()),
             human_input_quiet_ms: 0,
             control_rate_limit_per_minute: Some(DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE),
+            preview_max_edge: DEFAULT_PREVIEW_MAX_EDGE,
+            tile_max_edge: DEFAULT_TILE_MAX_EDGE,
             screenshot_redactions: Vec::new(),
         };
         std::thread::sleep(Duration::from_millis(2));
@@ -5993,6 +6100,8 @@ pause_on_human_input = true
 human_input_activity_file = "$XDG_RUNTIME_DIR/plasma-pilot/human-input-active"
 human_input_quiet_ms = 2500
 control_rate_limit_per_minute = 60
+preview_max_edge = 1200
+tile_max_edge = 2400
 
 [[safety.redact_regions]]
 x = 10
@@ -6040,6 +6149,8 @@ height = 40
         );
         assert_eq!(safety.human_input_quiet_ms, Some(2500));
         assert_eq!(safety.control_rate_limit_per_minute, Some(60));
+        assert_eq!(safety.preview_max_edge, Some(1200));
+        assert_eq!(safety.tile_max_edge, Some(2400));
         assert_eq!(
             safety
                 .redact_regions

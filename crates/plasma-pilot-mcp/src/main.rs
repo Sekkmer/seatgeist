@@ -282,15 +282,13 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
             height: required_u32(arguments, "height")?,
             max_edge: optional_u64(arguments, "max_edge")?
                 .map(u64_to_u32)
-                .transpose()?
-                .or(Some(1600)),
+                .transpose()?,
         })),
         "plasma.wait_for_change" => Ok(DaemonRequest::WaitForChange(WaitForChangeRequest {
             output: required_string(arguments, "output")?.into(),
             max_edge: optional_u64(arguments, "max_edge")?
                 .map(u64_to_u32)
-                .transpose()?
-                .or(Some(1600)),
+                .transpose()?,
             timeout_ms: optional_u64(arguments, "timeout_ms")?
                 .unwrap_or(DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS),
             interval_ms: optional_u64(arguments, "interval_ms")?
@@ -604,7 +602,7 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status.default_clipboard_write
         ),
         DaemonResponse::SafetyStatus(status) => format!(
-            "focus_guard={} human_pause={} human_signal_fresh={} human_quiet_ms={} control_rate_limit_per_minute={} redactions={}",
+            "focus_guard={} human_pause={} human_signal_fresh={} human_quiet_ms={} control_rate_limit_per_minute={} preview_max_edge={} tile_max_edge={} redactions={}",
             status.require_focus_guard,
             status.pause_on_human_input,
             status.human_input_signal_fresh,
@@ -613,6 +611,8 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
                 .control_rate_limit_per_minute
                 .map(|limit| limit.to_string())
                 .unwrap_or_else(|| "disabled".to_string()),
+            status.preview_max_edge,
+            status.tile_max_edge,
             status.screenshot_redaction_count
         ),
         DaemonResponse::DesktopSessionStatus(status) => format!(
@@ -860,7 +860,7 @@ fn tool_definitions() -> Vec<Value> {
                     ),
                     (
                         "max_edge",
-                        json!({"type": "integer", "minimum": 1, "description": "Screenshot preview max edge in pixels."}),
+                        json!({"type": "integer", "minimum": 1, "description": "Screenshot preview max edge in pixels. Defaults to the daemon safety config."}),
                     ),
                     (
                         "full_resolution",
@@ -882,7 +882,7 @@ fn tool_definitions() -> Vec<Value> {
                     ),
                     (
                         "max_edge",
-                        json!({"type": "integer", "minimum": 1, "description": "Preview max edge in pixels."}),
+                        json!({"type": "integer", "minimum": 1, "description": "Preview max edge in pixels. Defaults to the daemon safety config."}),
                     ),
                     (
                         "full_resolution",
@@ -908,7 +908,7 @@ fn tool_definitions() -> Vec<Value> {
                     ("height", json!({"type": "integer", "minimum": 1})),
                     (
                         "max_edge",
-                        json!({"type": "integer", "minimum": 1, "description": "Output max edge in pixels."}),
+                        json!({"type": "integer", "minimum": 1, "description": "Output max edge in pixels. Defaults to the daemon safety config."}),
                     ),
                 ],
                 vec!["output", "x", "y", "width", "height"],
@@ -926,7 +926,7 @@ fn tool_definitions() -> Vec<Value> {
                     ),
                     (
                         "max_edge",
-                        json!({"type": "integer", "minimum": 1, "description": "Screenshot preview max edge in pixels. Defaults to 1600."}),
+                        json!({"type": "integer", "minimum": 1, "description": "Screenshot preview max edge in pixels. Defaults to the daemon safety config."}),
                     ),
                     (
                         "timeout_ms",
@@ -1908,12 +1908,16 @@ mod tests {
                 human_input_signal_fresh: true,
                 human_input_signal_age_ms: Some(100),
                 control_rate_limit_per_minute: Some(120),
+                preview_max_edge: 1600,
+                tile_max_edge: 1600,
                 screenshot_redaction_count: 2,
             }),
         );
         assert!(text.contains("focus_guard=true"));
         assert!(text.contains("human_signal_fresh=true"));
         assert!(text.contains("control_rate_limit_per_minute=120"));
+        assert!(text.contains("preview_max_edge=1600"));
+        assert!(text.contains("tile_max_edge=1600"));
         assert!(text.contains("redactions=2"));
     }
 

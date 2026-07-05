@@ -184,6 +184,8 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
             human_input_signal_fresh: false,
             human_input_signal_age_ms: None,
             control_rate_limit_per_minute: Some(120),
+            preview_max_edge: 1600,
+            tile_max_edge: 1600,
             screenshot_redaction_count: 0,
         })
     );

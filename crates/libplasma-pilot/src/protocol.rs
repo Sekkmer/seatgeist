@@ -45,6 +45,8 @@ pub struct SafetyStatus {
     pub human_input_signal_fresh: bool,
     pub human_input_signal_age_ms: Option<u64>,
     pub control_rate_limit_per_minute: Option<u32>,
+    pub preview_max_edge: u32,
+    pub tile_max_edge: u32,
     pub screenshot_redaction_count: usize,
 }
 
@@ -1062,12 +1064,16 @@ mod tests {
             human_input_signal_fresh: false,
             human_input_signal_age_ms: Some(3000),
             control_rate_limit_per_minute: Some(120),
+            preview_max_edge: 1600,
+            tile_max_edge: 1600,
             screenshot_redaction_count: 2,
         });
         let encoded = serde_json::to_string(&response).expect("safety response serializes");
         assert!(encoded.contains(r#""type":"safety_status""#));
         assert!(encoded.contains(r#""require_focus_guard":true"#));
         assert!(encoded.contains(r#""control_rate_limit_per_minute":120"#));
+        assert!(encoded.contains(r#""preview_max_edge":1600"#));
+        assert!(encoded.contains(r#""tile_max_edge":1600"#));
         assert_eq!(response.response_type(), "safety_status");
 
         let status = DaemonRequest::PanicStopStatus;

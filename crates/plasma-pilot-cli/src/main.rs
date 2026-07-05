@@ -49,8 +49,8 @@ enum Command {
     Screenshot {
         #[arg(long)]
         output: String,
-        #[arg(long, default_value_t = 1600)]
-        max_edge: u32,
+        #[arg(long)]
+        max_edge: Option<u32>,
         #[arg(long)]
         full_resolution: bool,
     },
@@ -65,22 +65,22 @@ enum Command {
         width: u32,
         #[arg(long)]
         height: u32,
-        #[arg(long, default_value_t = 1600)]
-        max_edge: u32,
+        #[arg(long)]
+        max_edge: Option<u32>,
     },
     Observe {
         #[arg(long)]
         screenshot_output: Option<String>,
-        #[arg(long, default_value_t = 1600)]
-        max_edge: u32,
+        #[arg(long)]
+        max_edge: Option<u32>,
         #[arg(long)]
         full_resolution: bool,
     },
     WaitForChange {
         #[arg(long)]
         output: String,
-        #[arg(long, default_value_t = 1600)]
-        max_edge: u32,
+        #[arg(long)]
+        max_edge: Option<u32>,
         #[arg(long, default_value_t = DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS)]
         timeout_ms: u64,
         #[arg(long, default_value_t = DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS)]
@@ -595,11 +595,7 @@ fn main() -> Result<()> {
                 &socket,
                 DaemonRequest::Screenshot(ScreenshotRequest {
                     output: output.into(),
-                    max_edge: if full_resolution {
-                        None
-                    } else {
-                        Some(max_edge)
-                    },
+                    max_edge: if full_resolution { None } else { max_edge },
                     full_resolution,
                 }),
             )?;
@@ -620,7 +616,7 @@ fn main() -> Result<()> {
                     y,
                     width,
                     height,
-                    max_edge: Some(max_edge),
+                    max_edge,
                 }),
             )?;
         }
@@ -633,11 +629,7 @@ fn main() -> Result<()> {
             DaemonRequest::Observe(ObserveRequest {
                 screenshot: screenshot_output.map(|output| ScreenshotRequest {
                     output: output.into(),
-                    max_edge: if full_resolution {
-                        None
-                    } else {
-                        Some(max_edge)
-                    },
+                    max_edge: if full_resolution { None } else { max_edge },
                     full_resolution,
                 }),
             }),
@@ -652,7 +644,7 @@ fn main() -> Result<()> {
             &socket,
             DaemonRequest::WaitForChange(WaitForChangeRequest {
                 output: output.into(),
-                max_edge: Some(max_edge),
+                max_edge,
                 timeout_ms,
                 interval_ms,
                 threshold,
