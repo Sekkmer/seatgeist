@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "description": "Safe deny-by-default replay trace for verifying raw keyboard and pointer input fail closed before backend side effects.",
+  "steps": [
+    {
+      "label": "type-text-denied",
+      "request": {
+        "method": "type_text",
+        "text": "plasma-pilot-should-not-type"
+      },
+      "expect_response_type": "error",
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlKeyboard"
+    },
+    {
+      "label": "key-combo-denied",
+      "request": {
+        "method": "key_combo",
+        "combo": "Ctrl+L"
+      },
+      "expect_response_type": "error",
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlKeyboard"
+    },
+    {
+      "label": "move-pointer-denied",
+      "request": {
+        "method": "move_pointer",
+        "point": {
+          "x": 10.0,
+          "y": 10.0,
+          "space": "physical_pixel"
+        }
+      },
+      "expect_response_type": "error",
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlPointer"
+    },
+    {
+      "label": "click-pointer-denied",
+      "request": {
+        "method": "click_pointer",
+        "point": {
+          "x": 10.0,
+          "y": 10.0,
+          "space": "physical_pixel"
+        },
+        "button": "left",
+        "clicks": 1
+      },
+      "expect_response_type": "error",
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlPointer"
+    },
+    {
+      "label": "drag-pointer-denied",
+      "request": {
+        "method": "drag_pointer",
+        "from": {
+          "x": 10.0,
+          "y": 10.0,
+          "space": "physical_pixel"
+        },
+        "to": {
+          "x": 20.0,
+          "y": 20.0,
+          "space": "physical_pixel"
+        },
+        "button": "left",
+        "duration_ms": 50
+      },
+      "expect_response_type": "error",
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlPointer"
+    },
+    {
+      "label": "scroll-pointer-denied",
+      "request": {
+        "method": "scroll_pointer",
+        "vertical": -1,
+        "horizontal": 0
+      },
+      "expect_response_type": "error",
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlPointer"
+    }
+  ]
+}

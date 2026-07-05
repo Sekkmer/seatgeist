@@ -456,6 +456,63 @@ fn cli_replays_policy_denial_trace_against_real_daemon() -> Result<()> {
 }
 
 #[test]
+fn cli_replays_input_denial_trace_against_real_daemon() -> Result<()> {
+    let daemon = DaemonFixture::start()?;
+    let trace_path = workspace_root().join("examples/traces/input-denials-smoke.json");
+    let trace: ReplayTrace = serde_json::from_str(
+        &fs::read_to_string(&trace_path).context("read checked-in input denial trace fixture")?,
+    )
+    .context("parse checked-in input denial trace fixture")?;
+    assert_eq!(trace.version, 1);
+    assert_eq!(trace.steps.len(), 6);
+    assert!(
+        trace
+            .steps
+            .iter()
+            .all(|step| step.expect_response_type.as_deref() == Some("error"))
+    );
+
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let report = daemon.cli_value(&["trace", "replay", "--file", &trace_arg])?;
+    assert_eq!(report["type"], "trace_replay");
+    assert_eq!(report["trace_version"], 1);
+    let steps = report["steps"]
+        .as_array()
+        .context("trace report steps are an array")?;
+    assert_eq!(steps.len(), trace.steps.len());
+    assert!(
+        steps
+            .iter()
+            .all(|step| step["response_type"] == "error" && step["ok"] == false)
+    );
+    assert_eq!(steps[0]["method"], "type_text");
+    assert_eq!(steps[1]["method"], "key_combo");
+    assert_eq!(steps[2]["method"], "move_pointer");
+    assert_eq!(steps[3]["method"], "click_pointer");
+    assert_eq!(steps[4]["method"], "drag_pointer");
+    assert_eq!(steps[5]["method"], "scroll_pointer");
+
+    let journal = daemon.cli_json(&["journal", "tail", "--limit", "10", "--ok", "false"])?;
+    let DaemonResponse::Journal(entries) = journal else {
+        bail!("expected journal response, got {journal:?}");
+    };
+    assert_methods(
+        &entries,
+        &[
+            "type_text",
+            "key_combo",
+            "move_pointer",
+            "click_pointer",
+            "drag_pointer",
+            "scroll_pointer",
+        ],
+    );
+    assert!(entries.iter().all(|entry| !entry.ok));
+    assert!(entries.iter().all(|entry| entry.summary.contains("policy")));
+    Ok(())
+}
+
+#[test]
 fn cli_replays_panic_stop_trace_against_real_daemon() -> Result<()> {
     let daemon = DaemonFixture::start()?;
     let trace_path = workspace_root().join("examples/traces/panic-stop-smoke.json");
@@ -529,7 +586,7 @@ fn cli_replays_trace_directory_against_real_daemon() -> Result<()> {
         serde_json::Value::from(u64::try_from(traces.len()).expect("trace count fits u64"))
     );
     assert!(
-        report["step_count"].as_u64().unwrap_or_default() >= 13,
+        report["step_count"].as_u64().unwrap_or_default() >= 19,
         "trace replay directory report did not include aggregate steps: {report}"
     );
     assert!(
@@ -555,6 +612,22 @@ fn cli_replays_trace_directory_against_real_daemon() -> Result<()> {
                 })
         }),
         "policy denial replay trace did not report fail-closed steps: {traces:?}"
+    );
+    assert!(
+        traces.iter().any(|trace| {
+            trace["file"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("input-denials-smoke.json"))
+                && trace["steps"].as_array().is_some_and(|steps| {
+                    steps.len() == 6
+                        && steps
+                            .iter()
+                            .all(|step| step["response_type"] == "error" && step["ok"] == false)
+                        && steps.iter().any(|step| step["method"] == "type_text")
+                        && steps.iter().any(|step| step["method"] == "click_pointer")
+                })
+        }),
+        "input denial replay trace did not report keyboard/pointer denials: {traces:?}"
     );
     assert!(
         traces.iter().any(|trace| {
@@ -755,6 +828,38 @@ fn cli_validates_policy_denial_trace_expectations() -> Result<()> {
     assert_eq!(
         report["steps"][2]["expect_error_contains"],
         "policy prompt required for ControlSemantic"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_validates_input_denial_trace_expectations() -> Result<()> {
+    let trace_path = workspace_root().join("examples/traces/input-denials-smoke.json");
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+        .args(["trace", "validate", "--file", &trace_arg])
+        .output()
+        .context("run plasma-pilot-cli trace validate")?;
+    require_success(&["trace", "validate"], &output)?;
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("parse trace validation report")?;
+    assert_eq!(report["type"], "trace_validation");
+    assert_eq!(report["step_count"], 6);
+    assert_eq!(report["steps"][0]["method"], "type_text");
+    assert_eq!(
+        report["steps"][0]["expect_error_contains"],
+        "policy prompt required for ControlKeyboard"
+    );
+    assert_eq!(report["steps"][2]["method"], "move_pointer");
+    assert_eq!(
+        report["steps"][2]["expect_error_contains"],
+        "policy prompt required for ControlPointer"
+    );
+    assert_eq!(report["steps"][5]["method"], "scroll_pointer");
+    assert_eq!(
+        report["steps"][5]["expect_error_contains"],
+        "policy prompt required for ControlPointer"
     );
     Ok(())
 }
