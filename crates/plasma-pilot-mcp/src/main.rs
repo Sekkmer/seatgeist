@@ -757,6 +757,23 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status.eis_fd_closed,
             status.transient_session_closed
         ),
+        DaemonResponse::RemoteDesktopEisSessionStatus(status) => format!(
+            "remote desktop EIS session active={} runtime_connected={} bound={} resumed_devices={} selected={} clipboard={}",
+            status.active,
+            status.runtime_connected,
+            if status.bound_capabilities.is_empty() {
+                "none".to_string()
+            } else {
+                status.bound_capabilities.join("+")
+            },
+            status.resumed_device_count,
+            if status.selected_devices.is_empty() {
+                "none".to_string()
+            } else {
+                status.selected_devices.join("+")
+            },
+            status.clipboard_enabled,
+        ),
         DaemonResponse::CaptureBackendStatus(status) => format!(
             "capture backends preferred={} implemented={} portal_screenshot={} portal_screencast={} kwin_metadata={} spectacle={}",
             status

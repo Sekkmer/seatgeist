@@ -669,6 +669,13 @@ pub struct LibeiSenderContext {
     retained_devices: Vec<RetainedLibeiDevice>,
 }
 
+// SAFETY: the wrapper owns the libei sender context and retained device refs,
+// and all public operations require `&mut self` for dispatch or event
+// emission. Moving the wrapper between daemon worker threads is acceptable as
+// long as callers continue to serialize access, which the daemon session store
+// does with a mutex. This does not make concurrent libei access safe.
+unsafe impl Send for LibeiSenderContext {}
+
 impl LibeiSenderContext {
     pub fn from_owned_fd(
         fd: OwnedFd,

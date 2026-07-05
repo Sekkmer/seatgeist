@@ -187,6 +187,32 @@ pub struct RemoteDesktopEisProbe {
     pub setup_hint: String,
 }
 
+pub type RemoteDesktopEisStartRequest = RemoteDesktopSessionProbeRequest;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteDesktopEisSessionStatus {
+    pub active: bool,
+    #[serde(default)]
+    pub runtime_connected: bool,
+    #[serde(default)]
+    pub bound_capabilities: Vec<String>,
+    #[serde(default)]
+    pub resumed_device_count: usize,
+    pub selected_devices: Vec<String>,
+    pub clipboard_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_handle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_request_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select_request_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_request_path: Option<String>,
+    pub setup_hint: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureBackendStatus {
     pub screenshot_portal: ScreenshotPortalStatus,
@@ -757,6 +783,9 @@ pub enum DaemonRequest {
     InputBackendStatus,
     RemoteDesktopSessionProbe(RemoteDesktopSessionProbeRequest),
     RemoteDesktopEisProbe(RemoteDesktopEisProbeRequest),
+    RemoteDesktopEisStart(RemoteDesktopEisStartRequest),
+    RemoteDesktopEisSessionStatus,
+    RemoteDesktopEisStop,
     CaptureBackendStatus,
     PointerCalibration,
     ListMonitors,
@@ -814,6 +843,9 @@ impl DaemonRequest {
             Self::InputBackendStatus => "input_backend_status",
             Self::RemoteDesktopSessionProbe(_) => "remote_desktop_session_probe",
             Self::RemoteDesktopEisProbe(_) => "remote_desktop_eis_probe",
+            Self::RemoteDesktopEisStart(_) => "remote_desktop_eis_start",
+            Self::RemoteDesktopEisSessionStatus => "remote_desktop_eis_session_status",
+            Self::RemoteDesktopEisStop => "remote_desktop_eis_stop",
             Self::CaptureBackendStatus => "capture_backend_status",
             Self::PointerCalibration => "pointer_calibration",
             Self::ListMonitors => "list_monitors",
@@ -872,6 +904,7 @@ pub enum DaemonResponse {
     InputBackendStatus(InputBackendStatus),
     RemoteDesktopSessionProbe(RemoteDesktopSessionProbe),
     RemoteDesktopEisProbe(RemoteDesktopEisProbe),
+    RemoteDesktopEisSessionStatus(RemoteDesktopEisSessionStatus),
     CaptureBackendStatus(CaptureBackendStatus),
     PointerCalibration(PointerCalibrationStatus),
     Monitors(Vec<MonitorInfo>),
@@ -903,6 +936,7 @@ impl DaemonResponse {
             Self::InputBackendStatus(_) => "input_backend_status",
             Self::RemoteDesktopSessionProbe(_) => "remote_desktop_session_probe",
             Self::RemoteDesktopEisProbe(_) => "remote_desktop_eis_probe",
+            Self::RemoteDesktopEisSessionStatus(_) => "remote_desktop_eis_session_status",
             Self::CaptureBackendStatus(_) => "capture_backend_status",
             Self::PointerCalibration(_) => "pointer_calibration",
             Self::Monitors(_) => "monitors",
@@ -1467,6 +1501,61 @@ mod tests {
         assert!(encoded.contains(r#""eis_resumed_device_count":1"#));
         assert!(encoded.contains(r#""eis_fd_closed":true"#));
         assert_eq!(response.response_type(), "remote_desktop_eis_probe");
+    }
+
+    #[test]
+    fn serializes_remote_desktop_eis_session_lifecycle() {
+        let start = DaemonRequest::RemoteDesktopEisStart(RemoteDesktopEisStartRequest {
+            keyboard: true,
+            pointer: true,
+            touchscreen: false,
+            restore_token: Some("restore".to_string()),
+            persist_mode: Some(RemoteDesktopPersistMode::ApplicationLifetime),
+            parent_window: None,
+            timeout_ms: 30_000,
+            guard: None,
+        });
+        let encoded =
+            serde_json::to_string(&start).expect("remote desktop EIS start request serializes");
+        assert!(encoded.contains(r#""method":"remote_desktop_eis_start""#));
+        assert!(encoded.contains(r#""persist_mode":"application_lifetime""#));
+        assert_eq!(start.method_name(), "remote_desktop_eis_start");
+
+        assert_eq!(
+            serde_json::to_string(&DaemonRequest::RemoteDesktopEisSessionStatus)
+                .expect("remote desktop EIS status request serializes"),
+            r#"{"method":"remote_desktop_eis_session_status"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&DaemonRequest::RemoteDesktopEisStop)
+                .expect("remote desktop EIS stop request serializes"),
+            r#"{"method":"remote_desktop_eis_stop"}"#
+        );
+
+        let response =
+            DaemonResponse::RemoteDesktopEisSessionStatus(RemoteDesktopEisSessionStatus {
+                active: true,
+                runtime_connected: true,
+                bound_capabilities: vec!["text".to_string()],
+                resumed_device_count: 1,
+                selected_devices: vec!["keyboard".to_string()],
+                clipboard_enabled: false,
+                restore_token: Some("restore-next".to_string()),
+                session_handle: Some("/org/freedesktop/portal/desktop/session/1_42/p".to_string()),
+                create_request_path: None,
+                select_request_path: None,
+                start_request_path: None,
+                setup_hint: "stored session active".to_string(),
+            });
+        let encoded =
+            serde_json::to_string(&response).expect("remote desktop EIS status serializes");
+        assert!(encoded.contains(r#""type":"remote_desktop_eis_session_status""#));
+        assert!(encoded.contains(r#""active":true"#));
+        assert!(encoded.contains(r#""bound_capabilities":["text"]"#));
+        assert_eq!(
+            response.response_type(),
+            "remote_desktop_eis_session_status"
+        );
     }
 
     #[test]

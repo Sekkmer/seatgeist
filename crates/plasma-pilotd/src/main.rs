@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     env,
-    fmt::Display,
+    fmt::{self, Display},
     fs,
     fs::OpenOptions,
     io::Write,
@@ -29,14 +29,15 @@ use libplasma_pilot::{
     JournalWindowContext, KeyComboRequest, KwinBridgeStatus, KwinMetadataStatus, LibeiStatus,
     MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton,
     PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
-    PointerPhysicalBounds, PolicyStatus, RemoteDesktopEisProbe, RemoteDesktopPersistMode,
-    RemoteDesktopPortalStatus, RemoteDesktopSessionProbe, RemoteDesktopSessionProbeRequest,
-    SafetyClass, SafetyStatus, ScreenshotInfo, ScreenshotPortalStatus, ScreenshotRequest,
-    ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest, SelectItemRequest,
-    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, SpectacleStatus,
-    ToggleCheckRequest, ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest,
-    WaitForChangeResult, WindowGeometry, WindowInfo, current_egid, current_euid,
-    default_journal_path, default_panic_stop_path, default_socket_path,
+    PointerPhysicalBounds, PolicyStatus, RemoteDesktopEisProbe, RemoteDesktopEisSessionStatus,
+    RemoteDesktopPersistMode, RemoteDesktopPortalStatus, RemoteDesktopSessionProbe,
+    RemoteDesktopSessionProbeRequest, SafetyClass, SafetyStatus, ScreenshotInfo,
+    ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
+    ScrollPointerRequest, SelectItemRequest, SelectMenuRequest, SetPanicStopRequest,
+    SetTextFieldRequest, SetValueRequest, SpectacleStatus, ToggleCheckRequest, ToolApprovalLevel,
+    TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult, WindowGeometry,
+    WindowInfo, current_egid, current_euid, default_journal_path, default_panic_stop_path,
+    default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -679,6 +680,7 @@ async fn run(settings: RunSettings) -> Result<()> {
     let approval_store = ApprovalStore::new(approval_file_path);
     let policy = PolicyEngine::new(policy_config);
     let active_window_state = ActiveWindowState::default();
+    let portal_eis_session_store = PortalEisSessionStore::default();
     let _kwin_bridge_connection = match start_kwin_bridge(active_window_state.clone()).await {
         Ok(connection) => Some(connection),
         Err(err) => {
@@ -700,6 +702,7 @@ async fn run(settings: RunSettings) -> Result<()> {
         app_policy,
         safety_settings,
         input_backend_preference,
+        portal_eis_session_store,
     };
 
     prepare_socket_path(&socket)?;
@@ -758,6 +761,7 @@ struct DaemonRuntime {
     app_policy: AppPolicy,
     safety_settings: SafetySettings,
     input_backend_preference: InputBackendPreference,
+    portal_eis_session_store: PortalEisSessionStore,
 }
 
 async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()> {
@@ -945,6 +949,30 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
         DaemonRequest::RemoteDesktopEisProbe(request) => {
             match remote_desktop_eis_probe(request).await {
                 Ok(status) => DaemonResponse::RemoteDesktopEisProbe(status),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
+        DaemonRequest::RemoteDesktopEisStart(request) => {
+            match remote_desktop_eis_start(request, &runtime.portal_eis_session_store).await {
+                Ok(status) => DaemonResponse::RemoteDesktopEisSessionStatus(status),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
+        DaemonRequest::RemoteDesktopEisSessionStatus => {
+            match runtime.portal_eis_session_store.status() {
+                Ok(status) => DaemonResponse::RemoteDesktopEisSessionStatus(status),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
+        DaemonRequest::RemoteDesktopEisStop => {
+            match remote_desktop_eis_stop(&runtime.portal_eis_session_store) {
+                Ok(status) => DaemonResponse::RemoteDesktopEisSessionStatus(status),
                 Err(err) => DaemonResponse::Error {
                     message: format_error_chain(&err),
                 },
@@ -1833,6 +1861,62 @@ async fn remote_desktop_eis_probe(
     })
 }
 
+async fn remote_desktop_eis_start(
+    request: RemoteDesktopSessionProbeRequest,
+    store: &PortalEisSessionStore,
+) -> Result<RemoteDesktopEisSessionStatus> {
+    let portal_status = remote_desktop_portal_status();
+    if !portal_status.remote_desktop_interface_available {
+        bail!(
+            "xdg-desktop-portal RemoteDesktop is not available: {}",
+            portal_status.setup_hint
+        );
+    }
+
+    let (_requested_devices, options, timeout) = remote_desktop_probe_setup(request)?;
+    let result = plasma_pilot_portal::request_remote_desktop_eis_zbus(
+        &options,
+        &plasma_pilot_portal::PortalConnectToEisOptions::new(),
+        timeout,
+    )
+    .await
+    .context("request stored portal RemoteDesktop EIS connection")?;
+    let Some(session) = result else {
+        return Ok(remote_desktop_eis_session_status(
+            None,
+            None,
+            "portal RemoteDesktop interaction was cancelled or ended before a stored EIS session was created".to_string(),
+        ));
+    };
+
+    let mut session = DaemonPortalEisSession::from_portal_session(session)
+        .context("initialize stored daemon EIS runtime")?;
+    let snapshots = session.dispatch_pending();
+    let status = remote_desktop_eis_session_status(
+        Some(session.metadata()),
+        Some(session.state()),
+        format!(
+            "stored portal RemoteDesktop EIS session initialized and polled {} pending events; no input was sent",
+            snapshots.len()
+        ),
+    );
+    store.replace(session)?;
+    Ok(status)
+}
+
+fn remote_desktop_eis_stop(store: &PortalEisSessionStore) -> Result<RemoteDesktopEisSessionStatus> {
+    let was_active = store.clear()?;
+    Ok(remote_desktop_eis_session_status(
+        None,
+        None,
+        if was_active {
+            "stored portal RemoteDesktop EIS session was dropped; no input was sent".to_string()
+        } else {
+            "no stored portal RemoteDesktop EIS session was active".to_string()
+        },
+    ))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DaemonPortalEisSessionMetadata {
     selected_devices: Vec<String>,
@@ -1847,6 +1931,72 @@ struct DaemonPortalEisSessionMetadata {
 struct DaemonPortalEisSession<S = plasma_pilot_eis::LibeiSenderContext> {
     metadata: DaemonPortalEisSessionMetadata,
     runtime: plasma_pilot_eis::EisSessionRuntime<S>,
+}
+
+struct PortalEisSessionStore<S = plasma_pilot_eis::LibeiSenderContext> {
+    inner: Arc<Mutex<Option<DaemonPortalEisSession<S>>>>,
+}
+
+impl<S> Clone for PortalEisSessionStore<S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<S> fmt::Debug for PortalEisSessionStore<S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PortalEisSessionStore")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<S> Default for PortalEisSessionStore<S> {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+impl<S: plasma_pilot_eis::EisEventSource> PortalEisSessionStore<S> {
+    fn replace(&self, session: DaemonPortalEisSession<S>) -> Result<()> {
+        let mut stored = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("portal EIS session store lock is poisoned"))?;
+        *stored = Some(session);
+        Ok(())
+    }
+
+    fn clear(&self) -> Result<bool> {
+        let mut stored = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("portal EIS session store lock is poisoned"))?;
+        Ok(stored.take().is_some())
+    }
+
+    fn status(&self) -> Result<RemoteDesktopEisSessionStatus> {
+        let stored = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("portal EIS session store lock is poisoned"))?;
+        Ok(match stored.as_ref() {
+            Some(session) => remote_desktop_eis_session_status(
+                Some(session.metadata()),
+                Some(session.state()),
+                "stored portal RemoteDesktop EIS session is active; raw input routing still requires the stored-session backend selection gate".to_string(),
+            ),
+            None => remote_desktop_eis_session_status(
+                None,
+                None,
+                "no stored portal RemoteDesktop EIS session; start one before selecting portal/libei execution".to_string(),
+            ),
+        })
+    }
 }
 
 impl DaemonPortalEisSession<plasma_pilot_eis::LibeiSenderContext> {
@@ -1876,6 +2026,39 @@ impl DaemonPortalEisSessionMetadata {
             select_request_path: session_start.select_request_path.clone(),
             start_request_path: session_start.start_request_path.clone(),
         }
+    }
+}
+
+fn remote_desktop_eis_session_status(
+    metadata: Option<&DaemonPortalEisSessionMetadata>,
+    state: Option<&plasma_pilot_eis::EisRuntimeState>,
+    setup_hint: String,
+) -> RemoteDesktopEisSessionStatus {
+    RemoteDesktopEisSessionStatus {
+        active: metadata.is_some(),
+        runtime_connected: state.is_some_and(plasma_pilot_eis::EisRuntimeState::connected),
+        bound_capabilities: state
+            .map(|state| eis_capability_names(state.bound_capabilities()))
+            .unwrap_or_default(),
+        resumed_device_count: state
+            .map(|state| {
+                state
+                    .devices()
+                    .iter()
+                    .filter(|device| device.resumed)
+                    .count()
+            })
+            .unwrap_or_default(),
+        selected_devices: metadata
+            .map(|metadata| metadata.selected_devices.clone())
+            .unwrap_or_default(),
+        clipboard_enabled: metadata.is_some_and(|metadata| metadata.clipboard_enabled),
+        restore_token: metadata.and_then(|metadata| metadata.restore_token.clone()),
+        session_handle: metadata.map(|metadata| metadata.session_handle.clone()),
+        create_request_path: metadata.map(|metadata| metadata.create_request_path.clone()),
+        select_request_path: metadata.map(|metadata| metadata.select_request_path.clone()),
+        start_request_path: metadata.map(|metadata| metadata.start_request_path.clone()),
+        setup_hint,
     }
 }
 
@@ -1912,8 +2095,8 @@ impl<S: plasma_pilot_eis::EisEventSource> DaemonPortalEisSession<S> {
     }
 }
 
-// Production request routing constructs this after long-lived portal EIS
-// session storage lands; tests exercise the ready-session execution path now.
+// Production request routing constructs this after stored-session input routing
+// lands; tests exercise the ready-session execution path now.
 #[allow(dead_code)]
 impl<S> DaemonPortalEisSession<S>
 where
@@ -2400,16 +2583,16 @@ fn input_backend_setup_hint(
 
     match (preferred, implemented) {
         (Some("portal_remote_desktop"), Some("uinput")) => {
-            "portal RemoteDesktop is visible, but implemented input control currently uses uinput until portal session handling lands".to_string()
+            "portal RemoteDesktop is visible, but implemented input control currently uses uinput until stored-session input routing lands".to_string()
         }
         (Some("portal_remote_desktop"), _) => {
-            "portal RemoteDesktop is visible, but PlasmaPilot does not yet execute RemoteDesktop input sessions; configure uinput for the current control backend".to_string()
+            "portal RemoteDesktop is visible, but PlasmaPilot does not yet route raw input into stored RemoteDesktop EIS sessions; configure uinput for the current control backend".to_string()
         }
         (Some("libei"), Some("uinput")) => {
-            "libei client support is visible, but implemented input control currently uses uinput until an EIS session backend lands".to_string()
+            "libei client support is visible, but implemented input control currently uses uinput until stored-session input routing lands".to_string()
         }
         (Some("libei"), _) => {
-            "libei client support is visible, but PlasmaPilot does not yet execute EIS input sessions; configure uinput for the current control backend".to_string()
+            "libei client support is visible, but PlasmaPilot does not yet route raw input into stored EIS sessions; configure uinput for the current control backend".to_string()
         }
         (Some("uinput"), Some("uinput")) => {
             "only uinput is currently available; keep it behind policy, panic-stop, active-window guards, and journal checks".to_string()
@@ -2541,7 +2724,7 @@ struct EisPlanningInputExecutionBackend {
 impl EisPlanningInputExecutionBackend {
     fn fail_closed_with_plan(&self, plan: plasma_pilot_eis::EisActionPlan) -> Result<()> {
         bail!(
-            "configured input backend {} built an EIS action plan requiring {:?} across {} events, but no live consented EIS session/device executor is wired yet; use remote_desktop_eis_probe to validate handoff, or configure input = \"auto\" or \"uinput\" for current control",
+            "configured input backend {} built an EIS action plan requiring {:?} across {} events, but stored-session input routing is not enabled yet; use remote_desktop_eis_start to create a stored session for diagnostics, or configure input = \"auto\" or \"uinput\" for current control",
             self.backend_name,
             plan.required_capabilities,
             plan.events.len()
@@ -2615,8 +2798,8 @@ impl InputExecutionBackend for EisPlanningInputExecutionBackend {
     }
 }
 
-// Production request routing constructs this after long-lived portal EIS
-// session storage lands; tests exercise the ready-session execution path now.
+// Production request routing constructs this after stored-session input routing
+// lands; tests exercise the ready-session execution path now.
 #[allow(dead_code)]
 struct EisSessionInputExecutionBackend<'a, S> {
     backend_name: &'static str,
@@ -3045,6 +3228,7 @@ fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWin
         DaemonRequest::KeyCombo(request) => request.guard.as_ref(),
         DaemonRequest::RemoteDesktopSessionProbe(request) => request.guard.as_ref(),
         DaemonRequest::RemoteDesktopEisProbe(request) => request.guard.as_ref(),
+        DaemonRequest::RemoteDesktopEisStart(request) => request.guard.as_ref(),
         DaemonRequest::MovePointer(request) => request.guard.as_ref(),
         DaemonRequest::ClickPointer(request) => request.guard.as_ref(),
         DaemonRequest::DragPointer(request) => request.guard.as_ref(),
@@ -3073,6 +3257,8 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::SetPanicStop(_)
         | DaemonRequest::UinputStatus
         | DaemonRequest::InputBackendStatus
+        | DaemonRequest::RemoteDesktopEisSessionStatus
+        | DaemonRequest::RemoteDesktopEisStop
         | DaemonRequest::CaptureBackendStatus
         | DaemonRequest::PointerCalibration
         | DaemonRequest::JournalTail(_) => SafetyClass::Policy,
@@ -3106,7 +3292,8 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         DaemonRequest::ClipboardGet(_) => SafetyClass::ClipboardRead,
         DaemonRequest::ClipboardSet(_) => SafetyClass::ClipboardWrite,
         DaemonRequest::RemoteDesktopSessionProbe(request)
-        | DaemonRequest::RemoteDesktopEisProbe(request) => {
+        | DaemonRequest::RemoteDesktopEisProbe(request)
+        | DaemonRequest::RemoteDesktopEisStart(request) => {
             if request.pointer || request.touchscreen {
                 SafetyClass::ControlPointer
             } else {
@@ -5966,6 +6153,23 @@ fn summarize_response(response: &DaemonResponse) -> String {
             status.eis_fd_closed,
             status.transient_session_closed
         ),
+        DaemonResponse::RemoteDesktopEisSessionStatus(status) => format!(
+            "remote desktop EIS session active={} runtime_connected={} bound={} resumed_devices={} selected={} clipboard={}",
+            status.active,
+            status.runtime_connected,
+            if status.bound_capabilities.is_empty() {
+                "none".to_string()
+            } else {
+                status.bound_capabilities.join("+")
+            },
+            status.resumed_device_count,
+            if status.selected_devices.is_empty() {
+                "none".to_string()
+            } else {
+                status.selected_devices.join("+")
+            },
+            status.clipboard_enabled,
+        ),
         DaemonResponse::CaptureBackendStatus(status) => format!(
             "capture backends preferred={} implemented={} portal_screenshot={} portal_screencast={} kwin_metadata={} spectacle={}",
             status
@@ -7742,6 +7946,34 @@ height = 40
             safety_class_for_request(&keyboard_only_eis),
             SafetyClass::ControlKeyboard
         );
+
+        let start = DaemonRequest::RemoteDesktopEisStart(RemoteDesktopSessionProbeRequest {
+            keyboard: true,
+            pointer: true,
+            touchscreen: false,
+            restore_token: None,
+            persist_mode: None,
+            parent_window: None,
+            timeout_ms: 30_000,
+            guard: None,
+        });
+        assert_eq!(
+            safety_class_for_request(&start),
+            SafetyClass::ControlPointer
+        );
+        assert!(enforce_policy(&policy, &start).is_err());
+        assert_eq!(
+            safety_class_for_request(&DaemonRequest::RemoteDesktopEisSessionStatus),
+            SafetyClass::Policy
+        );
+        enforce_policy(&policy, &DaemonRequest::RemoteDesktopEisSessionStatus)
+            .expect("EIS session status is a policy diagnostic");
+        assert_eq!(
+            safety_class_for_request(&DaemonRequest::RemoteDesktopEisStop),
+            SafetyClass::Policy
+        );
+        enforce_policy(&policy, &DaemonRequest::RemoteDesktopEisStop)
+            .expect("EIS session stop is a policy action");
     }
 
     #[test]
@@ -7870,6 +8102,65 @@ height = 40
                 matched_region: None,
             }
         );
+    }
+
+    #[test]
+    fn portal_eis_session_store_reports_inactive_status() {
+        let store = PortalEisSessionStore::<MockEisSource>::default();
+
+        let status = store.status().expect("inactive status");
+
+        assert!(!status.active);
+        assert!(!status.runtime_connected);
+        assert!(status.bound_capabilities.is_empty());
+        assert!(status.selected_devices.is_empty());
+        assert!(status.setup_hint.contains("no stored"));
+    }
+
+    #[test]
+    fn portal_eis_session_store_replaces_and_clears_session() {
+        let mut source = MockEisSource::default();
+        source.push_pending(vec![
+            plasma_pilot_eis::LibeiEventSnapshot::Connect,
+            plasma_pilot_eis::LibeiEventSnapshot::SeatAdded {
+                capabilities: vec![plasma_pilot_eis::EisCapability::Text],
+                bound_capabilities: vec![plasma_pilot_eis::EisCapability::Text],
+            },
+            plasma_pilot_eis::LibeiEventSnapshot::DeviceResumed(plasma_pilot_eis::EisDeviceInfo {
+                id: "text-device".to_string(),
+                name: Some("Text Device".to_string()),
+                kind: plasma_pilot_eis::EisDeviceKind::Virtual,
+                resumed: true,
+                capabilities: vec![plasma_pilot_eis::EisCapability::Text],
+                regions: Vec::new(),
+            }),
+        ]);
+        let runtime = plasma_pilot_eis::EisSessionRuntime::new(source);
+        let mut session = DaemonPortalEisSession::from_runtime(
+            portal_session_start_fixture(),
+            "/org/freedesktop/portal/desktop/session/1/session".to_string(),
+            runtime,
+        );
+        session.dispatch_pending();
+        let store = PortalEisSessionStore::default();
+
+        store.replace(session).expect("store session");
+        let status = store.status().expect("active status");
+
+        assert!(status.active);
+        assert!(status.runtime_connected);
+        assert_eq!(status.bound_capabilities, vec!["text".to_string()]);
+        assert_eq!(status.resumed_device_count, 1);
+        assert_eq!(
+            status.selected_devices,
+            vec!["keyboard".to_string(), "pointer".to_string()]
+        );
+        assert!(status.session_handle.is_some());
+
+        assert!(store.clear().expect("clear active session"));
+        let status = store.status().expect("inactive status after clear");
+        assert!(!status.active);
+        assert!(!store.clear().expect("clear already inactive store"));
     }
 
     #[test]
@@ -8110,7 +8401,7 @@ height = 40
             &libei,
             false,
         );
-        assert!(visible_portal_hint.contains("does not yet execute RemoteDesktop"));
+        assert!(visible_portal_hint.contains("stored RemoteDesktop EIS sessions"));
 
         let configured_portal_hint = input_backend_setup_hint(
             InputBackendPreference::PortalRemoteDesktop,
@@ -8181,7 +8472,7 @@ height = 40
         assert!(err.contains("libei"));
         assert!(err.contains("Text"));
         assert!(err.contains("4 events"));
-        assert!(err.contains("no live consented EIS session/device executor"));
+        assert!(err.contains("stored-session input routing is not enabled yet"));
 
         let mut portal = input_execution_backend(InputBackendPreference::PortalRemoteDesktop)
             .expect("portal backend has a planning executor");
@@ -8206,7 +8497,7 @@ height = 40
         assert!(err.contains("portal_remote_desktop"));
         assert!(err.contains("PointerAbsolute"));
         assert!(err.contains("Button"));
-        assert!(err.contains("no live consented EIS session/device executor"));
+        assert!(err.contains("stored-session input routing is not enabled yet"));
     }
 
     #[test]
