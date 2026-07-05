@@ -1,6 +1,6 @@
 # Seatgeist Tracker
 
-Board name: `Seatgeist Tracker`. This replaces the original `plasma-pilot` project board name now that the public project identity is backend-neutral.
+Board name: `Seatgeist`. This is the canonical project board name for the backend-neutral public identity.
 
 Legend:
 
