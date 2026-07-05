@@ -362,6 +362,13 @@ eval_remote_desktop_eis_session() {
 		--ttl-ms 120000 \
 		--reason "gui-eval remote-desktop-eis-session minimal input" >"$run_dir/remote-desktop-eis-scroll-approval.json"
 	jq -e '.method == "scroll_pointer" and .safety_class == "control_pointer"' "$run_dir/remote-desktop-eis-scroll-approval.json" >/dev/null
+	cli approve \
+		--approval-file "$approval_file" \
+		--safety-class control-keyboard \
+		--method key_combo \
+		--ttl-ms 120000 \
+		--reason "gui-eval remote-desktop-eis-session keyboard input" >"$run_dir/remote-desktop-eis-key-combo-approval.json"
+	jq -e '.method == "key_combo" and .safety_class == "control_keyboard"' "$run_dir/remote-desktop-eis-key-combo-approval.json" >/dev/null
 	test "$(stat -c '%a' "$approval_file")" = "600"
 
 	if ! cli input remote-desktop-eis-start --keyboard --pointer --timeout-ms 120000 "${guard_args[@]}" >"$run_dir/remote-desktop-eis-start.json" 2>"$run_dir/remote-desktop-eis-start.err"; then
@@ -410,6 +417,22 @@ eval_remote_desktop_eis_session() {
 			exit 1
 		fi
 	fi
+	key_combo_ok=0
+	if cli input key-combo Shift "${guard_args[@]}" >"$run_dir/remote-desktop-eis-key-combo.json" 2>"$run_dir/remote-desktop-eis-key-combo.err"; then
+		key_combo_ok=1
+		jq -e '.type == "action" and (.data.message | contains("backend=portal_remote_desktop"))' "$run_dir/remote-desktop-eis-key-combo.json" >/dev/null
+	else
+		if [[ "${PLASMA_PILOT_REMOTE_DESKTOP_EIS_INPUT_STRICT:-0}" == "1" ]]; then
+			cat "$run_dir/remote-desktop-eis-key-combo.err" >&2
+			cli input remote-desktop-eis-stop >"$run_dir/remote-desktop-eis-stop-after-key-combo-failure.json" || true
+			exit 1
+		fi
+		if ! grep -Eiq 'EIS|readiness|resumed|capabilit|selected device|connected session' "$run_dir/remote-desktop-eis-key-combo.err"; then
+			cat "$run_dir/remote-desktop-eis-key-combo.err" >&2
+			cli input remote-desktop-eis-stop >"$run_dir/remote-desktop-eis-stop-after-unexpected-key-combo-failure.json" || true
+			exit 1
+		fi
+	fi
 
 	cli input remote-desktop-eis-stop >"$run_dir/remote-desktop-eis-stop.json"
 	jq -e '.type == "remote_desktop_eis_session_status" and .data.active == false' "$run_dir/remote-desktop-eis-stop.json" >/dev/null
@@ -423,6 +446,13 @@ eval_remote_desktop_eis_session() {
 	else
 		cli journal tail --limit 40 --method scroll_pointer --ok false >"$run_dir/remote-desktop-eis-scroll-journal.json"
 		jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/remote-desktop-eis-scroll-journal.json" >/dev/null
+	fi
+	if [[ "$key_combo_ok" == "1" ]]; then
+		cli journal tail --limit 40 --method key_combo --ok true >"$run_dir/remote-desktop-eis-key-combo-journal.json"
+		jq -e '.type == "journal" and any(.data[]; .summary | contains("backend=portal_remote_desktop"))' "$run_dir/remote-desktop-eis-key-combo-journal.json" >/dev/null
+	else
+		cli journal tail --limit 40 --method key_combo --ok false >"$run_dir/remote-desktop-eis-key-combo-journal.json"
+		jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/remote-desktop-eis-key-combo-journal.json" >/dev/null
 	fi
 }
 
