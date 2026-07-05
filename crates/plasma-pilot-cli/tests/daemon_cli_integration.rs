@@ -195,6 +195,12 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
     };
     assert!(!status.remote_desktop_portal.setup_hint.is_empty());
     assert!(!status.libei.setup_hint.is_empty());
+    if status.implemented_available_backend.is_some() {
+        assert_eq!(
+            status.implemented_available_backend.as_deref(),
+            Some("uinput")
+        );
+    }
     assert!(!status.setup_hint.is_empty());
 
     let capture_backends = daemon.cli_json(&["capture-backends"])?;
@@ -204,6 +210,12 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
     assert!(!status.screenshot_portal.setup_hint.is_empty());
     assert!(!status.kwin_metadata.setup_hint.is_empty());
     assert!(!status.spectacle.setup_hint.is_empty());
+    if status.implemented_available_backend.is_some() {
+        assert_eq!(
+            status.implemented_available_backend.as_deref(),
+            Some("spectacle")
+        );
+    }
     assert!(!status.setup_hint.is_empty());
 
     let journal = daemon.cli_json(&["journal", "tail", "--limit", "10"])?;

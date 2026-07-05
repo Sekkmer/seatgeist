@@ -245,6 +245,12 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
     };
     assert!(!status.remote_desktop_portal.setup_hint.is_empty());
     assert!(!status.libei.setup_hint.is_empty());
+    if status.implemented_available_backend.is_some() {
+        assert_eq!(
+            status.implemented_available_backend.as_deref(),
+            Some("uinput")
+        );
+    }
     assert!(!status.setup_hint.is_empty());
 
     let capture_backends = daemon.request(&DaemonRequest::CaptureBackendStatus)?;
@@ -254,6 +260,12 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
     assert!(!status.screenshot_portal.setup_hint.is_empty());
     assert!(!status.kwin_metadata.setup_hint.is_empty());
     assert!(!status.spectacle.setup_hint.is_empty());
+    if status.implemented_available_backend.is_some() {
+        assert_eq!(
+            status.implemented_available_backend.as_deref(),
+            Some("spectacle")
+        );
+    }
     assert!(!status.setup_hint.is_empty());
 
     let panic_stop = daemon.request(&DaemonRequest::SetPanicStop(SetPanicStopRequest {

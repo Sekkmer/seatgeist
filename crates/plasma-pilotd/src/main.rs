@@ -1577,8 +1577,10 @@ fn input_backend_status() -> Result<InputBackendStatus> {
     let libei = libei_status();
     let preferred_available_backend =
         preferred_input_backend(&remote_desktop_portal, &libei, uinput.available);
+    let implemented_available_backend = implemented_input_backend(uinput.available);
     let setup_hint = input_backend_setup_hint(
         preferred_available_backend.as_deref(),
+        implemented_available_backend.as_deref(),
         &remote_desktop_portal,
         &libei,
         uinput.available,
@@ -1589,6 +1591,7 @@ fn input_backend_status() -> Result<InputBackendStatus> {
         remote_desktop_portal,
         libei,
         preferred_available_backend,
+        implemented_available_backend,
         setup_hint,
     })
 }
@@ -1599,8 +1602,10 @@ fn capture_backend_status() -> CaptureBackendStatus {
     let spectacle = spectacle_status();
     let preferred_available_backend =
         preferred_capture_backend(&screenshot_portal, spectacle.command_available);
+    let implemented_available_backend = implemented_capture_backend(spectacle.command_available);
     let setup_hint = capture_backend_setup_hint(
         preferred_available_backend.as_deref(),
+        implemented_available_backend.as_deref(),
         &screenshot_portal,
         &kwin_metadata,
         &spectacle,
@@ -1611,6 +1616,7 @@ fn capture_backend_status() -> CaptureBackendStatus {
         kwin_metadata,
         spectacle,
         preferred_available_backend,
+        implemented_available_backend,
         setup_hint,
     }
 }
@@ -1719,23 +1725,33 @@ fn preferred_capture_backend(
     None
 }
 
+fn implemented_capture_backend(spectacle_available: bool) -> Option<String> {
+    spectacle_available.then(|| "spectacle".to_string())
+}
+
 fn capture_backend_setup_hint(
     preferred: Option<&str>,
+    implemented: Option<&str>,
     screenshot_portal: &ScreenshotPortalStatus,
     kwin_metadata: &KwinMetadataStatus,
     spectacle: &SpectacleStatus,
 ) -> String {
-    match preferred {
-        Some("portal_screenshot") if kwin_metadata.support_information_available => {
-            "prefer xdg-desktop-portal Screenshot for consented capture with KWin metadata for monitor scale and coordinate mapping".to_string()
+    match (preferred, implemented) {
+        (Some("portal_screenshot"), Some("spectacle"))
+            if kwin_metadata.support_information_available =>
+        {
+            "portal Screenshot is visible, but implemented capture currently uses Spectacle with KWin metadata until portal request handling lands".to_string()
         }
-        Some("portal_screenshot") => {
-            "portal Screenshot is visible; KWin supportInformation is unavailable, so monitor scale metadata may be incomplete".to_string()
+        (Some("portal_screenshot"), Some("spectacle")) => {
+            "portal Screenshot is visible, but implemented capture currently uses Spectacle; KWin supportInformation is unavailable, so monitor scale metadata may be incomplete".to_string()
         }
-        Some("spectacle") if kwin_metadata.support_information_available => {
+        (Some("portal_screenshot"), _) => {
+            "portal Screenshot is visible, but PlasmaPilot does not yet execute portal capture requests; install Spectacle for the current capture backend".to_string()
+        }
+        (Some("spectacle"), Some("spectacle")) if kwin_metadata.support_information_available => {
             "using Spectacle command fallback with KWin metadata for monitor scale and coordinate mapping".to_string()
         }
-        Some("spectacle") => {
+        (Some("spectacle"), Some("spectacle")) => {
             "using Spectacle command fallback; KWin supportInformation is unavailable, so monitor scale metadata may be incomplete".to_string()
         }
         _ if !screenshot_portal.busctl_available && !spectacle.command_available => {
@@ -1882,20 +1898,31 @@ fn preferred_input_backend(
     None
 }
 
+fn implemented_input_backend(uinput_available: bool) -> Option<String> {
+    uinput_available.then(|| "uinput".to_string())
+}
+
 fn input_backend_setup_hint(
     preferred: Option<&str>,
+    implemented: Option<&str>,
     remote_desktop_portal: &RemoteDesktopPortalStatus,
     libei: &LibeiStatus,
     uinput_available: bool,
 ) -> String {
-    match preferred {
-        Some("portal_remote_desktop") => {
-            "prefer xdg-desktop-portal RemoteDesktop for consented input sessions; uinput remains fallback".to_string()
+    match (preferred, implemented) {
+        (Some("portal_remote_desktop"), Some("uinput")) => {
+            "portal RemoteDesktop is visible, but implemented input control currently uses uinput until portal session handling lands".to_string()
         }
-        Some("libei") => {
-            "libei client support is visible; verify the compositor or portal grants an EIS connection before using it for control".to_string()
+        (Some("portal_remote_desktop"), _) => {
+            "portal RemoteDesktop is visible, but PlasmaPilot does not yet execute RemoteDesktop input sessions; configure uinput for the current control backend".to_string()
         }
-        Some("uinput") => {
+        (Some("libei"), Some("uinput")) => {
+            "libei client support is visible, but implemented input control currently uses uinput until an EIS session backend lands".to_string()
+        }
+        (Some("libei"), _) => {
+            "libei client support is visible, but PlasmaPilot does not yet execute EIS input sessions; configure uinput for the current control backend".to_string()
+        }
+        (Some("uinput"), Some("uinput")) => {
             "only uinput is currently available; keep it behind policy, panic-stop, active-window guards, and journal checks".to_string()
         }
         _ if !remote_desktop_portal.busctl_available => {
@@ -4955,9 +4982,13 @@ fn summarize_response(response: &DaemonResponse) -> String {
                 .unwrap_or_else(|| "unknown".to_string())
         ),
         DaemonResponse::InputBackendStatus(status) => format!(
-            "input backends preferred={} portal_remote_desktop={} libei={} uinput={}",
+            "input backends preferred={} implemented={} portal_remote_desktop={} libei={} uinput={}",
             status
                 .preferred_available_backend
+                .as_deref()
+                .unwrap_or("none"),
+            status
+                .implemented_available_backend
                 .as_deref()
                 .unwrap_or("none"),
             status
@@ -4967,9 +4998,13 @@ fn summarize_response(response: &DaemonResponse) -> String {
             status.uinput_available
         ),
         DaemonResponse::CaptureBackendStatus(status) => format!(
-            "capture backends preferred={} portal_screenshot={} portal_screencast={} kwin_metadata={} spectacle={}",
+            "capture backends preferred={} implemented={} portal_screenshot={} portal_screencast={} kwin_metadata={} spectacle={}",
             status
                 .preferred_available_backend
+                .as_deref()
+                .unwrap_or("none"),
+            status
+                .implemented_available_backend
                 .as_deref()
                 .unwrap_or("none"),
             status.screenshot_portal.screenshot_interface_available,
@@ -6643,6 +6678,8 @@ height = 40
             Some("uinput")
         );
         assert_eq!(preferred_input_backend(&portal, &libei, false), None);
+        assert_eq!(implemented_input_backend(true).as_deref(), Some("uinput"));
+        assert_eq!(implemented_input_backend(false), None);
     }
 
     #[test]
@@ -6655,8 +6692,17 @@ height = 40
             setup_hint: String::new(),
         };
         let libei = libei_status_fixture(false, false);
-        let hint = input_backend_setup_hint(None, &portal, &libei, false);
+        let hint = input_backend_setup_hint(None, None, &portal, &libei, false);
         assert!(hint.contains("busctl"));
+
+        let visible_portal_hint = input_backend_setup_hint(
+            Some("portal_remote_desktop"),
+            None,
+            &remote_desktop_status(true),
+            &libei,
+            false,
+        );
+        assert!(visible_portal_hint.contains("does not yet execute RemoteDesktop"));
 
         assert!(remote_desktop_portal_setup_hint(false, false, false, false).contains("busctl"));
         assert!(
@@ -6681,6 +6727,11 @@ height = 40
             Some("spectacle")
         );
         assert_eq!(preferred_capture_backend(&portal, false), None);
+        assert_eq!(
+            implemented_capture_backend(true).as_deref(),
+            Some("spectacle")
+        );
+        assert_eq!(implemented_capture_backend(false), None);
     }
 
     #[test]
@@ -6697,8 +6748,16 @@ height = 40
             setup_hint: String::new(),
         };
 
-        let hint = capture_backend_setup_hint(None, &portal, &kwin, &spectacle);
+        let hint = capture_backend_setup_hint(None, None, &portal, &kwin, &spectacle);
         assert!(hint.contains("busctl") || hint.contains("capture backend"));
+        let visible_portal_hint = capture_backend_setup_hint(
+            Some("portal_screenshot"),
+            None,
+            &screenshot_portal_status_fixture(true, true),
+            &kwin,
+            &spectacle,
+        );
+        assert!(visible_portal_hint.contains("does not yet execute portal capture"));
         assert!(screenshot_portal_setup_hint(false, false, false, false, false).contains("busctl"));
         assert!(
             screenshot_portal_setup_hint(true, true, false, false, true)

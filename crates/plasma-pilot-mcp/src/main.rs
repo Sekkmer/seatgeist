@@ -668,9 +668,13 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
                 .unwrap_or_else(|| "unknown".to_string())
         ),
         DaemonResponse::InputBackendStatus(status) => format!(
-            "input backends preferred={} portal_remote_desktop={} libei={} uinput={}",
+            "input backends preferred={} implemented={} portal_remote_desktop={} libei={} uinput={}",
             status
                 .preferred_available_backend
+                .as_deref()
+                .unwrap_or("none"),
+            status
+                .implemented_available_backend
                 .as_deref()
                 .unwrap_or("none"),
             status
@@ -680,9 +684,13 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status.uinput_available
         ),
         DaemonResponse::CaptureBackendStatus(status) => format!(
-            "capture backends preferred={} portal_screenshot={} portal_screencast={} kwin_metadata={} spectacle={}",
+            "capture backends preferred={} implemented={} portal_screenshot={} portal_screencast={} kwin_metadata={} spectacle={}",
             status
                 .preferred_available_backend
+                .as_deref()
+                .unwrap_or("none"),
+            status
+                .implemented_available_backend
                 .as_deref()
                 .unwrap_or("none"),
             status.screenshot_portal.screenshot_interface_available,
@@ -1893,7 +1901,10 @@ fn i64_to_i32(value: i64) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libplasma_pilot::SafetyStatus;
+    use libplasma_pilot::{
+        CaptureBackendStatus, InputBackendStatus, KwinMetadataStatus, LibeiStatus,
+        RemoteDesktopPortalStatus, SafetyStatus, ScreenshotPortalStatus, SpectacleStatus,
+    };
     use libplasma_pilot::{ScreenshotInfo, ScreenshotTransform, WaitForChangeResult};
 
     #[test]
@@ -1980,6 +1991,63 @@ mod tests {
         assert!(text.contains("preview_max_edge=1600"));
         assert!(text.contains("tile_max_edge=1600"));
         assert!(text.contains("redactions=2"));
+    }
+
+    #[test]
+    fn backend_status_compact_text_reports_implemented_backend() {
+        let input_text = compact_tool_text(
+            "plasma.input_backend_status",
+            &DaemonResponse::InputBackendStatus(InputBackendStatus {
+                uinput_available: true,
+                remote_desktop_portal: RemoteDesktopPortalStatus {
+                    busctl_available: true,
+                    portal_service_available: true,
+                    remote_desktop_interface_available: true,
+                    kde_portal_service_available: true,
+                    setup_hint: "portal visible".to_string(),
+                },
+                libei: LibeiStatus {
+                    pkg_config_available: true,
+                    client_library_available: true,
+                    socket_env_present: false,
+                    setup_hint: "libei visible".to_string(),
+                },
+                preferred_available_backend: Some("portal_remote_desktop".to_string()),
+                implemented_available_backend: Some("uinput".to_string()),
+                setup_hint: "portal visible, uinput implemented".to_string(),
+            }),
+        );
+        assert!(input_text.contains("preferred=portal_remote_desktop"));
+        assert!(input_text.contains("implemented=uinput"));
+
+        let capture_text = compact_tool_text(
+            "plasma.capture_backend_status",
+            &DaemonResponse::CaptureBackendStatus(CaptureBackendStatus {
+                screenshot_portal: ScreenshotPortalStatus {
+                    busctl_available: true,
+                    portal_service_available: true,
+                    screenshot_interface_available: true,
+                    screencast_interface_available: true,
+                    kde_portal_service_available: true,
+                    setup_hint: "portal visible".to_string(),
+                },
+                kwin_metadata: KwinMetadataStatus {
+                    busctl_available: true,
+                    kwin_service_available: true,
+                    support_information_available: true,
+                    setup_hint: "kwin visible".to_string(),
+                },
+                spectacle: SpectacleStatus {
+                    command_available: true,
+                    setup_hint: "spectacle visible".to_string(),
+                },
+                preferred_available_backend: Some("portal_screenshot".to_string()),
+                implemented_available_backend: Some("spectacle".to_string()),
+                setup_hint: "portal visible, spectacle implemented".to_string(),
+            }),
+        );
+        assert!(capture_text.contains("preferred=portal_screenshot"));
+        assert!(capture_text.contains("implemented=spectacle"));
     }
 
     #[test]

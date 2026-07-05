@@ -101,6 +101,7 @@ pub struct InputBackendStatus {
     pub remote_desktop_portal: RemoteDesktopPortalStatus,
     pub libei: LibeiStatus,
     pub preferred_available_backend: Option<String>,
+    pub implemented_available_backend: Option<String>,
     pub setup_hint: String,
 }
 
@@ -110,6 +111,7 @@ pub struct CaptureBackendStatus {
     pub kwin_metadata: KwinMetadataStatus,
     pub spectacle: SpectacleStatus,
     pub preferred_available_backend: Option<String>,
+    pub implemented_available_backend: Option<String>,
     pub setup_hint: String,
 }
 
@@ -1262,11 +1264,13 @@ mod tests {
                 setup_hint: "libei client library is available".to_string(),
             },
             preferred_available_backend: Some("portal_remote_desktop".to_string()),
+            implemented_available_backend: Some("uinput".to_string()),
             setup_hint: "prefer portal RemoteDesktop/libei before uinput".to_string(),
         });
         let encoded = serde_json::to_string(&response).expect("input backend status serializes");
         assert!(encoded.contains(r#""type":"input_backend_status""#));
         assert!(encoded.contains(r#""preferred_available_backend":"portal_remote_desktop""#));
+        assert!(encoded.contains(r#""implemented_available_backend":"uinput""#));
         assert_eq!(response.response_type(), "input_backend_status");
     }
 
@@ -1324,11 +1328,13 @@ mod tests {
                 setup_hint: "Spectacle command backend is available".to_string(),
             },
             preferred_available_backend: Some("portal_screenshot".to_string()),
+            implemented_available_backend: Some("spectacle".to_string()),
             setup_hint: "prefer portal Screenshot before Spectacle fallback".to_string(),
         });
         let encoded = serde_json::to_string(&response).expect("capture backend status serializes");
         assert!(encoded.contains(r#""type":"capture_backend_status""#));
         assert!(encoded.contains(r#""preferred_available_backend":"portal_screenshot""#));
+        assert!(encoded.contains(r#""implemented_available_backend":"spectacle""#));
         assert_eq!(response.response_type(), "capture_backend_status");
     }
 
