@@ -32,14 +32,14 @@ use libseatgeist::{
     JournalWindowContext, KeyComboRequest, KwinBridgeStatus, KwinMetadataStatus, LibeiStatus,
     MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton,
     PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
-    PointerPhysicalBounds, PolicyStatus, RemoteDesktopEisProbe, RemoteDesktopEisSessionStatus,
-    RemoteDesktopPersistMode, RemoteDesktopPortalStatus, RemoteDesktopSessionProbe,
-    RemoteDesktopSessionProbeRequest, SafetyClass, SafetyStatus, ScreenshotInfo,
-    ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
-    ScrollPointerRequest, SelectItemRequest, SelectMenuRequest, SetPanicStopRequest,
-    SetTextFieldRequest, SetValueRequest, SpectacleStatus, ToggleCheckRequest, ToolApprovalLevel,
-    TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult, WindowGeometry,
-    WindowInfo, XkbKeymapStatus, current_egid, current_euid, default_journal_path,
+    PointerPhysicalBounds, PolicyStatus, PortalScreenshotTarget, RemoteDesktopEisProbe,
+    RemoteDesktopEisSessionStatus, RemoteDesktopPersistMode, RemoteDesktopPortalStatus,
+    RemoteDesktopSessionProbe, RemoteDesktopSessionProbeRequest, SafetyClass, SafetyStatus,
+    ScreenshotInfo, ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest,
+    ScreenshotTransform, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
+    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, SpectacleStatus, ToggleCheckRequest,
+    ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult,
+    WindowGeometry, WindowInfo, XkbKeymapStatus, current_egid, current_euid, default_journal_path,
     default_panic_stop_path, default_socket_path,
 };
 use seatgeist_policy::{PolicyConfig, PolicyEngine};
@@ -4718,7 +4718,10 @@ async fn capture_screenshot(
     }
     prepare_screenshot_output(&request.output)?;
 
-    if screenshot_portal_status().screenshot_interface_available {
+    let screenshot_portal = screenshot_portal_status();
+    validate_portal_screenshot_target_request(&request, &screenshot_portal)?;
+
+    if screenshot_portal.screenshot_interface_available {
         match capture_screenshot_portal(request.clone(), safety_settings).await {
             Ok(Some(info)) => return Ok(info),
             Ok(None) => {
@@ -4749,6 +4752,7 @@ async fn capture_screenshot_portal(
     let handle_token = format!("seatgeist_{}", Uuid::new_v4().simple());
     let mut options = seatgeist_portal::PortalScreenshotOptions::new(handle_token);
     options.interactive = request.portal_interactive;
+    options.target = request.portal_target.map(portal_screenshot_target_to_xdg);
     let Some(capture) =
         seatgeist_portal::request_screenshot_zbus(&options, PORTAL_SCREENSHOT_RESPONSE_TIMEOUT)
             .await
@@ -4794,6 +4798,51 @@ async fn capture_screenshot_portal(
         source_height,
         safety_settings,
     )?))
+}
+
+fn validate_portal_screenshot_target_request(
+    request: &ScreenshotRequest,
+    screenshot_portal: &ScreenshotPortalStatus,
+) -> Result<()> {
+    let Some(target) = request.portal_target else {
+        return Ok(());
+    };
+    if !screenshot_portal.screenshot_interface_available {
+        bail!(
+            "portal screenshot target {target} requires xdg-desktop-portal Screenshot; no portal screenshot backend is visible"
+        );
+    }
+    if !screenshot_portal.screenshot_target_option_supported {
+        let version = screenshot_portal
+            .screenshot_interface_version
+            .map(|version| version.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        bail!(
+            "portal screenshot target {target} requires xdg-desktop-portal Screenshot v3/AvailableTargets; current Screenshot interface version is {version}"
+        );
+    }
+    if let Some(mask) = screenshot_portal.screenshot_available_targets_mask {
+        let target_mask = portal_screenshot_target_to_xdg(target).value();
+        if mask & target_mask == 0 {
+            bail!(
+                "portal screenshot target {target} is not advertised by AvailableTargets mask {mask}"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn portal_screenshot_target_to_xdg(
+    target: PortalScreenshotTarget,
+) -> seatgeist_portal::PortalScreenshotTarget {
+    match target {
+        PortalScreenshotTarget::Screen => seatgeist_portal::PortalScreenshotTarget::Screen,
+        PortalScreenshotTarget::Window => seatgeist_portal::PortalScreenshotTarget::Window,
+        PortalScreenshotTarget::Area => seatgeist_portal::PortalScreenshotTarget::Area,
+        PortalScreenshotTarget::ActiveWindow => {
+            seatgeist_portal::PortalScreenshotTarget::ActiveWindow
+        }
+    }
 }
 
 fn capture_screenshot_spectacle(
@@ -5040,6 +5089,7 @@ async fn wait_for_change(
         max_edge: request.max_edge.or(Some(safety_settings.preview_max_edge)),
         full_resolution: false,
         portal_interactive: false,
+        portal_target: None,
     };
 
     let baseline_info = capture_screenshot(screenshot_request(), safety_settings).await?;
@@ -7727,6 +7777,8 @@ fn classify_error_message(message: &str) -> ErrorKind {
         ErrorKind::RateLimited
     } else if lower.contains("xdg-desktop-portal remotedesktop is not available")
         || lower.contains("portal remotedesktop is not available")
+        || lower.contains("portal screenshot target")
+        || lower.contains("availabletargets")
     {
         ErrorKind::PortalUnavailable
     } else if lower.contains("at-spi")
@@ -8913,6 +8965,7 @@ mod tests {
                 max_edge: Some(1600),
                 full_resolution: false,
                 portal_interactive: false,
+                portal_target: None,
             }),
         )
         .expect("bounded screenshot requests are allowed by default");
@@ -8969,6 +9022,7 @@ mod tests {
                 max_edge: None,
                 full_resolution: true,
                 portal_interactive: false,
+                portal_target: None,
             }),
         )
         .expect_err("full-resolution screenshots require approval by default");
@@ -8986,6 +9040,7 @@ mod tests {
                     max_edge: None,
                     full_resolution: true,
                     portal_interactive: false,
+                    portal_target: None,
                 }),
             }),
         )
@@ -9003,6 +9058,7 @@ mod tests {
                 max_edge: None,
                 full_resolution: true,
                 portal_interactive: false,
+                portal_target: None,
             }),
         )
         .expect("explicit full-resolution screenshot override allows capture");
@@ -9719,6 +9775,10 @@ mod tests {
             ),
             (
                 "xdg-desktop-portal RemoteDesktop is not available: org.freedesktop.portal.Desktop is missing",
+                ErrorKind::PortalUnavailable,
+            ),
+            (
+                "portal screenshot target active_window requires xdg-desktop-portal Screenshot v3/AvailableTargets; current Screenshot interface version is 2",
                 ErrorKind::PortalUnavailable,
             ),
             (
@@ -11217,6 +11277,42 @@ height = 40
         assert!(kwin_metadata_setup_hint(false, false, false).contains("busctl"));
         assert!(kwin_metadata_setup_hint(true, false, false).contains("org.kde.KWin"));
         assert!(spectacle_setup_hint(false).contains("not on PATH"));
+    }
+
+    #[test]
+    fn portal_screenshot_target_requires_advertised_v3_support() {
+        let request = ScreenshotRequest {
+            output: temp_test_path("portal-target.png"),
+            max_edge: Some(1600),
+            full_resolution: false,
+            portal_interactive: false,
+            portal_target: Some(PortalScreenshotTarget::ActiveWindow),
+        };
+
+        let mut portal = screenshot_portal_status_fixture(true, true);
+        portal.screenshot_interface_version = Some(2);
+        portal.screenshot_available_targets_mask = None;
+        portal.screenshot_available_targets = Vec::new();
+        portal.screenshot_target_option_supported = false;
+        let err = validate_portal_screenshot_target_request(&request, &portal)
+            .expect_err("v2 portal must reject target-specific capture");
+        assert!(err.to_string().contains("Screenshot v3"));
+
+        portal.screenshot_interface_version = Some(3);
+        portal.screenshot_available_targets_mask =
+            Some(seatgeist_portal::PortalScreenshotTarget::Screen.value());
+        portal.screenshot_available_targets = vec!["screen".to_string()];
+        portal.screenshot_target_option_supported = true;
+        let err = validate_portal_screenshot_target_request(&request, &portal)
+            .expect_err("missing AvailableTargets bit must reject target-specific capture");
+        assert!(err.to_string().contains("not advertised"));
+
+        portal.screenshot_available_targets_mask = Some(
+            seatgeist_portal::PortalScreenshotTarget::Screen.value()
+                | seatgeist_portal::PortalScreenshotTarget::ActiveWindow.value(),
+        );
+        validate_portal_screenshot_target_request(&request, &portal)
+            .expect("advertised v3 target is accepted");
     }
 
     #[test]

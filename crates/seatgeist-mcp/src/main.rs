@@ -18,7 +18,7 @@ use libseatgeist::{
     DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonClientIdentity, DaemonRequest, DaemonRequestEnvelope,
     DaemonResponse, DragPointerRequest, FocusTextFieldRequest, FocusWindowRequest,
     FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, MovePointerRequest,
-    ObserveRequest, Point, PointerButton, RemoteDesktopPersistMode,
+    ObserveRequest, Point, PointerButton, PortalScreenshotTarget, RemoteDesktopPersistMode,
     RemoteDesktopSessionProbeRequest, ScreenshotRequest, ScreenshotTileRequest,
     ScrollPointerRequest, SelectItemRequest, SelectMenuRequest, SetPanicStopRequest,
     SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
@@ -287,6 +287,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                     full_resolution: optional_bool(arguments, "full_resolution")?.unwrap_or(false),
                     portal_interactive: optional_bool(arguments, "portal_interactive")?
                         .unwrap_or(false),
+                    portal_target: optional_portal_screenshot_target(arguments, "portal_target")?,
                 }),
                 None => None,
             };
@@ -304,6 +305,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 .transpose()?,
             full_resolution: optional_bool(arguments, "full_resolution")?.unwrap_or(false),
             portal_interactive: optional_bool(arguments, "portal_interactive")?.unwrap_or(false),
+            portal_target: optional_portal_screenshot_target(arguments, "portal_target")?,
         })),
         "seatgeist.screenshot_tile" => Ok(DaemonRequest::ScreenshotTile(ScreenshotTileRequest {
             output: optional_output_path(arguments, "output", "tile")?,
@@ -1212,6 +1214,10 @@ fn tool_definitions() -> Vec<Value> {
                         "portal_interactive",
                         json!({"type": "boolean", "description": "When the portal Screenshot backend is selected, ask the portal to offer interactive capture UI. Defaults to false."}),
                     ),
+                    (
+                        "portal_target",
+                        json!({"type": "string", "enum": ["screen", "window", "area", "active_window"], "description": "Optional xdg-desktop-portal Screenshot v3 target hint. Requires capture_backend_status.screenshot_portal.screenshot_target_option_supported=true; otherwise the daemon fails closed."}),
+                    ),
                 ],
                 vec![],
             ),
@@ -1237,6 +1243,10 @@ fn tool_definitions() -> Vec<Value> {
                     (
                         "portal_interactive",
                         json!({"type": "boolean", "description": "When the portal Screenshot backend is selected, ask the portal to offer interactive capture UI. Defaults to false."}),
+                    ),
+                    (
+                        "portal_target",
+                        json!({"type": "string", "enum": ["screen", "window", "area", "active_window"], "description": "Optional xdg-desktop-portal Screenshot v3 target hint. Requires capture_backend_status.screenshot_portal.screenshot_target_option_supported=true; otherwise the daemon fails closed."}),
                     ),
                 ],
                 vec![],
@@ -2210,6 +2220,15 @@ fn optional_pointer_button(arguments: &Value, key: &str) -> Result<Option<Pointe
         .transpose()
 }
 
+fn optional_portal_screenshot_target(
+    arguments: &Value,
+    key: &str,
+) -> Result<Option<PortalScreenshotTarget>> {
+    optional_string(arguments, key)?
+        .map(|value| value.parse().map_err(|err: String| anyhow!(err)))
+        .transpose()
+}
+
 fn optional_remote_desktop_persist_mode(
     arguments: &Value,
     key: &str,
@@ -2991,6 +3010,7 @@ mod tests {
                 max_edge: None,
                 full_resolution: false,
                 portal_interactive: false,
+                portal_target: None,
             })
         );
 
@@ -3031,6 +3051,7 @@ mod tests {
                     max_edge: None,
                     full_resolution: false,
                     portal_interactive: false,
+                    portal_target: None,
                 }),
             })
         );
@@ -3060,7 +3081,8 @@ mod tests {
                 "seatgeist.screenshot",
                 &json!({
                     "output": "/tmp/screen.png",
-                    "portal_interactive": true
+                    "portal_interactive": true,
+                    "portal_target": "active_window"
                 }),
             )
             .expect("screenshot args map"),
@@ -3069,6 +3091,7 @@ mod tests {
                 max_edge: None,
                 full_resolution: false,
                 portal_interactive: true,
+                portal_target: Some(PortalScreenshotTarget::ActiveWindow),
             })
         );
 
@@ -4118,6 +4141,7 @@ mod tests {
                     max_edge: Some(1200),
                     full_resolution: false,
                     portal_interactive: false,
+                    portal_target: None,
                 }),
             })
         );

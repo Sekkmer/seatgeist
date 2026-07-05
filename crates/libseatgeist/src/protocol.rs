@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, fmt, path::PathBuf, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -522,6 +522,8 @@ pub struct ScreenshotRequest {
     pub full_resolution: bool,
     #[serde(default)]
     pub portal_interactive: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portal_target: Option<PortalScreenshotTarget>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -534,6 +536,46 @@ pub struct ScreenshotTileRequest {
     pub max_edge: Option<u32>,
     #[serde(default)]
     pub portal_interactive: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortalScreenshotTarget {
+    Screen,
+    Window,
+    Area,
+    ActiveWindow,
+}
+
+impl PortalScreenshotTarget {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Screen => "screen",
+            Self::Window => "window",
+            Self::Area => "area",
+            Self::ActiveWindow => "active_window",
+        }
+    }
+}
+
+impl fmt::Display for PortalScreenshotTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for PortalScreenshotTarget {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "screen" => Ok(Self::Screen),
+            "window" => Ok(Self::Window),
+            "area" | "region" => Ok(Self::Area),
+            "active_window" | "active" => Ok(Self::ActiveWindow),
+            other => Err(format!("unsupported portal screenshot target: {other}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1194,12 +1236,14 @@ mod tests {
             max_edge: Some(1600),
             full_resolution: false,
             portal_interactive: true,
+            portal_target: Some(PortalScreenshotTarget::ActiveWindow),
         });
         let encoded = serde_json::to_string(&request).expect("screenshot request serializes");
         assert!(encoded.contains(r#""method":"screenshot""#));
         assert!(encoded.contains(r#"/tmp/seatgeist.png"#));
         assert!(encoded.contains(r#""max_edge":1600"#));
         assert!(encoded.contains(r#""portal_interactive":true"#));
+        assert!(encoded.contains(r#""portal_target":"active_window""#));
     }
 
     #[test]
@@ -2069,6 +2113,7 @@ mod tests {
                 max_edge: Some(1200),
                 full_resolution: false,
                 portal_interactive: false,
+                portal_target: None,
             }),
         });
         let encoded = serde_json::to_string(&request).expect("observe request serializes");

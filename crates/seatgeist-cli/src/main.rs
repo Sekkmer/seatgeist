@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use libseatgeist::{
     AccessibilityAction, AccessibilityCopyTextRequest, AccessibilityCutTextRequest,
     AccessibilityDeleteTextRequest, AccessibilityFindRequest, AccessibilityInsertTextRequest,
@@ -20,7 +20,7 @@ use libseatgeist::{
     DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonClientIdentity, DaemonRequest, DaemonRequestEnvelope,
     DaemonResponse, DragPointerRequest, FocusTextFieldRequest, FocusWindowRequest,
     FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, MovePointerRequest,
-    ObserveRequest, Point, PointerButton, RemoteDesktopPersistMode,
+    ObserveRequest, Point, PointerButton, PortalScreenshotTarget, RemoteDesktopPersistMode,
     RemoteDesktopSessionProbeRequest, ReplayTrace, SafetyClass, ScreenshotRequest,
     ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
     SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
@@ -63,6 +63,8 @@ enum Command {
         full_resolution: bool,
         #[arg(long)]
         portal_interactive: bool,
+        #[arg(long, value_enum)]
+        portal_target: Option<CliPortalScreenshotTarget>,
     },
     ScreenshotTile {
         #[arg(long)]
@@ -89,6 +91,8 @@ enum Command {
         full_resolution: bool,
         #[arg(long)]
         portal_interactive: bool,
+        #[arg(long, value_enum)]
+        portal_target: Option<CliPortalScreenshotTarget>,
     },
     WaitForChange {
         #[arg(long)]
@@ -154,6 +158,25 @@ enum Command {
         #[command(subcommand)]
         command: TraceCommand,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliPortalScreenshotTarget {
+    Screen,
+    Window,
+    Area,
+    ActiveWindow,
+}
+
+impl From<CliPortalScreenshotTarget> for PortalScreenshotTarget {
+    fn from(value: CliPortalScreenshotTarget) -> Self {
+        match value {
+            CliPortalScreenshotTarget::Screen => Self::Screen,
+            CliPortalScreenshotTarget::Window => Self::Window,
+            CliPortalScreenshotTarget::Area => Self::Area,
+            CliPortalScreenshotTarget::ActiveWindow => Self::ActiveWindow,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -714,6 +737,7 @@ fn main() -> Result<()> {
             max_edge,
             full_resolution,
             portal_interactive,
+            portal_target,
         } => {
             let output = screenshot_output_or_default(output, "screenshot")?;
             print_daemon_response(
@@ -723,6 +747,7 @@ fn main() -> Result<()> {
                     max_edge: if full_resolution { None } else { max_edge },
                     full_resolution,
                     portal_interactive,
+                    portal_target: portal_target.map(Into::into),
                 }),
             )?;
         }
@@ -754,6 +779,7 @@ fn main() -> Result<()> {
             max_edge,
             full_resolution,
             portal_interactive,
+            portal_target,
         } => print_daemon_response(
             &socket,
             DaemonRequest::Observe(ObserveRequest {
@@ -762,6 +788,7 @@ fn main() -> Result<()> {
                     max_edge: if full_resolution { None } else { max_edge },
                     full_resolution,
                     portal_interactive,
+                    portal_target: portal_target.map(Into::into),
                 }),
             }),
         )?,
