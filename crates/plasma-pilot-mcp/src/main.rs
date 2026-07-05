@@ -736,9 +736,17 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status.transient_session_closed
         ),
         DaemonResponse::RemoteDesktopEisProbe(status) => format!(
-            "remote desktop EIS probe started={} eis_connected={} requested={} selected={} clipboard={} fd_closed={} transient_closed={}",
+            "remote desktop EIS probe started={} eis_connected={} runtime_connected={} events={} bound={} resumed_devices={} requested={} selected={} clipboard={} fd_closed={} transient_closed={}",
             status.started,
             status.eis_connected,
+            status.eis_runtime_connected,
+            status.eis_event_count,
+            if status.eis_bound_capabilities.is_empty() {
+                "none".to_string()
+            } else {
+                status.eis_bound_capabilities.join("+")
+            },
+            status.eis_resumed_device_count,
             status.requested_devices.join("+"),
             if status.selected_devices.is_empty() {
                 "none".to_string()
@@ -962,7 +970,7 @@ fn tool_definitions() -> Vec<Value> {
         tool(
             "plasma.remote_desktop_eis_probe",
             "RemoteDesktop EIS Probe",
-            "Explicitly request a transient xdg-desktop-portal RemoteDesktop session, call ConnectToEIS, immediately close the returned FD, and send no input. This is policy-gated control and may open a portal dialog.",
+            "Explicitly request a transient xdg-desktop-portal RemoteDesktop session, call ConnectToEIS, report compact libei runtime state, close the returned FD, and send no input. This is policy-gated control and may open a portal dialog.",
             object_schema(
                 vec![
                     (
@@ -2236,6 +2244,10 @@ mod tests {
             &DaemonResponse::RemoteDesktopEisProbe(libplasma_pilot::RemoteDesktopEisProbe {
                 started: true,
                 eis_connected: true,
+                eis_runtime_connected: true,
+                eis_event_count: 2,
+                eis_bound_capabilities: vec!["text".to_string()],
+                eis_resumed_device_count: 1,
                 requested_devices: vec!["keyboard".to_string(), "pointer".to_string()],
                 selected_devices: vec!["keyboard".to_string(), "pointer".to_string()],
                 clipboard_enabled: false,
@@ -2250,6 +2262,10 @@ mod tests {
             }),
         );
         assert!(remote_desktop_eis_text.contains("eis_connected=true"));
+        assert!(remote_desktop_eis_text.contains("runtime_connected=true"));
+        assert!(remote_desktop_eis_text.contains("events=2"));
+        assert!(remote_desktop_eis_text.contains("bound=text"));
+        assert!(remote_desktop_eis_text.contains("resumed_devices=1"));
         assert!(remote_desktop_eis_text.contains("fd_closed=true"));
         assert!(remote_desktop_eis_text.contains("transient_closed=true"));
 

@@ -10,7 +10,7 @@ Workflow:
 1. Call `plasma.health`, `plasma.capabilities`, `plasma.policy_status`, `plasma.safety_status`, and `plasma.desktop_session_status` first.
 2. Use `plasma.kwin_bridge_status`, `plasma.list_monitors`, `plasma.list_windows`, and `plasma.active_window` for KWin/window issues.
 3. Use `plasma.uinput_status`, `plasma.input_backend_status`, and `plasma.pointer_calibration` for keyboard, pointer, uinput, portal, libei, or 8K coordinate issues.
-4. Use `plasma.remote_desktop_session_probe` only when the operator explicitly wants to test the portal RemoteDesktop consent path; it is policy-gated, may show a portal dialog, closes the transient session, and sends no input. Use `plasma.remote_desktop_eis_probe` only when the operator also wants to test `ConnectToEIS`; it immediately closes the returned FD and still sends no input.
+4. Use `plasma.remote_desktop_session_probe` only when the operator explicitly wants to test the portal RemoteDesktop consent path; it is policy-gated, may show a portal dialog, closes the transient session, and sends no input. Use `plasma.remote_desktop_eis_probe` only when the operator also wants to test `ConnectToEIS`; it reports compact libei runtime state, immediately closes the returned FD, and still sends no input.
 5. Use `plasma.capture_backend_status` for display/capture backend issues before requesting any screenshot.
 6. Treat `implemented_available_backend` as the backend PlasmaPilot can execute today; `configured_backend` is the operator request, and `preferred_available_backend` may name a visible portal/libei path that still needs implementation.
 7. Use `plasma.screenshot` or `plasma.screenshot_tile` for display/capture issues, keeping screenshots bounded by default.

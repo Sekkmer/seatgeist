@@ -161,6 +161,14 @@ pub type RemoteDesktopEisProbeRequest = RemoteDesktopSessionProbeRequest;
 pub struct RemoteDesktopEisProbe {
     pub started: bool,
     pub eis_connected: bool,
+    #[serde(default)]
+    pub eis_runtime_connected: bool,
+    #[serde(default)]
+    pub eis_event_count: usize,
+    #[serde(default)]
+    pub eis_bound_capabilities: Vec<String>,
+    #[serde(default)]
+    pub eis_resumed_device_count: usize,
     pub requested_devices: Vec<String>,
     pub selected_devices: Vec<String>,
     pub clipboard_enabled: bool,
@@ -1433,6 +1441,10 @@ mod tests {
         let response = DaemonResponse::RemoteDesktopEisProbe(RemoteDesktopEisProbe {
             started: true,
             eis_connected: true,
+            eis_runtime_connected: true,
+            eis_event_count: 3,
+            eis_bound_capabilities: vec!["text".to_string()],
+            eis_resumed_device_count: 1,
             requested_devices: vec!["keyboard".to_string(), "pointer".to_string()],
             selected_devices: vec!["keyboard".to_string(), "pointer".to_string()],
             clipboard_enabled: false,
@@ -1449,6 +1461,10 @@ mod tests {
             serde_json::to_string(&response).expect("remote desktop EIS probe response serializes");
         assert!(encoded.contains(r#""type":"remote_desktop_eis_probe""#));
         assert!(encoded.contains(r#""eis_connected":true"#));
+        assert!(encoded.contains(r#""eis_runtime_connected":true"#));
+        assert!(encoded.contains(r#""eis_event_count":3"#));
+        assert!(encoded.contains(r#""eis_bound_capabilities":["text"]"#));
+        assert!(encoded.contains(r#""eis_resumed_device_count":1"#));
         assert!(encoded.contains(r#""eis_fd_closed":true"#));
         assert_eq!(response.response_type(), "remote_desktop_eis_probe");
     }

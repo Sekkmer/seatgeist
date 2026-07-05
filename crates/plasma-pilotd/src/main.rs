@@ -1776,6 +1776,10 @@ async fn remote_desktop_eis_probe(
         return Ok(RemoteDesktopEisProbe {
             started: false,
             eis_connected: false,
+            eis_runtime_connected: false,
+            eis_event_count: 0,
+            eis_bound_capabilities: Vec::new(),
+            eis_resumed_device_count: 0,
             requested_devices,
             selected_devices: Vec::new(),
             clipboard_enabled: false,
@@ -1795,12 +1799,24 @@ async fn remote_desktop_eis_probe(
     let mut session = DaemonPortalEisSession::from_portal_session(session)
         .context("initialize transient daemon EIS runtime")?;
     let metadata = session.metadata().clone();
-    let _snapshots = session.dispatch_pending();
+    let snapshots = session.dispatch_pending();
+    let runtime_connected = session.state().connected();
+    let bound_capabilities = eis_capability_names(session.state().bound_capabilities());
+    let resumed_device_count = session
+        .state()
+        .devices()
+        .iter()
+        .filter(|device| device.resumed)
+        .count();
     drop(session);
 
     Ok(RemoteDesktopEisProbe {
         started: true,
         eis_connected: true,
+        eis_runtime_connected: runtime_connected,
+        eis_event_count: snapshots.len(),
+        eis_bound_capabilities: bound_capabilities,
+        eis_resumed_device_count: resumed_device_count,
         requested_devices,
         selected_devices: metadata.selected_devices,
         clipboard_enabled: metadata.clipboard_enabled,
@@ -1877,7 +1893,6 @@ impl<S: plasma_pilot_eis::EisEventSource> DaemonPortalEisSession<S> {
         &self.metadata
     }
 
-    #[cfg(test)]
     fn state(&self) -> &plasma_pilot_eis::EisRuntimeState {
         self.runtime.state()
     }
@@ -1917,6 +1932,19 @@ fn remote_desktop_probe_setup(
     options.select_devices.persist_mode = request.persist_mode.map(remote_desktop_persist_mode);
     options.start.parent_window = request.parent_window.unwrap_or_default();
     Ok((requested_devices, options, timeout))
+}
+
+fn eis_capability_names(capabilities: &[plasma_pilot_eis::EisCapability]) -> Vec<String> {
+    capabilities
+        .iter()
+        .map(|capability| match capability {
+            plasma_pilot_eis::EisCapability::PointerAbsolute => "pointer_absolute",
+            plasma_pilot_eis::EisCapability::Button => "button",
+            plasma_pilot_eis::EisCapability::Scroll => "scroll",
+            plasma_pilot_eis::EisCapability::Text => "text",
+        })
+        .map(str::to_string)
+        .collect()
 }
 
 fn remote_desktop_requested_devices(request: &RemoteDesktopSessionProbeRequest) -> Vec<String> {
@@ -5794,9 +5822,17 @@ fn summarize_response(response: &DaemonResponse) -> String {
             status.transient_session_closed
         ),
         DaemonResponse::RemoteDesktopEisProbe(status) => format!(
-            "remote desktop EIS probe started={} eis_connected={} requested={} selected={} clipboard={} fd_closed={} transient_closed={}",
+            "remote desktop EIS probe started={} eis_connected={} runtime_connected={} events={} bound={} resumed_devices={} requested={} selected={} clipboard={} fd_closed={} transient_closed={}",
             status.started,
             status.eis_connected,
+            status.eis_runtime_connected,
+            status.eis_event_count,
+            if status.eis_bound_capabilities.is_empty() {
+                "none".to_string()
+            } else {
+                status.eis_bound_capabilities.join("+")
+            },
+            status.eis_resumed_device_count,
             status.requested_devices.join("+"),
             if status.selected_devices.is_empty() {
                 "none".to_string()
@@ -7669,6 +7705,24 @@ height = 40
                 device_name: Some("Text Device".to_string()),
                 matched_region: None,
             }
+        );
+    }
+
+    #[test]
+    fn eis_capability_names_are_compact_and_stable() {
+        assert_eq!(
+            eis_capability_names(&[
+                plasma_pilot_eis::EisCapability::PointerAbsolute,
+                plasma_pilot_eis::EisCapability::Button,
+                plasma_pilot_eis::EisCapability::Scroll,
+                plasma_pilot_eis::EisCapability::Text,
+            ]),
+            vec![
+                "pointer_absolute".to_string(),
+                "button".to_string(),
+                "scroll".to_string(),
+                "text".to_string(),
+            ]
         );
     }
 
