@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
 	cat <<'USAGE'
-Usage: scripts/gui-eval.sh [all|status|session-preflight|observe|a11y-quality-status|a11y-focused-tree|clipboard-status|clipboard-denied|kwin-bridge-status|keymap-status|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|journal-artifacts|portal-screenshot|remote-desktop-probe|remote-desktop-eis-session|full-resolution-denied|control-safety]
+Usage: scripts/gui-eval.sh [all|status|session-preflight|observe|a11y-quality-status|a11y-focused-tree|a11y-find|clipboard-status|clipboard-denied|kwin-bridge-status|keymap-status|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|journal-artifacts|portal-screenshot|remote-desktop-probe|remote-desktop-eis-session|full-resolution-denied|control-safety]
 
 Runs opt-in local GUI evals against a private PlasmaPilot daemon socket.
 The default `all` set avoids control actions. `control-safety` starts a private
@@ -19,7 +19,7 @@ if [[ "$case_name" == "--help" || "$case_name" == "-h" ]]; then
 fi
 
 case "$case_name" in
-	all | status | session-preflight | observe | a11y-quality-status | a11y-focused-tree | clipboard-status | clipboard-denied | kwin-bridge-status | keymap-status | screenshot-preview | screenshot-coordinate-map | screenshot-config-bounds | journal-artifacts | portal-screenshot | remote-desktop-probe | remote-desktop-eis-session | full-resolution-denied | control-safety) ;;
+	all | status | session-preflight | observe | a11y-quality-status | a11y-focused-tree | a11y-find | clipboard-status | clipboard-denied | kwin-bridge-status | keymap-status | screenshot-preview | screenshot-coordinate-map | screenshot-config-bounds | journal-artifacts | portal-screenshot | remote-desktop-probe | remote-desktop-eis-session | full-resolution-denied | control-safety) ;;
 	*)
 		usage >&2
 		exit 2
@@ -295,6 +295,41 @@ eval_a11y_focused_tree() {
 	' "$run_dir/a11y-focused-tree.json" >/dev/null
 	cli journal tail --limit 20 --method focused_accessibility_tree --ok true >"$run_dir/a11y-focused-tree-journal.json"
 	jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/a11y-focused-tree-journal.json" >/dev/null
+}
+
+eval_a11y_find() {
+	cli atspi quality-status >"$run_dir/a11y-find-quality.json"
+	jq -e '.type == "accessibility_quality_status"' "$run_dir/a11y-find-quality.json" >/dev/null
+	if ! jq -e '.data.atspi_available == true' "$run_dir/a11y-find-quality.json" >/dev/null; then
+		echo "SKIP a11y-find: AT-SPI is unavailable"
+		return 0
+	fi
+
+	if ! cli atspi find --role application --max-results 3 --max-nodes 256 >"$run_dir/a11y-find.json" 2>"$run_dir/a11y-find.stderr"; then
+		cli journal tail --limit 20 --method accessibility_find --ok false >"$run_dir/a11y-find-unavailable-journal.json"
+		if grep -Eq 'AccessibilityUnavailable|backend unavailable' "$run_dir/a11y-find.stderr" \
+			&& jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .ok == false and (.summary | contains("AccessibilityUnavailable")))' "$run_dir/a11y-find-unavailable-journal.json" >/dev/null; then
+			echo "SKIP a11y-find: AT-SPI find is unavailable"
+			return 0
+		fi
+		cat "$run_dir/a11y-find.stderr" >&2
+		return 1
+	fi
+	jq -e '
+		.type == "accessibility_matches"
+		and (.data | type == "array")
+		and all(.data[];
+			(.id | type == "string")
+			and (.role | type == "string")
+			and (.sensitive | type == "boolean")
+			and (.states | type == "array")
+			and (.available_actions | type == "array")
+			and (.actions | type == "array")
+			and (.children | type == "array")
+		)
+	' "$run_dir/a11y-find.json" >/dev/null
+	cli journal tail --limit 20 --method accessibility_find --ok true >"$run_dir/a11y-find-journal.json"
+	jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/a11y-find-journal.json" >/dev/null
 }
 
 eval_clipboard_status() {
@@ -925,6 +960,7 @@ run_case() {
 		observe) eval_observe ;;
 		a11y-quality-status) eval_a11y_quality_status ;;
 		a11y-focused-tree) eval_a11y_focused_tree ;;
+		a11y-find) eval_a11y_find ;;
 		clipboard-status) eval_clipboard_status ;;
 		clipboard-denied) eval_clipboard_denied ;;
 		kwin-bridge-status) eval_kwin_bridge_status ;;
@@ -942,7 +978,7 @@ run_case() {
 }
 
 if [[ "$case_name" == "all" ]]; then
-	for eval_name in status session-preflight observe a11y-quality-status a11y-focused-tree clipboard-status clipboard-denied kwin-bridge-status keymap-status screenshot-preview screenshot-coordinate-map screenshot-config-bounds full-resolution-denied; do
+	for eval_name in status session-preflight observe a11y-quality-status a11y-focused-tree a11y-find clipboard-status clipboard-denied kwin-bridge-status keymap-status screenshot-preview screenshot-coordinate-map screenshot-config-bounds full-resolution-denied; do
 		run_case "$eval_name"
 	done
 else
