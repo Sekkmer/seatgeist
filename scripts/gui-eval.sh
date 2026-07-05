@@ -34,8 +34,11 @@ fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-run_dir="target/plasma-pilot-gui-eval"
-socket_dir="/tmp/plasma-pilot-gui-eval"
+run_root="target/plasma-pilot-gui-eval"
+run_id="${case_name}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+run_dir="$run_root/$run_id"
+latest_link="$run_root/latest"
+socket_dir="$(mktemp -d -t "plasma-pilot-gui-eval-${case_name}.XXXXXX")"
 socket="$socket_dir/plasma-pilotd.sock"
 log="$run_dir/daemon.log"
 journal="$run_dir/journal.jsonl"
@@ -67,6 +70,7 @@ cleanup() {
 		kill "$pid" 2>/dev/null || true
 		wait "$pid" 2>/dev/null || true
 	fi
+	rm -rf "$socket_dir"
 }
 
 on_exit() {
@@ -79,9 +83,9 @@ on_exit() {
 }
 trap on_exit EXIT
 
-rm -rf "$run_dir" "$socket_dir"
-mkdir -p "$run_dir"
-chmod 700 "$run_dir"
+mkdir -p "$run_root" "$run_dir"
+chmod 700 "$run_root" "$run_dir"
+ln -sfnT "$run_id" "$latest_link"
 
 cargo build -p plasma-pilotd -p plasma-pilot-cli
 if [[ "$case_name" == "all" || "$case_name" == "screenshot-config-bounds" || "$case_name" == "journal-artifacts" ]]; then
@@ -782,3 +786,4 @@ fi
 cli journal tail --limit 20 >"$run_dir/journal-tail.json"
 jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/journal-tail.json" >/dev/null
 echo "GUI eval $case_name passed; artifacts are in $run_dir"
+echo "Latest GUI eval artifacts symlink: $latest_link"
