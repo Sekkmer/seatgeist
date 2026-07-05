@@ -22,7 +22,7 @@ validate-traces:
 	cargo build -p plasma-pilot-cli
 	target/debug/plasma-pilot-cli trace validate --dir examples/traces >/dev/null
 
-verify: fmt check test clippy validate-plugin validate-traces
+verify: fmt check test clippy validate-plugin validate-traces smoke-trace-replay
 	git diff --check -- . ':(exclude)target'
 
 smoke:
