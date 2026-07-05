@@ -10,7 +10,7 @@ This checklist defines the minimum evidence required before calling a public rel
 - [x] Arch Linux/KDE Plasma 6 operator installation docs exist.
 - [x] Plugin manifest, MCP config, skills, and hook assets validate locally.
 - [~] Manual KDE Plasma 6 Wayland evals exist, but broader repeated passes are still required before a public v0.1 release.
-- [~] Versioned local release artifact packaging and verification exist through `make verify-release-artifacts` for binary/plugin and source archives; published signed artifacts are not produced yet.
+- [~] Versioned local release artifact packaging, verification, and optional GPG signing exist through `make verify-release-artifacts`, `make sign-release-artifacts`, and `make verify-release-signatures`; public uploads and signed release tags are not done yet.
 - [ ] Add real public repository metadata before publishing, replacing placeholder `example.invalid` Cargo package URLs.
 - [x] Final license files match the workspace `MIT OR Apache-2.0` declaration.
 - [x] Public project name and package/binary prefixes are `Seatgeist` / `seatgeist-*`.
@@ -31,6 +31,7 @@ The CI workflow runs only safe, non-opt-in gates. It does not send real desktop 
 4. Run each opt-in live eval intentionally on the supported KDE Plasma 6 Wayland workstation and save the artifact paths or summaries.
 5. Create a signed release tag.
 6. Build and verify local release artifacts with `make verify-release-artifacts`.
-7. Upload the generated Seatgeist binary/plugin tarball, source tarball, manifest, and checksums from `target/seatgeist-release/`.
-8. Publish checksums for every uploaded artifact and add signatures when the signing key is finalized.
-9. Verify a clean install from the released artifacts, not from the working tree.
+7. Sign the generated artifacts with `SEATGEIST_RELEASE_SIGNING_KEY=<key> make sign-release-artifacts`, then run `make verify-release-signatures`.
+8. Upload the generated Seatgeist binary/plugin tarball, source tarball, manifest, checksums, detached signatures, and signature checksum manifest from `target/seatgeist-release/`.
+9. Publish checksums and signatures for every uploaded artifact.
+10. Verify a clean install from the released artifacts, not from the working tree.

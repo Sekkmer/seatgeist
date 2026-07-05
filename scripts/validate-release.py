@@ -60,6 +60,10 @@ def main() -> None:
     require_contains("Makefile", makefile, "scripts/package-release.sh")
     require_contains("Makefile", makefile, "verify-release-artifacts: package-release")
     require_contains("Makefile", makefile, "scripts/verify-release-artifacts.py")
+    require_contains("Makefile", makefile, "sign-release-artifacts: verify-release-artifacts")
+    require_contains("Makefile", makefile, "scripts/sign-release-artifacts.sh")
+    require_contains("Makefile", makefile, "verify-release-signatures:")
+    require_contains("Makefile", makefile, "scripts/verify-release-signatures.sh")
 
     package_release = require_executable("scripts/package-release.sh")
     for needle in [
@@ -92,9 +96,29 @@ def main() -> None:
         "plugin/.mcp.json",
         "scripts/package-release.sh",
         "scripts/verify-release-artifacts.py",
+        "scripts/sign-release-artifacts.sh",
+        "scripts/verify-release-signatures.sh",
         "target/",
     ]:
         require_contains("scripts/verify-release-artifacts.py", verify_release, needle)
+
+    sign_release = require_executable("scripts/sign-release-artifacts.sh")
+    for needle in [
+        "SEATGEIST_RELEASE_SIGNING_KEY",
+        "gpg --batch --yes --armor --local-user",
+        "--detach-sign",
+        ".signatures.sha256",
+    ]:
+        require_contains("scripts/sign-release-artifacts.sh", sign_release, needle)
+
+    verify_signatures = require_executable("scripts/verify-release-signatures.sh")
+    for needle in [
+        "gpg --batch --verify",
+        "sha256sum --check",
+        ".signatures.sha256",
+        "verify-release-signatures: ok",
+    ]:
+        require_contains("scripts/verify-release-signatures.sh", verify_signatures, needle)
 
     checklist = read("docs/release-checklist.md")
     require_contains(
@@ -105,7 +129,7 @@ def main() -> None:
     require_contains(
         "docs/release-checklist.md",
         checklist,
-        "- [~] Versioned local release artifact packaging and verification exist through `make verify-release-artifacts` for binary/plugin and source archives; published signed artifacts are not produced yet.",
+        "- [~] Versioned local release artifact packaging, verification, and optional GPG signing exist through `make verify-release-artifacts`, `make sign-release-artifacts`, and `make verify-release-signatures`; public uploads and signed release tags are not done yet.",
     )
     require_contains(
         "docs/release-checklist.md",

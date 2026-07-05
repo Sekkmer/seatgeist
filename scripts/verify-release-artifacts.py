@@ -154,6 +154,8 @@ def verify_source(source: Path, manifest: dict[str, Any]) -> None:
             f"{prefix}plugin/.mcp.json",
             f"{prefix}scripts/package-release.sh",
             f"{prefix}scripts/verify-release-artifacts.py",
+            f"{prefix}scripts/sign-release-artifacts.sh",
+            f"{prefix}scripts/verify-release-signatures.sh",
         ],
     )
     forbidden = [name for name in names if "/target/" in name or "/.git/" in name]
