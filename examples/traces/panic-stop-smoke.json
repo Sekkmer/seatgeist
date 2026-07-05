@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "description": "Safe panic-stop state replay trace for verifying status, enable, and disable responses on a private daemon.",
+  "steps": [
+    {
+      "label": "panic-stop-initial-status",
+      "request": {
+        "method": "panic_stop_status"
+      },
+      "expect_response_type": "panic_stop",
+      "expect_ok": true,
+      "expect_json": [
+        {
+          "pointer": "/data/enabled",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "label": "panic-stop-enable",
+      "request": {
+        "method": "set_panic_stop",
+        "enabled": true
+      },
+      "expect_response_type": "panic_stop",
+      "expect_ok": true,
+      "expect_json": [
+        {
+          "pointer": "/data/enabled",
+          "equals": true
+        }
+      ]
+    },
+    {
+      "label": "panic-stop-enabled-status",
+      "request": {
+        "method": "panic_stop_status"
+      },
+      "expect_response_type": "panic_stop",
+      "expect_ok": true,
+      "expect_json": [
+        {
+          "pointer": "/data/enabled",
+          "equals": true
+        }
+      ]
+    },
+    {
+      "label": "panic-stop-disable",
+      "request": {
+        "method": "set_panic_stop",
+        "enabled": false
+      },
+      "expect_response_type": "panic_stop",
+      "expect_ok": true,
+      "expect_json": [
+        {
+          "pointer": "/data/enabled",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "label": "panic-stop-final-status",
+      "request": {
+        "method": "panic_stop_status"
+      },
+      "expect_response_type": "panic_stop",
+      "expect_ok": true,
+      "expect_json": [
+        {
+          "pointer": "/data/enabled",
+          "equals": false
+        }
+      ]
+    }
+  ]
+}

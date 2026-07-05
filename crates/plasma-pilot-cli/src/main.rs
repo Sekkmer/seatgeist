@@ -1481,6 +1481,14 @@ fn validate_trace(trace: &ReplayTrace) -> Result<()> {
                 );
             }
         }
+        for expectation in &step.expect_json {
+            if expectation.pointer.is_empty() || !expectation.pointer.starts_with('/') {
+                bail!(
+                    "trace {} JSON expectation pointer must start with '/'",
+                    trace_step_context(index, step)
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -1501,6 +1509,7 @@ fn validate_trace_file(file: PathBuf) -> Result<()> {
                 "expect_response_type": step.expect_response_type,
                 "expect_ok": step.expect_ok,
                 "expect_error_contains": step.expect_error_contains,
+                "expect_json_count": step.expect_json.len(),
             })
         })
         .collect::<Vec<_>>();
@@ -1559,6 +1568,25 @@ fn replay_trace(socket: &PathBuf, file: PathBuf) -> Result<()> {
                         "trace {} expected error containing {expected_error:?}, got response type {response_type}",
                         trace_step_context(index, step)
                     );
+                }
+            }
+        }
+        if !step.expect_json.is_empty() {
+            let response_value =
+                serde_json::to_value(&response).context("serialize daemon response for trace")?;
+            for expectation in &step.expect_json {
+                match response_value.pointer(&expectation.pointer) {
+                    Some(actual) if actual == &expectation.equals => {}
+                    Some(_) => bail!(
+                        "trace {} expected JSON pointer {} to match expected value",
+                        trace_step_context(index, step),
+                        expectation.pointer
+                    ),
+                    None => bail!(
+                        "trace {} missing JSON pointer {}",
+                        trace_step_context(index, step),
+                        expectation.pointer
+                    ),
                 }
             }
         }

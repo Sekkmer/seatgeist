@@ -20,8 +20,8 @@ pub use protocol::{
     ScreenshotInfo, ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest,
     ScreenshotTransform, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
     SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, SpectacleStatus, TextAttribute,
-    ToggleCheckRequest, TraceStep, TypeTextRequest, UinputStatus, WaitForChangeRequest,
-    WaitForChangeResult,
+    ToggleCheckRequest, TraceJsonExpectation, TraceStep, TypeTextRequest, UinputStatus,
+    WaitForChangeRequest, WaitForChangeResult,
 };
 pub use runtime::{
     current_egid, current_euid, default_approval_file_path, default_journal_path,

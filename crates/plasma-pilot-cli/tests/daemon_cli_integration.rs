@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use libplasma_pilot::{
     BackendCapability, CapabilitySet, ClipboardGetRequest, DaemonRequest, DaemonResponse,
     DesktopSessionStatus, HealthStatus, JournalEntry, PanicStopStatus, PolicyStatus, ReplayTrace,
-    SafetyStatus, ToolApprovalLevel, TraceStep, UinputStatus,
+    SafetyStatus, ToolApprovalLevel, TraceJsonExpectation, TraceStep, UinputStatus,
 };
 use std::os::unix::fs::PermissionsExt;
 
@@ -456,6 +456,56 @@ fn cli_replays_policy_denial_trace_against_real_daemon() -> Result<()> {
 }
 
 #[test]
+fn cli_replays_panic_stop_trace_against_real_daemon() -> Result<()> {
+    let daemon = DaemonFixture::start()?;
+    let trace_path = workspace_root().join("examples/traces/panic-stop-smoke.json");
+    let trace: ReplayTrace = serde_json::from_str(
+        &fs::read_to_string(&trace_path).context("read checked-in panic-stop trace fixture")?,
+    )
+    .context("parse checked-in panic-stop trace fixture")?;
+    assert_eq!(trace.version, 1);
+    assert!(trace.steps.iter().all(|step| !step.expect_json.is_empty()));
+
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let report = daemon.cli_value(&["trace", "replay", "--file", &trace_arg])?;
+    assert_eq!(report["type"], "trace_replay");
+    assert_eq!(report["trace_version"], 1);
+    assert_eq!(
+        report["steps"]
+            .as_array()
+            .context("trace report steps are an array")?
+            .len(),
+        trace.steps.len()
+    );
+    assert_eq!(report["steps"][0]["method"], "panic_stop_status");
+    assert_eq!(report["steps"][1]["method"], "set_panic_stop");
+    assert_eq!(report["steps"][2]["method"], "panic_stop_status");
+    assert_eq!(report["steps"][3]["method"], "set_panic_stop");
+    assert_eq!(report["steps"][4]["method"], "panic_stop_status");
+    assert!(
+        report["steps"]
+            .as_array()
+            .context("trace report steps are an array")?
+            .iter()
+            .all(|step| step["response_type"] == "panic_stop" && step["ok"] == true)
+    );
+
+    let final_status = daemon.cli_json(&["panic-stop", "status"])?;
+    let DaemonResponse::PanicStop(PanicStopStatus { enabled, .. }) = final_status else {
+        bail!("expected panic-stop response, got {final_status:?}");
+    };
+    assert!(!enabled);
+
+    let journal = daemon.cli_json(&["journal", "tail", "--limit", "10"])?;
+    let DaemonResponse::Journal(entries) = journal else {
+        bail!("expected journal response, got {journal:?}");
+    };
+    assert_methods(&entries, &["panic_stop_status", "set_panic_stop"]);
+    assert!(entries.iter().all(|entry| entry.ok));
+    Ok(())
+}
+
+#[test]
 fn cli_validates_trace_without_daemon() -> Result<()> {
     let trace_path = workspace_root().join("examples/traces/status-smoke.json");
     let trace_arg = trace_path.to_string_lossy().into_owned();
@@ -508,6 +558,27 @@ fn cli_validates_policy_denial_trace_expectations() -> Result<()> {
 }
 
 #[test]
+fn cli_validates_panic_stop_trace_json_expectations() -> Result<()> {
+    let trace_path = workspace_root().join("examples/traces/panic-stop-smoke.json");
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+        .args(["trace", "validate", "--file", &trace_arg])
+        .output()
+        .context("run plasma-pilot-cli trace validate")?;
+    require_success(&["trace", "validate"], &output)?;
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("parse trace validation report")?;
+    assert_eq!(report["type"], "trace_validation");
+    assert_eq!(report["step_count"], 5);
+    assert_eq!(report["steps"][0]["method"], "panic_stop_status");
+    assert_eq!(report["steps"][0]["expect_json_count"], 1);
+    assert_eq!(report["steps"][1]["method"], "set_panic_stop");
+    assert_eq!(report["steps"][1]["expect_json_count"], 1);
+    Ok(())
+}
+
+#[test]
 fn cli_validate_rejects_unknown_expected_response_type() -> Result<()> {
     let root = unique_temp_dir();
     fs::create_dir_all(&root).context("create integration temp dir")?;
@@ -521,6 +592,7 @@ fn cli_validate_rejects_unknown_expected_response_type() -> Result<()> {
             expect_response_type: Some("bogus".to_string()),
             expect_ok: Some(true),
             expect_error_contains: None,
+            expect_json: Vec::new(),
         }],
     };
     fs::write(
@@ -565,6 +637,7 @@ fn cli_validate_rejects_contradictory_error_expectations() -> Result<()> {
             expect_response_type: Some("health".to_string()),
             expect_ok: None,
             expect_error_contains: Some("policy prompt required".to_string()),
+            expect_json: Vec::new(),
         }],
     };
     fs::write(
@@ -602,6 +675,7 @@ fn cli_validate_rejects_contradictory_error_expectations() -> Result<()> {
             expect_response_type: Some("error".to_string()),
             expect_ok: Some(true),
             expect_error_contains: Some("policy prompt required".to_string()),
+            expect_json: Vec::new(),
         }],
     };
     fs::write(
@@ -639,6 +713,7 @@ fn cli_validate_rejects_contradictory_error_expectations() -> Result<()> {
             expect_response_type: Some("error".to_string()),
             expect_ok: Some(false),
             expect_error_contains: Some("   ".to_string()),
+            expect_json: Vec::new(),
         }],
     };
     fs::write(
@@ -669,6 +744,53 @@ fn cli_validate_rejects_contradictory_error_expectations() -> Result<()> {
 }
 
 #[test]
+fn cli_validate_rejects_invalid_json_expectation_pointer() -> Result<()> {
+    let root = unique_temp_dir();
+    fs::create_dir_all(&root).context("create integration temp dir")?;
+    let trace_path = root.join("bad-json-pointer-trace.json");
+    let trace = ReplayTrace {
+        version: 1,
+        description: Some("invalid JSON expectation pointer trace".to_string()),
+        steps: vec![TraceStep {
+            label: Some("bad-pointer".to_string()),
+            request: DaemonRequest::PanicStopStatus,
+            expect_response_type: Some("panic_stop".to_string()),
+            expect_ok: Some(true),
+            expect_error_contains: None,
+            expect_json: vec![TraceJsonExpectation {
+                pointer: "data/enabled".to_string(),
+                equals: serde_json::json!(false),
+            }],
+        }],
+    };
+    fs::write(
+        &trace_path,
+        serde_json::to_string_pretty(&trace).context("serialize bad trace")?,
+    )
+    .context("write bad trace file")?;
+
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+        .args(["trace", "validate", "--file", &trace_arg])
+        .output()
+        .context("run plasma-pilot-cli trace validate")?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(r#"trace step 0 label="bad-pointer" method=panic_stop_status"#),
+        "stderr did not include trace step context: {stderr}"
+    );
+    assert!(
+        stderr.contains("JSON expectation pointer must start with '/'"),
+        "stderr did not include JSON pointer detail: {stderr}"
+    );
+
+    fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+#[test]
 fn cli_replay_errors_include_step_label_and_method() -> Result<()> {
     let daemon = DaemonFixture::start()?;
     let trace_path = daemon.root.join("bad-status-trace.json");
@@ -681,6 +803,7 @@ fn cli_replay_errors_include_step_label_and_method() -> Result<()> {
             expect_response_type: Some("policy_status".to_string()),
             expect_ok: Some(true),
             expect_error_contains: None,
+            expect_json: Vec::new(),
         }],
     };
     fs::write(
@@ -720,6 +843,7 @@ fn cli_replay_errors_include_step_context_for_error_expectations() -> Result<()>
             expect_response_type: Some("error".to_string()),
             expect_ok: Some(false),
             expect_error_contains: Some("full resolution".to_string()),
+            expect_json: Vec::new(),
         }],
     };
     fs::write(
@@ -740,6 +864,47 @@ fn cli_replay_errors_include_step_context_for_error_expectations() -> Result<()>
     assert!(
         stderr.contains(r#"expected error containing "full resolution""#),
         "stderr did not include error-expectation mismatch detail: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_replay_errors_include_step_context_for_json_expectations() -> Result<()> {
+    let daemon = DaemonFixture::start()?;
+    let trace_path = daemon.root.join("bad-json-expectation-trace.json");
+    let trace = ReplayTrace {
+        version: 1,
+        description: Some("intentionally mismatched JSON expectation trace".to_string()),
+        steps: vec![TraceStep {
+            label: Some("bad-panic-json".to_string()),
+            request: DaemonRequest::PanicStopStatus,
+            expect_response_type: Some("panic_stop".to_string()),
+            expect_ok: Some(true),
+            expect_error_contains: None,
+            expect_json: vec![TraceJsonExpectation {
+                pointer: "/data/enabled".to_string(),
+                equals: serde_json::json!(true),
+            }],
+        }],
+    };
+    fs::write(
+        &trace_path,
+        serde_json::to_string_pretty(&trace).context("serialize bad trace")?,
+    )
+    .context("write bad trace file")?;
+
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let output = daemon.cli_output(&["trace", "replay", "--file", &trace_arg])?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(r#"trace step 0 label="bad-panic-json" method=panic_stop_status"#),
+        "stderr did not include trace step context: {stderr}"
+    );
+    assert!(
+        stderr.contains("expected JSON pointer /data/enabled to match expected value"),
+        "stderr did not include JSON expectation mismatch detail: {stderr}"
     );
     Ok(())
 }

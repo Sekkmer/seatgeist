@@ -380,15 +380,19 @@ smoke-trace-replay:
 	journal="target/plasma-pilot-trace-smoke-journal.jsonl"
 	status_out="target/plasma-pilot-trace-status-smoke.json"
 	denial_out="target/plasma-pilot-trace-denial-smoke.json"
+	panic_out="target/plasma-pilot-trace-panic-stop-smoke.json"
 	status_validate_out="target/plasma-pilot-trace-status-validate-smoke.json"
 	denial_validate_out="target/plasma-pilot-trace-denial-validate-smoke.json"
+	panic_validate_out="target/plasma-pilot-trace-panic-stop-validate-smoke.json"
 	denied_capture="/tmp/plasma-pilot-denied-full-resolution.png"
-	rm -rf /tmp/plasma-pilot-trace-smoke "$$log" "$$journal" "$$status_out" "$$denial_out" "$$status_validate_out" "$$denial_validate_out" "$$denied_capture"
+	rm -rf /tmp/plasma-pilot-trace-smoke "$$log" "$$journal" "$$status_out" "$$denial_out" "$$panic_out" "$$status_validate_out" "$$denial_validate_out" "$$panic_validate_out" "$$denied_capture"
 	cargo build -p plasma-pilotd -p plasma-pilot-cli
 	target/debug/plasma-pilot-cli trace validate --file examples/traces/status-smoke.json >"$$status_validate_out"
 	jq -e '.type == "trace_validation" and .trace_version == 1 and .step_count == 5 and any(.steps[]; .method == "safety_status")' "$$status_validate_out" >/dev/null
 	target/debug/plasma-pilot-cli trace validate --file examples/traces/policy-denials-smoke.json >"$$denial_validate_out"
 	jq -e '.type == "trace_validation" and .trace_version == 1 and .step_count == 3 and all(.steps[]; .expect_response_type == "error" and .expect_ok == false and (.expect_error_contains | type == "string"))' "$$denial_validate_out" >/dev/null
+	target/debug/plasma-pilot-cli trace validate --file examples/traces/panic-stop-smoke.json >"$$panic_validate_out"
+	jq -e '.type == "trace_validation" and .trace_version == 1 and .step_count == 5 and all(.steps[]; .expect_json_count == 1)' "$$panic_validate_out" >/dev/null
 	target/debug/plasma-pilotd --socket "$$socket" --journal "$$journal" >"$$log" 2>&1 &
 	pid=$$!
 	cleanup() {
@@ -412,8 +416,11 @@ smoke-trace-replay:
 	target/debug/plasma-pilot-cli --socket "$$socket" trace replay --file examples/traces/policy-denials-smoke.json >"$$denial_out"
 	jq -e '.type == "trace_replay" and .trace_version == 1 and (.steps | length) == 3 and all(.steps[]; .response_type == "error" and .ok == false) and any(.steps[]; .method == "focus_window")' "$$denial_out" >/dev/null
 	test ! -e "$$denied_capture"
+	target/debug/plasma-pilot-cli --socket "$$socket" trace replay --file examples/traces/panic-stop-smoke.json >"$$panic_out"
+	jq -e '.type == "trace_replay" and .trace_version == 1 and (.steps | length) == 5 and all(.steps[]; .response_type == "panic_stop" and .ok == true) and any(.steps[]; .method == "set_panic_stop")' "$$panic_out" >/dev/null
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 --method safety_status --ok true | jq -e '.type == "journal" and (.data | length) >= 1' >/dev/null
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 --ok false | jq -e '.type == "journal" and (.data | length) >= 3' >/dev/null
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 --method set_panic_stop --ok true | jq -e '.type == "journal" and (.data | length) >= 2' >/dev/null
 
 smoke-gui-input:
 	scripts/gui-input-smoke.sh text-editor

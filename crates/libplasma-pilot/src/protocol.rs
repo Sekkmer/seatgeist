@@ -242,6 +242,14 @@ pub struct TraceStep {
     pub expect_response_type: Option<String>,
     pub expect_ok: Option<bool>,
     pub expect_error_contains: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expect_json: Vec<TraceJsonExpectation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraceJsonExpectation {
+    pub pointer: String,
+    pub equals: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1361,6 +1369,10 @@ mod tests {
                     expect_response_type: Some("health".to_string()),
                     expect_ok: Some(true),
                     expect_error_contains: None,
+                    expect_json: vec![TraceJsonExpectation {
+                        pointer: "/type".to_string(),
+                        equals: serde_json::json!("health"),
+                    }],
                 },
                 TraceStep {
                     label: Some("policy".to_string()),
@@ -1368,6 +1380,7 @@ mod tests {
                     expect_response_type: Some("policy_status".to_string()),
                     expect_ok: Some(true),
                     expect_error_contains: None,
+                    expect_json: Vec::new(),
                 },
             ],
         };
@@ -1375,6 +1388,7 @@ mod tests {
         let encoded = serde_json::to_string(&trace).expect("trace serializes");
         assert!(encoded.contains(r#""version":1"#));
         assert!(encoded.contains(r#""method":"health""#));
+        assert!(encoded.contains(r#""pointer":"/type""#));
         let decoded: ReplayTrace = serde_json::from_str(&encoded).expect("trace deserializes");
         assert_eq!(decoded, trace);
     }
