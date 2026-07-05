@@ -130,6 +130,106 @@ pub enum LibeiEventSnapshot {
     },
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EisRuntimeState {
+    connected: bool,
+    seat_capabilities: Vec<EisCapability>,
+    bound_capabilities: Vec<EisCapability>,
+    devices: Vec<EisDeviceInfo>,
+}
+
+impl EisRuntimeState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn connected(&self) -> bool {
+        self.connected
+    }
+
+    pub fn seat_capabilities(&self) -> &[EisCapability] {
+        &self.seat_capabilities
+    }
+
+    pub fn bound_capabilities(&self) -> &[EisCapability] {
+        &self.bound_capabilities
+    }
+
+    pub fn devices(&self) -> &[EisDeviceInfo] {
+        &self.devices
+    }
+
+    pub fn apply_snapshots<'a>(
+        &mut self,
+        snapshots: impl IntoIterator<Item = &'a LibeiEventSnapshot>,
+    ) {
+        for snapshot in snapshots {
+            self.apply_snapshot(snapshot);
+        }
+    }
+
+    pub fn apply_snapshot(&mut self, snapshot: &LibeiEventSnapshot) {
+        match snapshot {
+            LibeiEventSnapshot::Connect => self.connected = true,
+            LibeiEventSnapshot::Disconnect => self.clear_connection(),
+            LibeiEventSnapshot::SeatAdded {
+                capabilities,
+                bound_capabilities,
+            } => {
+                self.seat_capabilities = capabilities.clone();
+                self.bound_capabilities = bound_capabilities.clone();
+            }
+            LibeiEventSnapshot::SeatRemoved => {
+                self.seat_capabilities.clear();
+                self.bound_capabilities.clear();
+                self.devices.clear();
+            }
+            LibeiEventSnapshot::DeviceAdded(device) | LibeiEventSnapshot::DeviceResumed(device) => {
+                self.upsert_device(device.clone());
+            }
+            LibeiEventSnapshot::DevicePaused { device_id } => {
+                if let Some(device) = self
+                    .devices
+                    .iter_mut()
+                    .find(|device| device.id == *device_id)
+                {
+                    device.resumed = false;
+                }
+            }
+            LibeiEventSnapshot::DeviceRemoved { device_id } => {
+                self.devices.retain(|device| device.id != *device_id);
+            }
+            LibeiEventSnapshot::Other { .. } => {}
+        }
+    }
+
+    pub fn select_device_for_plan(
+        &self,
+        plan: &EisActionPlan,
+    ) -> std::result::Result<EisDeviceSelection, EisDeviceSelectionError> {
+        select_resumed_device_for_plan(plan, &self.devices)
+    }
+
+    fn clear_connection(&mut self) {
+        self.connected = false;
+        self.seat_capabilities.clear();
+        self.bound_capabilities.clear();
+        self.devices.clear();
+    }
+
+    fn upsert_device(&mut self, device: EisDeviceInfo) {
+        if let Some(existing) = self
+            .devices
+            .iter_mut()
+            .find(|existing| existing.id == device.id)
+        {
+            *existing = device;
+            return;
+        }
+        self.devices.push(device);
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum LibeiConnectionError {
     #[error("libei client name contains an interior NUL byte")]
@@ -1101,6 +1201,132 @@ mod tests {
                 &[EisCapability::Text],
             ),
             Vec::<EisCapability>::new()
+        );
+    }
+
+    #[test]
+    fn runtime_state_tracks_seat_bindings_and_selects_resumed_devices() {
+        let text_plan = plan_text_utf8(1, "hello").expect("text plan");
+        let mut state = EisRuntimeState::new();
+
+        state.apply_snapshots(
+            [
+                LibeiEventSnapshot::Connect,
+                LibeiEventSnapshot::SeatAdded {
+                    capabilities: vec![EisCapability::Text, EisCapability::Button],
+                    bound_capabilities: vec![EisCapability::Text],
+                },
+                LibeiEventSnapshot::DeviceAdded(device(
+                    "text",
+                    false,
+                    vec![EisCapability::Text],
+                    vec![],
+                )),
+                LibeiEventSnapshot::DeviceResumed(device(
+                    "text",
+                    true,
+                    vec![EisCapability::Text],
+                    vec![],
+                )),
+            ]
+            .iter(),
+        );
+
+        assert!(state.connected());
+        assert_eq!(
+            state.seat_capabilities(),
+            &[EisCapability::Text, EisCapability::Button]
+        );
+        assert_eq!(state.bound_capabilities(), &[EisCapability::Text]);
+        assert_eq!(state.devices().len(), 1);
+        assert!(state.devices()[0].resumed);
+        assert_eq!(
+            state.select_device_for_plan(&text_plan).expect("selection"),
+            EisDeviceSelection {
+                device_id: "text".to_string(),
+                device_name: Some("device text".to_string()),
+                matched_region: None,
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_state_applies_pause_remove_and_disconnect_events() {
+        let text_plan = plan_text_utf8(1, "hello").expect("text plan");
+        let mut state = EisRuntimeState::new();
+        state.apply_snapshots(
+            [
+                LibeiEventSnapshot::Connect,
+                LibeiEventSnapshot::SeatAdded {
+                    capabilities: vec![EisCapability::Text],
+                    bound_capabilities: vec![EisCapability::Text],
+                },
+                LibeiEventSnapshot::DeviceResumed(device(
+                    "text",
+                    true,
+                    vec![EisCapability::Text],
+                    vec![],
+                )),
+                LibeiEventSnapshot::DevicePaused {
+                    device_id: "text".to_string(),
+                },
+            ]
+            .iter(),
+        );
+
+        assert_eq!(
+            state.select_device_for_plan(&text_plan),
+            Err(EisDeviceSelectionError::NoCapableResumedDevice)
+        );
+        assert!(!state.devices()[0].resumed);
+
+        state.apply_snapshot(&LibeiEventSnapshot::DeviceRemoved {
+            device_id: "text".to_string(),
+        });
+        assert!(state.devices().is_empty());
+
+        state.apply_snapshot(&LibeiEventSnapshot::DeviceResumed(device(
+            "text",
+            true,
+            vec![EisCapability::Text],
+            vec![],
+        )));
+        state.apply_snapshot(&LibeiEventSnapshot::Disconnect);
+        assert!(!state.connected());
+        assert!(state.seat_capabilities().is_empty());
+        assert!(state.bound_capabilities().is_empty());
+        assert!(state.devices().is_empty());
+    }
+
+    #[test]
+    fn runtime_state_keeps_absolute_pointer_region_selection() {
+        let plan = plan_pointer_click_absolute(1, point(75.0, 80.0), PointerButton::Left, 1)
+            .expect("click plan");
+        let mut state = EisRuntimeState::new();
+        state.apply_snapshots(
+            [
+                LibeiEventSnapshot::Connect,
+                LibeiEventSnapshot::SeatAdded {
+                    capabilities: vec![EisCapability::PointerAbsolute, EisCapability::Button],
+                    bound_capabilities: vec![EisCapability::PointerAbsolute, EisCapability::Button],
+                },
+                LibeiEventSnapshot::DeviceResumed(device(
+                    "pointer",
+                    true,
+                    vec![EisCapability::PointerAbsolute, EisCapability::Button],
+                    vec![region(50.0, 50.0, 100.0, 100.0)],
+                )),
+            ]
+            .iter(),
+        );
+
+        assert_eq!(
+            state.select_device_for_plan(&plan).expect("selection"),
+            EisDeviceSelection {
+                device_id: "pointer".to_string(),
+                device_name: Some("device pointer".to_string()),
+                matched_region: Some(region(50.0, 50.0, 100.0, 100.0)),
+            }
         );
     }
 
