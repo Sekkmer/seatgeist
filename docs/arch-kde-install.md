@@ -129,6 +129,7 @@ The matching safe smoke targets are:
 
 ```bash
 make smoke
+make validate-install-assets
 make validate-traces
 make smoke-trace-replay
 make smoke-mcp
