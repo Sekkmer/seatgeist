@@ -1792,23 +1792,107 @@ async fn remote_desktop_eis_probe(
         });
     };
 
-    let plasma_pilot_portal::PortalRemoteDesktopEisSession { session_start, eis } = session;
-    drop(eis.fd);
+    let mut session = DaemonPortalEisSession::from_portal_session(session)
+        .context("initialize transient daemon EIS runtime")?;
+    let metadata = session.metadata().clone();
+    let _snapshots = session.dispatch_pending();
+    drop(session);
+
     Ok(RemoteDesktopEisProbe {
         started: true,
         eis_connected: true,
         requested_devices,
-        selected_devices: remote_desktop_device_names(session_start.start.devices),
-        clipboard_enabled: session_start.start.clipboard_enabled,
-        restore_token: session_start.start.restore_token,
-        session_handle: Some(eis.session_handle),
-        create_request_path: Some(session_start.create_request_path),
-        select_request_path: Some(session_start.select_request_path),
-        start_request_path: Some(session_start.start_request_path),
+        selected_devices: metadata.selected_devices,
+        clipboard_enabled: metadata.clipboard_enabled,
+        restore_token: metadata.restore_token,
+        session_handle: Some(metadata.session_handle),
+        create_request_path: Some(metadata.create_request_path),
+        select_request_path: Some(metadata.select_request_path),
+        start_request_path: Some(metadata.start_request_path),
         eis_fd_closed: true,
         transient_session_closed: true,
-        setup_hint: "transient portal RemoteDesktop session reached Start, connected to EIS, closed the EIS FD, and sent no input".to_string(),
+        setup_hint: "transient portal RemoteDesktop session reached Start, initialized a daemon EIS runtime, polled pending events, closed the EIS FD, and sent no input".to_string(),
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DaemonPortalEisSessionMetadata {
+    selected_devices: Vec<String>,
+    clipboard_enabled: bool,
+    restore_token: Option<String>,
+    session_handle: String,
+    create_request_path: String,
+    select_request_path: String,
+    start_request_path: String,
+}
+
+struct DaemonPortalEisSession<S = plasma_pilot_eis::LibeiSenderContext> {
+    metadata: DaemonPortalEisSessionMetadata,
+    runtime: plasma_pilot_eis::EisSessionRuntime<S>,
+}
+
+impl DaemonPortalEisSession<plasma_pilot_eis::LibeiSenderContext> {
+    fn from_portal_session(
+        session: plasma_pilot_portal::PortalRemoteDesktopEisSession,
+    ) -> Result<Self> {
+        let plasma_pilot_portal::PortalRemoteDesktopEisSession { session_start, eis } = session;
+        let metadata =
+            DaemonPortalEisSessionMetadata::from_session_start(&session_start, eis.session_handle);
+        let runtime = plasma_pilot_eis::EisSessionRuntime::from_owned_fd(eis.fd, "PlasmaPilot")
+            .map_err(|err| anyhow::anyhow!(err))?;
+        Ok(Self { metadata, runtime })
+    }
+}
+
+impl DaemonPortalEisSessionMetadata {
+    fn from_session_start(
+        session_start: &plasma_pilot_portal::PortalRemoteDesktopSessionStart,
+        session_handle: String,
+    ) -> Self {
+        Self {
+            selected_devices: remote_desktop_device_names(session_start.start.devices),
+            clipboard_enabled: session_start.start.clipboard_enabled,
+            restore_token: session_start.start.restore_token.clone(),
+            session_handle,
+            create_request_path: session_start.create_request_path.clone(),
+            select_request_path: session_start.select_request_path.clone(),
+            start_request_path: session_start.start_request_path.clone(),
+        }
+    }
+}
+
+impl<S: plasma_pilot_eis::EisEventSource> DaemonPortalEisSession<S> {
+    #[cfg(test)]
+    fn from_runtime(
+        session_start: plasma_pilot_portal::PortalRemoteDesktopSessionStart,
+        session_handle: String,
+        runtime: plasma_pilot_eis::EisSessionRuntime<S>,
+    ) -> Self {
+        let metadata =
+            DaemonPortalEisSessionMetadata::from_session_start(&session_start, session_handle);
+        Self { metadata, runtime }
+    }
+
+    fn metadata(&self) -> &DaemonPortalEisSessionMetadata {
+        &self.metadata
+    }
+
+    #[cfg(test)]
+    fn state(&self) -> &plasma_pilot_eis::EisRuntimeState {
+        self.runtime.state()
+    }
+
+    fn dispatch_pending(&mut self) -> Vec<plasma_pilot_eis::LibeiEventSnapshot> {
+        self.runtime.dispatch_pending()
+    }
+
+    #[cfg(test)]
+    fn refresh_for_plan(
+        &mut self,
+        plan: &plasma_pilot_eis::EisActionPlan,
+    ) -> plasma_pilot_eis::EisPlanReadiness {
+        self.runtime.refresh_for_plan(plan)
+    }
 }
 
 fn remote_desktop_probe_setup(
@@ -5940,6 +6024,41 @@ fn validate_peer_uid(stream: &UnixStream) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::RawFd;
+
+    #[derive(Default)]
+    struct MockEisSource {
+        event_fd: RawFd,
+        pending_batches: VecDeque<Vec<plasma_pilot_eis::LibeiEventSnapshot>>,
+        plan_batches: VecDeque<Vec<plasma_pilot_eis::LibeiEventSnapshot>>,
+    }
+
+    impl MockEisSource {
+        fn push_pending(&mut self, snapshots: Vec<plasma_pilot_eis::LibeiEventSnapshot>) {
+            self.pending_batches.push_back(snapshots);
+        }
+
+        fn push_plan(&mut self, snapshots: Vec<plasma_pilot_eis::LibeiEventSnapshot>) {
+            self.plan_batches.push_back(snapshots);
+        }
+    }
+
+    impl plasma_pilot_eis::EisEventSource for MockEisSource {
+        fn event_fd(&self) -> RawFd {
+            self.event_fd
+        }
+
+        fn dispatch_pending(&mut self) -> Vec<plasma_pilot_eis::LibeiEventSnapshot> {
+            self.pending_batches.pop_front().unwrap_or_default()
+        }
+
+        fn dispatch_pending_for_plan(
+            &mut self,
+            _plan: &plasma_pilot_eis::EisActionPlan,
+        ) -> Vec<plasma_pilot_eis::LibeiEventSnapshot> {
+            self.plan_batches.pop_front().unwrap_or_default()
+        }
+    }
 
     #[test]
     fn active_window_state_accepts_kwin_payload() {
@@ -7454,6 +7573,97 @@ height = 40
         assert_eq!(
             remote_desktop_probe_timeout(30_000).expect("valid timeout"),
             Duration::from_secs(30)
+        );
+    }
+
+    fn portal_session_start_fixture() -> plasma_pilot_portal::PortalRemoteDesktopSessionStart {
+        plasma_pilot_portal::PortalRemoteDesktopSessionStart {
+            create_request_path: "/org/freedesktop/portal/desktop/request/1/create".to_string(),
+            select_request_path: "/org/freedesktop/portal/desktop/request/1/select".to_string(),
+            start_request_path: "/org/freedesktop/portal/desktop/request/1/start".to_string(),
+            session: plasma_pilot_portal::PortalRemoteDesktopSession {
+                expected_session_path: "/org/freedesktop/portal/desktop/session/1/session"
+                    .to_string(),
+                actual_session_path: "/org/freedesktop/portal/desktop/session/1/session"
+                    .to_string(),
+            },
+            start: plasma_pilot_portal::PortalRemoteDesktopStart {
+                devices: plasma_pilot_portal::RemoteDesktopDeviceTypes::keyboard_pointer(),
+                clipboard_enabled: true,
+                restore_token: Some("restore-token".to_string()),
+            },
+        }
+    }
+
+    #[test]
+    fn daemon_portal_eis_session_preserves_metadata_and_updates_state() {
+        let mut source = MockEisSource::default();
+        source.push_pending(vec![
+            plasma_pilot_eis::LibeiEventSnapshot::Connect,
+            plasma_pilot_eis::LibeiEventSnapshot::SeatAdded {
+                capabilities: vec![plasma_pilot_eis::EisCapability::Text],
+                bound_capabilities: vec![plasma_pilot_eis::EisCapability::Text],
+            },
+        ]);
+        let runtime = plasma_pilot_eis::EisSessionRuntime::new(source);
+        let mut session = DaemonPortalEisSession::from_runtime(
+            portal_session_start_fixture(),
+            "/org/freedesktop/portal/desktop/session/1/session".to_string(),
+            runtime,
+        );
+
+        assert_eq!(
+            session.metadata(),
+            &DaemonPortalEisSessionMetadata {
+                selected_devices: vec!["keyboard".to_string(), "pointer".to_string()],
+                clipboard_enabled: true,
+                restore_token: Some("restore-token".to_string()),
+                session_handle: "/org/freedesktop/portal/desktop/session/1/session".to_string(),
+                create_request_path: "/org/freedesktop/portal/desktop/request/1/create".to_string(),
+                select_request_path: "/org/freedesktop/portal/desktop/request/1/select".to_string(),
+                start_request_path: "/org/freedesktop/portal/desktop/request/1/start".to_string(),
+            }
+        );
+
+        let snapshots = session.dispatch_pending();
+        assert_eq!(snapshots.len(), 2);
+        assert!(session.state().connected());
+        assert_eq!(
+            session.state().bound_capabilities(),
+            &[plasma_pilot_eis::EisCapability::Text]
+        );
+    }
+
+    #[test]
+    fn daemon_portal_eis_session_reports_plan_readiness() {
+        let plan = plasma_pilot_eis::plan_text_utf8(1, "hello").expect("text plan");
+        let mut source = MockEisSource::default();
+        source.push_plan(vec![plasma_pilot_eis::LibeiEventSnapshot::DeviceResumed(
+            plasma_pilot_eis::EisDeviceInfo {
+                id: "text-device".to_string(),
+                name: Some("Text Device".to_string()),
+                kind: plasma_pilot_eis::EisDeviceKind::Virtual,
+                resumed: true,
+                capabilities: vec![plasma_pilot_eis::EisCapability::Text],
+                regions: Vec::new(),
+            },
+        )]);
+        let runtime = plasma_pilot_eis::EisSessionRuntime::new(source);
+        let mut session = DaemonPortalEisSession::from_runtime(
+            portal_session_start_fixture(),
+            "/org/freedesktop/portal/desktop/session/1/session".to_string(),
+            runtime,
+        );
+
+        let readiness = session.refresh_for_plan(&plan);
+
+        assert_eq!(
+            readiness.selection.expect("selection"),
+            plasma_pilot_eis::EisDeviceSelection {
+                device_id: "text-device".to_string(),
+                device_name: Some("Text Device".to_string()),
+                matched_region: None,
+            }
         );
     }
 
