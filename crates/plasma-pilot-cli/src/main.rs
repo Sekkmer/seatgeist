@@ -2105,12 +2105,19 @@ fn replay_trace_steps(socket: &PathBuf, trace: &ReplayTrace) -> Result<Vec<serde
             }
         }
 
+        let error_kind = match &response {
+            DaemonResponse::Error { kind, .. } => {
+                Some(serde_json::to_value(kind).context("serialize daemon error kind for trace")?)
+            }
+            _ => None,
+        };
         results.push(serde_json::json!({
             "index": index,
             "label": step.label,
             "method": step.request.method_name(),
             "response_type": response_type,
             "ok": ok,
+            "error_kind": error_kind,
         }));
     }
     Ok(results)

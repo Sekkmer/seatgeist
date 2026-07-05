@@ -8,10 +8,11 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use libplasma_pilot::{
-    BackendCapability, CapabilitySet, ClipboardGetRequest, DaemonRequest, DaemonResponse,
-    DesktopSessionStatus, HealthStatus, JournalEntry, PanicStopStatus, PolicyStatus,
-    RemoteDesktopEisSessionStatus, ReplayTrace, SafetyStatus, ToolApprovalLevel,
-    TraceJsonExpectation, TraceStep, UinputStatus,
+    AccessibilityTextAttributesRequest, BackendCapability, CapabilitySet, ClipboardGetRequest,
+    DaemonRequest, DaemonResponse, DesktopSessionStatus, HealthStatus, JournalEntry,
+    PanicStopStatus, PolicyStatus, RemoteDesktopEisSessionStatus, RemoteDesktopSessionProbeRequest,
+    ReplayTrace, SafetyStatus, ToolApprovalLevel, TraceJsonExpectation, TraceStep, TypeTextRequest,
+    UinputStatus,
 };
 use std::os::unix::fs::PermissionsExt;
 
@@ -48,28 +49,47 @@ impl DaemonFixture {
     }
 
     fn start_with_config(config_contents: &str) -> Result<Self> {
+        Self::start_with_config_and_env(config_contents, &[])
+    }
+
+    fn start_with_config_and_env(
+        config_contents: &str,
+        env_overrides: &[(&str, &str)],
+    ) -> Result<Self> {
         let root = unique_temp_dir();
         fs::create_dir_all(&root).context("create integration temp dir")?;
         let socket = root.join("configured.sock");
         let journal = root.join("configured-journal.jsonl");
         let panic_stop = root.join("configured-panic-stop");
         let config = root.join("config.toml");
+        let empty_bin = root.join("empty-bin");
+        fs::create_dir_all(&empty_bin).context("create empty PATH fixture")?;
         fs::write(
             &config,
             config_contents
+                .replace("__ROOT__", &root.display().to_string())
+                .replace("__EMPTY_BIN__", &empty_bin.display().to_string())
                 .replace("__SOCKET__", &socket.display().to_string())
                 .replace("__JOURNAL__", &journal.display().to_string())
                 .replace("__PANIC_STOP__", &panic_stop.display().to_string()),
         )
         .context("write daemon config fixture")?;
 
-        let child = Command::new(daemon_binary()?)
+        let mut command = Command::new(daemon_binary()?);
+        command
             .arg("--config")
             .arg(&config)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("spawn configured plasma-pilotd")?;
+            .stderr(Stdio::null());
+        for (key, value) in env_overrides {
+            command.env(
+                key,
+                value
+                    .replace("__ROOT__", &root.display().to_string())
+                    .replace("__EMPTY_BIN__", &empty_bin.display().to_string()),
+            );
+        }
+        let child = command.spawn().context("spawn configured plasma-pilotd")?;
         wait_for_socket(&socket)?;
         Ok(Self {
             child,
@@ -107,6 +127,17 @@ impl DaemonFixture {
             .args(args)
             .output()
             .with_context(|| format!("run plasma-pilot-cli {}", args.join(" ")))
+    }
+
+    fn replay_trace_value(&self, name: &str, trace: &ReplayTrace) -> Result<serde_json::Value> {
+        let trace_path = self.root.join(name);
+        fs::write(
+            &trace_path,
+            serde_json::to_string_pretty(trace).context("serialize replay trace fixture")?,
+        )
+        .context("write replay trace fixture")?;
+        let trace_arg = trace_path.to_string_lossy().into_owned();
+        self.cli_value(&["trace", "replay", "--file", &trace_arg])
     }
 }
 
@@ -530,7 +561,9 @@ fn cli_replays_policy_denial_trace_against_real_daemon() -> Result<()> {
             .as_array()
             .context("trace report steps are an array")?
             .iter()
-            .all(|step| step["response_type"] == "error" && step["ok"] == false)
+            .all(|step| step["response_type"] == "error"
+                && step["ok"] == false
+                && step["error_kind"] == "policy_prompt_required")
     );
     assert_eq!(report["steps"][0]["method"], "screenshot");
     assert_eq!(report["steps"][1]["method"], "clipboard_get");
@@ -576,11 +609,9 @@ fn cli_replays_input_denial_trace_against_real_daemon() -> Result<()> {
         .as_array()
         .context("trace report steps are an array")?;
     assert_eq!(steps.len(), trace.steps.len());
-    assert!(
-        steps
-            .iter()
-            .all(|step| step["response_type"] == "error" && step["ok"] == false)
-    );
+    assert!(steps.iter().all(|step| step["response_type"] == "error"
+        && step["ok"] == false
+        && step["error_kind"] == "policy_prompt_required"));
     assert_eq!(steps[0]["method"], "type_text");
     assert_eq!(steps[1]["method"], "key_combo");
     assert_eq!(steps[2]["method"], "move_pointer");
@@ -605,6 +636,144 @@ fn cli_replays_input_denial_trace_against_real_daemon() -> Result<()> {
     );
     assert!(entries.iter().all(|entry| !entry.ok));
     assert!(entries.iter().all(|entry| entry.summary.contains("policy")));
+    Ok(())
+}
+
+#[test]
+fn cli_replays_configured_denial_kind_traces_against_real_daemons() -> Result<()> {
+    let focus_guard = DaemonFixture::start_with_config(
+        r#"
+[daemon]
+socket = "__SOCKET__"
+journal = "__JOURNAL__"
+panic_stop_file = "__PANIC_STOP__"
+
+[policy]
+default_control = "allow"
+
+[safety]
+require_focus_guard = true
+"#,
+    )?;
+    assert_error_kind_trace(
+        &focus_guard,
+        "focus-guard-kind.json",
+        "focus-guard-kind",
+        DaemonRequest::TypeText(TypeTextRequest {
+            text: "blocked-before-input".to_string(),
+            guard: None,
+        }),
+        "focus_guard",
+        "focus guard is required",
+    )?;
+
+    let human_pause = DaemonFixture::start_with_config(
+        r#"
+[daemon]
+socket = "__SOCKET__"
+journal = "__JOURNAL__"
+panic_stop_file = "__PANIC_STOP__"
+
+[policy]
+default_control = "allow"
+
+[safety]
+require_focus_guard = false
+pause_on_human_input = true
+human_input_activity_file = "__ROOT__/human-input-active"
+human_input_quiet_ms = 60000
+"#,
+    )?;
+    fs::write(human_pause.root.join("human-input-active"), "activity")
+        .context("write fresh human input activity signal")?;
+    assert_error_kind_trace(
+        &human_pause,
+        "human-input-pause-kind.json",
+        "human-input-pause-kind",
+        DaemonRequest::TypeText(TypeTextRequest {
+            text: "blocked-before-input".to_string(),
+            guard: None,
+        }),
+        "human_input_pause",
+        "human input activity signal is fresh",
+    )?;
+
+    let app_policy = DaemonFixture::start_with_config(
+        r#"
+[daemon]
+socket = "__SOCKET__"
+journal = "__JOURNAL__"
+panic_stop_file = "__PANIC_STOP__"
+
+[policy]
+default_control = "allow"
+
+[apps]
+allow = ["org.kde.kate"]
+
+[safety]
+require_focus_guard = false
+"#,
+    )?;
+    assert_error_kind_trace(
+        &app_policy,
+        "app-policy-kind.json",
+        "app-policy-kind",
+        DaemonRequest::TypeText(TypeTextRequest {
+            text: "blocked-before-input".to_string(),
+            guard: None,
+        }),
+        "app_denied",
+        "app policy could not read active window",
+    )?;
+
+    let portal_unavailable = DaemonFixture::start_with_config_and_env(
+        r#"
+[daemon]
+socket = "__SOCKET__"
+journal = "__JOURNAL__"
+panic_stop_file = "__PANIC_STOP__"
+
+[policy]
+default_control = "allow"
+
+[safety]
+require_focus_guard = false
+"#,
+        &[("PATH", "__EMPTY_BIN__")],
+    )?;
+    assert_error_kind_trace(
+        &portal_unavailable,
+        "portal-unavailable-kind.json",
+        "portal-unavailable-kind",
+        DaemonRequest::RemoteDesktopSessionProbe(RemoteDesktopSessionProbeRequest {
+            keyboard: true,
+            pointer: true,
+            touchscreen: false,
+            restore_token: None,
+            persist_mode: None,
+            parent_window: None,
+            timeout_ms: 1000,
+            guard: None,
+        }),
+        "portal_unavailable",
+        "xdg-desktop-portal RemoteDesktop is not available",
+    )?;
+
+    let accessibility = DaemonFixture::start()?;
+    assert_error_kind_trace(
+        &accessibility,
+        "accessibility-unavailable-kind.json",
+        "accessibility-unavailable-kind",
+        DaemonRequest::AccessibilityTextAttributes(AccessibilityTextAttributesRequest {
+            node_id: "invalid-atspi-node".to_string(),
+            offset: 0,
+            include_defaults: false,
+        }),
+        "accessibility_unavailable",
+        "invalid AT-SPI node id",
+    )?;
+
     Ok(())
 }
 
@@ -717,9 +886,11 @@ fn cli_replays_trace_directory_against_real_daemon() -> Result<()> {
                 .as_str()
                 .is_some_and(|path| path.ends_with("policy-denials-smoke.json"))
                 && trace["steps"].as_array().is_some_and(|steps| {
-                    steps
-                        .iter()
-                        .all(|step| step["response_type"] == "error" && step["ok"] == false)
+                    steps.iter().all(|step| {
+                        step["response_type"] == "error"
+                            && step["ok"] == false
+                            && step["error_kind"] == "policy_prompt_required"
+                    })
                 })
         }),
         "policy denial replay trace did not report fail-closed steps: {traces:?}"
@@ -731,9 +902,11 @@ fn cli_replays_trace_directory_against_real_daemon() -> Result<()> {
                 .is_some_and(|path| path.ends_with("input-denials-smoke.json"))
                 && trace["steps"].as_array().is_some_and(|steps| {
                     steps.len() == 9
-                        && steps
-                            .iter()
-                            .all(|step| step["response_type"] == "error" && step["ok"] == false)
+                        && steps.iter().all(|step| {
+                            step["response_type"] == "error"
+                                && step["ok"] == false
+                                && step["error_kind"] == "policy_prompt_required"
+                        })
                         && steps.iter().any(|step| step["method"] == "type_text")
                         && steps.iter().any(|step| step["method"] == "click_pointer")
                         && steps
@@ -1768,6 +1941,42 @@ fn assert_methods(entries: &[JournalEntry], expected: &[&str]) {
             "journal missing method {expected_method}; got {methods:?}"
         );
     }
+}
+
+fn assert_error_kind_trace(
+    daemon: &DaemonFixture,
+    file_name: &str,
+    label: &str,
+    request: DaemonRequest,
+    expected_kind: &str,
+    expected_message: &str,
+) -> Result<()> {
+    let trace = ReplayTrace {
+        version: 1,
+        description: Some(format!("{label} denial-kind trace")),
+        steps: vec![TraceStep {
+            label: Some(label.to_string()),
+            request,
+            expect_response_type: Some("error".to_string()),
+            expect_ok: Some(false),
+            expect_error_contains: Some(expected_message.to_string()),
+            expect_json: vec![TraceJsonExpectation {
+                pointer: "/data/kind".to_string(),
+                equals: Some(serde_json::json!(expected_kind)),
+                value_type: None,
+                value_types: Vec::new(),
+                exists: None,
+            }],
+        }],
+    };
+
+    let report = daemon.replay_trace_value(file_name, &trace)?;
+    assert_eq!(report["type"], "trace_replay");
+    assert_eq!(report["steps"][0]["label"], label);
+    assert_eq!(report["steps"][0]["response_type"], "error");
+    assert_eq!(report["steps"][0]["ok"], false);
+    assert_eq!(report["steps"][0]["error_kind"], expected_kind);
+    Ok(())
 }
 
 fn daemon_binary() -> Result<PathBuf> {
