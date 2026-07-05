@@ -321,7 +321,7 @@ smoke-uinput-status:
 	target/debug/plasma-pilot-cli --socket "$$socket" input status >"$$out"
 	jq -e '.type == "uinput_status" and (.data.available | type == "boolean") and (.data.setup_hint | type == "string")' "$$out" >/dev/null
 	target/debug/plasma-pilot-cli --socket "$$socket" input backends >"$$out"
-	jq -e '.type == "input_backend_status" and (.data.uinput_available | type == "boolean") and ((.data.implemented_available_backend == null) or (.data.implemented_available_backend == "uinput")) and (.data.remote_desktop_portal.setup_hint | type == "string") and (.data.libei.setup_hint | type == "string")' "$$out" >/dev/null
+	jq -e '.type == "input_backend_status" and (.data.uinput_available | type == "boolean") and ((.data.implemented_available_backend == null) or (.data.implemented_available_backend == "uinput")) and (.data.remote_desktop_portal.setup_hint | type == "string") and (.data.libei.setup_hint | type == "string") and (.data.eis_keymap.source | type == "string") and (.data.eis_keymap.setup_hint | type == "string")' "$$out" >/dev/null
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "uinput_status"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "input_backend_status"
 

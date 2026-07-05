@@ -36,8 +36,8 @@ use libplasma_pilot::{
     ScrollPointerRequest, SelectItemRequest, SelectMenuRequest, SetPanicStopRequest,
     SetTextFieldRequest, SetValueRequest, SpectacleStatus, ToggleCheckRequest, ToolApprovalLevel,
     TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult, WindowGeometry,
-    WindowInfo, current_egid, current_euid, default_journal_path, default_panic_stop_path,
-    default_socket_path,
+    WindowInfo, XkbKeymapStatus, current_egid, current_euid, default_journal_path,
+    default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -495,6 +495,26 @@ impl XkbKeymapSettings {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct XkbKeymapConfig {
+    configured: bool,
+    settings: XkbKeymapSettings,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct XkbKeymapResolution {
+    settings: XkbKeymapSettings,
+    status: XkbKeymapStatus,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct KdeKeyboardConfig {
+    model: Option<String>,
+    layout_list: Option<String>,
+    variant_list: Option<String>,
+    options: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 #[value(rename_all = "snake_case")]
@@ -629,7 +649,7 @@ async fn main() -> Result<()> {
             .as_ref()
             .and_then(|config| config.input),
     );
-    let xkb_keymap_settings = xkb_keymap_settings(file_config.backends.as_ref());
+    let xkb_keymap_config = xkb_keymap_config(file_config.backends.as_ref());
 
     if args.print_capabilities {
         let portal_eis_session_store = PortalEisSessionStore::default();
@@ -685,7 +705,7 @@ async fn main() -> Result<()> {
         app_policy,
         safety_settings,
         input_backend_preference,
-        xkb_keymap_settings,
+        xkb_keymap_config,
     })
     .await
 }
@@ -699,7 +719,7 @@ struct RunSettings {
     app_policy: AppPolicy,
     safety_settings: SafetySettings,
     input_backend_preference: InputBackendPreference,
-    xkb_keymap_settings: XkbKeymapSettings,
+    xkb_keymap_config: XkbKeymapConfig,
 }
 
 async fn run(settings: RunSettings) -> Result<()> {
@@ -712,7 +732,7 @@ async fn run(settings: RunSettings) -> Result<()> {
         app_policy,
         safety_settings,
         input_backend_preference,
-        xkb_keymap_settings,
+        xkb_keymap_config,
     } = settings;
     let journal = ActionJournal::new(journal_path);
     let panic_stop = PanicStopState::new(panic_stop_path);
@@ -741,7 +761,7 @@ async fn run(settings: RunSettings) -> Result<()> {
         app_policy,
         safety_settings,
         input_backend_preference,
-        xkb_keymap_settings,
+        xkb_keymap_config,
         portal_eis_session_store,
     };
 
@@ -801,7 +821,7 @@ struct DaemonRuntime {
     app_policy: AppPolicy,
     safety_settings: SafetySettings,
     input_backend_preference: InputBackendPreference,
-    xkb_keymap_settings: XkbKeymapSettings,
+    xkb_keymap_config: XkbKeymapConfig,
     portal_eis_session_store: PortalEisSessionStore,
 }
 
@@ -976,6 +996,7 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
             match input_backend_status(
                 runtime.input_backend_preference,
                 &runtime.portal_eis_session_store,
+                &runtime.xkb_keymap_config,
             ) {
                 Ok(status) => DaemonResponse::InputBackendStatus(status),
                 Err(err) => DaemonResponse::Error {
@@ -1198,7 +1219,7 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
             match key_combo(
                 request,
                 runtime.input_backend_preference,
-                &runtime.xkb_keymap_settings,
+                &runtime.xkb_keymap_config,
                 &runtime.portal_eis_session_store,
             ) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
@@ -1500,17 +1521,204 @@ fn input_backend_preference(
     cli_backend.or(config_backend).unwrap_or_default()
 }
 
-fn xkb_keymap_settings(file_backends: Option<&BackendFileConfig>) -> XkbKeymapSettings {
+fn xkb_keymap_config(file_backends: Option<&BackendFileConfig>) -> XkbKeymapConfig {
     let Some(keymap) = file_backends.and_then(|backends| backends.keymap.as_ref()) else {
-        return XkbKeymapSettings::default();
+        return XkbKeymapConfig::default();
     };
-    XkbKeymapSettings {
-        rules: clean_config_value(keymap.rules.as_deref()),
-        model: clean_config_value(keymap.model.as_deref()),
-        layout: clean_config_value(keymap.layout.as_deref()),
-        variant: clean_config_value(keymap.variant.as_deref()),
-        options: keymap.options.clone(),
+    XkbKeymapConfig {
+        configured: true,
+        settings: XkbKeymapSettings {
+            rules: clean_config_value(keymap.rules.as_deref()),
+            model: clean_config_value(keymap.model.as_deref()),
+            layout: clean_config_value(keymap.layout.as_deref()),
+            variant: clean_config_value(keymap.variant.as_deref()),
+            options: keymap.options.clone(),
+        },
     }
+}
+
+fn effective_xkb_keymap_resolution(config: &XkbKeymapConfig) -> XkbKeymapResolution {
+    if config.configured {
+        let settings = config.settings.clone();
+        return XkbKeymapResolution {
+            status: xkb_keymap_status(
+                "config",
+                &settings,
+                None,
+                None,
+                "using explicit [backends.keymap] RMLVO names for EIS key-combo lookup",
+            ),
+            settings,
+        };
+    }
+
+    let kde_current_layout = kde_current_keyboard_layout();
+    let kde_config = kde_keyboard_config();
+    let kde_config_layouts = kde_config
+        .as_ref()
+        .and_then(|config| config.layout_list.clone());
+
+    let mut settings = XkbKeymapSettings {
+        model: kde_config.as_ref().and_then(|config| config.model.clone()),
+        options: kde_config
+            .as_ref()
+            .and_then(|config| config.options.clone()),
+        ..XkbKeymapSettings::default()
+    };
+
+    if let Some((layout, variant)) = kde_current_layout
+        .as_deref()
+        .and_then(parse_kde_layout_name)
+    {
+        settings.layout = Some(layout);
+        settings.variant = variant;
+        return XkbKeymapResolution {
+            status: xkb_keymap_status(
+                "kde_current_layout",
+                &settings,
+                kde_current_layout,
+                kde_config_layouts,
+                "using KDE current keyboard layout DBus metadata for EIS key-combo lookup",
+            ),
+            settings,
+        };
+    }
+
+    if let Some(config) = kde_config
+        && let Some(layout) = first_csv_value(config.layout_list.as_deref())
+    {
+        settings.layout = Some(layout);
+        settings.variant = first_csv_value(config.variant_list.as_deref());
+        return XkbKeymapResolution {
+            status: xkb_keymap_status(
+                "kde_kxkbrc",
+                &settings,
+                kde_current_layout,
+                kde_config_layouts,
+                "using first configured KDE kxkbrc layout for EIS key-combo lookup; current-layout DBus metadata was unavailable",
+            ),
+            settings,
+        };
+    }
+
+    let settings = XkbKeymapSettings::default();
+    XkbKeymapResolution {
+        status: xkb_keymap_status(
+            "xkbcommon_default",
+            &settings,
+            kde_current_layout,
+            kde_config_layouts,
+            "KDE keyboard layout metadata was unavailable; using xkbcommon defaults for EIS key-combo lookup",
+        ),
+        settings,
+    }
+}
+
+fn xkb_keymap_status(
+    source: impl Into<String>,
+    settings: &XkbKeymapSettings,
+    kde_current_layout: Option<String>,
+    kde_config_layouts: Option<String>,
+    setup_hint: impl Into<String>,
+) -> XkbKeymapStatus {
+    XkbKeymapStatus {
+        source: source.into(),
+        rules: settings.rules.clone(),
+        model: settings.model.clone(),
+        layout: settings.layout.clone(),
+        variant: settings.variant.clone(),
+        options: settings.options.clone(),
+        kde_current_layout,
+        kde_config_layouts,
+        setup_hint: setup_hint.into(),
+    }
+}
+
+fn kde_current_keyboard_layout() -> Option<String> {
+    command_output_trimmed(
+        "qdbus6",
+        &[
+            "org.kde.keyboard",
+            "/Layouts",
+            "org.kde.KeyboardLayouts.getCurrentLayout",
+        ],
+    )
+    .or_else(|| {
+        command_output_trimmed(
+            "qdbus6",
+            &["org.kde.keyboard", "/Layouts", "getCurrentLayout"],
+        )
+    })
+}
+
+fn kde_keyboard_config() -> Option<KdeKeyboardConfig> {
+    let config = KdeKeyboardConfig {
+        model: kreadconfig_layout_key("Model").and_then(|value| clean_config_value(Some(&value))),
+        layout_list: kreadconfig_layout_key("LayoutList")
+            .and_then(|value| clean_config_value(Some(&value))),
+        variant_list: kreadconfig_layout_key("VariantList"),
+        options: kreadconfig_layout_key("Options"),
+    };
+    if config.model.is_some()
+        || config.layout_list.is_some()
+        || config.variant_list.is_some()
+        || config.options.is_some()
+    {
+        Some(config)
+    } else {
+        None
+    }
+}
+
+fn kreadconfig_layout_key(key: &str) -> Option<String> {
+    command_output_trimmed(
+        "kreadconfig6",
+        &["--file", "kxkbrc", "--group", "Layout", "--key", key],
+    )
+}
+
+fn command_output_trimmed(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    clean_config_value(Some(&value))
+}
+
+fn parse_kde_layout_name(value: &str) -> Option<(String, Option<String>)> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Some((layout, variant)) = value
+        .strip_suffix(')')
+        .and_then(|value| value.split_once('('))
+    {
+        let layout = clean_layout_token(layout)?;
+        let variant =
+            clean_config_value(Some(variant)).and_then(|value| clean_layout_token(&value));
+        return Some((layout, variant));
+    }
+    clean_layout_token(value).map(|layout| (layout, None))
+}
+
+fn clean_layout_token(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
+    {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn first_csv_value(value: Option<&str>) -> Option<String> {
+    value
+        .and_then(|value| value.split(',').next())
+        .and_then(|value| clean_config_value(Some(value)))
 }
 
 fn clean_config_value(value: Option<&str>) -> Option<String> {
@@ -1795,10 +2003,12 @@ fn uinput_setup_hint(available: bool, exists: bool, is_char_device: bool) -> Str
 fn input_backend_status(
     preference: InputBackendPreference,
     portal_eis_session_store: &PortalEisSessionStore,
+    xkb_keymap_config: &XkbKeymapConfig,
 ) -> Result<InputBackendStatus> {
     let uinput = uinput_status()?;
     let remote_desktop_portal = remote_desktop_portal_status();
     let libei = libei_status();
+    let xkb_keymap = effective_xkb_keymap_resolution(xkb_keymap_config).status;
     let preferred_available_backend =
         preferred_input_backend(&remote_desktop_portal, &libei, uinput.available);
     let stored_session_active = portal_eis_session_store.active()?;
@@ -1818,6 +2028,7 @@ fn input_backend_status(
         uinput_available: uinput.available,
         remote_desktop_portal,
         libei,
+        eis_keymap: xkb_keymap,
         configured_backend: preference.status_name().to_string(),
         preferred_available_backend,
         implemented_available_backend,
@@ -4757,16 +4968,24 @@ fn type_text(
 fn key_combo(
     request: KeyComboRequest,
     input_backend_preference: InputBackendPreference,
-    xkb_keymap_settings: &XkbKeymapSettings,
+    xkb_keymap_config: &XkbKeymapConfig,
     portal_eis_session_store: &PortalEisSessionStore,
 ) -> Result<ActionResult> {
     if request.combo.trim().is_empty() {
         bail!("combo must be non-empty");
     }
+    let xkb_keymap_settings = match input_backend_preference {
+        InputBackendPreference::PortalRemoteDesktop | InputBackendPreference::Libei => {
+            effective_xkb_keymap_resolution(xkb_keymap_config).settings
+        }
+        InputBackendPreference::Auto | InputBackendPreference::Uinput => {
+            XkbKeymapSettings::default()
+        }
+    };
     let mut backend = input_execution_backend_with_store(
         input_backend_preference,
         portal_eis_session_store,
-        xkb_keymap_settings,
+        &xkb_keymap_settings,
     )?;
     let key_count = backend.key_combo(&request.combo)?;
     Ok(ActionResult {
@@ -7207,8 +7426,8 @@ mod tests {
     }
 
     #[test]
-    fn xkb_keymap_settings_resolve_backend_config() {
-        assert_eq!(xkb_keymap_settings(None), XkbKeymapSettings::default());
+    fn xkb_keymap_config_resolves_backend_config() {
+        assert_eq!(xkb_keymap_config(None), XkbKeymapConfig::default());
 
         let backends = BackendFileConfig {
             input: None,
@@ -7222,15 +7441,57 @@ mod tests {
         };
 
         assert_eq!(
-            xkb_keymap_settings(Some(&backends)),
-            XkbKeymapSettings {
-                rules: Some("evdev".to_string()),
-                model: Some("pc105".to_string()),
-                layout: Some("de".to_string()),
-                variant: None,
-                options: Some("".to_string()),
+            xkb_keymap_config(Some(&backends)),
+            XkbKeymapConfig {
+                configured: true,
+                settings: XkbKeymapSettings {
+                    rules: Some("evdev".to_string()),
+                    model: Some("pc105".to_string()),
+                    layout: Some("de".to_string()),
+                    variant: None,
+                    options: Some("".to_string()),
+                },
             }
         );
+    }
+
+    #[test]
+    fn parses_kde_keyboard_layout_names() {
+        assert_eq!(
+            parse_kde_layout_name("gb(intl)"),
+            Some(("gb".to_string(), Some("intl".to_string())))
+        );
+        assert_eq!(
+            parse_kde_layout_name(" us "),
+            Some(("us".to_string(), None))
+        );
+        assert_eq!(parse_kde_layout_name("English (US)"), None);
+        assert_eq!(
+            first_csv_value(Some("de(nodeadkeys),us")),
+            Some("de(nodeadkeys)".to_string())
+        );
+        assert_eq!(first_csv_value(Some(" ,us")), None);
+    }
+
+    #[test]
+    fn xkb_keymap_status_reports_config_source() {
+        let config = XkbKeymapConfig {
+            configured: true,
+            settings: XkbKeymapSettings {
+                rules: Some("evdev".to_string()),
+                model: Some("pc105".to_string()),
+                layout: Some("us".to_string()),
+                variant: None,
+                options: Some("".to_string()),
+            },
+        };
+        let resolution = effective_xkb_keymap_resolution(&config);
+
+        assert_eq!(resolution.settings.layout.as_deref(), Some("us"));
+        assert_eq!(resolution.status.source, "config");
+        assert_eq!(resolution.status.layout.as_deref(), Some("us"));
+        assert_eq!(resolution.status.options.as_deref(), Some(""));
+        assert!(resolution.status.kde_current_layout.is_none());
     }
 
     #[test]

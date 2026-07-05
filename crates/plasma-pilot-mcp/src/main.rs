@@ -682,7 +682,7 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
                 .unwrap_or_else(|| "unknown".to_string())
         ),
         DaemonResponse::InputBackendStatus(status) => format!(
-            "input backends configured={} preferred={} implemented={} portal_remote_desktop={} libei={} uinput={}",
+            "input backends configured={} preferred={} implemented={} portal_remote_desktop={} libei={} uinput={} eis_keymap_source={} eis_keymap_layout={}",
             status.configured_backend,
             status
                 .preferred_available_backend
@@ -696,7 +696,9 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
                 .remote_desktop_portal
                 .remote_desktop_interface_available,
             status.libei.client_library_available || status.libei.socket_env_present,
-            status.uinput_available
+            status.uinput_available,
+            status.eis_keymap.source,
+            status.eis_keymap.layout.as_deref().unwrap_or("default")
         ),
         DaemonResponse::RemoteDesktopSessionProbe(status) => format!(
             "remote desktop probe started={} requested={} selected={} clipboard={} transient_closed={}",
@@ -2170,6 +2172,7 @@ mod tests {
     use libplasma_pilot::{
         CaptureBackendStatus, InputBackendStatus, KwinMetadataStatus, LibeiStatus,
         RemoteDesktopPortalStatus, SafetyStatus, ScreenshotPortalStatus, SpectacleStatus,
+        XkbKeymapStatus,
     };
     use libplasma_pilot::{ScreenshotInfo, ScreenshotTransform, WaitForChangeResult};
 
@@ -2278,6 +2281,17 @@ mod tests {
                     socket_env_present: false,
                     setup_hint: "libei visible".to_string(),
                 },
+                eis_keymap: XkbKeymapStatus {
+                    source: "kde_current_layout".to_string(),
+                    rules: None,
+                    model: Some("pc105".to_string()),
+                    layout: Some("de".to_string()),
+                    variant: Some("nodeadkeys".to_string()),
+                    options: Some("".to_string()),
+                    kde_current_layout: Some("de(nodeadkeys)".to_string()),
+                    kde_config_layouts: Some("de,us".to_string()),
+                    setup_hint: "using KDE current keyboard layout".to_string(),
+                },
                 configured_backend: "portal_remote_desktop".to_string(),
                 preferred_available_backend: Some("portal_remote_desktop".to_string()),
                 implemented_available_backend: Some("uinput".to_string()),
@@ -2287,6 +2301,8 @@ mod tests {
         assert!(input_text.contains("configured=portal_remote_desktop"));
         assert!(input_text.contains("preferred=portal_remote_desktop"));
         assert!(input_text.contains("implemented=uinput"));
+        assert!(input_text.contains("eis_keymap_source=kde_current_layout"));
+        assert!(input_text.contains("eis_keymap_layout=de"));
 
         let remote_desktop_text = compact_tool_text(
             "plasma.remote_desktop_session_probe",

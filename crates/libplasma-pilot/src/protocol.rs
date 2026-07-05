@@ -101,9 +101,23 @@ pub struct InputBackendStatus {
     pub uinput_available: bool,
     pub remote_desktop_portal: RemoteDesktopPortalStatus,
     pub libei: LibeiStatus,
+    pub eis_keymap: XkbKeymapStatus,
     pub configured_backend: String,
     pub preferred_available_backend: Option<String>,
     pub implemented_available_backend: Option<String>,
+    pub setup_hint: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XkbKeymapStatus {
+    pub source: String,
+    pub rules: Option<String>,
+    pub model: Option<String>,
+    pub layout: Option<String>,
+    pub variant: Option<String>,
+    pub options: Option<String>,
+    pub kde_current_layout: Option<String>,
+    pub kde_config_layouts: Option<String>,
     pub setup_hint: String,
 }
 
@@ -1395,6 +1409,17 @@ mod tests {
                 socket_env_present: false,
                 setup_hint: "libei client library is available".to_string(),
             },
+            eis_keymap: XkbKeymapStatus {
+                source: "kde_current_layout".to_string(),
+                rules: None,
+                model: Some("pc105".to_string()),
+                layout: Some("us".to_string()),
+                variant: None,
+                options: Some("".to_string()),
+                kde_current_layout: Some("us".to_string()),
+                kde_config_layouts: Some("us,de".to_string()),
+                setup_hint: "using KDE current keyboard layout for EIS key combos".to_string(),
+            },
             configured_backend: "portal_remote_desktop".to_string(),
             preferred_available_backend: Some("portal_remote_desktop".to_string()),
             implemented_available_backend: Some("uinput".to_string()),
@@ -1405,6 +1430,8 @@ mod tests {
         assert!(encoded.contains(r#""configured_backend":"portal_remote_desktop""#));
         assert!(encoded.contains(r#""preferred_available_backend":"portal_remote_desktop""#));
         assert!(encoded.contains(r#""implemented_available_backend":"uinput""#));
+        assert!(encoded.contains(r#""source":"kde_current_layout""#));
+        assert!(encoded.contains(r#""layout":"us""#));
         assert_eq!(response.response_type(), "input_backend_status");
     }
 
