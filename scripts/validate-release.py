@@ -216,7 +216,7 @@ def main() -> None:
         "seatgeist-local",
         "marketplace_source",
         "installed_plugin_cache",
-        "OLD_CHECKOUT_MARKERS",
+        "foreign_build_output_path",
         "seatgeist-mcp",
         "seatgeist-cli",
         "seatgeistd",

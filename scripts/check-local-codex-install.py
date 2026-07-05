@@ -15,7 +15,6 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ID = "seatgeist@seatgeist-local"
 MARKETPLACE = "seatgeist-local"
-OLD_CHECKOUT_MARKERS = ("/plasma-pilot/",)
 BINARIES = ("seatgeist-mcp", "seatgeist-cli", "seatgeistd")
 
 
@@ -54,8 +53,17 @@ def load_config(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def stale_path(value: str) -> bool:
-    return any(marker in value for marker in OLD_CHECKOUT_MARKERS)
+def inside_current_checkout(path: Path) -> bool:
+    try:
+        path.relative_to(ROOT)
+    except ValueError:
+        return False
+    return True
+
+
+def foreign_build_output_path(path: Path) -> bool:
+    parts = set(path.parts)
+    return "target" in parts and not inside_current_checkout(path)
 
 
 def check_config(home: Path) -> tuple[dict[str, Any] | None, Check]:
@@ -85,8 +93,6 @@ def check_marketplace(config: dict[str, Any] | None) -> Check:
             "Seatgeist marketplace source does not point at this checkout",
             evidence + [f"expected={expected}"],
         )
-    if stale_path(str(source)):
-        return Check("marketplace_source", "blocker", False, "Seatgeist marketplace source is stale", evidence)
     return Check("marketplace_source", "required", True, "Seatgeist marketplace source points at this checkout", evidence)
 
 
@@ -137,10 +143,10 @@ def check_binary(name: str) -> Check:
     path = Path(found)
     resolved = path.resolve(strict=False)
     evidence = [f"path={path}", f"resolved={resolved}"]
-    if stale_path(str(path)) or stale_path(str(resolved)):
-        return Check(f"binary_{name}", "blocker", False, f"{name} points at an old checkout path", evidence)
     if not resolved.exists():
         return Check(f"binary_{name}", "blocker", False, f"{name} resolves to a missing target", evidence)
+    if foreign_build_output_path(resolved):
+        return Check(f"binary_{name}", "blocker", False, f"{name} resolves to another checkout build output", evidence)
     result = run([str(path), "--version"])
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
