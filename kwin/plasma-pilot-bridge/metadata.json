@@ -6,7 +6,7 @@
         "Name": "Sekkmer"
       }
     ],
-    "Description": "Publishes KWin active-window metadata to the local PlasmaPilot daemon.",
+    "Description": "Publishes KWin active-window and window-list metadata to the local PlasmaPilot daemon.",
     "Icon": "preferences-system-windows",
     "Id": "plasma-pilot-bridge",
     "License": "MIT OR Apache-2.0",

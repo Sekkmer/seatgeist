@@ -1116,7 +1116,7 @@ fn tool_definitions() -> Vec<Value> {
         tool(
             "plasma.list_windows",
             "List Windows",
-            "List compact KWin window metadata.",
+            "List compact KWin window metadata, using the KWin script bridge for pid/app/geometry enrichment when available.",
             object_schema(vec![], vec![]),
         ),
         tool(

@@ -40,12 +40,11 @@ function windowId(window) {
   );
 }
 
-function payloadFor(window) {
+function windowPayload(window) {
   if (!window) {
-    return { active: false };
+    return null;
   }
   return {
-    active: true,
     id: windowId(window),
     title: maybeString(window.caption) || "",
     app_id: maybeString(window.desktopFileName) || maybeString(window.resourceClass),
@@ -54,21 +53,46 @@ function payloadFor(window) {
   };
 }
 
+function payloadFor(window) {
+  const payload = windowPayload(window);
+  if (!payload) {
+    return { active: false };
+  }
+  payload.active = true;
+  return payload;
+}
+
 function publishActiveWindow(window) {
   const payload = JSON.stringify(payloadFor(window || workspace.activeWindow));
   callDBus(SERVICE, PATH, INTERFACE, "UpdateActiveWindow", payload);
 }
 
+function publishWindows() {
+  const source = workspace.stackingOrder || [];
+  const windows = [];
+  for (var i = 0; i < source.length; i++) {
+    const payload = windowPayload(source[i]);
+    if (payload && payload.id) {
+      windows.push(payload);
+    }
+  }
+  callDBus(SERVICE, PATH, INTERFACE, "UpdateWindows", JSON.stringify({ windows: windows }));
+}
+
 workspace.windowActivated.connect(function (window) {
   publishActiveWindow(window);
+  publishWindows();
 });
 
 workspace.windowRemoved.connect(function () {
   publishActiveWindow(workspace.activeWindow);
+  publishWindows();
 });
 
 workspace.windowAdded.connect(function () {
   publishActiveWindow(workspace.activeWindow);
+  publishWindows();
 });
 
 publishActiveWindow(workspace.activeWindow);
+publishWindows();

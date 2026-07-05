@@ -178,6 +178,49 @@ struct ActiveWindowSnapshot {
     window: Option<WindowInfo>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct WindowListState {
+    inner: Arc<Mutex<WindowListSnapshot>>,
+}
+
+impl WindowListState {
+    fn update_from_payload(&self, payload: &str) -> Result<()> {
+        let payload = serde_json::from_str::<KwinWindowListPayload>(payload)
+            .context("parse KWin window-list payload")?;
+        let mut windows = Vec::with_capacity(payload.windows.len());
+        for window in payload.windows {
+            if let Some(window) = window.into_window()? {
+                windows.push(window);
+            }
+        }
+        let mut snapshot = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("window-list state lock is poisoned"))?;
+        snapshot.updated = true;
+        snapshot.windows = windows;
+        Ok(())
+    }
+
+    fn snapshot(&self) -> Result<Option<Vec<WindowInfo>>> {
+        let snapshot = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("window-list state lock is poisoned"))?;
+        if snapshot.updated {
+            Ok(Some(snapshot.windows.clone()))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct WindowListSnapshot {
+    updated: bool,
+    windows: Vec<WindowInfo>,
+}
+
 #[derive(Debug, Clone)]
 struct PanicStopState {
     path: PathBuf,
@@ -396,12 +439,20 @@ fn validate_approval_file_parent(path: &Path) -> Result<()> {
 #[derive(Debug, Clone)]
 struct KwinBridge {
     active_window_state: ActiveWindowState,
+    window_list_state: WindowListState,
 }
 
 #[zbus::interface(name = "org.plasmapilot.KWinBridge1")]
 impl KwinBridge {
     async fn update_active_window(&self, payload: &str) -> zbus::fdo::Result<()> {
         self.active_window_state
+            .update_from_payload(payload)
+            .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))?;
+        Ok(())
+    }
+
+    async fn update_windows(&self, payload: &str) -> zbus::fdo::Result<()> {
+        self.window_list_state
             .update_from_payload(payload)
             .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))?;
         Ok(())
@@ -423,10 +474,37 @@ impl KwinActiveWindowPayload {
         if !self.active {
             return Ok(None);
         }
+        KwinBridgeWindowPayload {
+            id: self.id,
+            title: self.title,
+            app_id: self.app_id,
+            pid: self.pid,
+            geometry: self.geometry,
+        }
+        .into_window()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct KwinWindowListPayload {
+    windows: Vec<KwinBridgeWindowPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KwinBridgeWindowPayload {
+    id: Option<String>,
+    title: Option<String>,
+    app_id: Option<String>,
+    pid: Option<u32>,
+    geometry: Option<KwinActiveWindowGeometry>,
+}
+
+impl KwinBridgeWindowPayload {
+    fn into_window(self) -> Result<Option<WindowInfo>> {
         let id = self
             .id
             .filter(|id| !id.trim().is_empty())
-            .ok_or_else(|| anyhow::anyhow!("KWin active-window payload missing id"))?;
+            .ok_or_else(|| anyhow::anyhow!("KWin window payload missing id"))?;
         Ok(Some(WindowInfo {
             id,
             app_id: self.app_id.filter(|app_id| !app_id.trim().is_empty()),
@@ -765,17 +843,20 @@ async fn run(settings: RunSettings) -> Result<()> {
     let approval_store = ApprovalStore::new(approval_file_path);
     let policy = PolicyEngine::new(policy_config);
     let active_window_state = ActiveWindowState::default();
+    let window_list_state = WindowListState::default();
     let portal_eis_session_store = PortalEisSessionStore::default();
-    let _kwin_bridge_connection = match start_kwin_bridge(active_window_state.clone()).await {
-        Ok(connection) => Some(connection),
-        Err(err) => {
-            warn!(error = %err, "KWin bridge DBus service is unavailable");
-            None
-        }
-    };
+    let _kwin_bridge_connection =
+        match start_kwin_bridge(active_window_state.clone(), window_list_state.clone()).await {
+            Ok(connection) => Some(connection),
+            Err(err) => {
+                warn!(error = %err, "KWin bridge DBus service is unavailable");
+                None
+            }
+        };
     let kwin_bridge_registered = _kwin_bridge_connection.is_some();
     let runtime = DaemonRuntime {
         active_window_state,
+        window_list_state,
         kwin_bridge_registered,
         journal,
         panic_stop,
@@ -811,7 +892,10 @@ async fn run(settings: RunSettings) -> Result<()> {
     }
 }
 
-async fn start_kwin_bridge(active_window_state: ActiveWindowState) -> Result<zbus::Connection> {
+async fn start_kwin_bridge(
+    active_window_state: ActiveWindowState,
+    window_list_state: WindowListState,
+) -> Result<zbus::Connection> {
     let connection = zbus::connection::Builder::session()
         .context("connect to session bus for KWin bridge")?
         .name(KWIN_BRIDGE_SERVICE)
@@ -820,6 +904,7 @@ async fn start_kwin_bridge(active_window_state: ActiveWindowState) -> Result<zbu
             KWIN_BRIDGE_PATH,
             KwinBridge {
                 active_window_state,
+                window_list_state,
             },
         )
         .context("serve KWin bridge DBus object")?
@@ -838,6 +923,7 @@ async fn start_kwin_bridge(active_window_state: ActiveWindowState) -> Result<zbu
 #[derive(Debug, Clone)]
 struct DaemonRuntime {
     active_window_state: ActiveWindowState,
+    window_list_state: WindowListState,
     kwin_bridge_registered: bool,
     journal: ActionJournal,
     panic_stop: PanicStopState,
@@ -1468,9 +1554,12 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
             message: format_error_chain(&err),
         };
     }
-    if let Err(err) =
-        enforce_app_policy(&runtime.active_window_state, &runtime.app_policy, &request)
-    {
+    if let Err(err) = enforce_app_policy(
+        &runtime.active_window_state,
+        &runtime.window_list_state,
+        &runtime.app_policy,
+        &request,
+    ) {
         return DaemonResponse::Error {
             message: format_error_chain(&err),
         };
@@ -1591,7 +1680,7 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 message: format_error_chain(&err),
             },
         },
-        DaemonRequest::ListWindows => match list_windows() {
+        DaemonRequest::ListWindows => match list_windows(&runtime.window_list_state) {
             Ok(windows) => DaemonResponse::Windows(windows),
             Err(err) => DaemonResponse::Error {
                 message: format_error_chain(&err),
@@ -1607,6 +1696,7 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
             match observe_desktop(
                 request,
                 &runtime.active_window_state,
+                &runtime.window_list_state,
                 &runtime.safety_settings,
             )
             .await
@@ -4098,6 +4188,7 @@ fn pointer_request_uses_window_local(request: &DaemonRequest) -> bool {
 
 fn enforce_app_policy(
     active_window_state: &ActiveWindowState,
+    window_list_state: &WindowListState,
     app_policy: &AppPolicy,
     request: &DaemonRequest,
 ) -> Result<()> {
@@ -4109,7 +4200,8 @@ fn enforce_app_policy(
     }
 
     if let DaemonRequest::FocusWindow(request) = request {
-        let windows = list_windows().context("app policy could not list focus targets")?;
+        let windows =
+            list_windows(window_list_state).context("app policy could not list focus targets")?;
         let target = windows
             .iter()
             .find(|window| window.id == request.window_id)
@@ -4938,17 +5030,61 @@ fn list_monitors() -> Result<Vec<libplasma_pilot::MonitorInfo>> {
     plasma_pilot_kwin::list_monitors().map_err(|err| anyhow::anyhow!(err))
 }
 
-fn list_windows() -> Result<Vec<libplasma_pilot::WindowInfo>> {
+fn list_windows(window_list_state: &WindowListState) -> Result<Vec<libplasma_pilot::WindowInfo>> {
     let monitors = list_monitors().unwrap_or_default();
-    list_windows_with_monitors(&monitors)
+    list_windows_with_monitors(window_list_state, &monitors)
 }
 
 fn list_windows_with_monitors(
+    window_list_state: &WindowListState,
     monitors: &[libplasma_pilot::MonitorInfo],
 ) -> Result<Vec<libplasma_pilot::WindowInfo>> {
-    let mut windows = plasma_pilot_kwin::list_windows().map_err(|err| anyhow::anyhow!(err))?;
+    let bridge_windows = window_list_state.snapshot()?;
+    let mut windows = match plasma_pilot_kwin::list_windows() {
+        Ok(windows) => windows,
+        Err(err) => match bridge_windows {
+            Some(mut windows) => {
+                assign_monitor_ids(&mut windows, monitors);
+                return Ok(windows);
+            }
+            None => return Err(anyhow::anyhow!(err)),
+        },
+    };
+    if let Some(bridge_windows) = bridge_windows {
+        merge_bridge_windows(&mut windows, bridge_windows);
+    }
     assign_monitor_ids(&mut windows, monitors);
     Ok(windows)
+}
+
+fn merge_bridge_windows(windows: &mut Vec<WindowInfo>, bridge_windows: Vec<WindowInfo>) {
+    for bridge_window in bridge_windows {
+        match windows
+            .iter_mut()
+            .find(|window| window.id == bridge_window.id)
+        {
+            Some(window) => merge_bridge_window(window, bridge_window),
+            None => windows.push(bridge_window),
+        }
+    }
+}
+
+fn merge_bridge_window(window: &mut WindowInfo, bridge_window: WindowInfo) {
+    if let Some(app_id) = bridge_window.app_id {
+        window.app_id = Some(app_id);
+    }
+    if !bridge_window.title.trim().is_empty() {
+        window.title = bridge_window.title;
+    }
+    if bridge_window.pid.is_some() {
+        window.pid = bridge_window.pid;
+    }
+    if bridge_window.geometry.is_some() {
+        window.geometry = bridge_window.geometry;
+    }
+    if bridge_window.monitor_id.is_some() {
+        window.monitor_id = bridge_window.monitor_id;
+    }
 }
 
 fn active_window(active_window_state: &ActiveWindowState) -> Result<Option<WindowInfo>> {
@@ -5021,10 +5157,11 @@ fn logical_overlap_area(geometry: &WindowGeometry, monitor: &libplasma_pilot::Mo
 async fn observe_desktop(
     request: ObserveRequest,
     active_window_state: &ActiveWindowState,
+    window_list_state: &WindowListState,
     safety_settings: &SafetySettings,
 ) -> Result<DesktopObservation> {
     let monitors = list_monitors().unwrap_or_default();
-    let windows = list_windows_with_monitors(&monitors).unwrap_or_default();
+    let windows = list_windows_with_monitors(window_list_state, &monitors).unwrap_or_default();
     let active_window =
         active_window_with_monitors(active_window_state, &monitors).unwrap_or_default();
     let screenshot = match request.screenshot {
@@ -7789,6 +7926,118 @@ mod tests {
     }
 
     #[test]
+    fn window_list_state_accepts_kwin_payload() {
+        let state = WindowListState::default();
+        assert!(
+            state
+                .snapshot()
+                .expect("initial snapshot succeeds")
+                .is_none()
+        );
+
+        state
+            .update_from_payload(
+                r#"{
+                    "windows": [
+                        {
+                            "id": "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}",
+                            "title": "Konsole",
+                            "app_id": "org.kde.konsole",
+                            "pid": 1234,
+                            "geometry": {"x": 10, "y": 20, "width": 800, "height": 600}
+                        },
+                        {
+                            "id": "{7d6c2ae6-38a9-4a99-8b65-5bbd2aa6d7d4}",
+                            "title": "Kate",
+                            "app_id": "org.kde.kate",
+                            "pid": 4321,
+                            "geometry": {"x": 900, "y": 40, "width": 1200, "height": 900}
+                        }
+                    ]
+                }"#,
+            )
+            .expect("payload updates window-list state");
+
+        let windows = state
+            .snapshot()
+            .expect("state snapshot succeeds")
+            .expect("bridge reported");
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].title, "Konsole");
+        assert_eq!(windows[0].pid, Some(1234));
+        assert_eq!(
+            windows[1].geometry.as_ref().map(|geometry| geometry.space),
+            Some(CoordinateSpace::LogicalPixel)
+        );
+    }
+
+    #[test]
+    fn bridge_windows_enrich_runner_window_list() {
+        let mut windows = vec![
+            WindowInfo {
+                id: "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}".to_string(),
+                app_id: Some("utilities-terminal".to_string()),
+                title: "Runner Konsole".to_string(),
+                pid: None,
+                monitor_id: None,
+                geometry: None,
+            },
+            WindowInfo {
+                id: "{runner-only}".to_string(),
+                app_id: Some("org.example.RunnerOnly".to_string()),
+                title: "Runner Only".to_string(),
+                pid: None,
+                monitor_id: None,
+                geometry: None,
+            },
+        ];
+        let bridge_windows = vec![
+            WindowInfo {
+                id: "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}".to_string(),
+                app_id: Some("org.kde.konsole".to_string()),
+                title: "Bridge Konsole".to_string(),
+                pid: Some(1234),
+                monitor_id: None,
+                geometry: Some(WindowGeometry {
+                    x: 10,
+                    y: 20,
+                    width: 800,
+                    height: 600,
+                    space: CoordinateSpace::LogicalPixel,
+                }),
+            },
+            WindowInfo {
+                id: "{bridge-only}".to_string(),
+                app_id: Some("org.example.BridgeOnly".to_string()),
+                title: "Bridge Only".to_string(),
+                pid: Some(777),
+                monitor_id: None,
+                geometry: None,
+            },
+        ];
+
+        merge_bridge_windows(&mut windows, bridge_windows);
+
+        assert_eq!(windows.len(), 3);
+        let enriched = windows
+            .iter()
+            .find(|window| window.id == "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}")
+            .expect("matching runner window is preserved");
+        assert_eq!(enriched.app_id.as_deref(), Some("org.kde.konsole"));
+        assert_eq!(enriched.title, "Bridge Konsole");
+        assert_eq!(enriched.pid, Some(1234));
+        assert!(enriched.geometry.is_some());
+        assert!(
+            windows.iter().any(|window| window.id == "{runner-only}"),
+            "runner-only fallback windows remain visible"
+        );
+        assert!(
+            windows.iter().any(|window| window.id == "{bridge-only}"),
+            "bridge-only windows are included"
+        );
+    }
+
+    #[test]
     fn journal_active_window_context_is_control_only() {
         let state = ActiveWindowState::default();
         state
@@ -9354,6 +9603,7 @@ height = 40
 
         let err = enforce_app_policy(
             &state,
+            &WindowListState::default(),
             &policy,
             &DaemonRequest::TypeText(TypeTextRequest {
                 text: "should-not-type".to_string(),
