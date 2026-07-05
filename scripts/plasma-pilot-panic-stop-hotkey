@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+	cat <<'USAGE'
+Usage: plasma-pilot-panic-stop-hotkey [enable|status|disable]
+
+KDE global-shortcut friendly wrapper around:
+
+  plasma-pilot-cli panic-stop enable
+
+With no arguments, the helper enables panic-stop. Set PLASMA_PILOT_CLI to an
+explicit plasma-pilot-cli path when the KDE shortcut environment has a narrow
+PATH. Set PLASMA_PILOT_SOCKET to target a non-default daemon socket.
+USAGE
+}
+
+action="${1:-enable}"
+case "$action" in
+	enable | status | disable) ;;
+	--help | -h)
+		usage
+		exit 0
+		;;
+	*)
+		usage >&2
+		exit 2
+		;;
+esac
+
+if [[ -n "${PLASMA_PILOT_CLI:-}" ]]; then
+	cli="$PLASMA_PILOT_CLI"
+elif command -v plasma-pilot-cli >/dev/null 2>&1; then
+	cli="$(command -v plasma-pilot-cli)"
+elif [[ -x "$HOME/.cargo/bin/plasma-pilot-cli" ]]; then
+	cli="$HOME/.cargo/bin/plasma-pilot-cli"
+else
+	echo "plasma-pilot-cli was not found; set PLASMA_PILOT_CLI for the KDE shortcut" >&2
+	exit 127
+fi
+
+socket_args=()
+if [[ -n "${PLASMA_PILOT_SOCKET:-}" ]]; then
+	socket_args=(--socket "$PLASMA_PILOT_SOCKET")
+fi
+
+exec "$cli" "${socket_args[@]}" panic-stop "$action"

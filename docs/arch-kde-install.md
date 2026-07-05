@@ -102,6 +102,24 @@ plasma-pilot-cli policy-status
 
 The socket unit uses mode `0600` and directory mode `0700`. Keep the daemon running as the desktop user. Do not run it as root for ordinary operation.
 
+## Panic-Stop Shortcut
+
+Install the panic-stop helper somewhere KDE's global shortcut runner can execute:
+
+```bash
+install -Dm755 scripts/plasma-pilot-panic-stop-hotkey ~/.local/bin/plasma-pilot-panic-stop-hotkey
+```
+
+Bind `~/.local/bin/plasma-pilot-panic-stop-hotkey` to a KDE custom shortcut if you want a keyboard emergency stop. With no arguments it runs `plasma-pilot-cli panic-stop enable`, so the request still goes through the daemon and is journaled. If KDE's shortcut environment cannot find the CLI, set `PLASMA_PILOT_CLI=/home/$USER/.cargo/bin/plasma-pilot-cli` in the shortcut command or wrap it in a small shell command.
+
+Verify the binding target manually before assigning a shortcut:
+
+```bash
+~/.local/bin/plasma-pilot-panic-stop-hotkey
+plasma-pilot-cli panic-stop status
+plasma-pilot-cli panic-stop disable
+```
+
 ## KDE Bridge
 
 The KWin bridge is an explicit KDE configuration mutation. Install it only from the target KDE session:

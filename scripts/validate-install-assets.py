@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import configparser
+import stat
+import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -124,6 +126,31 @@ def validate_polkit(root: Path) -> None:
             fail(f"{path} defaults {tag} expected {expected!r}")
 
 
+def validate_panic_stop_hotkey(root: Path) -> None:
+    path = root / "scripts" / "plasma-pilot-panic-stop-hotkey"
+    if not path.is_file():
+        fail(f"{path} is missing")
+    mode = path.stat().st_mode
+    if not mode & stat.S_IXUSR:
+        fail(f"{path} must be executable by the owner")
+    try:
+        subprocess.run(["bash", "-n", str(path)], check=True)
+    except (OSError, subprocess.CalledProcessError) as err:
+        fail(f"{path} is not valid bash: {err}")
+
+    text = path.read_text(encoding="utf-8")
+    required_fragments = [
+        "plasma-pilot-cli",
+        "panic-stop",
+        "enable",
+        "PLASMA_PILOT_CLI",
+        "PLASMA_PILOT_SOCKET",
+    ]
+    for fragment in required_fragments:
+        if fragment not in text:
+            fail(f"{path} must contain {fragment!r}")
+
+
 def main() -> None:
     root = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
     if not root.is_dir():
@@ -131,6 +158,7 @@ def main() -> None:
     validate_systemd(root)
     validate_udev(root)
     validate_polkit(root)
+    validate_panic_stop_hotkey(root)
     print(f"install asset validation passed: {root}")
 
 
