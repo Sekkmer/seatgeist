@@ -600,9 +600,13 @@ async fn main() -> Result<()> {
     );
 
     if args.print_capabilities {
+        let portal_eis_session_store = PortalEisSessionStore::default();
         println!(
             "{}",
-            serde_json::to_string_pretty(&capabilities(input_backend_preference))?
+            serde_json::to_string_pretty(&capabilities(
+                input_backend_preference,
+                &portal_eis_session_store,
+            ))?
         );
         return Ok(());
     }
@@ -892,9 +896,10 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
 
     match request {
         DaemonRequest::Health => DaemonResponse::Health(health()),
-        DaemonRequest::Capabilities => {
-            DaemonResponse::Capabilities(capabilities(runtime.input_backend_preference))
-        }
+        DaemonRequest::Capabilities => DaemonResponse::Capabilities(capabilities(
+            runtime.input_backend_preference,
+            &runtime.portal_eis_session_store,
+        )),
         DaemonRequest::PolicyStatus => {
             DaemonResponse::PolicyStatus(policy_status_from_config(runtime.policy.config()))
         }
@@ -931,7 +936,10 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
             },
         },
         DaemonRequest::InputBackendStatus => {
-            match input_backend_status(runtime.input_backend_preference) {
+            match input_backend_status(
+                runtime.input_backend_preference,
+                &runtime.portal_eis_session_store,
+            ) {
                 Ok(status) => DaemonResponse::InputBackendStatus(status),
                 Err(err) => DaemonResponse::Error {
                     message: format_error_chain(&err),
@@ -1138,7 +1146,11 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
             }
         }
         DaemonRequest::TypeText(request) => {
-            match type_text(request, runtime.input_backend_preference) {
+            match type_text(
+                request,
+                runtime.input_backend_preference,
+                &runtime.portal_eis_session_store,
+            ) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => DaemonResponse::Error {
                     message: format_error_chain(&err),
@@ -1146,7 +1158,11 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
             }
         }
         DaemonRequest::KeyCombo(request) => {
-            match key_combo(request, runtime.input_backend_preference) {
+            match key_combo(
+                request,
+                runtime.input_backend_preference,
+                &runtime.portal_eis_session_store,
+            ) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => DaemonResponse::Error {
                     message: format_error_chain(&err),
@@ -1158,6 +1174,7 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 request,
                 &runtime.active_window_state,
                 runtime.input_backend_preference,
+                &runtime.portal_eis_session_store,
             ) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => DaemonResponse::Error {
@@ -1170,6 +1187,7 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 request,
                 &runtime.active_window_state,
                 runtime.input_backend_preference,
+                &runtime.portal_eis_session_store,
             ) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => DaemonResponse::Error {
@@ -1182,6 +1200,7 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 request,
                 &runtime.active_window_state,
                 runtime.input_backend_preference,
+                &runtime.portal_eis_session_store,
             ) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => DaemonResponse::Error {
@@ -1190,7 +1209,11 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
             }
         }
         DaemonRequest::ScrollPointer(request) => {
-            match scroll_pointer(request, runtime.input_backend_preference) {
+            match scroll_pointer(
+                request,
+                runtime.input_backend_preference,
+                &runtime.portal_eis_session_store,
+            ) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => DaemonResponse::Error {
                     message: format_error_chain(&err),
@@ -1280,9 +1303,13 @@ fn health() -> HealthStatus {
     }
 }
 
-fn capabilities(input_backend_preference: InputBackendPreference) -> CapabilitySet {
+fn capabilities(
+    input_backend_preference: InputBackendPreference,
+    portal_eis_session_store: &PortalEisSessionStore,
+) -> CapabilitySet {
+    let stored_session_active = portal_eis_session_store.active().unwrap_or(false);
     CapabilitySet {
-        capabilities: current_capabilities(input_backend_preference),
+        capabilities: current_capabilities(input_backend_preference, stored_session_active),
     }
 }
 
@@ -1707,13 +1734,18 @@ fn uinput_setup_hint(available: bool, exists: bool, is_char_device: bool) -> Str
     "grant the daemon read/write access to /dev/uinput with the packaged udev rule, reload udev, add the user to the configured group, then restart the user session or service".to_string()
 }
 
-fn input_backend_status(preference: InputBackendPreference) -> Result<InputBackendStatus> {
+fn input_backend_status(
+    preference: InputBackendPreference,
+    portal_eis_session_store: &PortalEisSessionStore,
+) -> Result<InputBackendStatus> {
     let uinput = uinput_status()?;
     let remote_desktop_portal = remote_desktop_portal_status();
     let libei = libei_status();
     let preferred_available_backend =
         preferred_input_backend(&remote_desktop_portal, &libei, uinput.available);
-    let implemented_available_backend = implemented_input_backend(preference, uinput.available);
+    let stored_session_active = portal_eis_session_store.active()?;
+    let implemented_available_backend =
+        implemented_input_backend(preference, uinput.available, stored_session_active);
     let setup_hint = input_backend_setup_hint(
         preference,
         preferred_available_backend.as_deref(),
@@ -1721,6 +1753,7 @@ fn input_backend_status(preference: InputBackendPreference) -> Result<InputBacke
         &remote_desktop_portal,
         &libei,
         uinput.available,
+        stored_session_active,
     );
 
     Ok(InputBackendStatus {
@@ -1979,6 +2012,14 @@ impl<S: plasma_pilot_eis::EisEventSource> PortalEisSessionStore<S> {
         Ok(stored.take().is_some())
     }
 
+    fn active(&self) -> Result<bool> {
+        let stored = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("portal EIS session store lock is poisoned"))?;
+        Ok(stored.is_some())
+    }
+
     fn status(&self) -> Result<RemoteDesktopEisSessionStatus> {
         let stored = self
             .inner
@@ -1988,7 +2029,7 @@ impl<S: plasma_pilot_eis::EisEventSource> PortalEisSessionStore<S> {
             Some(session) => remote_desktop_eis_session_status(
                 Some(session.metadata()),
                 Some(session.state()),
-                "stored portal RemoteDesktop EIS session is active; raw input routing still requires the stored-session backend selection gate".to_string(),
+                "stored portal RemoteDesktop EIS session is active; explicit portal/libei raw input uses this session after the per-plan readiness gate passes".to_string(),
             ),
             None => remote_desktop_eis_session_status(
                 None,
@@ -1996,6 +2037,30 @@ impl<S: plasma_pilot_eis::EisEventSource> PortalEisSessionStore<S> {
                 "no stored portal RemoteDesktop EIS session; start one before selecting portal/libei execution".to_string(),
             ),
         })
+    }
+}
+
+impl<S> PortalEisSessionStore<S>
+where
+    S: plasma_pilot_eis::EisEventSource + plasma_pilot_eis::EisSelectedDeviceExecutor,
+    S::Error: Display,
+{
+    fn execute_ready_plan(
+        &self,
+        backend_name: &'static str,
+        plan: &plasma_pilot_eis::EisActionPlan,
+    ) -> Result<()> {
+        let mut stored = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("portal EIS session store lock is poisoned"))?;
+        let session = stored.as_mut().ok_or_else(|| {
+            anyhow::anyhow!(
+                "configured input backend {backend_name} requires a stored RemoteDesktop EIS session; run remote_desktop_eis_start before selecting portal/libei execution"
+            )
+        })?;
+        session.execute_ready_plan(plan)?;
+        Ok(())
     }
 }
 
@@ -2542,12 +2607,16 @@ fn preferred_input_backend(
 fn implemented_input_backend(
     preference: InputBackendPreference,
     uinput_available: bool,
+    stored_session_active: bool,
 ) -> Option<String> {
     match preference {
         InputBackendPreference::Auto | InputBackendPreference::Uinput => {
             uinput_available.then(|| "uinput".to_string())
         }
-        InputBackendPreference::PortalRemoteDesktop | InputBackendPreference::Libei => None,
+        InputBackendPreference::PortalRemoteDesktop => {
+            stored_session_active.then(|| "portal_remote_desktop".to_string())
+        }
+        InputBackendPreference::Libei => stored_session_active.then(|| "libei".to_string()),
     }
 }
 
@@ -2558,19 +2627,26 @@ fn input_backend_setup_hint(
     remote_desktop_portal: &RemoteDesktopPortalStatus,
     libei: &LibeiStatus,
     uinput_available: bool,
+    stored_session_active: bool,
 ) -> String {
     match preference {
         InputBackendPreference::PortalRemoteDesktop => {
-            if remote_desktop_portal.remote_desktop_interface_available {
-                return "configured input backend portal_remote_desktop is visible, but execution is not implemented yet; configure input = \"auto\" or \"uinput\" for current control".to_string();
+            if stored_session_active {
+                return "configured input backend portal_remote_desktop will use the stored RemoteDesktop EIS session after policy, panic-stop, active-window guard, and per-plan readiness checks".to_string();
             }
-            return "configured input backend portal_remote_desktop is not visible on the user bus and execution is not implemented yet; configure input = \"auto\" or \"uinput\" for current control".to_string();
+            if remote_desktop_portal.remote_desktop_interface_available {
+                return "configured input backend portal_remote_desktop is visible; run remote_desktop_eis_start to create a stored session before raw input execution".to_string();
+            }
+            return "configured input backend portal_remote_desktop is not visible on the user bus; run in a KDE session with xdg-desktop-portal RemoteDesktop or configure input = \"auto\"/\"uinput\"".to_string();
         }
         InputBackendPreference::Libei => {
-            if libei.socket_env_present || libei.client_library_available {
-                return "configured input backend libei is visible, but EIS execution is not implemented yet; configure input = \"auto\" or \"uinput\" for current control".to_string();
+            if stored_session_active {
+                return "configured input backend libei will use the stored EIS session after policy, panic-stop, active-window guard, and per-plan readiness checks".to_string();
             }
-            return "configured input backend libei is not visible and EIS execution is not implemented yet; configure input = \"auto\" or \"uinput\" for current control".to_string();
+            if libei.socket_env_present || libei.client_library_available {
+                return "configured input backend libei is visible; run remote_desktop_eis_start or provide a stored EIS session before raw input execution".to_string();
+            }
+            return "configured input backend libei is not visible and no stored EIS session is active; configure input = \"auto\"/\"uinput\" or create an EIS session".to_string();
         }
         InputBackendPreference::Uinput if implemented == Some("uinput") => {
             return "configured input backend uinput is available; keep it behind policy, panic-stop, active-window guards, and journal checks".to_string();
@@ -2582,17 +2658,23 @@ fn input_backend_setup_hint(
     }
 
     match (preferred, implemented) {
+        (Some("portal_remote_desktop"), Some("portal_remote_desktop")) => {
+            "portal RemoteDesktop is visible and a stored EIS session is active for explicit portal_remote_desktop input".to_string()
+        }
+        (Some("libei"), Some("libei")) => {
+            "libei support is visible and a stored EIS session is active for explicit libei input".to_string()
+        }
         (Some("portal_remote_desktop"), Some("uinput")) => {
-            "portal RemoteDesktop is visible, but implemented input control currently uses uinput until stored-session input routing lands".to_string()
+            "portal RemoteDesktop is visible; auto input currently uses uinput until an explicit stored-session backend is selected".to_string()
         }
         (Some("portal_remote_desktop"), _) => {
-            "portal RemoteDesktop is visible, but PlasmaPilot does not yet route raw input into stored RemoteDesktop EIS sessions; configure uinput for the current control backend".to_string()
+            "portal RemoteDesktop is visible; run remote_desktop_eis_start and select portal_remote_desktop to use the stored EIS session".to_string()
         }
         (Some("libei"), Some("uinput")) => {
-            "libei client support is visible, but implemented input control currently uses uinput until stored-session input routing lands".to_string()
+            "libei client support is visible; auto input currently uses uinput until an explicit stored-session backend is selected".to_string()
         }
         (Some("libei"), _) => {
-            "libei client support is visible, but PlasmaPilot does not yet route raw input into stored EIS sessions; configure uinput for the current control backend".to_string()
+            "libei client support is visible; create or attach a stored EIS session and select libei for raw input".to_string()
         }
         (Some("uinput"), Some("uinput")) => {
             "only uinput is currently available; keep it behind policy, panic-stop, active-window guards, and journal checks".to_string()
@@ -2717,22 +2799,30 @@ impl InputExecutionBackend for UinputInputExecutionBackend {
     }
 }
 
-struct EisPlanningInputExecutionBackend {
+#[cfg(test)]
+struct EisSessionInputExecutionBackend<'a, S> {
     backend_name: &'static str,
+    session: &'a mut DaemonPortalEisSession<S>,
 }
 
-impl EisPlanningInputExecutionBackend {
-    fn fail_closed_with_plan(&self, plan: plasma_pilot_eis::EisActionPlan) -> Result<()> {
-        bail!(
-            "configured input backend {} built an EIS action plan requiring {:?} across {} events, but stored-session input routing is not enabled yet; use remote_desktop_eis_start to create a stored session for diagnostics, or configure input = \"auto\" or \"uinput\" for current control",
-            self.backend_name,
-            plan.required_capabilities,
-            plan.events.len()
-        )
+#[cfg(test)]
+impl<S> EisSessionInputExecutionBackend<'_, S>
+where
+    S: plasma_pilot_eis::EisEventSource + plasma_pilot_eis::EisSelectedDeviceExecutor,
+    S::Error: Display,
+{
+    fn execute_plan(&mut self, plan: plasma_pilot_eis::EisActionPlan) -> Result<()> {
+        self.session.execute_ready_plan(&plan)?;
+        Ok(())
     }
 }
 
-impl InputExecutionBackend for EisPlanningInputExecutionBackend {
+#[cfg(test)]
+impl<S> InputExecutionBackend for EisSessionInputExecutionBackend<'_, S>
+where
+    S: plasma_pilot_eis::EisEventSource + plasma_pilot_eis::EisSelectedDeviceExecutor,
+    S::Error: Display,
+{
     fn name(&self) -> &'static str {
         self.backend_name
     }
@@ -2740,7 +2830,7 @@ impl InputExecutionBackend for EisPlanningInputExecutionBackend {
     fn type_text(&mut self, text: &str) -> Result<()> {
         let plan = plasma_pilot_eis::plan_text_utf8(EIS_PLAN_SEQUENCE, text)
             .map_err(|err| anyhow::anyhow!(err))?;
-        self.fail_closed_with_plan(plan)
+        self.execute_plan(plan)
     }
 
     fn key_combo(&mut self, _combo: &str) -> Result<usize> {
@@ -2755,8 +2845,10 @@ impl InputExecutionBackend for EisPlanningInputExecutionBackend {
         point: Point,
         _bounds: plasma_pilot_uinput::PointerBounds,
     ) -> Result<()> {
-        let plan = plasma_pilot_eis::plan_pointer_move_absolute(EIS_PLAN_SEQUENCE, point);
-        self.fail_closed_with_plan(plan)
+        self.execute_plan(plasma_pilot_eis::plan_pointer_move_absolute(
+            EIS_PLAN_SEQUENCE,
+            point,
+        ))
     }
 
     fn click_pointer(
@@ -2769,7 +2861,7 @@ impl InputExecutionBackend for EisPlanningInputExecutionBackend {
         let plan =
             plasma_pilot_eis::plan_pointer_click_absolute(EIS_PLAN_SEQUENCE, point, button, clicks)
                 .map_err(|err| anyhow::anyhow!(err))?;
-        self.fail_closed_with_plan(plan)
+        self.execute_plan(plan)
     }
 
     fn drag_pointer(
@@ -2780,9 +2872,12 @@ impl InputExecutionBackend for EisPlanningInputExecutionBackend {
         button: PointerButton,
         _duration_ms: u64,
     ) -> Result<()> {
-        let plan =
-            plasma_pilot_eis::plan_pointer_drag_absolute(EIS_PLAN_SEQUENCE, from, to, button);
-        self.fail_closed_with_plan(plan)
+        self.execute_plan(plasma_pilot_eis::plan_pointer_drag_absolute(
+            EIS_PLAN_SEQUENCE,
+            from,
+            to,
+            button,
+        ))
     }
 
     fn scroll_pointer(
@@ -2794,31 +2889,26 @@ impl InputExecutionBackend for EisPlanningInputExecutionBackend {
         let plan =
             plasma_pilot_eis::plan_pointer_scroll_discrete(EIS_PLAN_SEQUENCE, vertical, horizontal)
                 .map_err(|err| anyhow::anyhow!(err))?;
-        self.fail_closed_with_plan(plan)
+        self.execute_plan(plan)
     }
 }
 
-// Production request routing constructs this after stored-session input routing
-// lands; tests exercise the ready-session execution path now.
-#[allow(dead_code)]
-struct EisSessionInputExecutionBackend<'a, S> {
+struct StoredEisSessionInputExecutionBackend<'a, S> {
     backend_name: &'static str,
-    session: &'a mut DaemonPortalEisSession<S>,
+    store: &'a PortalEisSessionStore<S>,
 }
 
-#[allow(dead_code)]
-impl<S> EisSessionInputExecutionBackend<'_, S>
+impl<S> StoredEisSessionInputExecutionBackend<'_, S>
 where
     S: plasma_pilot_eis::EisEventSource + plasma_pilot_eis::EisSelectedDeviceExecutor,
     S::Error: Display,
 {
     fn execute_plan(&mut self, plan: plasma_pilot_eis::EisActionPlan) -> Result<()> {
-        self.session.execute_ready_plan(&plan)?;
-        Ok(())
+        self.store.execute_ready_plan(self.backend_name, &plan)
     }
 }
 
-impl<S> InputExecutionBackend for EisSessionInputExecutionBackend<'_, S>
+impl<S> InputExecutionBackend for StoredEisSessionInputExecutionBackend<'_, S>
 where
     S: plasma_pilot_eis::EisEventSource + plasma_pilot_eis::EisSelectedDeviceExecutor,
     S::Error: Display,
@@ -2895,18 +2985,32 @@ where
 
 fn input_execution_backend(
     preference: InputBackendPreference,
-) -> Result<Box<dyn InputExecutionBackend>> {
+    portal_eis_session_store: &PortalEisSessionStore,
+) -> Result<Box<dyn InputExecutionBackend + '_>> {
+    input_execution_backend_with_store(preference, portal_eis_session_store)
+}
+
+fn input_execution_backend_with_store<'a, S>(
+    preference: InputBackendPreference,
+    portal_eis_session_store: &'a PortalEisSessionStore<S>,
+) -> Result<Box<dyn InputExecutionBackend + 'a>>
+where
+    S: plasma_pilot_eis::EisEventSource + plasma_pilot_eis::EisSelectedDeviceExecutor + 'a,
+    S::Error: Display,
+{
     match preference {
         InputBackendPreference::Auto | InputBackendPreference::Uinput => {
             Ok(Box::new(UinputInputExecutionBackend))
         }
         InputBackendPreference::PortalRemoteDesktop => {
-            Ok(Box::new(EisPlanningInputExecutionBackend {
+            Ok(Box::new(StoredEisSessionInputExecutionBackend {
                 backend_name: "portal_remote_desktop",
+                store: portal_eis_session_store,
             }))
         }
-        InputBackendPreference::Libei => Ok(Box::new(EisPlanningInputExecutionBackend {
+        InputBackendPreference::Libei => Ok(Box::new(StoredEisSessionInputExecutionBackend {
             backend_name: "libei",
+            store: portal_eis_session_store,
         })),
     }
 }
@@ -3431,6 +3535,7 @@ fn set_panic_stop(
 
 fn current_capabilities(
     input_backend_preference: InputBackendPreference,
+    stored_session_active: bool,
 ) -> Vec<BackendCapability> {
     let mut capabilities = vec![
         BackendCapability::DaemonHealth,
@@ -3449,9 +3554,7 @@ fn current_capabilities(
     if clipboard_read_backend().is_some() && clipboard_write_backend().is_some() {
         capabilities.push(BackendCapability::ClipboardText);
     }
-    if implemented_input_backend(input_backend_preference, plasma_pilot_uinput::available())
-        .is_some()
-    {
+    if raw_input_capability_available(input_backend_preference, stored_session_active) {
         capabilities.push(BackendCapability::KeyboardInput);
         capabilities.push(BackendCapability::PointerInput);
     }
@@ -3460,6 +3563,20 @@ fn current_capabilities(
         capabilities.push(BackendCapability::SemanticActions);
     }
     capabilities
+}
+
+fn raw_input_capability_available(
+    input_backend_preference: InputBackendPreference,
+    stored_session_active: bool,
+) -> bool {
+    match input_backend_preference {
+        InputBackendPreference::Auto | InputBackendPreference::Uinput => {
+            plasma_pilot_uinput::available()
+        }
+        InputBackendPreference::PortalRemoteDesktop | InputBackendPreference::Libei => {
+            stored_session_active
+        }
+    }
 }
 
 fn command_exists(command: &str) -> bool {
@@ -4416,6 +4533,7 @@ fn accessibility_set_selection(request: AccessibilitySetSelectionRequest) -> Res
 fn type_text(
     request: TypeTextRequest,
     input_backend_preference: InputBackendPreference,
+    portal_eis_session_store: &PortalEisSessionStore,
 ) -> Result<ActionResult> {
     if request.text.is_empty() {
         bail!("text must be non-empty");
@@ -4423,7 +4541,7 @@ fn type_text(
     if request.text.chars().count() > 8192 {
         bail!("text must be at most 8192 characters");
     }
-    let mut backend = input_execution_backend(input_backend_preference)?;
+    let mut backend = input_execution_backend(input_backend_preference, portal_eis_session_store)?;
     backend.type_text(&request.text)?;
     Ok(ActionResult {
         id: Uuid::new_v4(),
@@ -4440,11 +4558,12 @@ fn type_text(
 fn key_combo(
     request: KeyComboRequest,
     input_backend_preference: InputBackendPreference,
+    portal_eis_session_store: &PortalEisSessionStore,
 ) -> Result<ActionResult> {
     if request.combo.trim().is_empty() {
         bail!("combo must be non-empty");
     }
-    let mut backend = input_execution_backend(input_backend_preference)?;
+    let mut backend = input_execution_backend(input_backend_preference, portal_eis_session_store)?;
     let key_count = backend.key_combo(&request.combo)?;
     Ok(ActionResult {
         id: Uuid::new_v4(),
@@ -4536,8 +4655,9 @@ fn move_pointer(
     request: MovePointerRequest,
     active_window_state: &ActiveWindowState,
     input_backend_preference: InputBackendPreference,
+    portal_eis_session_store: &PortalEisSessionStore,
 ) -> Result<ActionResult> {
-    let mut backend = input_execution_backend(input_backend_preference)?;
+    let mut backend = input_execution_backend(input_backend_preference, portal_eis_session_store)?;
     let (point, bounds) = resolve_pointer_point(request.point, active_window_state)?;
     backend.move_pointer(point, bounds)?;
     Ok(ActionResult {
@@ -4558,11 +4678,12 @@ fn click_pointer(
     request: ClickPointerRequest,
     active_window_state: &ActiveWindowState,
     input_backend_preference: InputBackendPreference,
+    portal_eis_session_store: &PortalEisSessionStore,
 ) -> Result<ActionResult> {
     if request.clicks == 0 || request.clicks > 2 {
         bail!("clicks must be 1 or 2");
     }
-    let mut backend = input_execution_backend(input_backend_preference)?;
+    let mut backend = input_execution_backend(input_backend_preference, portal_eis_session_store)?;
     let (point, bounds) = resolve_pointer_point(request.point, active_window_state)?;
     backend.click_pointer(point, bounds, request.button, request.clicks)?;
     Ok(ActionResult {
@@ -4585,6 +4706,7 @@ fn drag_pointer(
     request: DragPointerRequest,
     active_window_state: &ActiveWindowState,
     input_backend_preference: InputBackendPreference,
+    portal_eis_session_store: &PortalEisSessionStore,
 ) -> Result<ActionResult> {
     if request.duration_ms > 10_000 {
         bail!("duration_ms must be at most 10000");
@@ -4596,7 +4718,7 @@ fn drag_pointer(
             request.to.space
         );
     }
-    let mut backend = input_execution_backend(input_backend_preference)?;
+    let mut backend = input_execution_backend(input_backend_preference, portal_eis_session_store)?;
     let (from, bounds) = resolve_pointer_point(request.from, active_window_state)?;
     let (to, to_bounds) = resolve_pointer_point(request.to, active_window_state)?;
     if bounds != to_bounds {
@@ -4624,11 +4746,12 @@ fn drag_pointer(
 fn scroll_pointer(
     request: ScrollPointerRequest,
     input_backend_preference: InputBackendPreference,
+    portal_eis_session_store: &PortalEisSessionStore,
 ) -> Result<ActionResult> {
     if request.vertical == 0 && request.horizontal == 0 {
         bail!("scroll request must include a non-zero delta");
     }
-    let mut backend = input_execution_backend(input_backend_preference)?;
+    let mut backend = input_execution_backend(input_backend_preference, portal_eis_session_store)?;
     let bounds = physical_pointer_bounds()?;
     backend.scroll_pointer(request.vertical, request.horizontal, bounds)?;
     Ok(ActionResult {
@@ -8352,23 +8475,32 @@ height = 40
         );
         assert_eq!(preferred_input_backend(&portal, &libei, false), None);
         assert_eq!(
-            implemented_input_backend(InputBackendPreference::Auto, true).as_deref(),
+            implemented_input_backend(InputBackendPreference::Auto, true, false).as_deref(),
             Some("uinput")
         );
         assert_eq!(
-            implemented_input_backend(InputBackendPreference::Uinput, true).as_deref(),
+            implemented_input_backend(InputBackendPreference::Uinput, true, false).as_deref(),
             Some("uinput")
         );
         assert_eq!(
-            implemented_input_backend(InputBackendPreference::PortalRemoteDesktop, true),
+            implemented_input_backend(InputBackendPreference::PortalRemoteDesktop, true, false),
             None
         );
         assert_eq!(
-            implemented_input_backend(InputBackendPreference::Libei, true),
+            implemented_input_backend(InputBackendPreference::Libei, true, false),
             None
         );
         assert_eq!(
-            implemented_input_backend(InputBackendPreference::Auto, false),
+            implemented_input_backend(InputBackendPreference::PortalRemoteDesktop, true, true)
+                .as_deref(),
+            Some("portal_remote_desktop")
+        );
+        assert_eq!(
+            implemented_input_backend(InputBackendPreference::Libei, true, true).as_deref(),
+            Some("libei")
+        );
+        assert_eq!(
+            implemented_input_backend(InputBackendPreference::Auto, false, true),
             None
         );
     }
@@ -8390,6 +8522,7 @@ height = 40
             &portal,
             &libei,
             false,
+            false,
         );
         assert!(hint.contains("busctl"));
 
@@ -8400,8 +8533,9 @@ height = 40
             &remote_desktop_status(true),
             &libei,
             false,
+            false,
         );
-        assert!(visible_portal_hint.contains("stored RemoteDesktop EIS sessions"));
+        assert!(visible_portal_hint.contains("remote_desktop_eis_start"));
 
         let configured_portal_hint = input_backend_setup_hint(
             InputBackendPreference::PortalRemoteDesktop,
@@ -8410,8 +8544,20 @@ height = 40
             &remote_desktop_status(true),
             &libei,
             true,
+            false,
         );
-        assert!(configured_portal_hint.contains("configured input backend"));
+        assert!(configured_portal_hint.contains("remote_desktop_eis_start"));
+
+        let configured_active_portal_hint = input_backend_setup_hint(
+            InputBackendPreference::PortalRemoteDesktop,
+            Some("portal_remote_desktop"),
+            Some("portal_remote_desktop"),
+            &remote_desktop_status(true),
+            &libei,
+            true,
+            true,
+        );
+        assert!(configured_active_portal_hint.contains("stored RemoteDesktop EIS session"));
 
         let configured_uinput_hint = input_backend_setup_hint(
             InputBackendPreference::Uinput,
@@ -8420,6 +8566,7 @@ height = 40
             &remote_desktop_status(true),
             &libei,
             true,
+            false,
         );
         assert!(configured_uinput_hint.contains("configured input backend uinput is available"));
 
@@ -8434,48 +8581,50 @@ height = 40
 
     #[test]
     fn input_execution_backend_routes_current_backends() {
+        let store = PortalEisSessionStore::<MockEisSource>::default();
         assert_eq!(
-            input_execution_backend(InputBackendPreference::Auto)
+            input_execution_backend_with_store(InputBackendPreference::Auto, &store)
                 .expect("auto currently executes through uinput")
                 .name(),
             "uinput"
         );
         assert_eq!(
-            input_execution_backend(InputBackendPreference::Uinput)
+            input_execution_backend_with_store(InputBackendPreference::Uinput, &store)
                 .expect("explicit uinput currently executes through uinput")
                 .name(),
             "uinput"
         );
 
         assert_eq!(
-            input_execution_backend(InputBackendPreference::PortalRemoteDesktop)
-                .expect("explicit portal backend has an EIS planning executor")
+            input_execution_backend_with_store(InputBackendPreference::PortalRemoteDesktop, &store)
+                .expect("explicit portal backend routes through stored EIS sessions")
                 .name(),
             "portal_remote_desktop"
         );
         assert_eq!(
-            input_execution_backend(InputBackendPreference::Libei)
-                .expect("explicit libei backend has an EIS planning executor")
+            input_execution_backend_with_store(InputBackendPreference::Libei, &store)
+                .expect("explicit libei backend routes through stored EIS sessions")
                 .name(),
             "libei"
         );
     }
 
     #[test]
-    fn explicit_eis_backends_build_action_plans_then_fail_closed() {
-        let mut libei = input_execution_backend(InputBackendPreference::Libei)
-            .expect("libei backend has a planning executor");
+    fn explicit_eis_backends_require_stored_session() {
+        let store = PortalEisSessionStore::<MockEisSource>::default();
+        let mut libei = input_execution_backend_with_store(InputBackendPreference::Libei, &store)
+            .expect("libei backend routes through stored EIS sessions");
         let err = libei
             .type_text("hello")
-            .expect_err("libei text planning still fails before execution");
+            .expect_err("libei text execution requires a stored session");
         let err = err.to_string();
         assert!(err.contains("libei"));
-        assert!(err.contains("Text"));
-        assert!(err.contains("4 events"));
-        assert!(err.contains("stored-session input routing is not enabled yet"));
+        assert!(err.contains("requires a stored RemoteDesktop EIS session"));
+        assert!(err.contains("remote_desktop_eis_start"));
 
-        let mut portal = input_execution_backend(InputBackendPreference::PortalRemoteDesktop)
-            .expect("portal backend has a planning executor");
+        let mut portal =
+            input_execution_backend_with_store(InputBackendPreference::PortalRemoteDesktop, &store)
+                .expect("portal backend routes through stored EIS sessions");
         let err = portal
             .click_pointer(
                 Point {
@@ -8492,18 +8641,67 @@ height = 40
                 PointerButton::Left,
                 1,
             )
-            .expect_err("portal EIS pointer planning still fails before execution");
+            .expect_err("portal EIS pointer execution requires a stored session");
         let err = err.to_string();
         assert!(err.contains("portal_remote_desktop"));
-        assert!(err.contains("PointerAbsolute"));
-        assert!(err.contains("Button"));
-        assert!(err.contains("stored-session input routing is not enabled yet"));
+        assert!(err.contains("requires a stored RemoteDesktop EIS session"));
+    }
+
+    #[test]
+    fn explicit_eis_backend_executes_through_stored_session() {
+        let mut source = MockEisSource::default();
+        source.push_plan(vec![
+            plasma_pilot_eis::LibeiEventSnapshot::Connect,
+            plasma_pilot_eis::LibeiEventSnapshot::SeatAdded {
+                capabilities: vec![plasma_pilot_eis::EisCapability::Text],
+                bound_capabilities: vec![plasma_pilot_eis::EisCapability::Text],
+            },
+            plasma_pilot_eis::LibeiEventSnapshot::DeviceResumed(plasma_pilot_eis::EisDeviceInfo {
+                id: "text-device".to_string(),
+                name: Some("Text Device".to_string()),
+                kind: plasma_pilot_eis::EisDeviceKind::Virtual,
+                resumed: true,
+                capabilities: vec![plasma_pilot_eis::EisCapability::Text],
+                regions: Vec::new(),
+            }),
+        ]);
+        let runtime = plasma_pilot_eis::EisSessionRuntime::new(source);
+        let session = DaemonPortalEisSession::from_runtime(
+            portal_session_start_fixture(),
+            "/org/freedesktop/portal/desktop/session/1/session".to_string(),
+            runtime,
+        );
+        let store = PortalEisSessionStore::default();
+        store.replace(session).expect("store ready session");
+
+        {
+            let mut backend = input_execution_backend_with_store(
+                InputBackendPreference::PortalRemoteDesktop,
+                &store,
+            )
+            .expect("portal backend routes through stored session");
+            backend
+                .type_text("hello")
+                .expect("stored session executes text plan");
+            assert_eq!(backend.name(), "portal_remote_desktop");
+        }
+
+        let stored = store.inner.lock().expect("store lock");
+        let session = stored.as_ref().expect("stored session remains active");
+        assert_eq!(session.runtime.source().executed_plans.len(), 1);
+        assert_eq!(
+            session.runtime.source().executed_plans[0]
+                .selection
+                .device_id,
+            "text-device"
+        );
     }
 
     #[test]
     fn explicit_eis_key_combos_fail_until_keymap_planning_lands() {
-        let mut libei = input_execution_backend(InputBackendPreference::Libei)
-            .expect("libei backend has a planning executor");
+        let store = PortalEisSessionStore::<MockEisSource>::default();
+        let mut libei = input_execution_backend_with_store(InputBackendPreference::Libei, &store)
+            .expect("libei backend routes through stored EIS sessions");
         let err = libei
             .key_combo("Ctrl+L")
             .expect_err("EIS key combo support is not implemented yet");
@@ -8511,8 +8709,8 @@ height = 40
     }
 
     #[test]
-    fn unimplemented_input_backend_selection_removes_raw_input_capabilities() {
-        let capabilities = current_capabilities(InputBackendPreference::PortalRemoteDesktop);
+    fn inactive_eis_backend_selection_removes_raw_input_capabilities() {
+        let capabilities = current_capabilities(InputBackendPreference::PortalRemoteDesktop, false);
 
         assert!(
             !capabilities
@@ -8521,6 +8719,22 @@ height = 40
         );
         assert!(
             !capabilities
+                .iter()
+                .any(|capability| capability == &BackendCapability::PointerInput)
+        );
+    }
+
+    #[test]
+    fn active_eis_backend_selection_reports_raw_input_capabilities() {
+        let capabilities = current_capabilities(InputBackendPreference::PortalRemoteDesktop, true);
+
+        assert!(
+            capabilities
+                .iter()
+                .any(|capability| capability == &BackendCapability::KeyboardInput)
+        );
+        assert!(
+            capabilities
                 .iter()
                 .any(|capability| capability == &BackendCapability::PointerInput)
         );
