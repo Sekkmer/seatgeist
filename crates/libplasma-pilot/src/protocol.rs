@@ -437,6 +437,8 @@ pub struct TraceJsonExpectation {
     pub equals: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub value_types: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exists: Option<bool>,
 }
@@ -1849,6 +1851,7 @@ mod tests {
                         pointer: "/type".to_string(),
                         equals: Some(serde_json::json!("health")),
                         value_type: None,
+                        value_types: Vec::new(),
                         exists: None,
                     }],
                 },

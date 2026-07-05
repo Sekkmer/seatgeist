@@ -139,6 +139,20 @@
           "value_type": "boolean"
         },
         {
+          "pointer": "/data/read_backend",
+          "value_types": [
+            "string",
+            "null"
+          ]
+        },
+        {
+          "pointer": "/data/write_backend",
+          "value_types": [
+            "string",
+            "null"
+          ]
+        },
+        {
           "pointer": "/data/setup_hint",
           "value_type": "string"
         }

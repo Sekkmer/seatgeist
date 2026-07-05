@@ -1792,18 +1792,27 @@ fn validate_trace(trace: &ReplayTrace) -> Result<()> {
             }
             if expectation.equals.is_none()
                 && expectation.value_type.is_none()
+                && expectation.value_types.is_empty()
                 && expectation.exists.is_none()
             {
                 bail!(
-                    "trace {} JSON expectation must set equals, value_type, or exists",
+                    "trace {} JSON expectation must set equals, value_type, value_types, or exists",
                     trace_step_context(index, step)
                 );
             }
             if expectation.exists == Some(false)
-                && (expectation.equals.is_some() || expectation.value_type.is_some())
+                && (expectation.equals.is_some()
+                    || expectation.value_type.is_some()
+                    || !expectation.value_types.is_empty())
             {
                 bail!(
-                    "trace {} JSON expectation cannot combine exists=false with equals or value_type",
+                    "trace {} JSON expectation cannot combine exists=false with equals, value_type, or value_types",
+                    trace_step_context(index, step)
+                );
+            }
+            if expectation.value_type.is_some() && !expectation.value_types.is_empty() {
+                bail!(
+                    "trace {} JSON expectation cannot combine value_type and value_types",
                     trace_step_context(index, step)
                 );
             }
@@ -1814,6 +1823,14 @@ fn validate_trace(trace: &ReplayTrace) -> Result<()> {
                     "trace {} JSON expectation has unknown value_type {expected_type}",
                     trace_step_context(index, step)
                 );
+            }
+            for expected_type in &expectation.value_types {
+                if !known_json_value_types().contains(&expected_type.as_str()) {
+                    bail!(
+                        "trace {} JSON expectation has unknown value_type {expected_type}",
+                        trace_step_context(index, step)
+                    );
+                }
             }
         }
     }
@@ -2050,6 +2067,22 @@ fn replay_trace_steps(socket: &PathBuf, trace: &ReplayTrace) -> Result<Vec<serde
                             "trace {} expected JSON pointer {} to have type {expected_type}, got {actual_type}",
                             trace_step_context(index, step),
                             expectation.pointer
+                        );
+                    }
+                }
+
+                if !expectation.value_types.is_empty() {
+                    let actual_type = json_value_type(actual);
+                    if !expectation
+                        .value_types
+                        .iter()
+                        .any(|expected_type| expected_type == actual_type)
+                    {
+                        bail!(
+                            "trace {} expected JSON pointer {} to have one of types {}, got {actual_type}",
+                            trace_step_context(index, step),
+                            expectation.pointer,
+                            expectation.value_types.join("/")
                         );
                     }
                 }

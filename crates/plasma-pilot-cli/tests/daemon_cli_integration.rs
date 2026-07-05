@@ -815,7 +815,7 @@ fn cli_validates_trace_without_daemon() -> Result<()> {
     assert_eq!(report["steps"][7]["method"], "capture_backend_status");
     assert_eq!(report["steps"][7]["expect_json_count"], 4);
     assert_eq!(report["steps"][8]["method"], "clipboard_backend_status");
-    assert_eq!(report["steps"][8]["expect_json_count"], 4);
+    assert_eq!(report["steps"][8]["expect_json_count"], 6);
     assert_eq!(report["steps"][9]["method"], "input_backend_status");
     assert_eq!(report["steps"][9]["expect_json_count"], 3);
     assert_eq!(
@@ -1336,6 +1336,7 @@ fn cli_validate_rejects_invalid_json_expectation_pointer() -> Result<()> {
                 pointer: "data/enabled".to_string(),
                 equals: Some(serde_json::json!(false)),
                 value_type: None,
+                value_types: Vec::new(),
                 exists: None,
             }],
         }],
@@ -1385,6 +1386,7 @@ fn cli_validate_rejects_invalid_json_expectation_type() -> Result<()> {
                 pointer: "/data/enabled".to_string(),
                 equals: None,
                 value_type: Some("str".to_string()),
+                value_types: Vec::new(),
                 exists: None,
             }],
         }],
@@ -1409,6 +1411,56 @@ fn cli_validate_rejects_invalid_json_expectation_type() -> Result<()> {
     );
     assert!(
         stderr.contains("unknown value_type str"),
+        "stderr did not include value type detail: {stderr}"
+    );
+
+    fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+#[test]
+fn cli_validate_rejects_invalid_json_expectation_type_list() -> Result<()> {
+    let root = unique_temp_dir();
+    fs::create_dir_all(&root).context("create integration temp dir")?;
+    let trace_path = root.join("bad-json-type-list-trace.json");
+    let trace = ReplayTrace {
+        version: 1,
+        description: Some("invalid JSON expectation type list trace".to_string()),
+        steps: vec![TraceStep {
+            label: Some("bad-type-list".to_string()),
+            request: DaemonRequest::PanicStopStatus,
+            expect_response_type: Some("panic_stop".to_string()),
+            expect_ok: Some(true),
+            expect_error_contains: None,
+            expect_json: vec![TraceJsonExpectation {
+                pointer: "/data/enabled".to_string(),
+                equals: None,
+                value_type: None,
+                value_types: vec!["boolean".to_string(), "bool".to_string()],
+                exists: None,
+            }],
+        }],
+    };
+    fs::write(
+        &trace_path,
+        serde_json::to_string_pretty(&trace).context("serialize bad trace")?,
+    )
+    .context("write bad trace file")?;
+
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+        .args(["trace", "validate", "--file", &trace_arg])
+        .output()
+        .context("run plasma-pilot-cli trace validate")?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(r#"trace step 0 label="bad-type-list" method=panic_stop_status"#),
+        "stderr did not include trace step context: {stderr}"
+    );
+    assert!(
+        stderr.contains("unknown value_type bool"),
         "stderr did not include value type detail: {stderr}"
     );
 
@@ -1511,6 +1563,7 @@ fn cli_replay_errors_include_step_context_for_json_expectations() -> Result<()> 
                 pointer: "/data/enabled".to_string(),
                 equals: Some(serde_json::json!(true)),
                 value_type: None,
+                value_types: Vec::new(),
                 exists: None,
             }],
         }],
@@ -1554,6 +1607,7 @@ fn cli_replay_errors_include_step_context_for_json_type_expectations() -> Result
                 pointer: "/data/enabled".to_string(),
                 equals: None,
                 value_type: Some("string".to_string()),
+                value_types: Vec::new(),
                 exists: None,
             }],
         }],
@@ -1576,6 +1630,54 @@ fn cli_replay_errors_include_step_context_for_json_type_expectations() -> Result
     assert!(
         stderr.contains("expected JSON pointer /data/enabled to have type string, got boolean"),
         "stderr did not include JSON type mismatch detail: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_replay_errors_include_step_context_for_json_type_list_expectations() -> Result<()> {
+    let daemon = DaemonFixture::start()?;
+    let trace_path = daemon
+        .root
+        .join("bad-json-type-list-expectation-trace.json");
+    let trace = ReplayTrace {
+        version: 1,
+        description: Some("intentionally mismatched JSON type-list trace".to_string()),
+        steps: vec![TraceStep {
+            label: Some("bad-panic-type-list".to_string()),
+            request: DaemonRequest::PanicStopStatus,
+            expect_response_type: Some("panic_stop".to_string()),
+            expect_ok: Some(true),
+            expect_error_contains: None,
+            expect_json: vec![TraceJsonExpectation {
+                pointer: "/data/enabled".to_string(),
+                equals: None,
+                value_type: None,
+                value_types: vec!["string".to_string(), "null".to_string()],
+                exists: None,
+            }],
+        }],
+    };
+    fs::write(
+        &trace_path,
+        serde_json::to_string_pretty(&trace).context("serialize bad trace")?,
+    )
+    .context("write bad trace file")?;
+
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let output = daemon.cli_output(&["trace", "replay", "--file", &trace_arg])?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(r#"trace step 0 label="bad-panic-type-list" method=panic_stop_status"#),
+        "stderr did not include trace step context: {stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "expected JSON pointer /data/enabled to have one of types string/null, got boolean"
+        ),
+        "stderr did not include JSON type-list mismatch detail: {stderr}"
     );
     Ok(())
 }
