@@ -42,6 +42,42 @@ journal="$run_dir/journal.jsonl"
 panic_stop_file="$run_dir/panic-stop.flag"
 approval_file="$run_dir/approvals.jsonl"
 config_file="$run_dir/config.toml"
+pid=""
+
+emit_failure_diagnostics() {
+	local status="$1"
+	echo "GUI eval $case_name failed with status $status" >&2
+	echo "Artifacts: $run_dir" >&2
+	if [[ -f "$log" ]]; then
+		echo "--- daemon log tail ---" >&2
+		tail -80 "$log" >&2 || true
+	fi
+	if [[ -f "$journal" ]]; then
+		echo "--- journal tail ---" >&2
+		tail -20 "$journal" >&2 || true
+	fi
+	if [[ -d "$run_dir" ]]; then
+		echo "--- artifact files ---" >&2
+		find "$run_dir" -maxdepth 1 -type f -printf '%f\n' | sort >&2 || true
+	fi
+}
+
+cleanup() {
+	if [[ -n "$pid" ]]; then
+		kill "$pid" 2>/dev/null || true
+		wait "$pid" 2>/dev/null || true
+	fi
+}
+
+on_exit() {
+	local status="$?"
+	if [[ "$status" -ne 0 ]]; then
+		emit_failure_diagnostics "$status"
+	fi
+	cleanup
+	exit "$status"
+}
+trap on_exit EXIT
 
 rm -rf "$run_dir" "$socket_dir"
 mkdir -p "$run_dir"
@@ -68,12 +104,6 @@ if [[ "$case_name" == "control-safety" ]]; then
 fi
 target/debug/plasma-pilotd "${daemon_args[@]}" >"$log" 2>&1 &
 pid=$!
-
-cleanup() {
-	kill "$pid" 2>/dev/null || true
-	wait "$pid" 2>/dev/null || true
-}
-trap cleanup EXIT
 
 for _ in {1..50}; do
 	if [[ -S "$socket" ]]; then
