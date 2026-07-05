@@ -2,7 +2,7 @@
 
 This checklist defines the minimum evidence required before calling a public release ready. It is intentionally stricter than the local development tracker because public users need repeatable install, safety, and troubleshooting paths.
 
-Run `make release-readiness` to summarize current blockers from local repo metadata, generated release artifacts, public-name collision evidence, signatures, and opt-in live eval evidence. Live eval evidence must include a matching `evidence.json` pass record written by the eval scripts, not only loose artifact files. For a release cut, run `scripts/release-readiness.py --strict` after the checklist items below are complete.
+Run `make release-readiness` to summarize current blockers from local repo metadata, generated release artifacts, public-name collision evidence, signatures, and opt-in live eval evidence. Run `make release-external-preflight` for a focused read-only report of public/operator prerequisites such as final public URLs, signed tags, live eval evidence, and upload-ready signed artifacts. Live eval evidence must include a matching `evidence.json` pass record written by the eval scripts, not only loose artifact files. For a release cut, run `scripts/release-readiness.py --strict` and `scripts/release-external-preflight.py --strict` after the checklist items below are complete.
 
 ## Release Blocking Evidence
 
@@ -40,7 +40,7 @@ The CI workflow runs only safe, non-opt-in gates. It does not send real desktop 
 10. Sign the generated artifacts with `SEATGEIST_RELEASE_SIGNING_KEY=<key> make sign-release-artifacts`, then run `make verify-release-signatures`.
 11. Run `make write-release-evidence` to retain the JSON release-readiness report and portal Screenshot v3 diagnostic next to the release manifest.
 12. Run `make verify-release-evidence` to confirm the retained JSON snapshots are linked to the selected manifest and have the expected release-readiness and portal-diagnostic shape.
-13. Run `scripts/release-readiness.py --strict`; it must report no blockers before upload.
+13. Run `scripts/release-readiness.py --strict` and `scripts/release-external-preflight.py --strict`; both must report no blockers before upload.
 14. Upload the generated Seatgeist binary/plugin tarball, source tarball, manifest, checksums, detached signatures, signature checksum manifest, and release-evidence JSON snapshots from `target/seatgeist-release/`.
 15. Publish checksums and signatures for every uploaded artifact.
 16. Verify a clean install from the released artifacts on a separate release-test checkout or machine, not from the working tree.

@@ -124,6 +124,7 @@ def verify_bundle(bundle: Path, manifest: dict[str, Any]) -> None:
             f"{prefix}plugin/.mcp.json",
             f"{prefix}docs/release-checklist.md",
             f"{prefix}scripts/portal-screenshot-v3-status.py",
+            f"{prefix}scripts/release-external-preflight.py",
             f"{prefix}scripts/run-release-live-evals.sh",
             f"{prefix}scripts/seatgeist-panic-stop-hotkey",
             f"{prefix}scripts/smoke-codex-plugin-install.sh",
@@ -204,6 +205,7 @@ def verify_source(source: Path, manifest: dict[str, Any]) -> None:
             f"{prefix}scripts/smoke-codex-plugin-install.sh",
             f"{prefix}scripts/check-public-name.py",
             f"{prefix}scripts/release-readiness.py",
+            f"{prefix}scripts/release-external-preflight.py",
             f"{prefix}scripts/write-eval-evidence.py",
         ],
     )

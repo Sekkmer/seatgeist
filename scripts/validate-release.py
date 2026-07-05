@@ -76,6 +76,8 @@ def main() -> None:
     require_contains("Makefile", makefile, "scripts/check-public-name.py")
     require_contains("Makefile", makefile, "release-readiness:")
     require_contains("Makefile", makefile, "scripts/release-readiness.py")
+    require_contains("Makefile", makefile, "release-external-preflight:")
+    require_contains("Makefile", makefile, "scripts/release-external-preflight.py")
     require_contains("Makefile", makefile, "release-live-evals:")
     require_contains("Makefile", makefile, "scripts/run-release-live-evals.sh")
     require_contains("Makefile", makefile, "portal-screenshot-v3-status:")
@@ -125,6 +127,7 @@ def main() -> None:
         "scripts/portal-screenshot-v3-status.py",
         "scripts/check-public-name.py",
         "scripts/release-readiness.py",
+        "scripts/release-external-preflight.py",
         "scripts/verify-release-evidence.py",
         "scripts/smoke-codex-plugin-install.sh",
         "scripts/run-release-live-evals.sh",
@@ -233,6 +236,20 @@ def main() -> None:
     ]:
         require_contains("scripts/release-readiness.py", readiness, needle)
 
+    external_preflight = require_executable("scripts/release-external-preflight.py")
+    for needle in [
+        "release_external_preflight",
+        "public_metadata",
+        "signed_release_tag",
+        "signed_release_artifacts",
+        "live_eval_evidence",
+        "name_collision_report",
+        "SEATGEIST_RELEASE_LIVE_EVALS_APPROVED=1 make release-live-evals",
+        "git tag -s v0.1.0",
+        "--strict",
+    ]:
+        require_contains("scripts/release-external-preflight.py", external_preflight, needle)
+
     eval_evidence = require_executable("scripts/write-eval-evidence.py")
     for needle in [
         "seatgeist_eval_evidence",
@@ -315,6 +332,11 @@ def main() -> None:
         "docs/release-checklist.md",
         checklist,
         "Run `make release-readiness` to summarize current blockers",
+    )
+    require_contains(
+        "docs/release-checklist.md",
+        checklist,
+        "Run `make release-external-preflight`",
     )
     require_contains(
         "docs/release-checklist.md",

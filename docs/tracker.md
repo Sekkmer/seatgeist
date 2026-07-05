@@ -108,7 +108,7 @@ Current full-project estimate: `[~]` about one third complete. This estimate use
 - [~] Opt-in GUI evals exist for KWrite/Kate, KCalc, Firefox localhost button, portal Screenshot, RemoteDesktop probe, and retained RemoteDesktop EIS session.
 - [x] `make release-live-evals` provides an explicit, env-gated runner for the release-blocking live eval evidence set.
 - [~] Manual KDE Plasma 6 Wayland eval suite is useful and now writes explicit pass evidence records, but broader repeated passes are still required before v0.1 is complete.
-- [~] Public release checklist, external CI, dual license files, local Seatgeist binary, standalone plugin, and source release packaging, artifact verification, clean-install validation, optional GPG signing targets, repeatable public-name collision evidence, retained JSON release-evidence snapshots with snapshot-shape verification, and a release-readiness blocker audit exist; public uploads and signed release tags are not done.
+- [~] Public release checklist, external CI, dual license files, local Seatgeist binary, standalone plugin, and source release packaging, artifact verification, clean-install validation, optional GPG signing targets, repeatable public-name collision evidence, retained JSON release-evidence snapshots with snapshot-shape verification, release-readiness blocker audit, and read-only external prerequisite preflight exist; public uploads and signed release tags are not done.
 
 ## v0.1 Definition Of Done
 
