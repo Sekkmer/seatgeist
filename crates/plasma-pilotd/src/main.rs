@@ -462,6 +462,37 @@ struct DaemonFileConfig {
 #[derive(Debug, Default, Deserialize)]
 struct BackendFileConfig {
     input: Option<InputBackendPreference>,
+    keymap: Option<XkbKeymapFileConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct XkbKeymapFileConfig {
+    rules: Option<String>,
+    model: Option<String>,
+    layout: Option<String>,
+    variant: Option<String>,
+    options: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct XkbKeymapSettings {
+    rules: Option<String>,
+    model: Option<String>,
+    layout: Option<String>,
+    variant: Option<String>,
+    options: Option<String>,
+}
+
+impl XkbKeymapSettings {
+    fn as_names(&self) -> plasma_pilot_eis::XkbKeymapNames<'_> {
+        plasma_pilot_eis::XkbKeymapNames {
+            rules: self.rules.as_deref(),
+            model: self.model.as_deref(),
+            layout: self.layout.as_deref(),
+            variant: self.variant.as_deref(),
+            options: self.options.as_deref(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, ValueEnum)]
@@ -598,6 +629,7 @@ async fn main() -> Result<()> {
             .as_ref()
             .and_then(|config| config.input),
     );
+    let xkb_keymap_settings = xkb_keymap_settings(file_config.backends.as_ref());
 
     if args.print_capabilities {
         let portal_eis_session_store = PortalEisSessionStore::default();
@@ -653,6 +685,7 @@ async fn main() -> Result<()> {
         app_policy,
         safety_settings,
         input_backend_preference,
+        xkb_keymap_settings,
     })
     .await
 }
@@ -666,6 +699,7 @@ struct RunSettings {
     app_policy: AppPolicy,
     safety_settings: SafetySettings,
     input_backend_preference: InputBackendPreference,
+    xkb_keymap_settings: XkbKeymapSettings,
 }
 
 async fn run(settings: RunSettings) -> Result<()> {
@@ -678,6 +712,7 @@ async fn run(settings: RunSettings) -> Result<()> {
         app_policy,
         safety_settings,
         input_backend_preference,
+        xkb_keymap_settings,
     } = settings;
     let journal = ActionJournal::new(journal_path);
     let panic_stop = PanicStopState::new(panic_stop_path);
@@ -706,6 +741,7 @@ async fn run(settings: RunSettings) -> Result<()> {
         app_policy,
         safety_settings,
         input_backend_preference,
+        xkb_keymap_settings,
         portal_eis_session_store,
     };
 
@@ -765,6 +801,7 @@ struct DaemonRuntime {
     app_policy: AppPolicy,
     safety_settings: SafetySettings,
     input_backend_preference: InputBackendPreference,
+    xkb_keymap_settings: XkbKeymapSettings,
     portal_eis_session_store: PortalEisSessionStore,
 }
 
@@ -1161,6 +1198,7 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
             match key_combo(
                 request,
                 runtime.input_backend_preference,
+                &runtime.xkb_keymap_settings,
                 &runtime.portal_eis_session_store,
             ) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
@@ -1460,6 +1498,26 @@ fn input_backend_preference(
     config_backend: Option<InputBackendPreference>,
 ) -> InputBackendPreference {
     cli_backend.or(config_backend).unwrap_or_default()
+}
+
+fn xkb_keymap_settings(file_backends: Option<&BackendFileConfig>) -> XkbKeymapSettings {
+    let Some(keymap) = file_backends.and_then(|backends| backends.keymap.as_ref()) else {
+        return XkbKeymapSettings::default();
+    };
+    XkbKeymapSettings {
+        rules: clean_config_value(keymap.rules.as_deref()),
+        model: clean_config_value(keymap.model.as_deref()),
+        layout: clean_config_value(keymap.layout.as_deref()),
+        variant: clean_config_value(keymap.variant.as_deref()),
+        options: keymap.options.clone(),
+    }
+}
+
+fn clean_config_value(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn expand_config_path(value: &str) -> Result<PathBuf> {
@@ -2810,8 +2868,8 @@ impl InputExecutionBackend for UinputInputExecutionBackend {
     }
 }
 
-fn eis_key_combo_codes(combo: &str) -> Result<Vec<u16>> {
-    let keymap = plasma_pilot_eis::XkbKeymap::new_from_names(Default::default())
+fn eis_key_combo_codes(combo: &str, keymap_settings: &XkbKeymapSettings) -> Result<Vec<u16>> {
+    let keymap = plasma_pilot_eis::XkbKeymap::new_from_names(keymap_settings.as_names())
         .map_err(|err| anyhow::anyhow!(err))?;
     eis_key_combo_codes_with_keymap(combo, &keymap)
 }
@@ -2904,7 +2962,7 @@ where
     }
 
     fn key_combo(&mut self, combo: &str) -> Result<usize> {
-        let codes = eis_key_combo_codes(combo)?;
+        let codes = eis_key_combo_codes(combo, &XkbKeymapSettings::default())?;
         let plan = plasma_pilot_eis::plan_key_combo_evdev(EIS_PLAN_SEQUENCE, &codes)
             .map_err(|err| anyhow::anyhow!(err))?;
         let key_count = codes.len();
@@ -2967,6 +3025,7 @@ where
 
 struct StoredEisSessionInputExecutionBackend<'a, S> {
     backend_name: &'static str,
+    keymap_settings: XkbKeymapSettings,
     store: &'a PortalEisSessionStore<S>,
 }
 
@@ -2996,7 +3055,7 @@ where
     }
 
     fn key_combo(&mut self, combo: &str) -> Result<usize> {
-        let codes = eis_key_combo_codes(combo)?;
+        let codes = eis_key_combo_codes(combo, &self.keymap_settings)?;
         let plan = plasma_pilot_eis::plan_key_combo_evdev(EIS_PLAN_SEQUENCE, &codes)
             .map_err(|err| anyhow::anyhow!(err))?;
         let key_count = codes.len();
@@ -3061,12 +3120,17 @@ fn input_execution_backend(
     preference: InputBackendPreference,
     portal_eis_session_store: &PortalEisSessionStore,
 ) -> Result<Box<dyn InputExecutionBackend + '_>> {
-    input_execution_backend_with_store(preference, portal_eis_session_store)
+    input_execution_backend_with_store(
+        preference,
+        portal_eis_session_store,
+        &XkbKeymapSettings::default(),
+    )
 }
 
 fn input_execution_backend_with_store<'a, S>(
     preference: InputBackendPreference,
     portal_eis_session_store: &'a PortalEisSessionStore<S>,
+    keymap_settings: &XkbKeymapSettings,
 ) -> Result<Box<dyn InputExecutionBackend + 'a>>
 where
     S: plasma_pilot_eis::EisEventSource + plasma_pilot_eis::EisSelectedDeviceExecutor + 'a,
@@ -3079,11 +3143,13 @@ where
         InputBackendPreference::PortalRemoteDesktop => {
             Ok(Box::new(StoredEisSessionInputExecutionBackend {
                 backend_name: "portal_remote_desktop",
+                keymap_settings: keymap_settings.clone(),
                 store: portal_eis_session_store,
             }))
         }
         InputBackendPreference::Libei => Ok(Box::new(StoredEisSessionInputExecutionBackend {
             backend_name: "libei",
+            keymap_settings: keymap_settings.clone(),
             store: portal_eis_session_store,
         })),
     }
@@ -4691,12 +4757,17 @@ fn type_text(
 fn key_combo(
     request: KeyComboRequest,
     input_backend_preference: InputBackendPreference,
+    xkb_keymap_settings: &XkbKeymapSettings,
     portal_eis_session_store: &PortalEisSessionStore,
 ) -> Result<ActionResult> {
     if request.combo.trim().is_empty() {
         bail!("combo must be non-empty");
     }
-    let mut backend = input_execution_backend(input_backend_preference, portal_eis_session_store)?;
+    let mut backend = input_execution_backend_with_store(
+        input_backend_preference,
+        portal_eis_session_store,
+        xkb_keymap_settings,
+    )?;
     let key_count = backend.key_combo(&request.combo)?;
     Ok(ActionResult {
         id: Uuid::new_v4(),
@@ -7136,6 +7207,33 @@ mod tests {
     }
 
     #[test]
+    fn xkb_keymap_settings_resolve_backend_config() {
+        assert_eq!(xkb_keymap_settings(None), XkbKeymapSettings::default());
+
+        let backends = BackendFileConfig {
+            input: None,
+            keymap: Some(XkbKeymapFileConfig {
+                rules: Some(" evdev ".to_string()),
+                model: Some(" pc105 ".to_string()),
+                layout: Some(" de ".to_string()),
+                variant: Some(" ".to_string()),
+                options: Some("".to_string()),
+            }),
+        };
+
+        assert_eq!(
+            xkb_keymap_settings(Some(&backends)),
+            XkbKeymapSettings {
+                rules: Some("evdev".to_string()),
+                model: Some("pc105".to_string()),
+                layout: Some("de".to_string()),
+                variant: None,
+                options: Some("".to_string()),
+            }
+        );
+    }
+
+    #[test]
     fn app_policy_from_config_normalizes_lists() {
         let file_apps = AppsFileConfig {
             allow: Some(vec![
@@ -7752,6 +7850,16 @@ journal = "$XDG_STATE_HOME/plasma-pilot/configured.jsonl"
 panic_stop_file = "$XDG_RUNTIME_DIR/plasma-pilot/configured-panic-stop"
 approval_file = "$XDG_RUNTIME_DIR/plasma-pilot/approvals.jsonl"
 
+[backends]
+input = "portal_remote_desktop"
+
+[backends.keymap]
+rules = "evdev"
+model = "pc105"
+layout = "de"
+variant = "nodeadkeys"
+options = ""
+
 [policy]
 default_observe = "allow"
 default_control = "deny"
@@ -7793,6 +7901,17 @@ height = 40
             daemon.approval_file.as_deref(),
             Some("$XDG_RUNTIME_DIR/plasma-pilot/approvals.jsonl")
         );
+        let backends = config.backends.expect("backends section is present");
+        assert_eq!(
+            backends.input,
+            Some(InputBackendPreference::PortalRemoteDesktop)
+        );
+        let keymap = backends.keymap.expect("keymap section is present");
+        assert_eq!(keymap.rules.as_deref(), Some("evdev"));
+        assert_eq!(keymap.model.as_deref(), Some("pc105"));
+        assert_eq!(keymap.layout.as_deref(), Some("de"));
+        assert_eq!(keymap.variant.as_deref(), Some("nodeadkeys"));
+        assert_eq!(keymap.options.as_deref(), Some(""));
 
         let policy = config.policy.expect("policy section is present");
         assert_eq!(policy.default_control, Some(ToolApprovalLevel::Deny));
@@ -8747,27 +8866,32 @@ height = 40
     #[test]
     fn input_execution_backend_routes_current_backends() {
         let store = PortalEisSessionStore::<MockEisSource>::default();
+        let keymap = XkbKeymapSettings::default();
         assert_eq!(
-            input_execution_backend_with_store(InputBackendPreference::Auto, &store)
+            input_execution_backend_with_store(InputBackendPreference::Auto, &store, &keymap)
                 .expect("auto currently executes through uinput")
                 .name(),
             "uinput"
         );
         assert_eq!(
-            input_execution_backend_with_store(InputBackendPreference::Uinput, &store)
+            input_execution_backend_with_store(InputBackendPreference::Uinput, &store, &keymap)
                 .expect("explicit uinput currently executes through uinput")
                 .name(),
             "uinput"
         );
 
         assert_eq!(
-            input_execution_backend_with_store(InputBackendPreference::PortalRemoteDesktop, &store)
-                .expect("explicit portal backend routes through stored EIS sessions")
-                .name(),
+            input_execution_backend_with_store(
+                InputBackendPreference::PortalRemoteDesktop,
+                &store,
+                &keymap,
+            )
+            .expect("explicit portal backend routes through stored EIS sessions")
+            .name(),
             "portal_remote_desktop"
         );
         assert_eq!(
-            input_execution_backend_with_store(InputBackendPreference::Libei, &store)
+            input_execution_backend_with_store(InputBackendPreference::Libei, &store, &keymap)
                 .expect("explicit libei backend routes through stored EIS sessions")
                 .name(),
             "libei"
@@ -8805,8 +8929,10 @@ height = 40
     #[test]
     fn explicit_eis_backends_require_stored_session() {
         let store = PortalEisSessionStore::<MockEisSource>::default();
-        let mut libei = input_execution_backend_with_store(InputBackendPreference::Libei, &store)
-            .expect("libei backend routes through stored EIS sessions");
+        let keymap = XkbKeymapSettings::default();
+        let mut libei =
+            input_execution_backend_with_store(InputBackendPreference::Libei, &store, &keymap)
+                .expect("libei backend routes through stored EIS sessions");
         let err = libei
             .type_text("hello")
             .expect_err("libei text execution requires a stored session");
@@ -8815,9 +8941,12 @@ height = 40
         assert!(err.contains("requires a stored RemoteDesktop EIS session"));
         assert!(err.contains("remote_desktop_eis_start"));
 
-        let mut portal =
-            input_execution_backend_with_store(InputBackendPreference::PortalRemoteDesktop, &store)
-                .expect("portal backend routes through stored EIS sessions");
+        let mut portal = input_execution_backend_with_store(
+            InputBackendPreference::PortalRemoteDesktop,
+            &store,
+            &keymap,
+        )
+        .expect("portal backend routes through stored EIS sessions");
         let err = portal
             .click_pointer(
                 Point {
@@ -8868,9 +8997,11 @@ height = 40
         store.replace(session).expect("store ready session");
 
         {
+            let keymap = XkbKeymapSettings::default();
             let mut backend = input_execution_backend_with_store(
                 InputBackendPreference::PortalRemoteDesktop,
                 &store,
+                &keymap,
             )
             .expect("portal backend routes through stored session");
             backend
@@ -8918,13 +9049,19 @@ height = 40
         store.replace(session).expect("store ready session");
 
         {
+            let keymap = XkbKeymapSettings {
+                model: Some("pc105".to_string()),
+                layout: Some("us".to_string()),
+                options: Some("".to_string()),
+                ..XkbKeymapSettings::default()
+            };
             let mut libei =
-                input_execution_backend_with_store(InputBackendPreference::Libei, &store)
+                input_execution_backend_with_store(InputBackendPreference::Libei, &store, &keymap)
                     .expect("libei backend routes through stored EIS sessions");
             assert_eq!(
                 libei
-                    .key_combo("Ctrl+L")
-                    .expect("stored session executes key combo"),
+                    .key_combo("Ctrl+;")
+                    .expect("stored session executes configured-keymap symbol combo"),
                 2
             );
             assert_eq!(libei.name(), "libei");
@@ -8944,12 +9081,12 @@ height = 40
                     is_press: true,
                 },
                 plasma_pilot_eis::EisEvent::KeyboardKey {
-                    keycode: 38,
+                    keycode: 39,
                     is_press: true,
                 },
                 plasma_pilot_eis::EisEvent::Frame,
                 plasma_pilot_eis::EisEvent::KeyboardKey {
-                    keycode: 38,
+                    keycode: 39,
                     is_press: false,
                 },
                 plasma_pilot_eis::EisEvent::KeyboardKey {
