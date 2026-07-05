@@ -2810,6 +2810,65 @@ impl InputExecutionBackend for UinputInputExecutionBackend {
     }
 }
 
+fn eis_key_combo_codes(combo: &str) -> Result<Vec<u16>> {
+    let keymap = plasma_pilot_eis::XkbKeymap::new_from_names(Default::default())
+        .map_err(|err| anyhow::anyhow!(err))?;
+    eis_key_combo_codes_with_keymap(combo, &keymap)
+}
+
+fn eis_key_combo_codes_with_keymap(
+    combo: &str,
+    keymap: &plasma_pilot_eis::XkbKeymap,
+) -> Result<Vec<u16>> {
+    match plasma_pilot_uinput::parse_key_combo(combo) {
+        Ok(codes) => return Ok(codes),
+        Err(err) => tracing::debug!(%err, "falling back to XKB symbol key-combo lookup"),
+    }
+
+    let parts = combo
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        bail!("key combo must contain at least one key");
+    }
+    if parts.len() > 8 {
+        bail!("key combo may contain at most 8 keys");
+    }
+
+    parts
+        .iter()
+        .map(|part| eis_key_combo_part_code(part, keymap))
+        .collect()
+}
+
+fn eis_key_combo_part_code(part: &str, keymap: &plasma_pilot_eis::XkbKeymap) -> Result<u16> {
+    if let Ok(codes) = plasma_pilot_uinput::parse_key_combo(part)
+        && let [code] = codes.as_slice()
+    {
+        return Ok(*code);
+    }
+
+    let mut chars = part.chars();
+    let Some(character) = chars.next() else {
+        bail!("key combo must contain at least one key");
+    };
+    if chars.next().is_some() {
+        bail!("unsupported key name in EIS combo: {part}");
+    }
+
+    let keysym =
+        plasma_pilot_eis::unicode_char_to_keysym(character).map_err(|err| anyhow::anyhow!(err))?;
+    keymap
+        .evdev_keycode_for_keysym_level0(keysym)
+        .with_context(|| {
+            format!(
+                "key combo symbol {character:?} does not map to a level-0 evdev keycode in the current XKB keymap"
+            )
+        })
+}
+
 #[cfg(test)]
 struct EisSessionInputExecutionBackend<'a, S> {
     backend_name: &'static str,
@@ -2845,8 +2904,7 @@ where
     }
 
     fn key_combo(&mut self, combo: &str) -> Result<usize> {
-        let codes =
-            plasma_pilot_uinput::parse_key_combo(combo).map_err(|err| anyhow::anyhow!(err))?;
+        let codes = eis_key_combo_codes(combo)?;
         let plan = plasma_pilot_eis::plan_key_combo_evdev(EIS_PLAN_SEQUENCE, &codes)
             .map_err(|err| anyhow::anyhow!(err))?;
         let key_count = codes.len();
@@ -2938,8 +2996,7 @@ where
     }
 
     fn key_combo(&mut self, combo: &str) -> Result<usize> {
-        let codes =
-            plasma_pilot_uinput::parse_key_combo(combo).map_err(|err| anyhow::anyhow!(err))?;
+        let codes = eis_key_combo_codes(combo)?;
         let plan = plasma_pilot_eis::plan_key_combo_evdev(EIS_PLAN_SEQUENCE, &codes)
             .map_err(|err| anyhow::anyhow!(err))?;
         let key_count = codes.len();
@@ -8715,6 +8772,34 @@ height = 40
                 .name(),
             "libei"
         );
+    }
+
+    #[test]
+    fn eis_key_combo_codes_use_xkb_for_symbol_parts() {
+        let keymap = plasma_pilot_eis::XkbKeymap::new_from_names(
+            plasma_pilot_eis::XkbKeymapNames::us_pc105(),
+        )
+        .expect("us xkb keymap");
+
+        assert_eq!(
+            eis_key_combo_codes_with_keymap("Ctrl+L", &keymap)
+                .expect("named combo still parses through evdev names"),
+            vec![29, 38]
+        );
+        assert_eq!(
+            eis_key_combo_codes_with_keymap("Ctrl+;", &keymap)
+                .expect("symbol combo parses through xkb"),
+            vec![29, 39]
+        );
+        assert_eq!(
+            eis_key_combo_codes_with_keymap("Alt+,", &keymap)
+                .expect("punctuation combo parses through xkb"),
+            vec![56, 51]
+        );
+
+        let err = eis_key_combo_codes_with_keymap("Ctrl+NotAKey", &keymap)
+            .expect_err("unsupported multi-character key is rejected");
+        assert!(err.to_string().contains("unsupported key name"));
     }
 
     #[test]
