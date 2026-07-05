@@ -5807,18 +5807,30 @@ fn resolve_pointer_point(
     let bounds = physical_pointer_bounds_from_monitors(&monitors)?;
     let point = match point.space {
         CoordinateSpace::PhysicalPixel => point,
+        CoordinateSpace::LogicalPixel => logical_to_physical_point(point, &monitors)?,
         CoordinateSpace::WindowLocal => {
             active_window_local_to_physical_point(point, active_window_state, &monitors)?
         }
-        CoordinateSpace::LogicalPixel | CoordinateSpace::AccessibilityNode => {
+        CoordinateSpace::AccessibilityNode => {
             bail!(
-                "pointer actions currently support physical_pixel and active-window window_local coordinate spaces, got {:?}",
+                "pointer actions currently support physical_pixel, logical_pixel, and active-window window_local coordinate spaces, got {:?}",
                 point.space
             );
         }
     };
     validate_physical_pointer_point(point, bounds)?;
     Ok((point, bounds))
+}
+
+fn logical_to_physical_point(
+    point: Point,
+    monitors: &[libplasma_pilot::MonitorInfo],
+) -> Result<Point> {
+    if !point.x.is_finite() || !point.y.is_finite() {
+        bail!("logical_pixel pointer coordinates must be finite");
+    }
+    let monitor = monitor_for_global_logical_point(point.x, point.y, monitors)?;
+    logical_point_on_monitor_to_physical(point.x, point.y, monitor)
 }
 
 fn active_window_local_to_physical_point(
@@ -5859,17 +5871,9 @@ fn active_window_local_to_physical_point(
         );
     }
     let monitor = monitor_for_window_point(&window, geometry, point, monitors)?;
-    let physical_origin_x = scaled_physical_origin(monitor.logical_origin_x, monitor.scale_factor)?;
-    let physical_origin_y = scaled_physical_origin(monitor.logical_origin_y, monitor.scale_factor)?;
     let global_logical_x = f64::from(geometry.x) + point.x;
     let global_logical_y = f64::from(geometry.y) + point.y;
-    Ok(Point {
-        x: f64::from(physical_origin_x)
-            + (global_logical_x - f64::from(monitor.logical_origin_x)) * monitor.scale_factor,
-        y: f64::from(physical_origin_y)
-            + (global_logical_y - f64::from(monitor.logical_origin_y)) * monitor.scale_factor,
-        space: CoordinateSpace::PhysicalPixel,
-    })
+    logical_point_on_monitor_to_physical(global_logical_x, global_logical_y, monitor)
 }
 
 fn monitor_for_window_point<'a>(
@@ -5886,6 +5890,16 @@ fn monitor_for_window_point<'a>(
 
     let global_x = f64::from(geometry.x) + point.x;
     let global_y = f64::from(geometry.y) + point.y;
+    monitor_for_global_logical_point(global_x, global_y, monitors).map_err(|_| {
+        anyhow::anyhow!("window_local pointer coordinate does not map to a known monitor")
+    })
+}
+
+fn monitor_for_global_logical_point(
+    x: f64,
+    y: f64,
+    monitors: &[libplasma_pilot::MonitorInfo],
+) -> Result<&libplasma_pilot::MonitorInfo> {
     monitors
         .iter()
         .find(|monitor| {
@@ -5893,11 +5907,30 @@ fn monitor_for_window_point<'a>(
             let top = f64::from(monitor.logical_origin_y);
             let right = left + f64::from(monitor.logical_width);
             let bottom = top + f64::from(monitor.logical_height);
-            global_x >= left && global_x < right && global_y >= top && global_y < bottom
+            x >= left && x < right && y >= top && y < bottom
         })
         .ok_or_else(|| {
-            anyhow::anyhow!("window_local pointer coordinate does not map to a known monitor")
+            anyhow::anyhow!("logical_pixel pointer coordinate does not map to a known monitor")
         })
+}
+
+fn logical_point_on_monitor_to_physical(
+    x: f64,
+    y: f64,
+    monitor: &libplasma_pilot::MonitorInfo,
+) -> Result<Point> {
+    if monitor.logical_width == 0 || monitor.logical_height == 0 {
+        bail!("monitor {} has invalid logical dimensions", monitor.id);
+    }
+    let physical_origin_x = scaled_physical_origin(monitor.logical_origin_x, monitor.scale_factor)?;
+    let physical_origin_y = scaled_physical_origin(monitor.logical_origin_y, monitor.scale_factor)?;
+    Ok(Point {
+        x: f64::from(physical_origin_x)
+            + (x - f64::from(monitor.logical_origin_x)) * monitor.scale_factor,
+        y: f64::from(physical_origin_y)
+            + (y - f64::from(monitor.logical_origin_y)) * monitor.scale_factor,
+        space: CoordinateSpace::PhysicalPixel,
+    })
 }
 
 fn physical_pointer_bounds_from_monitors(
@@ -10521,12 +10554,70 @@ height = 40
             },
             bounds,
         )
-        .expect_err("logical coordinate space is rejected for now");
+        .expect_err("unresolved logical coordinate space is rejected");
         assert!(err.to_string().contains("physical_pixel"));
 
         let err = validate_physical_pointer_point(physical_point(7680.0, 4319.0), bounds)
             .expect_err("out-of-bounds coordinate is rejected");
         assert!(err.to_string().contains("outside physical desktop bounds"));
+    }
+
+    #[test]
+    fn maps_logical_pointer_points_to_scaled_physical_pixels() {
+        let monitors = vec![monitor("main-8k", 0, 0, 7680, 4320, 5120, 2880, 1.5)];
+
+        let point = logical_to_physical_point(
+            Point {
+                x: 3200.0,
+                y: 1600.0,
+                space: CoordinateSpace::LogicalPixel,
+            },
+            &monitors,
+        )
+        .expect("logical point maps");
+
+        assert_eq!(point.space, CoordinateSpace::PhysicalPixel);
+        assert_eq!(point.x, 4800.0);
+        assert_eq!(point.y, 2400.0);
+    }
+
+    #[test]
+    fn maps_logical_pointer_points_on_negative_origin_monitor() {
+        let monitors = vec![
+            monitor("left", -1920, 0, 1920, 1080, 1920, 1080, 1.0),
+            monitor("main", 0, 0, 3840, 2160, 3840, 2160, 1.0),
+        ];
+
+        let point = logical_to_physical_point(
+            Point {
+                x: -100.0,
+                y: 20.0,
+                space: CoordinateSpace::LogicalPixel,
+            },
+            &monitors,
+        )
+        .expect("negative-origin logical point maps");
+
+        assert_eq!(point.space, CoordinateSpace::PhysicalPixel);
+        assert_eq!(point.x, -100.0);
+        assert_eq!(point.y, 20.0);
+    }
+
+    #[test]
+    fn rejects_logical_pointer_points_outside_monitors() {
+        let monitors = vec![monitor("main", 0, 0, 1920, 1080, 1920, 1080, 1.0)];
+
+        let err = logical_to_physical_point(
+            Point {
+                x: 1920.0,
+                y: 10.0,
+                space: CoordinateSpace::LogicalPixel,
+            },
+            &monitors,
+        )
+        .expect_err("right edge is outside logical monitor bounds");
+
+        assert!(err.to_string().contains("does not map to a known monitor"));
     }
 
     #[test]
