@@ -147,6 +147,7 @@ eval_session_preflight() {
 		and (.data.preview_max_edge | type == "number")
 		and (.data.tile_max_edge | type == "number")
 		and (.data.screenshot_redaction_count | type == "number")
+		and .data.journal_artifact_metadata_enabled == false
 	' "$run_dir/session-preflight-safety.json" >/dev/null
 
 	cli desktop-session-status >"$run_dir/session-preflight-desktop.json"
@@ -340,6 +341,7 @@ eval_screenshot_config_bounds() {
 		.type == "safety_status"
 		and .data.preview_max_edge == 800
 		and .data.tile_max_edge == 640
+		and .data.journal_artifact_metadata_enabled == false
 	' "$run_dir/screenshot-config-safety.json" >/dev/null
 
 	if ! cli screenshot --output "$run_dir/config-preview.png" >"$run_dir/screenshot-config-preview.json" 2>"$run_dir/screenshot-config-preview.err"; then
@@ -402,6 +404,8 @@ eval_journal_artifacts() {
 	jq -e '
 		.type == "safety_status"
 		and .data.preview_max_edge == 800
+		and .data.tile_max_edge == 640
+		and .data.journal_artifact_metadata_enabled == true
 	' "$run_dir/journal-artifacts-safety.json" >/dev/null
 
 	screenshot_path="$run_dir/journal-artifact-preview.png"
