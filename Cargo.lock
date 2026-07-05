@@ -594,6 +594,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "plasma-pilot-eis"
+version = "0.1.0"
+dependencies = [
+ "libplasma-pilot",
+ "thiserror",
+]
+
+[[package]]
 name = "plasma-pilot-kwin"
 version = "0.1.0"
 dependencies = [

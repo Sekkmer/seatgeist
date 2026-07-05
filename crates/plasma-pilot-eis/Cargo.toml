@@ -1,0 +1,17 @@
+[package]
+name = "plasma-pilot-eis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Typed libei/EIS input event planning for PlasmaPilot."
+
+[dependencies]
+libplasma-pilot.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
