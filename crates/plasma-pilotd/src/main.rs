@@ -24,13 +24,14 @@ use libplasma_pilot::{
     AccessibilityTextAttributesRequest, ActionResult, ActivateLinkRequest, ActivateTabRequest,
     ActiveWindowGuard, BackendCapability, CapabilitySet, CaptureBackendStatus, ClickButtonRequest,
     ClickPointerRequest, ClipboardBackendStatus, ClipboardGetRequest, ClipboardText,
-    CoordinateSpace, DaemonClientIdentity, DaemonRequest, DaemonRequestEnvelope, DaemonResponse,
-    DesktopObservation, DesktopSessionStatus, DragPointerRequest, ErrorKind, FocusTextFieldRequest,
-    FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus,
-    JournalArtifactContext, JournalClientContext, JournalControlContext, JournalEntry,
-    JournalRequestedTarget, JournalWindowContext, KeyComboRequest, KwinBridgeStatus,
-    KwinMetadataStatus, LibeiStatus, MovePointerRequest, ObserveRequest, PanicStopStatus, Point,
-    PointerButton, PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
+    ComputerUseReadinessStatus, CoordinateSpace, DaemonClientIdentity, DaemonRequest,
+    DaemonRequestEnvelope, DaemonResponse, DesktopObservation, DesktopSessionStatus,
+    DragPointerRequest, ErrorKind, FocusTextFieldRequest, FocusWindowRequest,
+    FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus, JournalArtifactContext,
+    JournalClientContext, JournalControlContext, JournalEntry, JournalRequestedTarget,
+    JournalWindowContext, KeyComboRequest, KwinBridgeStatus, KwinMetadataStatus, LibeiStatus,
+    MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton,
+    PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
     PointerPhysicalBounds, PolicyStatus, RemoteDesktopEisProbe, RemoteDesktopEisSessionStatus,
     RemoteDesktopPersistMode, RemoteDesktopPortalStatus, RemoteDesktopSessionProbe,
     RemoteDesktopSessionProbeRequest, SafetyClass, SafetyStatus, ScreenshotInfo,
@@ -1580,6 +1581,9 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
         DaemonRequest::DesktopSessionStatus => {
             DaemonResponse::DesktopSessionStatus(desktop_session_status_from_env(std::env::vars()))
         }
+        DaemonRequest::ComputerUseReadiness => {
+            DaemonResponse::ComputerUseReadiness(computer_use_readiness_status(runtime))
+        }
         DaemonRequest::PanicStopStatus => DaemonResponse::PanicStop(runtime.panic_stop.status()),
         DaemonRequest::SetPanicStop(request) => {
             match set_panic_stop(&runtime.panic_stop, request) {
@@ -1928,6 +1932,127 @@ fn safety_status(
         screenshot_redaction_count: settings.screenshot_redactions.len(),
         journal_artifact_metadata_enabled: journal_settings.include_artifact_metadata,
     })
+}
+
+fn computer_use_readiness_status(runtime: &DaemonRuntime) -> ComputerUseReadinessStatus {
+    let mut issues = Vec::new();
+    let mut next_steps = Vec::new();
+
+    let safety = match safety_status(&runtime.safety_settings, &runtime.journal.settings) {
+        Ok(status) => status,
+        Err(err) => {
+            issues.push(format!("safety status unavailable: {err}"));
+            next_steps.push("check plasma.safety_status".to_string());
+            SafetyStatus {
+                require_focus_guard: runtime.safety_settings.require_focus_guard,
+                pause_on_human_input: runtime.safety_settings.pause_on_human_input,
+                human_input_activity_file: runtime
+                    .safety_settings
+                    .human_input_activity_file
+                    .clone(),
+                human_input_quiet_ms: runtime.safety_settings.human_input_quiet_ms,
+                human_input_signal_fresh: false,
+                human_input_signal_age_ms: None,
+                control_rate_limit_per_minute: runtime
+                    .safety_settings
+                    .control_rate_limit_per_minute,
+                preview_max_edge: runtime.safety_settings.preview_max_edge,
+                tile_max_edge: runtime.safety_settings.tile_max_edge,
+                screenshot_redaction_count: runtime.safety_settings.screenshot_redactions.len(),
+                journal_artifact_metadata_enabled: runtime
+                    .journal
+                    .settings
+                    .include_artifact_metadata,
+            }
+        }
+    };
+    let desktop = desktop_session_status_from_env(std::env::vars());
+    let panic_stop = runtime.panic_stop.status();
+    let capture = capture_backend_status();
+    let clipboard = clipboard_backend_status();
+    let accessibility = accessibility_quality_status();
+    let input = match input_backend_status(
+        runtime.input_backend_preference,
+        &runtime.portal_eis_session_store,
+        &runtime.xkb_keymap_config,
+    ) {
+        Ok(status) => Some(status),
+        Err(err) => {
+            issues.push(format!("input backend status unavailable: {err}"));
+            next_steps.push("check plasma.input_backend_status".to_string());
+            None
+        }
+    };
+
+    let desktop_session_ready =
+        desktop.dbus_session_bus_address_present && desktop.xdg_runtime_dir_present;
+    if !desktop_session_ready {
+        issues.push("desktop session bus or runtime directory is missing".to_string());
+        next_steps.push("check plasma.desktop_session_status".to_string());
+    }
+    if capture.implemented_available_backend.is_none() {
+        issues.push("no executable screenshot backend is available".to_string());
+        next_steps.push("check plasma.capture_backend_status".to_string());
+    }
+    if input
+        .as_ref()
+        .and_then(|status| status.implemented_available_backend.as_ref())
+        .is_none()
+    {
+        issues.push("no executable input backend is available".to_string());
+        next_steps.push("check plasma.input_backend_status".to_string());
+    }
+    if !accessibility.semantic_targeting_reliable {
+        issues.push("accessibility tree is weak or unavailable for semantic targeting".to_string());
+        next_steps.push("check plasma.a11y_quality_status".to_string());
+    }
+    if clipboard.read_backend.is_none() {
+        issues.push("clipboard read backend is unavailable".to_string());
+        next_steps.push("check plasma.clipboard_status".to_string());
+    }
+    if clipboard.write_backend.is_none() {
+        issues.push("clipboard write backend is unavailable".to_string());
+        next_steps.push("check plasma.clipboard_status".to_string());
+    }
+    if panic_stop.enabled {
+        issues.push("panic-stop is enabled".to_string());
+        next_steps.push("disable panic-stop only when control is safe".to_string());
+    }
+    if safety.pause_on_human_input && safety.human_input_signal_fresh {
+        issues.push("fresh human input activity is blocking control".to_string());
+        next_steps.push("wait for the configured human-input quiet interval".to_string());
+    }
+
+    let input_backend = input
+        .as_ref()
+        .and_then(|status| status.implemented_available_backend.clone());
+    let control_blocked =
+        panic_stop.enabled || (safety.pause_on_human_input && safety.human_input_signal_fresh);
+
+    ComputerUseReadinessStatus {
+        ready_for_observe: desktop_session_ready,
+        ready_for_screenshot: capture.implemented_available_backend.is_some(),
+        ready_for_window_control: desktop_session_ready && !control_blocked,
+        ready_for_keyboard_input: input_backend.is_some() && !control_blocked,
+        ready_for_pointer_input: input_backend.is_some() && !control_blocked,
+        ready_for_semantic_actions: accessibility.semantic_targeting_reliable && !control_blocked,
+        ready_for_clipboard_read: clipboard.read_backend.is_some(),
+        ready_for_clipboard_write: clipboard.write_backend.is_some(),
+        focus_guard_required: safety.require_focus_guard,
+        panic_stop_enabled: panic_stop.enabled,
+        human_input_pause_enabled: safety.pause_on_human_input,
+        human_input_signal_fresh: safety.human_input_signal_fresh,
+        desktop_session_ready,
+        dbus_session_bus_present: desktop.dbus_session_bus_address_present,
+        runtime_dir_present: desktop.xdg_runtime_dir_present,
+        capture_backend: capture.implemented_available_backend,
+        input_backend,
+        clipboard_read_backend: clipboard.read_backend,
+        clipboard_write_backend: clipboard.write_backend,
+        accessibility_backend: accessibility.recommended_fallback,
+        issues,
+        next_steps,
+    }
 }
 
 fn desktop_session_status_from_env<I, K, V>(vars: I) -> DesktopSessionStatus
@@ -4254,6 +4379,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::PolicyStatus
         | DaemonRequest::SafetyStatus
         | DaemonRequest::DesktopSessionStatus
+        | DaemonRequest::ComputerUseReadiness
         | DaemonRequest::PanicStopStatus
         | DaemonRequest::SetPanicStop(_)
         | DaemonRequest::UinputStatus
@@ -4441,6 +4567,7 @@ fn current_capabilities(
         BackendCapability::DaemonPolicyStatus,
         BackendCapability::DaemonSafetyStatus,
         BackendCapability::DaemonDesktopSessionStatus,
+        BackendCapability::DaemonComputerUseReadiness,
     ];
     if command_exists("spectacle") || screenshot_portal_status().screenshot_interface_available {
         capabilities.push(BackendCapability::Screenshot);
@@ -7643,6 +7770,23 @@ fn summarize_response(response: &DaemonResponse) -> String {
             status.xdg_current_desktop.as_deref().unwrap_or("unknown"),
             status.dbus_session_bus_address_present,
             status.xdg_runtime_dir_present
+        ),
+        DaemonResponse::ComputerUseReadiness(status) => format!(
+            "computer_use_readiness observe={} screenshot={} window_control={} keyboard={} pointer={} semantic={} clipboard_read={} clipboard_write={} focus_guard={} panic_stop={} issues={} capture_backend={} input_backend={} a11y={}",
+            status.ready_for_observe,
+            status.ready_for_screenshot,
+            status.ready_for_window_control,
+            status.ready_for_keyboard_input,
+            status.ready_for_pointer_input,
+            status.ready_for_semantic_actions,
+            status.ready_for_clipboard_read,
+            status.ready_for_clipboard_write,
+            status.focus_guard_required,
+            status.panic_stop_enabled,
+            status.issues.len(),
+            status.capture_backend.as_deref().unwrap_or("none"),
+            status.input_backend.as_deref().unwrap_or("none"),
+            status.accessibility_backend
         ),
         DaemonResponse::PanicStop(status) => format!(
             "panic-stop enabled={} path={}",

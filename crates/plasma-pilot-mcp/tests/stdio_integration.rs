@@ -157,6 +157,15 @@ fn mcp_stdio_talks_to_real_daemon_and_reports_tool_errors() -> Result<()> {
             "id": 4,
             "method": "tools/call",
             "params": {
+                "name": "plasma.computer_use_readiness",
+                "arguments": {}
+            }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
                 "name": "plasma.a11y_text_attributes",
                 "arguments": {
                     "node_id": "invalid-atspi-node",
@@ -166,7 +175,7 @@ fn mcp_stdio_talks_to_real_daemon_and_reports_tool_errors() -> Result<()> {
         }),
         json!({
             "jsonrpc": "2.0",
-            "id": 5,
+            "id": 6,
             "method": "tools/call",
             "params": {
                 "name": "plasma.journal_tail",
@@ -177,7 +186,7 @@ fn mcp_stdio_talks_to_real_daemon_and_reports_tool_errors() -> Result<()> {
         }),
     ])?;
 
-    assert_eq!(responses.len(), 5);
+    assert_eq!(responses.len(), 6);
     assert_eq!(responses[0]["id"], 1);
     assert_eq!(
         responses[0]["result"]["capabilities"]["tools"]["listChanged"],
@@ -190,6 +199,7 @@ fn mcp_stdio_talks_to_real_daemon_and_reports_tool_errors() -> Result<()> {
     assert_tool_present(tools, "plasma.health");
     assert_tool_present(tools, "plasma.remote_desktop_session_probe");
     assert_tool_present(tools, "plasma.remote_desktop_eis_probe");
+    assert_tool_present(tools, "plasma.computer_use_readiness");
     assert_tool_present(tools, "plasma.a11y_text_attributes");
     assert_tool_present(tools, "plasma.journal_tail");
 
@@ -201,7 +211,21 @@ fn mcp_stdio_talks_to_real_daemon_and_reports_tool_errors() -> Result<()> {
         "plasma-pilotd"
     );
 
-    let attributes_error = &responses[3]["result"];
+    let readiness = &responses[3]["result"];
+    assert_eq!(readiness["isError"], false);
+    assert_eq!(
+        readiness["structuredContent"]["type"],
+        "computer_use_readiness"
+    );
+    assert!(readiness["structuredContent"]["data"]["ready_for_observe"].is_boolean());
+    assert!(
+        readiness["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("readiness observe=")
+    );
+
+    let attributes_error = &responses[4]["result"];
     assert_eq!(attributes_error["isError"], true);
     assert_eq!(attributes_error["structuredContent"]["type"], "error");
     assert!(
@@ -217,7 +241,7 @@ fn mcp_stdio_talks_to_real_daemon_and_reports_tool_errors() -> Result<()> {
             .contains("invalid AT-SPI node id")
     );
 
-    let journal = &responses[4]["result"];
+    let journal = &responses[5]["result"];
     assert_eq!(journal["isError"], false);
     assert_eq!(journal["structuredContent"]["type"], "journal");
     let entries = journal["structuredContent"]["data"]

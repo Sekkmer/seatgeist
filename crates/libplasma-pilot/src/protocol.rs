@@ -68,6 +68,32 @@ pub struct DesktopSessionStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputerUseReadinessStatus {
+    pub ready_for_observe: bool,
+    pub ready_for_screenshot: bool,
+    pub ready_for_window_control: bool,
+    pub ready_for_keyboard_input: bool,
+    pub ready_for_pointer_input: bool,
+    pub ready_for_semantic_actions: bool,
+    pub ready_for_clipboard_read: bool,
+    pub ready_for_clipboard_write: bool,
+    pub focus_guard_required: bool,
+    pub panic_stop_enabled: bool,
+    pub human_input_pause_enabled: bool,
+    pub human_input_signal_fresh: bool,
+    pub desktop_session_ready: bool,
+    pub dbus_session_bus_present: bool,
+    pub runtime_dir_present: bool,
+    pub capture_backend: Option<String>,
+    pub input_backend: Option<String>,
+    pub clipboard_read_backend: Option<String>,
+    pub clipboard_write_backend: Option<String>,
+    pub accessibility_backend: String,
+    pub issues: Vec<String>,
+    pub next_steps: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PanicStopStatus {
     pub enabled: bool,
     pub path: PathBuf,
@@ -894,6 +920,7 @@ pub enum DaemonRequest {
     PolicyStatus,
     SafetyStatus,
     DesktopSessionStatus,
+    ComputerUseReadiness,
     PanicStopStatus,
     SetPanicStop(SetPanicStopRequest),
     KwinBridgeStatus,
@@ -956,6 +983,7 @@ impl DaemonRequest {
             Self::PolicyStatus => "policy_status",
             Self::SafetyStatus => "safety_status",
             Self::DesktopSessionStatus => "desktop_session_status",
+            Self::ComputerUseReadiness => "computer_use_readiness",
             Self::PanicStopStatus => "panic_stop_status",
             Self::SetPanicStop(_) => "set_panic_stop",
             Self::KwinBridgeStatus => "kwin_bridge_status",
@@ -1020,6 +1048,7 @@ pub enum DaemonResponse {
     PolicyStatus(PolicyStatus),
     SafetyStatus(SafetyStatus),
     DesktopSessionStatus(DesktopSessionStatus),
+    ComputerUseReadiness(ComputerUseReadinessStatus),
     PanicStop(PanicStopStatus),
     KwinBridgeStatus(KwinBridgeStatus),
     UinputStatus(UinputStatus),
@@ -1054,6 +1083,7 @@ impl DaemonResponse {
             Self::PolicyStatus(_) => "policy_status",
             Self::SafetyStatus(_) => "safety_status",
             Self::DesktopSessionStatus(_) => "desktop_session_status",
+            Self::ComputerUseReadiness(_) => "computer_use_readiness",
             Self::PanicStop(_) => "panic_stop",
             Self::KwinBridgeStatus(_) => "kwin_bridge_status",
             Self::UinputStatus(_) => "uinput_status",
@@ -1806,6 +1836,46 @@ mod tests {
         assert!(encoded.contains(r#""type":"desktop_session_status""#));
         assert!(encoded.contains(r#""xdg_session_type":"wayland""#));
         assert_eq!(response.response_type(), "desktop_session_status");
+    }
+
+    #[test]
+    fn serializes_computer_use_readiness_status() {
+        let request = DaemonRequest::ComputerUseReadiness;
+        assert_eq!(
+            serde_json::to_string(&request).expect("readiness request serializes"),
+            r#"{"method":"computer_use_readiness"}"#
+        );
+        assert_eq!(request.method_name(), "computer_use_readiness");
+
+        let response = DaemonResponse::ComputerUseReadiness(ComputerUseReadinessStatus {
+            ready_for_observe: true,
+            ready_for_screenshot: true,
+            ready_for_window_control: false,
+            ready_for_keyboard_input: false,
+            ready_for_pointer_input: false,
+            ready_for_semantic_actions: true,
+            ready_for_clipboard_read: false,
+            ready_for_clipboard_write: true,
+            focus_guard_required: true,
+            panic_stop_enabled: false,
+            human_input_pause_enabled: true,
+            human_input_signal_fresh: false,
+            desktop_session_ready: true,
+            dbus_session_bus_present: true,
+            runtime_dir_present: true,
+            capture_backend: Some("portal_screenshot".to_string()),
+            input_backend: None,
+            clipboard_read_backend: None,
+            clipboard_write_backend: Some("wl-clipboard".to_string()),
+            accessibility_backend: "atspi_semantic".to_string(),
+            issues: vec!["input backend is not executable".to_string()],
+            next_steps: vec!["check plasma.input_backend_status".to_string()],
+        });
+        let encoded = serde_json::to_string(&response).expect("readiness response serializes");
+        assert!(encoded.contains(r#""type":"computer_use_readiness""#));
+        assert!(encoded.contains(r#""ready_for_observe":true"#));
+        assert!(encoded.contains(r#""input backend is not executable""#));
+        assert_eq!(response.response_type(), "computer_use_readiness");
     }
 
     #[test]

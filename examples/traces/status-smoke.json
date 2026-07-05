@@ -49,6 +49,40 @@
       "expect_ok": true
     },
     {
+      "label": "computer-use-readiness",
+      "request": {
+        "method": "computer_use_readiness"
+      },
+      "expect_response_type": "computer_use_readiness",
+      "expect_ok": true,
+      "expect_json": [
+        {
+          "pointer": "/data/ready_for_observe",
+          "value_type": "boolean"
+        },
+        {
+          "pointer": "/data/ready_for_screenshot",
+          "value_type": "boolean"
+        },
+        {
+          "pointer": "/data/ready_for_keyboard_input",
+          "value_type": "boolean"
+        },
+        {
+          "pointer": "/data/ready_for_semantic_actions",
+          "value_type": "boolean"
+        },
+        {
+          "pointer": "/data/issues",
+          "value_type": "array"
+        },
+        {
+          "pointer": "/data/next_steps",
+          "value_type": "array"
+        }
+      ]
+    },
+    {
       "label": "accessibility-quality-status",
       "request": {
         "method": "accessibility_quality_status"

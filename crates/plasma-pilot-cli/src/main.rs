@@ -50,6 +50,7 @@ enum Command {
     PolicyStatus,
     SafetyStatus,
     DesktopSessionStatus,
+    Readiness,
     KwinBridgeStatus,
     CaptureBackends,
     Monitors,
@@ -691,6 +692,9 @@ fn main() -> Result<()> {
         Command::SafetyStatus => print_daemon_response(&socket, DaemonRequest::SafetyStatus)?,
         Command::DesktopSessionStatus => {
             print_daemon_response(&socket, DaemonRequest::DesktopSessionStatus)?;
+        }
+        Command::Readiness => {
+            print_daemon_response(&socket, DaemonRequest::ComputerUseReadiness)?;
         }
         Command::KwinBridgeStatus => {
             print_daemon_response(&socket, DaemonRequest::KwinBridgeStatus)?;
@@ -2145,6 +2149,7 @@ fn known_response_types() -> &'static [&'static str] {
         "policy_status",
         "safety_status",
         "desktop_session_status",
+        "computer_use_readiness",
         "panic_stop",
         "kwin_bridge_status",
         "uinput_status",

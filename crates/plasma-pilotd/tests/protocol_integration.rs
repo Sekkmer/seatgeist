@@ -200,6 +200,7 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
     assert!(capabilities.contains(&libplasma_pilot::BackendCapability::DaemonPolicyStatus));
     assert!(capabilities.contains(&libplasma_pilot::BackendCapability::DaemonSafetyStatus));
     assert!(capabilities.contains(&libplasma_pilot::BackendCapability::DaemonDesktopSessionStatus));
+    assert!(capabilities.contains(&libplasma_pilot::BackendCapability::DaemonComputerUseReadiness));
 
     let safety = daemon.request(&DaemonRequest::SafetyStatus)?;
     assert_eq!(
@@ -226,6 +227,16 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
         bail!("expected desktop session status response, got {desktop_session:?}");
     };
     assert!(!setup_hint.is_empty());
+
+    let readiness = daemon.request(&DaemonRequest::ComputerUseReadiness)?;
+    let DaemonResponse::ComputerUseReadiness(status) = readiness else {
+        bail!("expected readiness response, got {readiness:?}");
+    };
+    assert_eq!(
+        status.dbus_session_bus_present && status.runtime_dir_present,
+        status.desktop_session_ready
+    );
+    assert!(status.focus_guard_required);
 
     let panic_stop = daemon.request(&DaemonRequest::PanicStopStatus)?;
     let DaemonResponse::PanicStop(PanicStopStatus { enabled, path }) = panic_stop else {
@@ -292,7 +303,7 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
     assert!(!path.exists());
 
     let journal = daemon.request(&DaemonRequest::JournalTail(JournalTailRequest {
-        limit: 11,
+        limit: 12,
         method_filter: None,
         ok: None,
     }))?;
@@ -307,6 +318,7 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
             "capabilities",
             "safety_status",
             "desktop_session_status",
+            "computer_use_readiness",
             "panic_stop_status",
             "uinput_status",
             "input_backend_status",

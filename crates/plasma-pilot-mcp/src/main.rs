@@ -248,6 +248,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         "plasma.policy_status" => Ok(DaemonRequest::PolicyStatus),
         "plasma.safety_status" => Ok(DaemonRequest::SafetyStatus),
         "plasma.desktop_session_status" => Ok(DaemonRequest::DesktopSessionStatus),
+        "plasma.computer_use_readiness" => Ok(DaemonRequest::ComputerUseReadiness),
         "plasma.panic_stop_status" => Ok(DaemonRequest::PanicStopStatus),
         "plasma.panic_stop_enable" => Ok(DaemonRequest::SetPanicStop(SetPanicStopRequest {
             enabled: true,
@@ -671,6 +672,23 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status.dbus_session_bus_address_present,
             status.xdg_runtime_dir_present
         ),
+        DaemonResponse::ComputerUseReadiness(status) => format!(
+            "readiness observe={} screenshot={} window_control={} keyboard={} pointer={} semantic={} clipboard_read={} clipboard_write={} focus_guard={} panic_stop={} issues={} capture_backend={} input_backend={} a11y={}",
+            status.ready_for_observe,
+            status.ready_for_screenshot,
+            status.ready_for_window_control,
+            status.ready_for_keyboard_input,
+            status.ready_for_pointer_input,
+            status.ready_for_semantic_actions,
+            status.ready_for_clipboard_read,
+            status.ready_for_clipboard_write,
+            status.focus_guard_required,
+            status.panic_stop_enabled,
+            status.issues.len(),
+            status.capture_backend.as_deref().unwrap_or("none"),
+            status.input_backend.as_deref().unwrap_or("none"),
+            status.accessibility_backend
+        ),
         DaemonResponse::PanicStop(status) => format!(
             "panic-stop enabled={} path={}",
             status.enabled,
@@ -915,6 +933,12 @@ fn tool_definitions() -> Vec<Value> {
             "plasma.desktop_session_status",
             "Desktop Session Status",
             "Report sanitized KDE/Wayland/session environment diagnostics for portal, KWin, DBus, and runtime troubleshooting.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.computer_use_readiness",
+            "Computer Use Readiness",
+            "Summarize safe preflight readiness for observe, screenshots, window control, input, semantic actions, clipboard, and active safety blockers.",
             object_schema(vec![], vec![]),
         ),
         tool(
@@ -2233,8 +2257,9 @@ mod tests {
     use super::*;
     use libplasma_pilot::{
         AccessibilityQualityStatus, CaptureBackendStatus, ClipboardBackendStatus,
-        InputBackendStatus, KwinMetadataStatus, LibeiStatus, RemoteDesktopPortalStatus,
-        SafetyStatus, ScreenshotPortalStatus, SpectacleStatus, XkbKeymapStatus,
+        ComputerUseReadinessStatus, InputBackendStatus, KwinMetadataStatus, LibeiStatus,
+        RemoteDesktopPortalStatus, SafetyStatus, ScreenshotPortalStatus, SpectacleStatus,
+        XkbKeymapStatus,
     };
     use libplasma_pilot::{ScreenshotInfo, ScreenshotTransform, WaitForChangeResult};
     use std::path::Path;
@@ -2347,6 +2372,42 @@ mod tests {
         assert!(text.contains("reliable=true"));
         assert!(text.contains("nodes=12"));
         assert!(text.contains("fallback=atspi_semantic"));
+    }
+
+    #[test]
+    fn readiness_compact_text_reports_preflight_summary() {
+        let text = compact_tool_text(
+            "plasma.computer_use_readiness",
+            &DaemonResponse::ComputerUseReadiness(ComputerUseReadinessStatus {
+                ready_for_observe: true,
+                ready_for_screenshot: true,
+                ready_for_window_control: false,
+                ready_for_keyboard_input: false,
+                ready_for_pointer_input: false,
+                ready_for_semantic_actions: true,
+                ready_for_clipboard_read: false,
+                ready_for_clipboard_write: true,
+                focus_guard_required: true,
+                panic_stop_enabled: false,
+                human_input_pause_enabled: true,
+                human_input_signal_fresh: false,
+                desktop_session_ready: true,
+                dbus_session_bus_present: true,
+                runtime_dir_present: true,
+                capture_backend: Some("portal_screenshot".to_string()),
+                input_backend: None,
+                clipboard_read_backend: None,
+                clipboard_write_backend: Some("wl-clipboard".to_string()),
+                accessibility_backend: "atspi_semantic".to_string(),
+                issues: vec!["no executable input backend is available".to_string()],
+                next_steps: vec!["check plasma.input_backend_status".to_string()],
+            }),
+        );
+        assert!(text.contains("observe=true"));
+        assert!(text.contains("keyboard=false"));
+        assert!(text.contains("issues=1"));
+        assert!(text.contains("capture_backend=portal_screenshot"));
+        assert!(text.contains("input_backend=none"));
     }
 
     #[test]
@@ -2571,6 +2632,11 @@ mod tests {
             tools
                 .iter()
                 .any(|tool| tool["name"] == "plasma.desktop_session_status")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.computer_use_readiness")
         );
         assert!(
             tools
@@ -3133,6 +3199,11 @@ mod tests {
             daemon_request_for_tool("plasma.desktop_session_status", &json!({}))
                 .expect("desktop session status maps"),
             DaemonRequest::DesktopSessionStatus
+        );
+        assert_eq!(
+            daemon_request_for_tool("plasma.computer_use_readiness", &json!({}))
+                .expect("computer use readiness maps"),
+            DaemonRequest::ComputerUseReadiness
         );
         assert_eq!(
             daemon_request_for_tool("plasma.panic_stop_status", &json!({}))
