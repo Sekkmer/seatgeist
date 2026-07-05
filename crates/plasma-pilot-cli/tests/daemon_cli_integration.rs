@@ -46,6 +46,37 @@ impl DaemonFixture {
         })
     }
 
+    fn start_with_config(config_contents: &str) -> Result<Self> {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).context("create integration temp dir")?;
+        let socket = root.join("configured.sock");
+        let journal = root.join("configured-journal.jsonl");
+        let panic_stop = root.join("configured-panic-stop");
+        let config = root.join("config.toml");
+        fs::write(
+            &config,
+            config_contents
+                .replace("__SOCKET__", &socket.display().to_string())
+                .replace("__JOURNAL__", &journal.display().to_string())
+                .replace("__PANIC_STOP__", &panic_stop.display().to_string()),
+        )
+        .context("write daemon config fixture")?;
+
+        let child = Command::new(daemon_binary()?)
+            .arg("--config")
+            .arg(&config)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("spawn configured plasma-pilotd")?;
+        wait_for_socket(&socket)?;
+        Ok(Self {
+            child,
+            socket,
+            root,
+        })
+    }
+
     fn cli_json(&self, args: &[&str]) -> Result<DaemonResponse> {
         let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
             .arg("--socket")
@@ -193,6 +224,43 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
         ],
     );
     assert!(entries.iter().all(|entry| entry.ok));
+    Ok(())
+}
+
+#[test]
+fn cli_reports_configured_safety_bounds() -> Result<()> {
+    let daemon = DaemonFixture::start_with_config(
+        r#"
+[daemon]
+socket = "__SOCKET__"
+journal = "__JOURNAL__"
+panic_stop_file = "__PANIC_STOP__"
+
+[safety]
+require_focus_guard = false
+human_input_quiet_ms = 2500
+control_rate_limit_per_minute = 42
+preview_max_edge = 1024
+tile_max_edge = 2048
+"#,
+    )?;
+
+    let safety = daemon.cli_json(&["safety-status"])?;
+    assert_eq!(
+        safety,
+        DaemonResponse::SafetyStatus(SafetyStatus {
+            require_focus_guard: false,
+            pause_on_human_input: false,
+            human_input_activity_file: None,
+            human_input_quiet_ms: 2500,
+            human_input_signal_fresh: false,
+            human_input_signal_age_ms: None,
+            control_rate_limit_per_minute: Some(42),
+            preview_max_edge: 1024,
+            tile_max_edge: 2048,
+            screenshot_redaction_count: 0,
+        })
+    );
     Ok(())
 }
 

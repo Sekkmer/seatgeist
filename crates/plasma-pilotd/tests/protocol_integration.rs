@@ -117,6 +117,13 @@ secret_fields = "prompt"
 default_clipboard_read = "allow"
 default_clipboard_write = "prompt"
 full_resolution_screenshot = "deny"
+
+[safety]
+require_focus_guard = false
+human_input_quiet_ms = 2500
+control_rate_limit_per_minute = 42
+preview_max_edge = 1024
+tile_max_edge = 2048
 "#,
     )?;
 
@@ -131,6 +138,23 @@ full_resolution_screenshot = "deny"
             default_full_resolution_screenshot: ToolApprovalLevel::Deny,
             default_clipboard_read: ToolApprovalLevel::Allow,
             default_clipboard_write: ToolApprovalLevel::Prompt,
+        })
+    );
+
+    let safety = daemon.request(&DaemonRequest::SafetyStatus)?;
+    assert_eq!(
+        safety,
+        DaemonResponse::SafetyStatus(SafetyStatus {
+            require_focus_guard: false,
+            pause_on_human_input: false,
+            human_input_activity_file: None,
+            human_input_quiet_ms: 2500,
+            human_input_signal_fresh: false,
+            human_input_signal_age_ms: None,
+            control_rate_limit_per_minute: Some(42),
+            preview_max_edge: 1024,
+            tile_max_edge: 2048,
+            screenshot_redaction_count: 0,
         })
     );
     Ok(())
