@@ -272,6 +272,14 @@ pub struct ScreenshotPortalStatus {
     pub busctl_available: bool,
     pub portal_service_available: bool,
     pub screenshot_interface_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot_interface_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot_available_targets_mask: Option<u32>,
+    #[serde(default)]
+    pub screenshot_available_targets: Vec<String>,
+    #[serde(default)]
+    pub screenshot_target_option_supported: bool,
     pub screencast_interface_available: bool,
     pub kde_portal_service_available: bool,
     pub setup_hint: String,
@@ -1899,6 +1907,15 @@ mod tests {
                 busctl_available: true,
                 portal_service_available: true,
                 screenshot_interface_available: true,
+                screenshot_interface_version: Some(3),
+                screenshot_available_targets_mask: Some(15),
+                screenshot_available_targets: vec![
+                    "screen".to_string(),
+                    "window".to_string(),
+                    "area".to_string(),
+                    "active_window".to_string(),
+                ],
+                screenshot_target_option_supported: true,
                 screencast_interface_available: true,
                 kde_portal_service_available: true,
                 setup_hint: "portal screenshot interface is visible".to_string(),

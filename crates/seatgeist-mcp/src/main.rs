@@ -791,7 +791,7 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status.clipboard_enabled,
         ),
         DaemonResponse::CaptureBackendStatus(status) => format!(
-            "capture backends preferred={} implemented={} portal_screenshot={} portal_screencast={} kwin_metadata={} spectacle={}",
+            "capture backends preferred={} implemented={} portal_screenshot={} portal_version={} portal_targets={} portal_screencast={} kwin_metadata={} spectacle={}",
             status
                 .preferred_available_backend
                 .as_deref()
@@ -801,6 +801,23 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
                 .as_deref()
                 .unwrap_or("none"),
             status.screenshot_portal.screenshot_interface_available,
+            status
+                .screenshot_portal
+                .screenshot_interface_version
+                .map(|version| version.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            if status
+                .screenshot_portal
+                .screenshot_available_targets
+                .is_empty()
+            {
+                "unknown".to_string()
+            } else {
+                status
+                    .screenshot_portal
+                    .screenshot_available_targets
+                    .join("+")
+            },
             status.screenshot_portal.screencast_interface_available,
             status.kwin_metadata.support_information_available,
             status.spectacle.command_available
@@ -2580,6 +2597,15 @@ mod tests {
                     busctl_available: true,
                     portal_service_available: true,
                     screenshot_interface_available: true,
+                    screenshot_interface_version: Some(3),
+                    screenshot_available_targets_mask: Some(15),
+                    screenshot_available_targets: vec![
+                        "screen".to_string(),
+                        "window".to_string(),
+                        "area".to_string(),
+                        "active_window".to_string(),
+                    ],
+                    screenshot_target_option_supported: true,
                     screencast_interface_available: true,
                     kde_portal_service_available: true,
                     setup_hint: "portal visible".to_string(),

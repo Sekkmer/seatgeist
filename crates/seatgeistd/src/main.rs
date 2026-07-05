@@ -3264,9 +3264,13 @@ fn screenshot_portal_status() -> ScreenshotPortalStatus {
             busctl_available,
             portal_service_available: false,
             screenshot_interface_available: false,
+            screenshot_interface_version: None,
+            screenshot_available_targets_mask: None,
+            screenshot_available_targets: Vec::new(),
+            screenshot_target_option_supported: false,
             screencast_interface_available: false,
             kde_portal_service_available: false,
-            setup_hint: screenshot_portal_setup_hint(false, false, false, false, false),
+            setup_hint: screenshot_portal_setup_hint(false, false, false, None, None, false, false),
         };
     }
 
@@ -3299,21 +3303,82 @@ fn screenshot_portal_status() -> ScreenshotPortalStatus {
                 "org.freedesktop.portal.ScreenCast",
             ],
         );
+    let screenshot_interface_version = screenshot_interface_available
+        .then(|| busctl_user_get_u32_property("org.freedesktop.portal.Screenshot", "version"))
+        .flatten();
+    let screenshot_available_targets_mask = screenshot_interface_available
+        .then(|| {
+            busctl_user_get_u32_property("org.freedesktop.portal.Screenshot", "AvailableTargets")
+        })
+        .flatten();
+    let screenshot_available_targets = screenshot_available_targets_mask
+        .map(decode_screenshot_available_targets)
+        .unwrap_or_default();
+    let screenshot_target_option_supported =
+        screenshot_interface_version.is_some_and(|version| version >= 3);
 
     ScreenshotPortalStatus {
         busctl_available,
         portal_service_available,
         screenshot_interface_available,
+        screenshot_interface_version,
+        screenshot_available_targets_mask,
+        screenshot_available_targets,
+        screenshot_target_option_supported,
         screencast_interface_available,
         kde_portal_service_available,
         setup_hint: screenshot_portal_setup_hint(
             busctl_available,
             portal_service_available,
             screenshot_interface_available,
+            screenshot_interface_version,
+            screenshot_available_targets_mask,
             screencast_interface_available,
             kde_portal_service_available,
         ),
     }
+}
+
+fn busctl_user_get_u32_property(interface: &str, property: &str) -> Option<u32> {
+    let output = command_stdout(
+        "busctl",
+        &[
+            "--user",
+            "--no-pager",
+            "get-property",
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            interface,
+            property,
+        ],
+    )
+    .ok()?;
+    parse_busctl_u32_property(&output)
+}
+
+fn parse_busctl_u32_property(output: &str) -> Option<u32> {
+    let mut parts = output.split_whitespace();
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some("u"), Some(value), None) => value.parse().ok(),
+        _ => None,
+    }
+}
+
+fn decode_screenshot_available_targets(mask: u32) -> Vec<String> {
+    let mut targets = Vec::new();
+    if mask & seatgeist_portal::PortalScreenshotTarget::Screen.value() != 0 {
+        targets.push("screen".to_string());
+    }
+    if mask & seatgeist_portal::PortalScreenshotTarget::Window.value() != 0 {
+        targets.push("window".to_string());
+    }
+    if mask & seatgeist_portal::PortalScreenshotTarget::Area.value() != 0 {
+        targets.push("area".to_string());
+    }
+    if mask & seatgeist_portal::PortalScreenshotTarget::ActiveWindow.value() != 0 {
+        targets.push("active_window".to_string());
+    }
+    targets
 }
 
 fn kwin_metadata_status() -> KwinMetadataStatus {
@@ -3420,6 +3485,8 @@ fn screenshot_portal_setup_hint(
     busctl_available: bool,
     portal_service_available: bool,
     screenshot_interface_available: bool,
+    screenshot_interface_version: Option<u32>,
+    screenshot_available_targets_mask: Option<u32>,
     screencast_interface_available: bool,
     kde_portal_service_available: bool,
 ) -> String {
@@ -3435,6 +3502,21 @@ fn screenshot_portal_setup_hint(
     }
     if !kde_portal_service_available {
         return "portal capture interface is visible; KDE portal backend service was not listed"
+            .to_string();
+    }
+    if screenshot_interface_available
+        && screenshot_interface_version.is_some_and(|version| version < 3)
+    {
+        return format!(
+            "portal Screenshot v{} and KDE portal backend are visible; target-specific Screenshot v3/AvailableTargets is unavailable, so requests use the v2 full-screen contract",
+            screenshot_interface_version.unwrap_or_default()
+        );
+    }
+    if screenshot_interface_available
+        && screenshot_interface_version.is_some_and(|version| version >= 3)
+        && screenshot_available_targets_mask.is_none()
+    {
+        return "portal Screenshot v3+ and KDE portal backend are visible, but AvailableTargets did not read successfully"
             .to_string();
     }
     if screenshot_interface_available && screencast_interface_available {
@@ -7880,7 +7962,7 @@ fn summarize_response(response: &DaemonResponse) -> String {
             status.clipboard_enabled,
         ),
         DaemonResponse::CaptureBackendStatus(status) => format!(
-            "capture backends preferred={} implemented={} portal_screenshot={} portal_screencast={} kwin_metadata={} spectacle={}",
+            "capture backends preferred={} implemented={} portal_screenshot={} portal_version={} portal_targets={} portal_screencast={} kwin_metadata={} spectacle={}",
             status
                 .preferred_available_backend
                 .as_deref()
@@ -7890,6 +7972,23 @@ fn summarize_response(response: &DaemonResponse) -> String {
                 .as_deref()
                 .unwrap_or("none"),
             status.screenshot_portal.screenshot_interface_available,
+            status
+                .screenshot_portal
+                .screenshot_interface_version
+                .map(|version| version.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            if status
+                .screenshot_portal
+                .screenshot_available_targets
+                .is_empty()
+            {
+                "unknown".to_string()
+            } else {
+                status
+                    .screenshot_portal
+                    .screenshot_available_targets
+                    .join("+")
+            },
             status.screenshot_portal.screencast_interface_available,
             status.kwin_metadata.support_information_available,
             status.spectacle.command_available
@@ -11103,10 +11202,17 @@ height = 40
             &spectacle,
         );
         assert!(visible_portal_hint.contains("using portal Screenshot"));
-        assert!(screenshot_portal_setup_hint(false, false, false, false, false).contains("busctl"));
         assert!(
-            screenshot_portal_setup_hint(true, true, false, false, true)
+            screenshot_portal_setup_hint(false, false, false, None, None, false, false)
+                .contains("busctl")
+        );
+        assert!(
+            screenshot_portal_setup_hint(true, true, false, None, None, false, true)
                 .contains("did not introspect")
+        );
+        assert!(
+            screenshot_portal_setup_hint(true, true, true, Some(2), None, true, true)
+                .contains("v2 full-screen contract")
         );
         assert!(kwin_metadata_setup_hint(false, false, false).contains("busctl"));
         assert!(kwin_metadata_setup_hint(true, false, false).contains("org.kde.KWin"));
@@ -12900,6 +13006,19 @@ height = 40
             busctl_available,
             portal_service_available: screenshot_available,
             screenshot_interface_available: screenshot_available,
+            screenshot_interface_version: screenshot_available.then_some(3),
+            screenshot_available_targets_mask: screenshot_available.then_some(15),
+            screenshot_available_targets: if screenshot_available {
+                vec![
+                    "screen".to_string(),
+                    "window".to_string(),
+                    "area".to_string(),
+                    "active_window".to_string(),
+                ]
+            } else {
+                Vec::new()
+            },
+            screenshot_target_option_supported: screenshot_available,
             screencast_interface_available: screenshot_available,
             kde_portal_service_available: screenshot_available,
             setup_hint: String::new(),

@@ -382,7 +382,7 @@ smoke-capture-backends:
 		exit 1
 	fi
 	target/debug/seatgeist-cli --socket "$$socket" capture-backends >"$$out"
-	jq -e '.type == "capture_backend_status" and ((.data.implemented_available_backend == null) or (.data.implemented_available_backend == "spectacle") or (.data.implemented_available_backend == "portal_screenshot")) and (.data.screenshot_portal.setup_hint | type == "string") and (.data.kwin_metadata.setup_hint | type == "string") and (.data.spectacle.setup_hint | type == "string") and (.data.setup_hint | type == "string")' "$$out" >/dev/null
+	jq -e '.type == "capture_backend_status" and ((.data.implemented_available_backend == null) or (.data.implemented_available_backend == "spectacle") or (.data.implemented_available_backend == "portal_screenshot")) and (.data.screenshot_portal.setup_hint | type == "string") and ((.data.screenshot_portal.screenshot_interface_version == null) or (.data.screenshot_portal.screenshot_interface_version | type == "number")) and ((.data.screenshot_portal.screenshot_available_targets_mask == null) or (.data.screenshot_portal.screenshot_available_targets_mask | type == "number")) and (.data.screenshot_portal.screenshot_available_targets | type == "array") and (.data.screenshot_portal.screenshot_target_option_supported | type == "boolean") and (.data.kwin_metadata.setup_hint | type == "string") and (.data.spectacle.setup_hint | type == "string") and (.data.setup_hint | type == "string")' "$$out" >/dev/null
 	target/debug/seatgeist-cli --socket "$$socket" journal tail --limit 10 | grep -q "capture_backend_status"
 
 smoke-pointer-calibration:
