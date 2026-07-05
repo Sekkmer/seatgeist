@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::future::poll_fn;
+use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::Duration;
@@ -33,6 +34,7 @@ pub enum PortalContractError {
     UnknownResponseCode(u32),
     MissingSessionHandle,
     MissingScreenshotUri,
+    InvalidFileDescriptor(RawFd),
     UnsupportedUri(String),
     InvalidPercentEncoding(String),
     Transport(String),
@@ -80,6 +82,9 @@ impl fmt::Display for PortalContractError {
             }
             Self::MissingScreenshotUri => {
                 write!(formatter, "portal screenshot response omitted uri")
+            }
+            Self::InvalidFileDescriptor(fd) => {
+                write!(formatter, "portal returned invalid file descriptor: {fd}")
             }
             Self::UnsupportedUri(uri) => {
                 write!(formatter, "unsupported portal screenshot uri: {uri}")
@@ -325,6 +330,25 @@ impl PortalStartOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortalConnectToEisOptions;
+
+impl PortalConnectToEisOptions {
+    pub const fn new() -> Self {
+        Self
+    }
+
+    pub const fn vardict_entry_count(self) -> usize {
+        0
+    }
+}
+
+impl Default for PortalConnectToEisOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortalRemoteDesktopSession {
     pub expected_session_path: String,
@@ -388,6 +412,12 @@ pub struct PortalRemoteDesktopSessionStart {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortalRemoteDesktopEisConnection {
+    pub session_handle: String,
+    pub fd: RawFd,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortalRequestResponse {
     pub response: PortalResponseCode,
     pub uri: Option<String>,
@@ -416,6 +446,11 @@ pub trait PortalRemoteDesktopTransport {
         options: &PortalSelectDevicesOptions,
     ) -> Result<String>;
     fn call_start(&mut self, session_handle: &str, options: &PortalStartOptions) -> Result<String>;
+    fn call_connect_to_eis(
+        &mut self,
+        session_handle: &str,
+        options: &PortalConnectToEisOptions,
+    ) -> Result<RawFd>;
     fn wait_for_response(
         &mut self,
         handle_path: &str,
@@ -549,6 +584,27 @@ pub fn start_remote_desktop_busctl_call(
     })
 }
 
+pub fn connect_remote_desktop_eis_busctl_call(
+    session_handle: &str,
+    options: &PortalConnectToEisOptions,
+) -> Result<BusctlPortalCall> {
+    validate_session_path(session_handle)?;
+    Ok(BusctlPortalCall {
+        program: "busctl",
+        args: vec![
+            "--user".to_string(),
+            "call".to_string(),
+            DESKTOP_BUS_NAME.to_string(),
+            DESKTOP_OBJECT_PATH.to_string(),
+            REMOTE_DESKTOP_INTERFACE.to_string(),
+            CONNECT_TO_EIS_METHOD.to_string(),
+            "oa{sv}".to_string(),
+            session_handle.to_string(),
+            options.vardict_entry_count().to_string(),
+        ],
+    })
+}
+
 pub fn request_response_match_rule(handle_path: &str) -> String {
     format!(
         "type='signal',sender='{DESKTOP_BUS_NAME}',path='{handle_path}',interface='{REQUEST_INTERFACE}',member='{RESPONSE_SIGNAL}'"
@@ -632,6 +688,25 @@ where
         session,
         start,
     }))
+}
+
+pub fn connect_remote_desktop_eis<T>(
+    transport: &mut T,
+    session_handle: &str,
+    options: &PortalConnectToEisOptions,
+) -> Result<PortalRemoteDesktopEisConnection>
+where
+    T: PortalRemoteDesktopTransport,
+{
+    validate_session_path(session_handle)?;
+    let fd = transport.call_connect_to_eis(session_handle, options)?;
+    if fd < 0 {
+        return Err(PortalContractError::InvalidFileDescriptor(fd));
+    }
+    Ok(PortalRemoteDesktopEisConnection {
+        session_handle: session_handle.to_string(),
+        fd,
+    })
 }
 
 pub async fn request_screenshot_zbus(
@@ -1358,6 +1433,15 @@ mod tests {
             Ok(self.start_handle.clone())
         }
 
+        fn call_connect_to_eis(
+            &mut self,
+            session_handle: &str,
+            _options: &PortalConnectToEisOptions,
+        ) -> Result<RawFd> {
+            self.calls.push(format!("connect-eis:{session_handle}"));
+            Ok(42)
+        }
+
         fn wait_for_response(
             &mut self,
             handle_path: &str,
@@ -1618,6 +1702,30 @@ mod tests {
     }
 
     #[test]
+    fn builds_remote_desktop_connect_to_eis_busctl_call() -> Result<()> {
+        let session = "/org/freedesktop/portal/desktop/session/1_42/plasma_pilot_session";
+        let options = PortalConnectToEisOptions::new();
+
+        let call = connect_remote_desktop_eis_busctl_call(session, &options)?;
+        assert_eq!(
+            call.args,
+            vec![
+                "--user",
+                "call",
+                DESKTOP_BUS_NAME,
+                DESKTOP_OBJECT_PATH,
+                REMOTE_DESKTOP_INTERFACE,
+                CONNECT_TO_EIS_METHOD,
+                "oa{sv}",
+                session,
+                "0",
+            ]
+        );
+        assert!(connect_remote_desktop_eis_busctl_call("/not/a/session", &options).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn runs_remote_desktop_session_lifecycle_with_transport() -> Result<()> {
         let mut transport = MockRemoteDesktopTransport::success();
         let mut options = PortalRemoteDesktopOptions::new(
@@ -1660,6 +1768,27 @@ mod tests {
                 "select:/org/freedesktop/portal/desktop/session/1_42/plasma_pilot_session:plasma_pilot_select:3",
                 "start:/org/freedesktop/portal/desktop/session/1_42/plasma_pilot_session:plasma_pilot_start:wayland:test-window",
             ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn connects_remote_desktop_session_to_eis_with_transport() -> Result<()> {
+        let mut transport = MockRemoteDesktopTransport::success();
+        let session = "/org/freedesktop/portal/desktop/session/1_42/plasma_pilot_session";
+        let connection =
+            connect_remote_desktop_eis(&mut transport, session, &PortalConnectToEisOptions)?;
+
+        assert_eq!(connection.session_handle, session);
+        assert_eq!(connection.fd, 42);
+        assert_eq!(transport.calls, vec![format!("connect-eis:{session}")]);
+        assert!(
+            connect_remote_desktop_eis(
+                &mut transport,
+                "/org/freedesktop/portal/desktop/request/1_42/plasma_pilot_session",
+                &PortalConnectToEisOptions,
+            )
+            .is_err()
         );
         Ok(())
     }
