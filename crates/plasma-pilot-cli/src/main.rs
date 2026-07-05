@@ -1781,6 +1781,31 @@ fn validate_trace(trace: &ReplayTrace) -> Result<()> {
                     trace_step_context(index, step)
                 );
             }
+            if expectation.equals.is_none()
+                && expectation.value_type.is_none()
+                && expectation.exists.is_none()
+            {
+                bail!(
+                    "trace {} JSON expectation must set equals, value_type, or exists",
+                    trace_step_context(index, step)
+                );
+            }
+            if expectation.exists == Some(false)
+                && (expectation.equals.is_some() || expectation.value_type.is_some())
+            {
+                bail!(
+                    "trace {} JSON expectation cannot combine exists=false with equals or value_type",
+                    trace_step_context(index, step)
+                );
+            }
+            if let Some(expected_type) = &expectation.value_type
+                && !known_json_value_types().contains(&expected_type.as_str())
+            {
+                bail!(
+                    "trace {} JSON expectation has unknown value_type {expected_type}",
+                    trace_step_context(index, step)
+                );
+            }
         }
     }
     Ok(())
@@ -1989,18 +2014,45 @@ fn replay_trace_steps(socket: &PathBuf, trace: &ReplayTrace) -> Result<Vec<serde
             let response_value =
                 serde_json::to_value(&response).context("serialize daemon response for trace")?;
             for expectation in &step.expect_json {
-                match response_value.pointer(&expectation.pointer) {
-                    Some(actual) if actual == &expectation.equals => {}
-                    Some(_) => bail!(
-                        "trace {} expected JSON pointer {} to match expected value",
-                        trace_step_context(index, step),
-                        expectation.pointer
-                    ),
-                    None => bail!(
+                let actual = response_value.pointer(&expectation.pointer);
+                if expectation.exists == Some(false) {
+                    if actual.is_some() {
+                        bail!(
+                            "trace {} expected JSON pointer {} to be absent",
+                            trace_step_context(index, step),
+                            expectation.pointer
+                        );
+                    }
+                    continue;
+                }
+
+                let Some(actual) = actual else {
+                    bail!(
                         "trace {} missing JSON pointer {}",
                         trace_step_context(index, step),
                         expectation.pointer
-                    ),
+                    );
+                };
+
+                if let Some(expected_type) = &expectation.value_type {
+                    let actual_type = json_value_type(actual);
+                    if actual_type != expected_type {
+                        bail!(
+                            "trace {} expected JSON pointer {} to have type {expected_type}, got {actual_type}",
+                            trace_step_context(index, step),
+                            expectation.pointer
+                        );
+                    }
+                }
+
+                if let Some(expected) = &expectation.equals
+                    && actual != expected
+                {
+                    bail!(
+                        "trace {} expected JSON pointer {} to match expected value",
+                        trace_step_context(index, step),
+                        expectation.pointer
+                    );
                 }
             }
         }
@@ -2014,6 +2066,21 @@ fn replay_trace_steps(socket: &PathBuf, trace: &ReplayTrace) -> Result<Vec<serde
         }));
     }
     Ok(results)
+}
+
+fn known_json_value_types() -> &'static [&'static str] {
+    &["null", "boolean", "number", "string", "array", "object"]
+}
+
+fn json_value_type(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 fn known_response_types() -> &'static [&'static str] {

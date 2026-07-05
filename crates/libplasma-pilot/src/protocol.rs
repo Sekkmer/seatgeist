@@ -373,7 +373,12 @@ pub struct TraceStep {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TraceJsonExpectation {
     pub pointer: String,
-    pub equals: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equals: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exists: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1710,7 +1715,9 @@ mod tests {
                     expect_error_contains: None,
                     expect_json: vec![TraceJsonExpectation {
                         pointer: "/type".to_string(),
-                        equals: serde_json::json!("health"),
+                        equals: Some(serde_json::json!("health")),
+                        value_type: None,
+                        exists: None,
                     }],
                 },
                 TraceStep {

@@ -43,6 +43,28 @@
       "expect_ok": true
     },
     {
+      "label": "input-backend-keymap-status",
+      "request": {
+        "method": "input_backend_status"
+      },
+      "expect_response_type": "input_backend_status",
+      "expect_ok": true,
+      "expect_json": [
+        {
+          "pointer": "/data/configured_backend",
+          "equals": "auto"
+        },
+        {
+          "pointer": "/data/eis_keymap/source",
+          "value_type": "string"
+        },
+        {
+          "pointer": "/data/eis_keymap/setup_hint",
+          "value_type": "string"
+        }
+      ]
+    },
+    {
       "label": "remote-desktop-eis-session-status-inactive",
       "request": {
         "method": "remote_desktop_eis_session_status"

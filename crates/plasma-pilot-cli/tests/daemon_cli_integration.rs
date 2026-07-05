@@ -435,6 +435,9 @@ fn cli_replays_trace_against_real_daemon() -> Result<()> {
         "desktop_session_status"
     );
     assert_eq!(report["steps"][4]["ok"], true);
+    assert_eq!(report["steps"][5]["method"], "input_backend_status");
+    assert_eq!(report["steps"][5]["response_type"], "input_backend_status");
+    assert_eq!(report["steps"][5]["ok"], true);
 
     let journal = daemon.cli_json(&["journal", "tail", "--limit", "10"])?;
     let DaemonResponse::Journal(entries) = journal else {
@@ -448,6 +451,7 @@ fn cli_replays_trace_against_real_daemon() -> Result<()> {
             "policy_status",
             "safety_status",
             "desktop_session_status",
+            "input_backend_status",
         ],
     );
     assert!(entries.iter().all(|entry| entry.ok));
@@ -750,16 +754,18 @@ fn cli_validates_trace_without_daemon() -> Result<()> {
         serde_json::from_slice(&output.stdout).context("parse trace validation report")?;
     assert_eq!(report["type"], "trace_validation");
     assert_eq!(report["trace_version"], 1);
-    assert_eq!(report["step_count"], 7);
+    assert_eq!(report["step_count"], 8);
     assert_eq!(report["steps"][0]["label"], "health");
     assert_eq!(report["steps"][0]["method"], "health");
     assert_eq!(report["steps"][0]["expect_response_type"], "health");
     assert_eq!(report["steps"][4]["method"], "desktop_session_status");
+    assert_eq!(report["steps"][5]["method"], "input_backend_status");
+    assert_eq!(report["steps"][5]["expect_json_count"], 3);
     assert_eq!(
-        report["steps"][5]["method"],
+        report["steps"][6]["method"],
         "remote_desktop_eis_session_status"
     );
-    assert_eq!(report["steps"][6]["method"], "remote_desktop_eis_stop");
+    assert_eq!(report["steps"][7]["method"], "remote_desktop_eis_stop");
     Ok(())
 }
 
@@ -1249,7 +1255,9 @@ fn cli_validate_rejects_invalid_json_expectation_pointer() -> Result<()> {
             expect_error_contains: None,
             expect_json: vec![TraceJsonExpectation {
                 pointer: "data/enabled".to_string(),
-                equals: serde_json::json!(false),
+                equals: Some(serde_json::json!(false)),
+                value_type: None,
+                exists: None,
             }],
         }],
     };
@@ -1274,6 +1282,55 @@ fn cli_validate_rejects_invalid_json_expectation_pointer() -> Result<()> {
     assert!(
         stderr.contains("JSON expectation pointer must start with '/'"),
         "stderr did not include JSON pointer detail: {stderr}"
+    );
+
+    fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+#[test]
+fn cli_validate_rejects_invalid_json_expectation_type() -> Result<()> {
+    let root = unique_temp_dir();
+    fs::create_dir_all(&root).context("create integration temp dir")?;
+    let trace_path = root.join("bad-json-type-trace.json");
+    let trace = ReplayTrace {
+        version: 1,
+        description: Some("invalid JSON expectation type trace".to_string()),
+        steps: vec![TraceStep {
+            label: Some("bad-type".to_string()),
+            request: DaemonRequest::PanicStopStatus,
+            expect_response_type: Some("panic_stop".to_string()),
+            expect_ok: Some(true),
+            expect_error_contains: None,
+            expect_json: vec![TraceJsonExpectation {
+                pointer: "/data/enabled".to_string(),
+                equals: None,
+                value_type: Some("str".to_string()),
+                exists: None,
+            }],
+        }],
+    };
+    fs::write(
+        &trace_path,
+        serde_json::to_string_pretty(&trace).context("serialize bad trace")?,
+    )
+    .context("write bad trace file")?;
+
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+        .args(["trace", "validate", "--file", &trace_arg])
+        .output()
+        .context("run plasma-pilot-cli trace validate")?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(r#"trace step 0 label="bad-type" method=panic_stop_status"#),
+        "stderr did not include trace step context: {stderr}"
+    );
+    assert!(
+        stderr.contains("unknown value_type str"),
+        "stderr did not include value type detail: {stderr}"
     );
 
     fs::remove_dir_all(&root).ok();
@@ -1373,7 +1430,9 @@ fn cli_replay_errors_include_step_context_for_json_expectations() -> Result<()> 
             expect_error_contains: None,
             expect_json: vec![TraceJsonExpectation {
                 pointer: "/data/enabled".to_string(),
-                equals: serde_json::json!(true),
+                equals: Some(serde_json::json!(true)),
+                value_type: None,
+                exists: None,
             }],
         }],
     };
@@ -1395,6 +1454,49 @@ fn cli_replay_errors_include_step_context_for_json_expectations() -> Result<()> 
     assert!(
         stderr.contains("expected JSON pointer /data/enabled to match expected value"),
         "stderr did not include JSON expectation mismatch detail: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_replay_errors_include_step_context_for_json_type_expectations() -> Result<()> {
+    let daemon = DaemonFixture::start()?;
+    let trace_path = daemon.root.join("bad-json-type-expectation-trace.json");
+    let trace = ReplayTrace {
+        version: 1,
+        description: Some("intentionally mismatched JSON type trace".to_string()),
+        steps: vec![TraceStep {
+            label: Some("bad-panic-type".to_string()),
+            request: DaemonRequest::PanicStopStatus,
+            expect_response_type: Some("panic_stop".to_string()),
+            expect_ok: Some(true),
+            expect_error_contains: None,
+            expect_json: vec![TraceJsonExpectation {
+                pointer: "/data/enabled".to_string(),
+                equals: None,
+                value_type: Some("string".to_string()),
+                exists: None,
+            }],
+        }],
+    };
+    fs::write(
+        &trace_path,
+        serde_json::to_string_pretty(&trace).context("serialize bad trace")?,
+    )
+    .context("write bad trace file")?;
+
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let output = daemon.cli_output(&["trace", "replay", "--file", &trace_arg])?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(r#"trace step 0 label="bad-panic-type" method=panic_stop_status"#),
+        "stderr did not include trace step context: {stderr}"
+    );
+    assert!(
+        stderr.contains("expected JSON pointer /data/enabled to have type string, got boolean"),
+        "stderr did not include JSON type mismatch detail: {stderr}"
     );
     Ok(())
 }
