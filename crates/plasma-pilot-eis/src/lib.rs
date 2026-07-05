@@ -112,13 +112,22 @@ impl LibeiEventType {
 pub enum LibeiEventSnapshot {
     Connect,
     Disconnect,
-    SeatAdded { capabilities: Vec<EisCapability> },
+    SeatAdded {
+        capabilities: Vec<EisCapability>,
+        bound_capabilities: Vec<EisCapability>,
+    },
     SeatRemoved,
     DeviceAdded(EisDeviceInfo),
-    DeviceRemoved { device_id: String },
-    DevicePaused { device_id: String },
+    DeviceRemoved {
+        device_id: String,
+    },
+    DevicePaused {
+        device_id: String,
+    },
     DeviceResumed(EisDeviceInfo),
-    Other { event_type: u32 },
+    Other {
+        event_type: u32,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -332,6 +341,7 @@ unsafe extern "C" {
     fn ei_event_get_device(event: *mut EiEvent) -> *mut EiDevice;
     fn ei_event_get_seat(event: *mut EiEvent) -> *mut EiSeat;
     fn ei_seat_has_capability(seat: *mut EiSeat, capability: libc::c_uint) -> bool;
+    fn ei_seat_bind_capabilities(seat: *mut EiSeat, ...);
     fn ei_device_get_name(device: *mut EiDevice) -> *const libc::c_char;
     fn ei_device_get_type(device: *mut EiDevice) -> libc::c_uint;
     fn ei_device_has_capability(device: *mut EiDevice, capability: libc::c_uint) -> bool;
@@ -392,6 +402,17 @@ impl LibeiSenderContext {
     }
 
     pub fn dispatch_pending(&mut self) -> Vec<LibeiEventSnapshot> {
+        self.dispatch_pending_with_bindings(&[])
+    }
+
+    pub fn dispatch_pending_for_plan(&mut self, plan: &EisActionPlan) -> Vec<LibeiEventSnapshot> {
+        self.dispatch_pending_with_bindings(&plan.required_capabilities)
+    }
+
+    pub fn dispatch_pending_with_bindings(
+        &mut self,
+        requested_capabilities: &[EisCapability],
+    ) -> Vec<LibeiEventSnapshot> {
         // SAFETY: `context` is valid for this wrapper's lifetime.
         unsafe { ei_dispatch(self.context.as_ptr()) };
 
@@ -403,7 +424,7 @@ impl LibeiSenderContext {
                 break;
             };
 
-            snapshots.push(libei_event_snapshot(event.as_ptr()));
+            snapshots.push(libei_event_snapshot(event.as_ptr(), requested_capabilities));
             // SAFETY: each event returned by ei_get_event must be unref'd once.
             unsafe { ei_event_unref(event.as_ptr()) };
         }
@@ -447,7 +468,10 @@ impl<'a> LibeiDeviceSink<'a> {
     }
 }
 
-fn libei_event_snapshot(event: *mut EiEvent) -> LibeiEventSnapshot {
+fn libei_event_snapshot(
+    event: *mut EiEvent,
+    requested_capabilities: &[EisCapability],
+) -> LibeiEventSnapshot {
     let event_type = LibeiEventType::from_raw(unsafe { ei_event_get_type(event) });
     match event_type {
         LibeiEventType::Connect => LibeiEventSnapshot::Connect,
@@ -455,8 +479,12 @@ fn libei_event_snapshot(event: *mut EiEvent) -> LibeiEventSnapshot {
         LibeiEventType::SeatAdded => {
             // SAFETY: libei permits retrieving the seat for seat events; NULL is handled.
             let seat = unsafe { ei_event_get_seat(event) };
+            let capabilities = libei_seat_capabilities(seat);
+            let bound_capabilities =
+                bind_available_seat_capabilities(seat, requested_capabilities, &capabilities);
             LibeiEventSnapshot::SeatAdded {
-                capabilities: libei_seat_capabilities(seat),
+                capabilities,
+                bound_capabilities,
             }
         }
         LibeiEventType::SeatRemoved => LibeiEventSnapshot::SeatRemoved,
@@ -505,6 +533,68 @@ fn libei_seat_capabilities(seat: *mut EiSeat) -> Vec<EisCapability> {
             ei_seat_has_capability(seat.as_ptr(), capability_to_libei(*capability))
         })
         .collect()
+}
+
+fn bind_available_seat_capabilities(
+    seat: *mut EiSeat,
+    requested_capabilities: &[EisCapability],
+    available_capabilities: &[EisCapability],
+) -> Vec<EisCapability> {
+    if NonNull::new(seat).is_none() {
+        return Vec::new();
+    }
+
+    let capabilities = unique_capabilities(requested_capabilities)
+        .into_iter()
+        .filter(|capability| available_capabilities.contains(capability))
+        .collect::<Vec<_>>();
+
+    // SAFETY: `seat` is a non-null seat borrowed from a SeatAdded event. The
+    // variadic call is terminated with a NULL sentinel and only includes libei
+    // capability constants.
+    unsafe { bind_seat_capability_slice(seat, &capabilities) };
+    capabilities
+}
+
+fn unique_capabilities(capabilities: &[EisCapability]) -> Vec<EisCapability> {
+    let mut unique = Vec::new();
+    for capability in capabilities {
+        if !unique.contains(capability) {
+            unique.push(*capability);
+        }
+    }
+    unique
+}
+
+unsafe fn bind_seat_capability_slice(seat: *mut EiSeat, capabilities: &[EisCapability]) {
+    let null = ptr::null::<std::ffi::c_void>();
+    match capabilities {
+        [] => {}
+        [a] => unsafe { ei_seat_bind_capabilities(seat, capability_to_libei(*a), null) },
+        [a, b] => unsafe {
+            ei_seat_bind_capabilities(seat, capability_to_libei(*a), capability_to_libei(*b), null)
+        },
+        [a, b, c] => unsafe {
+            ei_seat_bind_capabilities(
+                seat,
+                capability_to_libei(*a),
+                capability_to_libei(*b),
+                capability_to_libei(*c),
+                null,
+            )
+        },
+        [a, b, c, d] => unsafe {
+            ei_seat_bind_capabilities(
+                seat,
+                capability_to_libei(*a),
+                capability_to_libei(*b),
+                capability_to_libei(*c),
+                capability_to_libei(*d),
+                null,
+            )
+        },
+        _ => unreachable!("PlasmaPilot only models four EIS capabilities today"),
+    }
 }
 
 fn libei_device_info(device: *mut EiDevice, resumed: bool) -> Option<EisDeviceInfo> {
@@ -981,6 +1071,36 @@ mod tests {
                 EisCapability::Button,
                 EisCapability::Text,
             ]
+        );
+    }
+
+    #[test]
+    fn unique_capabilities_preserves_first_seen_order() {
+        assert_eq!(
+            unique_capabilities(&[
+                EisCapability::Text,
+                EisCapability::Button,
+                EisCapability::Text,
+                EisCapability::Scroll,
+                EisCapability::Button,
+            ]),
+            vec![
+                EisCapability::Text,
+                EisCapability::Button,
+                EisCapability::Scroll,
+            ]
+        );
+    }
+
+    #[test]
+    fn seat_binding_returns_empty_for_missing_seat() {
+        assert_eq!(
+            bind_available_seat_capabilities(
+                ptr::null_mut(),
+                &[EisCapability::Text],
+                &[EisCapability::Text],
+            ),
+            Vec::<EisCapability>::new()
         );
     }
 
