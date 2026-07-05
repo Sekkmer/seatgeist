@@ -20,6 +20,8 @@ plasma-pilot-cli input backends
 
 The same aggregate probe is available to MCP as `plasma.input_backend_status`. It checks xdg-desktop-portal RemoteDesktop interface visibility, KDE portal service visibility, libei client metadata/socket hints, and uinput fallback availability without starting a portal consent flow or sending input.
 
+To intentionally test the RemoteDesktop consent path, use `plasma-pilot-cli input remote-desktop-probe` or MCP `plasma.remote_desktop_session_probe` with a method approval and active-window guard. This may show a portal dialog, reports selected devices, closes the transient session, and still does not send input.
+
 Before any real pointer action, check monitor-derived physical pointer bounds:
 
 ```bash

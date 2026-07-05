@@ -15,14 +15,16 @@ use libplasma_pilot::{
     AccessibilitySetSelectionRequest, AccessibilitySetTextRequest,
     AccessibilityTextAttributesRequest, ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard,
     ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest,
-    CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
-    DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
-    DaemonResponse, DragPointerRequest, FocusTextFieldRequest, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, MovePointerRequest,
-    ObserveRequest, Point, PointerButton, ReplayTrace, SafetyClass, ScreenshotRequest,
-    ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
-    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
-    WaitForChangeRequest, default_approval_file_path, default_socket_path,
+    CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS,
+    DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
+    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest, DaemonResponse, DragPointerRequest,
+    FocusTextFieldRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
+    KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton,
+    RemoteDesktopPersistMode, RemoteDesktopSessionProbeRequest, ReplayTrace, SafetyClass,
+    ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest,
+    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest,
+    ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest, default_approval_file_path,
+    default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -163,6 +165,28 @@ enum InputCommand {
     Status,
     Backends,
     PointerCalibration,
+    RemoteDesktopProbe {
+        #[arg(long)]
+        keyboard: bool,
+        #[arg(long)]
+        pointer: bool,
+        #[arg(long)]
+        touchscreen: bool,
+        #[arg(long)]
+        restore_token: Option<String>,
+        #[arg(long)]
+        persist_mode: Option<String>,
+        #[arg(long)]
+        parent_window: Option<String>,
+        #[arg(long, default_value_t = DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS)]
+        timeout_ms: u64,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
     MovePointer {
         #[arg(long)]
         x: f64,
@@ -729,6 +753,43 @@ fn main() -> Result<()> {
         Command::Input {
             command: InputCommand::PointerCalibration,
         } => print_daemon_response(&socket, DaemonRequest::PointerCalibration)?,
+        Command::Input {
+            command:
+                InputCommand::RemoteDesktopProbe {
+                    keyboard,
+                    pointer,
+                    touchscreen,
+                    restore_token,
+                    persist_mode,
+                    parent_window,
+                    timeout_ms,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                },
+        } => {
+            let any_device_flag = keyboard || pointer || touchscreen;
+            print_daemon_response(
+                &socket,
+                DaemonRequest::RemoteDesktopSessionProbe(RemoteDesktopSessionProbeRequest {
+                    keyboard: if any_device_flag { keyboard } else { true },
+                    pointer: if any_device_flag { pointer } else { true },
+                    touchscreen,
+                    restore_token,
+                    persist_mode: persist_mode
+                        .as_deref()
+                        .map(parse_remote_desktop_persist_mode)
+                        .transpose()?,
+                    parent_window,
+                    timeout_ms,
+                    guard: active_window_guard(
+                        expected_active_window,
+                        expected_active_app,
+                        active_title_contains,
+                    ),
+                }),
+            )?;
+        }
         Command::Input {
             command:
                 InputCommand::MovePointer {
@@ -1491,6 +1552,17 @@ fn parse_menu_path_argument(path: &str) -> Vec<String> {
         .filter(|part| !part.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn parse_remote_desktop_persist_mode(value: &str) -> Result<RemoteDesktopPersistMode> {
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "do_not_persist" | "none" | "0" => Ok(RemoteDesktopPersistMode::DoNotPersist),
+        "application_lifetime" | "app_lifetime" | "1" => {
+            Ok(RemoteDesktopPersistMode::ApplicationLifetime)
+        }
+        "explicitly_revoked" | "revoked" | "2" => Ok(RemoteDesktopPersistMode::ExplicitlyRevoked),
+        other => bail!("unsupported RemoteDesktop persist mode: {other}"),
+    }
 }
 
 fn active_window_guard(

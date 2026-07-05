@@ -138,6 +138,7 @@ fn mcp_stdio_talks_to_real_daemon_and_reports_tool_errors() -> Result<()> {
         .as_array()
         .context("tools/list result is an array")?;
     assert_tool_present(tools, "plasma.health");
+    assert_tool_present(tools, "plasma.remote_desktop_session_probe");
     assert_tool_present(tools, "plasma.a11y_text_attributes");
     assert_tool_present(tools, "plasma.journal_tail");
 

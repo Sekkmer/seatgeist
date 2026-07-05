@@ -137,7 +137,7 @@ make smoke-uinput-status
 make smoke-pointer-calibration
 ```
 
-`make smoke-monitors`, `make smoke-windows`, `make smoke-clipboard`, and `make smoke-atspi` require a real KDE user session and may observe session state. `make gui-eval-portal-screenshot` validates live portal Screenshot capture when the portal interface is visible and may show a desktop consent dialog; set `PLASMA_PILOT_PORTAL_SCREENSHOT_STRICT=1` to fail instead of skip when the portal cancels. `make smoke-gui-input` sends real keyboard and pointer input into a disposable KWrite/Kate document and should only be run intentionally.
+`make smoke-monitors`, `make smoke-windows`, `make smoke-clipboard`, and `make smoke-atspi` require a real KDE user session and may observe session state. `make gui-eval-portal-screenshot` validates live portal Screenshot capture when the portal interface is visible and may show a desktop consent dialog; set `PLASMA_PILOT_PORTAL_SCREENSHOT_STRICT=1` to fail instead of skip when the portal cancels. `plasma-pilot-cli input remote-desktop-probe` is an explicit policy-gated RemoteDesktop consent-path probe that may show a portal dialog and closes the transient session without sending input. `make smoke-gui-input` sends real keyboard and pointer input into a disposable KWrite/Kate document and should only be run intentionally.
 
 ## Optional Uinput
 

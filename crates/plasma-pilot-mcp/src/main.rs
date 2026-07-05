@@ -13,13 +13,14 @@ use libplasma_pilot::{
     AccessibilitySetSelectionRequest, AccessibilitySetTextRequest,
     AccessibilityTextAttributesRequest, ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard,
     ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest,
-    CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
-    DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
-    DaemonResponse, DragPointerRequest, FocusTextFieldRequest, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, MovePointerRequest,
-    ObserveRequest, Point, PointerButton, ScreenshotRequest, ScreenshotTileRequest,
-    ScrollPointerRequest, SelectItemRequest, SelectMenuRequest, SetPanicStopRequest,
-    SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
+    CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS,
+    DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
+    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest, DaemonResponse, DragPointerRequest,
+    FocusTextFieldRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
+    KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton,
+    RemoteDesktopPersistMode, RemoteDesktopSessionProbeRequest, ScreenshotRequest,
+    ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
+    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
     WaitForChangeRequest, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
@@ -245,6 +246,25 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         "plasma.kwin_bridge_status" => Ok(DaemonRequest::KwinBridgeStatus),
         "plasma.uinput_status" => Ok(DaemonRequest::UinputStatus),
         "plasma.input_backend_status" => Ok(DaemonRequest::InputBackendStatus),
+        "plasma.remote_desktop_session_probe" => {
+            let keyboard = optional_bool(arguments, "keyboard")?;
+            let pointer = optional_bool(arguments, "pointer")?;
+            let touchscreen = optional_bool(arguments, "touchscreen")?.unwrap_or(false);
+            let any_device = keyboard.is_some() || pointer.is_some() || touchscreen;
+            Ok(DaemonRequest::RemoteDesktopSessionProbe(
+                RemoteDesktopSessionProbeRequest {
+                    keyboard: keyboard.unwrap_or(!any_device),
+                    pointer: pointer.unwrap_or(!any_device),
+                    touchscreen,
+                    restore_token: optional_string(arguments, "restore_token")?,
+                    persist_mode: optional_remote_desktop_persist_mode(arguments, "persist_mode")?,
+                    parent_window: optional_string(arguments, "parent_window")?,
+                    timeout_ms: optional_u64(arguments, "timeout_ms")?
+                        .unwrap_or(DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS),
+                    guard: active_window_guard(arguments)?,
+                },
+            ))
+        }
         "plasma.capture_backend_status" => Ok(DaemonRequest::CaptureBackendStatus),
         "plasma.pointer_calibration" => Ok(DaemonRequest::PointerCalibration),
         "plasma.list_monitors" => Ok(DaemonRequest::ListMonitors),
@@ -684,6 +704,18 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status.libei.client_library_available || status.libei.socket_env_present,
             status.uinput_available
         ),
+        DaemonResponse::RemoteDesktopSessionProbe(status) => format!(
+            "remote desktop probe started={} requested={} selected={} clipboard={} transient_closed={}",
+            status.started,
+            status.requested_devices.join("+"),
+            if status.selected_devices.is_empty() {
+                "none".to_string()
+            } else {
+                status.selected_devices.join("+")
+            },
+            status.clipboard_enabled,
+            status.transient_session_closed
+        ),
         DaemonResponse::CaptureBackendStatus(status) => format!(
             "capture backends preferred={} implemented={} portal_screenshot={} portal_screencast={} kwin_metadata={} spectacle={}",
             status
@@ -843,6 +875,56 @@ fn tool_definitions() -> Vec<Value> {
             "Input Backend Status",
             "Probe read-only input backend availability in priority order: xdg-desktop-portal RemoteDesktop, libei, then uinput fallback.",
             object_schema(vec![], vec![]),
+        ),
+        tool(
+            "plasma.remote_desktop_session_probe",
+            "RemoteDesktop Session Probe",
+            "Explicitly request a transient xdg-desktop-portal RemoteDesktop session to validate consent and selected devices. This is policy-gated control, may open a portal dialog, closes the session after probing, and sends no input.",
+            object_schema(
+                vec![
+                    (
+                        "keyboard",
+                        json!({"type": "boolean", "description": "Request keyboard control permission. Defaults to true when no device flags are supplied."}),
+                    ),
+                    (
+                        "pointer",
+                        json!({"type": "boolean", "description": "Request pointer control permission. Defaults to true when no device flags are supplied."}),
+                    ),
+                    (
+                        "touchscreen",
+                        json!({"type": "boolean", "description": "Request touchscreen control permission. Defaults to false."}),
+                    ),
+                    (
+                        "restore_token",
+                        json!({"type": "string", "description": "Optional single-use portal restore token from a previous started session."}),
+                    ),
+                    (
+                        "persist_mode",
+                        json!({"type": "string", "enum": ["do_not_persist", "application_lifetime", "explicitly_revoked"], "description": "Requested portal permission persistence mode."}),
+                    ),
+                    (
+                        "parent_window",
+                        json!({"type": "string", "description": "Optional portal parent window identifier."}),
+                    ),
+                    (
+                        "timeout_ms",
+                        json!({"type": "integer", "minimum": 1, "maximum": 300000, "description": "Maximum time to wait for each portal interaction. Defaults to 120000."}),
+                    ),
+                    (
+                        "expected_active_window",
+                        json!({"type": "string", "description": "Optional active-window id guard checked before opening the portal interaction."}),
+                    ),
+                    (
+                        "expected_active_app",
+                        json!({"type": "string", "description": "Optional active app id guard checked before opening the portal interaction."}),
+                    ),
+                    (
+                        "active_title_contains",
+                        json!({"type": "string", "description": "Optional active-window title substring guard checked before opening the portal interaction."}),
+                    ),
+                ],
+                vec![],
+            ),
         ),
         tool(
             "plasma.capture_backend_status",
@@ -1862,6 +1944,26 @@ fn optional_pointer_button(arguments: &Value, key: &str) -> Result<Option<Pointe
         .transpose()
 }
 
+fn optional_remote_desktop_persist_mode(
+    arguments: &Value,
+    key: &str,
+) -> Result<Option<RemoteDesktopPersistMode>> {
+    optional_string(arguments, key)?
+        .map(
+            |value| match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+                "do_not_persist" | "none" | "0" => Ok(RemoteDesktopPersistMode::DoNotPersist),
+                "application_lifetime" | "app_lifetime" | "1" => {
+                    Ok(RemoteDesktopPersistMode::ApplicationLifetime)
+                }
+                "explicitly_revoked" | "revoked" | "2" => {
+                    Ok(RemoteDesktopPersistMode::ExplicitlyRevoked)
+                }
+                other => bail!("unsupported RemoteDesktop persist mode: {other}"),
+            },
+        )
+        .transpose()
+}
+
 fn required_string_array(arguments: &Value, key: &str) -> Result<Vec<String>> {
     let array = arguments
         .get(key)
@@ -2023,6 +2125,29 @@ mod tests {
         assert!(input_text.contains("preferred=portal_remote_desktop"));
         assert!(input_text.contains("implemented=uinput"));
 
+        let remote_desktop_text = compact_tool_text(
+            "plasma.remote_desktop_session_probe",
+            &DaemonResponse::RemoteDesktopSessionProbe(
+                libplasma_pilot::RemoteDesktopSessionProbe {
+                    started: true,
+                    requested_devices: vec!["keyboard".to_string(), "pointer".to_string()],
+                    selected_devices: vec!["pointer".to_string()],
+                    clipboard_enabled: false,
+                    restore_token: None,
+                    session_handle: None,
+                    create_request_path: None,
+                    select_request_path: None,
+                    start_request_path: None,
+                    transient_session_closed: true,
+                    setup_hint: "transient probe".to_string(),
+                },
+            ),
+        );
+        assert!(remote_desktop_text.contains("started=true"));
+        assert!(remote_desktop_text.contains("requested=keyboard+pointer"));
+        assert!(remote_desktop_text.contains("selected=pointer"));
+        assert!(remote_desktop_text.contains("transient_closed=true"));
+
         let capture_text = compact_tool_text(
             "plasma.capture_backend_status",
             &DaemonResponse::CaptureBackendStatus(CaptureBackendStatus {
@@ -2105,6 +2230,11 @@ mod tests {
             tools
                 .iter()
                 .any(|tool| tool["name"] == "plasma.input_backend_status")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.remote_desktop_session_probe")
         );
         assert!(
             tools
@@ -2588,6 +2718,54 @@ mod tests {
             daemon_request_for_tool("plasma.input_backend_status", &json!({}))
                 .expect("input backend status maps"),
             DaemonRequest::InputBackendStatus
+        );
+    }
+
+    #[test]
+    fn maps_remote_desktop_session_probe_tool() {
+        assert_eq!(
+            daemon_request_for_tool("plasma.remote_desktop_session_probe", &json!({}))
+                .expect("default remote desktop probe maps"),
+            DaemonRequest::RemoteDesktopSessionProbe(RemoteDesktopSessionProbeRequest {
+                keyboard: true,
+                pointer: true,
+                touchscreen: false,
+                restore_token: None,
+                persist_mode: None,
+                parent_window: None,
+                timeout_ms: DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS,
+                guard: None,
+            })
+        );
+
+        assert_eq!(
+            daemon_request_for_tool(
+                "plasma.remote_desktop_session_probe",
+                &json!({
+                    "keyboard": false,
+                    "pointer": true,
+                    "touchscreen": false,
+                    "persist_mode": "application-lifetime",
+                    "restore_token": "restore_once",
+                    "timeout_ms": 30000,
+                    "expected_active_app": "org.kde.kwrite"
+                }),
+            )
+            .expect("remote desktop probe maps"),
+            DaemonRequest::RemoteDesktopSessionProbe(RemoteDesktopSessionProbeRequest {
+                keyboard: false,
+                pointer: true,
+                touchscreen: false,
+                restore_token: Some("restore_once".to_string()),
+                persist_mode: Some(RemoteDesktopPersistMode::ApplicationLifetime),
+                parent_window: None,
+                timeout_ms: 30_000,
+                guard: Some(ActiveWindowGuard {
+                    expected_window_id: None,
+                    expected_app_id: Some("org.kde.kwrite".to_string()),
+                    title_contains: None,
+                }),
+            })
         );
     }
 

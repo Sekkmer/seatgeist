@@ -12,6 +12,7 @@ pub const DEFAULT_CLIPBOARD_MAX_BYTES: usize = 64 * 1024;
 pub const DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS: u64 = 5_000;
 pub const DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS: u64 = 250;
 pub const DEFAULT_WAIT_FOR_CHANGE_THRESHOLD: f64 = 0.01;
+pub const DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS: u64 = 120_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthStatus {
@@ -103,6 +104,54 @@ pub struct InputBackendStatus {
     pub configured_backend: String,
     pub preferred_available_backend: Option<String>,
     pub implemented_available_backend: Option<String>,
+    pub setup_hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteDesktopPersistMode {
+    DoNotPersist,
+    ApplicationLifetime,
+    ExplicitlyRevoked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteDesktopSessionProbeRequest {
+    #[serde(default = "default_true")]
+    pub keyboard: bool,
+    #[serde(default = "default_true")]
+    pub pointer: bool,
+    #[serde(default)]
+    pub touchscreen: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persist_mode: Option<RemoteDesktopPersistMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_window: Option<String>,
+    #[serde(default = "default_remote_desktop_session_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteDesktopSessionProbe {
+    pub started: bool,
+    pub requested_devices: Vec<String>,
+    pub selected_devices: Vec<String>,
+    pub clipboard_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_handle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_request_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select_request_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_request_path: Option<String>,
+    pub transient_session_closed: bool,
     pub setup_hint: String,
 }
 
@@ -638,6 +687,14 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_remote_desktop_session_timeout_ms() -> u64 {
+    DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DesktopObservation {
     pub active_window: Option<WindowInfo>,
@@ -666,6 +723,7 @@ pub enum DaemonRequest {
     KwinBridgeStatus,
     UinputStatus,
     InputBackendStatus,
+    RemoteDesktopSessionProbe(RemoteDesktopSessionProbeRequest),
     CaptureBackendStatus,
     PointerCalibration,
     ListMonitors,
@@ -721,6 +779,7 @@ impl DaemonRequest {
             Self::KwinBridgeStatus => "kwin_bridge_status",
             Self::UinputStatus => "uinput_status",
             Self::InputBackendStatus => "input_backend_status",
+            Self::RemoteDesktopSessionProbe(_) => "remote_desktop_session_probe",
             Self::CaptureBackendStatus => "capture_backend_status",
             Self::PointerCalibration => "pointer_calibration",
             Self::ListMonitors => "list_monitors",
@@ -777,6 +836,7 @@ pub enum DaemonResponse {
     KwinBridgeStatus(KwinBridgeStatus),
     UinputStatus(UinputStatus),
     InputBackendStatus(InputBackendStatus),
+    RemoteDesktopSessionProbe(RemoteDesktopSessionProbe),
     CaptureBackendStatus(CaptureBackendStatus),
     PointerCalibration(PointerCalibrationStatus),
     Monitors(Vec<MonitorInfo>),
@@ -806,6 +866,7 @@ impl DaemonResponse {
             Self::KwinBridgeStatus(_) => "kwin_bridge_status",
             Self::UinputStatus(_) => "uinput_status",
             Self::InputBackendStatus(_) => "input_backend_status",
+            Self::RemoteDesktopSessionProbe(_) => "remote_desktop_session_probe",
             Self::CaptureBackendStatus(_) => "capture_backend_status",
             Self::PointerCalibration(_) => "pointer_calibration",
             Self::Monitors(_) => "monitors",
@@ -1275,6 +1336,48 @@ mod tests {
         assert!(encoded.contains(r#""preferred_available_backend":"portal_remote_desktop""#));
         assert!(encoded.contains(r#""implemented_available_backend":"uinput""#));
         assert_eq!(response.response_type(), "input_backend_status");
+    }
+
+    #[test]
+    fn serializes_remote_desktop_session_probe() {
+        let request = DaemonRequest::RemoteDesktopSessionProbe(RemoteDesktopSessionProbeRequest {
+            keyboard: true,
+            pointer: true,
+            touchscreen: false,
+            restore_token: Some("restore_once".to_string()),
+            persist_mode: Some(RemoteDesktopPersistMode::ApplicationLifetime),
+            parent_window: Some("wayland:app-window".to_string()),
+            timeout_ms: 30_000,
+            guard: Some(ActiveWindowGuard {
+                expected_window_id: Some("current-window".to_string()),
+                expected_app_id: None,
+                title_contains: None,
+            }),
+        });
+        let encoded =
+            serde_json::to_string(&request).expect("remote desktop probe request serializes");
+        assert!(encoded.contains(r#""method":"remote_desktop_session_probe""#));
+        assert!(encoded.contains(r#""persist_mode":"application_lifetime""#));
+        assert!(encoded.contains(r#""expected_window_id":"current-window""#));
+
+        let response = DaemonResponse::RemoteDesktopSessionProbe(RemoteDesktopSessionProbe {
+            started: true,
+            requested_devices: vec!["keyboard".to_string(), "pointer".to_string()],
+            selected_devices: vec!["pointer".to_string()],
+            clipboard_enabled: false,
+            restore_token: Some("restore_next".to_string()),
+            session_handle: Some("/org/freedesktop/portal/desktop/session/1_42/p".to_string()),
+            create_request_path: None,
+            select_request_path: None,
+            start_request_path: None,
+            transient_session_closed: true,
+            setup_hint: "transient probe completed".to_string(),
+        });
+        let encoded =
+            serde_json::to_string(&response).expect("remote desktop probe response serializes");
+        assert!(encoded.contains(r#""type":"remote_desktop_session_probe""#));
+        assert!(encoded.contains(r#""selected_devices":["pointer"]"#));
+        assert_eq!(response.response_type(), "remote_desktop_session_probe");
     }
 
     #[test]

@@ -27,7 +27,8 @@ use libplasma_pilot::{
     JournalWindowContext, KeyComboRequest, KwinBridgeStatus, KwinMetadataStatus, LibeiStatus,
     MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton,
     PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
-    PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus, SafetyClass, SafetyStatus,
+    PointerPhysicalBounds, PolicyStatus, RemoteDesktopPersistMode, RemoteDesktopPortalStatus,
+    RemoteDesktopSessionProbe, RemoteDesktopSessionProbeRequest, SafetyClass, SafetyStatus,
     ScreenshotInfo, ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest,
     ScreenshotTransform, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
     SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, SpectacleStatus, ToggleCheckRequest,
@@ -53,6 +54,7 @@ const DEFAULT_PREVIEW_MAX_EDGE: u32 = 1600;
 const DEFAULT_TILE_MAX_EDGE: u32 = 1600;
 const CONTROL_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 const PORTAL_SCREENSHOT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_REMOTE_DESKTOP_PROBE_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone)]
 struct ActionJournal {
@@ -930,6 +932,14 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 },
             }
         }
+        DaemonRequest::RemoteDesktopSessionProbe(request) => {
+            match remote_desktop_session_probe(request).await {
+                Ok(status) => DaemonResponse::RemoteDesktopSessionProbe(status),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
         DaemonRequest::CaptureBackendStatus => {
             DaemonResponse::CaptureBackendStatus(capture_backend_status())
         }
@@ -1686,6 +1696,148 @@ fn input_backend_status(preference: InputBackendPreference) -> Result<InputBacke
     })
 }
 
+async fn remote_desktop_session_probe(
+    request: RemoteDesktopSessionProbeRequest,
+) -> Result<RemoteDesktopSessionProbe> {
+    let portal_status = remote_desktop_portal_status();
+    if !portal_status.remote_desktop_interface_available {
+        bail!(
+            "xdg-desktop-portal RemoteDesktop is not available: {}",
+            portal_status.setup_hint
+        );
+    }
+
+    let requested_devices = remote_desktop_requested_devices(&request);
+    let device_types = remote_desktop_device_types(&request)?;
+    let timeout = remote_desktop_probe_timeout(request.timeout_ms)?;
+    let token_seed = Uuid::new_v4().simple().to_string();
+    let mut options = plasma_pilot_portal::PortalRemoteDesktopOptions::new(
+        format!("plasma_pilot_create_{token_seed}"),
+        format!("plasma_pilot_session_{token_seed}"),
+        format!("plasma_pilot_select_{token_seed}"),
+        format!("plasma_pilot_start_{token_seed}"),
+    );
+    options.select_devices.types = Some(device_types);
+    options.select_devices.restore_token = request.restore_token;
+    options.select_devices.persist_mode = request.persist_mode.map(remote_desktop_persist_mode);
+    options.start.parent_window = request.parent_window.unwrap_or_default();
+
+    let result = plasma_pilot_portal::request_remote_desktop_session_zbus(&options, timeout)
+        .await
+        .context("request transient portal RemoteDesktop session")?;
+    let Some(session) = result else {
+        return Ok(RemoteDesktopSessionProbe {
+            started: false,
+            requested_devices,
+            selected_devices: Vec::new(),
+            clipboard_enabled: false,
+            restore_token: None,
+            session_handle: None,
+            create_request_path: None,
+            select_request_path: None,
+            start_request_path: None,
+            transient_session_closed: true,
+            setup_hint:
+                "portal RemoteDesktop interaction was cancelled or ended before Start completed"
+                    .to_string(),
+        });
+    };
+
+    Ok(RemoteDesktopSessionProbe {
+        started: true,
+        requested_devices,
+        selected_devices: remote_desktop_device_names(session.start.devices),
+        clipboard_enabled: session.start.clipboard_enabled,
+        restore_token: session.start.restore_token,
+        session_handle: Some(session.session.actual_session_path),
+        create_request_path: Some(session.create_request_path),
+        select_request_path: Some(session.select_request_path),
+        start_request_path: Some(session.start_request_path),
+        transient_session_closed: true,
+        setup_hint: "transient portal RemoteDesktop session reached Start; PlasmaPilot closed it after the probe and did not call ConnectToEIS or send input".to_string(),
+    })
+}
+
+fn remote_desktop_requested_devices(request: &RemoteDesktopSessionProbeRequest) -> Vec<String> {
+    let mut devices = Vec::new();
+    if request.keyboard {
+        devices.push("keyboard".to_string());
+    }
+    if request.pointer {
+        devices.push("pointer".to_string());
+    }
+    if request.touchscreen {
+        devices.push("touchscreen".to_string());
+    }
+    devices
+}
+
+fn remote_desktop_device_types(
+    request: &RemoteDesktopSessionProbeRequest,
+) -> Result<plasma_pilot_portal::RemoteDesktopDeviceTypes> {
+    let mut bits = 0;
+    if request.keyboard {
+        bits |= plasma_pilot_portal::RemoteDesktopDeviceTypes::KEYBOARD.bits();
+    }
+    if request.pointer {
+        bits |= plasma_pilot_portal::RemoteDesktopDeviceTypes::POINTER.bits();
+    }
+    if request.touchscreen {
+        bits |= plasma_pilot_portal::RemoteDesktopDeviceTypes::TOUCHSCREEN.bits();
+    }
+    if bits == 0 {
+        bail!("remote desktop session probe must request at least one input device");
+    }
+    plasma_pilot_portal::RemoteDesktopDeviceTypes::try_from(bits)
+        .map_err(|err| anyhow::anyhow!(err))
+}
+
+fn remote_desktop_device_names(
+    devices: plasma_pilot_portal::RemoteDesktopDeviceTypes,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    if devices.contains(plasma_pilot_portal::RemoteDesktopDeviceTypes::KEYBOARD) {
+        names.push("keyboard".to_string());
+    }
+    if devices.contains(plasma_pilot_portal::RemoteDesktopDeviceTypes::POINTER) {
+        names.push("pointer".to_string());
+    }
+    if devices.contains(plasma_pilot_portal::RemoteDesktopDeviceTypes::TOUCHSCREEN) {
+        names.push("touchscreen".to_string());
+    }
+    names
+}
+
+fn remote_desktop_persist_mode(
+    mode: RemoteDesktopPersistMode,
+) -> plasma_pilot_portal::RemoteDesktopPersistMode {
+    match mode {
+        RemoteDesktopPersistMode::DoNotPersist => {
+            plasma_pilot_portal::RemoteDesktopPersistMode::DoNotPersist
+        }
+        RemoteDesktopPersistMode::ApplicationLifetime => {
+            plasma_pilot_portal::RemoteDesktopPersistMode::ApplicationLifetime
+        }
+        RemoteDesktopPersistMode::ExplicitlyRevoked => {
+            plasma_pilot_portal::RemoteDesktopPersistMode::ExplicitlyRevoked
+        }
+    }
+}
+
+fn remote_desktop_probe_timeout(timeout_ms: u64) -> Result<Duration> {
+    if timeout_ms == 0 {
+        bail!("remote desktop session probe timeout_ms must be greater than zero");
+    }
+    let timeout = Duration::from_millis(timeout_ms);
+    if timeout > MAX_REMOTE_DESKTOP_PROBE_TIMEOUT {
+        bail!(
+            "remote desktop session probe timeout_ms must be at most {}",
+            MAX_REMOTE_DESKTOP_PROBE_TIMEOUT.as_millis()
+        );
+    }
+    Ok(timeout)
+}
+
 fn capture_backend_status() -> CaptureBackendStatus {
     let screenshot_portal = screenshot_portal_status();
     let kwin_metadata = kwin_metadata_status();
@@ -2398,6 +2550,7 @@ fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWin
         DaemonRequest::AccessibilitySetSelection(request) => request.guard.as_ref(),
         DaemonRequest::TypeText(request) => request.guard.as_ref(),
         DaemonRequest::KeyCombo(request) => request.guard.as_ref(),
+        DaemonRequest::RemoteDesktopSessionProbe(request) => request.guard.as_ref(),
         DaemonRequest::MovePointer(request) => request.guard.as_ref(),
         DaemonRequest::ClickPointer(request) => request.guard.as_ref(),
         DaemonRequest::DragPointer(request) => request.guard.as_ref(),
@@ -2458,6 +2611,13 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         }
         DaemonRequest::ClipboardGet(_) => SafetyClass::ClipboardRead,
         DaemonRequest::ClipboardSet(_) => SafetyClass::ClipboardWrite,
+        DaemonRequest::RemoteDesktopSessionProbe(request) => {
+            if request.pointer || request.touchscreen {
+                SafetyClass::ControlPointer
+            } else {
+                SafetyClass::ControlKeyboard
+            }
+        }
         DaemonRequest::MovePointer(_)
         | DaemonRequest::ClickPointer(_)
         | DaemonRequest::DragPointer(_)
@@ -5275,6 +5435,18 @@ fn summarize_response(response: &DaemonResponse) -> String {
             status.libei.client_library_available || status.libei.socket_env_present,
             status.uinput_available
         ),
+        DaemonResponse::RemoteDesktopSessionProbe(status) => format!(
+            "remote desktop session probe started={} requested={} selected={} clipboard={} transient_closed={}",
+            status.started,
+            status.requested_devices.join("+"),
+            if status.selected_devices.is_empty() {
+                "none".to_string()
+            } else {
+                status.selected_devices.join("+")
+            },
+            status.clipboard_enabled,
+            status.transient_session_closed
+        ),
         DaemonResponse::CaptureBackendStatus(status) => format!(
             "capture backends preferred={} implemented={} portal_screenshot={} portal_screencast={} kwin_metadata={} spectacle={}",
             status
@@ -6903,6 +7075,76 @@ height = 40
             .expect("pointer calibration is allowed as policy diagnostics");
         enforce_policy(&policy, &DaemonRequest::DesktopSessionStatus)
             .expect("desktop session status is allowed as policy diagnostics");
+    }
+
+    #[test]
+    fn remote_desktop_session_probe_is_control_pointer_policy() {
+        let request = DaemonRequest::RemoteDesktopSessionProbe(RemoteDesktopSessionProbeRequest {
+            keyboard: true,
+            pointer: true,
+            touchscreen: false,
+            restore_token: None,
+            persist_mode: None,
+            parent_window: None,
+            timeout_ms: 30_000,
+            guard: None,
+        });
+        assert_eq!(
+            safety_class_for_request(&request),
+            SafetyClass::ControlPointer
+        );
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(&policy, &request)
+            .expect_err("remote desktop session probe prompts by default");
+        assert!(err.to_string().contains("ControlPointer"));
+
+        let keyboard_only =
+            DaemonRequest::RemoteDesktopSessionProbe(RemoteDesktopSessionProbeRequest {
+                keyboard: true,
+                pointer: false,
+                touchscreen: false,
+                restore_token: None,
+                persist_mode: None,
+                parent_window: None,
+                timeout_ms: 30_000,
+                guard: None,
+            });
+        assert_eq!(
+            safety_class_for_request(&keyboard_only),
+            SafetyClass::ControlKeyboard
+        );
+    }
+
+    #[test]
+    fn remote_desktop_session_probe_validates_devices_and_timeout() {
+        let request = RemoteDesktopSessionProbeRequest {
+            keyboard: true,
+            pointer: false,
+            touchscreen: true,
+            restore_token: None,
+            persist_mode: None,
+            parent_window: None,
+            timeout_ms: 30_000,
+            guard: None,
+        };
+        let devices = remote_desktop_device_types(&request).expect("device bitmask builds");
+        assert!(devices.contains(plasma_pilot_portal::RemoteDesktopDeviceTypes::KEYBOARD));
+        assert!(devices.contains(plasma_pilot_portal::RemoteDesktopDeviceTypes::TOUCHSCREEN));
+        assert!(!devices.contains(plasma_pilot_portal::RemoteDesktopDeviceTypes::POINTER));
+
+        let empty = RemoteDesktopSessionProbeRequest {
+            keyboard: false,
+            pointer: false,
+            touchscreen: false,
+            ..request.clone()
+        };
+        assert!(remote_desktop_device_types(&empty).is_err());
+        assert!(remote_desktop_probe_timeout(0).is_err());
+        assert!(remote_desktop_probe_timeout(300_001).is_err());
+        assert_eq!(
+            remote_desktop_probe_timeout(30_000).expect("valid timeout"),
+            Duration::from_secs(30)
+        );
     }
 
     #[test]
