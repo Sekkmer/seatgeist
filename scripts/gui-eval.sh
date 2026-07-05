@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
 	cat <<'USAGE'
-Usage: scripts/gui-eval.sh [all|status|observe|clipboard-denied|kwin-bridge-status|keymap-status|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|portal-screenshot|remote-desktop-probe|remote-desktop-eis-session|full-resolution-denied|control-safety]
+Usage: scripts/gui-eval.sh [all|status|session-preflight|observe|clipboard-denied|kwin-bridge-status|keymap-status|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|portal-screenshot|remote-desktop-probe|remote-desktop-eis-session|full-resolution-denied|control-safety]
 
 Runs opt-in local GUI evals against a private PlasmaPilot daemon socket.
 The default `all` set avoids control actions. `control-safety` starts a private
@@ -19,7 +19,7 @@ if [[ "$case_name" == "--help" || "$case_name" == "-h" ]]; then
 fi
 
 case "$case_name" in
-	all | status | observe | clipboard-denied | kwin-bridge-status | keymap-status | screenshot-preview | screenshot-coordinate-map | screenshot-config-bounds | portal-screenshot | remote-desktop-probe | remote-desktop-eis-session | full-resolution-denied | control-safety) ;;
+	all | status | session-preflight | observe | clipboard-denied | kwin-bridge-status | keymap-status | screenshot-preview | screenshot-coordinate-map | screenshot-config-bounds | portal-screenshot | remote-desktop-probe | remote-desktop-eis-session | full-resolution-denied | control-safety) ;;
 	*)
 		usage >&2
 		exit 2
@@ -130,6 +130,50 @@ eval_status() {
 	jq -e '.type == "capabilities"' "$run_dir/capabilities.json" >/dev/null
 	cli policy-status >"$run_dir/policy-status.json"
 	jq -e '.type == "policy_status" and .data.default_control == "prompt"' "$run_dir/policy-status.json" >/dev/null
+}
+
+eval_session_preflight() {
+	cli safety-status >"$run_dir/session-preflight-safety.json"
+	jq -e '
+		.type == "safety_status"
+		and (.data.require_focus_guard | type == "boolean")
+		and (.data.pause_on_human_input | type == "boolean")
+		and (.data.human_input_signal_fresh | type == "boolean")
+		and (.data.human_input_quiet_ms | type == "number")
+		and (.data.control_rate_limit_per_minute | type == "number")
+		and (.data.preview_max_edge | type == "number")
+		and (.data.tile_max_edge | type == "number")
+		and (.data.screenshot_redaction_count | type == "number")
+	' "$run_dir/session-preflight-safety.json" >/dev/null
+
+	cli desktop-session-status >"$run_dir/session-preflight-desktop.json"
+	jq -e '
+		.type == "desktop_session_status"
+		and (.data.dbus_session_bus_address_present | type == "boolean")
+		and (.data.xdg_runtime_dir_present | type == "boolean")
+		and (.data.setup_hint | type == "string")
+		and (
+			(.data.xdg_session_type | type == "string")
+			or (.data.xdg_session_type == null)
+		)
+		and (
+			(.data.xdg_current_desktop | type == "string")
+			or (.data.xdg_current_desktop == null)
+		)
+		and (
+			(.data.wayland_display | type == "string")
+			or (.data.wayland_display == null)
+		)
+		and (
+			(.data.display | type == "string")
+			or (.data.display == null)
+		)
+	' "$run_dir/session-preflight-desktop.json" >/dev/null
+
+	cli journal tail --limit 20 --method safety_status --ok true >"$run_dir/session-preflight-safety-journal.json"
+	jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/session-preflight-safety-journal.json" >/dev/null
+	cli journal tail --limit 20 --method desktop_session_status --ok true >"$run_dir/session-preflight-desktop-journal.json"
+	jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/session-preflight-desktop-journal.json" >/dev/null
 }
 
 eval_observe() {
@@ -614,6 +658,7 @@ eval_control_safety() {
 run_case() {
 	case "$1" in
 		status) eval_status ;;
+		session-preflight) eval_session_preflight ;;
 		observe) eval_observe ;;
 		clipboard-denied) eval_clipboard_denied ;;
 		kwin-bridge-status) eval_kwin_bridge_status ;;
@@ -630,7 +675,7 @@ run_case() {
 }
 
 if [[ "$case_name" == "all" ]]; then
-	for eval_name in status observe clipboard-denied kwin-bridge-status keymap-status screenshot-preview screenshot-coordinate-map screenshot-config-bounds full-resolution-denied; do
+	for eval_name in status session-preflight observe clipboard-denied kwin-bridge-status keymap-status screenshot-preview screenshot-coordinate-map screenshot-config-bounds full-resolution-denied; do
 		run_case "$eval_name"
 	done
 else
