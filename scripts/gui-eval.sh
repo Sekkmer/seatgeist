@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
 	cat <<'USAGE'
-Usage: scripts/gui-eval.sh [all|status|observe|clipboard-denied|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|full-resolution-denied|control-safety]
+Usage: scripts/gui-eval.sh [all|status|observe|clipboard-denied|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|portal-screenshot|full-resolution-denied|control-safety]
 
 Runs opt-in local GUI evals against a private PlasmaPilot daemon socket.
 The default `all` set avoids control actions. `control-safety` starts a private
@@ -19,7 +19,7 @@ if [[ "$case_name" == "--help" || "$case_name" == "-h" ]]; then
 fi
 
 case "$case_name" in
-	all | status | observe | clipboard-denied | screenshot-preview | screenshot-coordinate-map | screenshot-config-bounds | full-resolution-denied | control-safety) ;;
+	all | status | observe | clipboard-denied | screenshot-preview | screenshot-coordinate-map | screenshot-config-bounds | portal-screenshot | full-resolution-denied | control-safety) ;;
 	*)
 		usage >&2
 		exit 2
@@ -240,6 +240,41 @@ eval_screenshot_config_bounds() {
 	' "$run_dir/screenshot-config-tile.json" >/dev/null
 }
 
+eval_portal_screenshot() {
+	cli capture-backends >"$run_dir/portal-capture-backends.json"
+	if ! jq -e '.type == "capture_backend_status" and .data.screenshot_portal.screenshot_interface_available == true' "$run_dir/portal-capture-backends.json" >/dev/null; then
+		echo "SKIP portal-screenshot: xdg-desktop-portal Screenshot interface is not visible"
+		return 0
+	fi
+	if ! jq -e '.data.implemented_available_backend == "portal_screenshot"' "$run_dir/portal-capture-backends.json" >/dev/null; then
+		echo "portal Screenshot is visible but not selected as implemented backend" >&2
+		cat "$run_dir/portal-capture-backends.json" >&2
+		exit 1
+	fi
+
+	if ! cli screenshot --output "$run_dir/portal-screenshot.png" >"$run_dir/portal-screenshot.json" 2>"$run_dir/portal-screenshot.err"; then
+		if grep -qi "portal screenshot request was cancelled or ended without a screenshot" "$run_dir/portal-screenshot.err" && [[ "${PLASMA_PILOT_PORTAL_SCREENSHOT_STRICT:-0}" != "1" ]]; then
+			echo "SKIP portal-screenshot: portal cancelled or ended the request without a screenshot"
+			return 0
+		fi
+		cat "$run_dir/portal-screenshot.err" >&2
+		exit 1
+	fi
+	test -s "$run_dir/portal-screenshot.png"
+	jq -e '
+		.type == "screenshot"
+		and .data.backend == "portal_screenshot"
+		and .data.source_width >= .data.output_width
+		and .data.source_height >= .data.output_height
+		and .data.output_width <= 1600
+		and .data.output_height <= 1600
+		and .data.transform.scale_x > 0
+		and .data.transform.scale_y > 0
+	' "$run_dir/portal-screenshot.json" >/dev/null
+	cli journal tail --limit 20 --method screenshot --ok true >"$run_dir/portal-screenshot-journal.json"
+	jq -e '.type == "journal" and any(.data[]; .summary | contains("backend=portal_screenshot"))' "$run_dir/portal-screenshot-journal.json" >/dev/null
+}
+
 eval_full_resolution_denied() {
 	if cli screenshot --output "$run_dir/full-resolution-denied.png" --full-resolution >"$run_dir/full-resolution-denied.txt" 2>&1; then
 		echo "full-resolution screenshot unexpectedly succeeded without explicit approval" >&2
@@ -304,6 +339,7 @@ run_case() {
 		screenshot-preview) eval_screenshot_preview ;;
 		screenshot-coordinate-map) eval_screenshot_coordinate_map ;;
 		screenshot-config-bounds) eval_screenshot_config_bounds ;;
+		portal-screenshot) eval_portal_screenshot ;;
 		full-resolution-denied) eval_full_resolution_denied ;;
 		control-safety) eval_control_safety ;;
 	esac

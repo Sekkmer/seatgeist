@@ -18,8 +18,8 @@ The package roles are:
 
 - `plasma-meta` / `plasma-workspace`: KDE Plasma session and KWin.
 - `kde-cli-tools`: `kpackagetool6`, `kwriteconfig6`, and related KDE command tools.
-- `spectacle`: current screenshot command backend.
-- `xdg-desktop-portal` / `xdg-desktop-portal-kde`: portal services for current diagnostics and future consented capture/control backends.
+- `spectacle`: screenshot tile backend and compatibility fallback.
+- `xdg-desktop-portal` / `xdg-desktop-portal-kde`: portal services for current consented full-screen Screenshot capture, capture/control diagnostics, and future RemoteDesktop control backends.
 - `wl-clipboard`: current Wayland clipboard command backend.
 - `jq`: smoke target JSON checks.
 
@@ -137,7 +137,7 @@ make smoke-uinput-status
 make smoke-pointer-calibration
 ```
 
-`make smoke-monitors`, `make smoke-windows`, `make smoke-clipboard`, and `make smoke-atspi` require a real KDE user session and may observe session state. `make smoke-gui-input` sends real keyboard and pointer input into a disposable KWrite/Kate document and should only be run intentionally.
+`make smoke-monitors`, `make smoke-windows`, `make smoke-clipboard`, and `make smoke-atspi` require a real KDE user session and may observe session state. `make gui-eval-portal-screenshot` validates live portal Screenshot capture when the portal interface is visible and may show a desktop consent dialog; set `PLASMA_PILOT_PORTAL_SCREENSHOT_STRICT=1` to fail instead of skip when the portal cancels. `make smoke-gui-input` sends real keyboard and pointer input into a disposable KWrite/Kate document and should only be run intentionally.
 
 ## Optional Uinput
 

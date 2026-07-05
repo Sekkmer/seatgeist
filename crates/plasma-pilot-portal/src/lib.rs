@@ -137,7 +137,7 @@ impl PortalScreenshotOptions {
             handle_token: handle_token.into(),
             modal: true,
             interactive: false,
-            target: Some(PortalScreenshotTarget::Screen),
+            target: None,
         }
     }
 
@@ -549,6 +549,13 @@ mod tests {
             validate_handle_token("bad/token"),
             Err(PortalContractError::InvalidHandleToken(_))
         ));
+    }
+
+    #[test]
+    fn default_options_omit_version_three_target_for_compatibility() {
+        let options = PortalScreenshotOptions::new("plasma_pilot_abc");
+        assert_eq!(options.target, None);
+        assert_eq!(options.vardict_entry_count(), 3);
     }
 
     #[test]
