@@ -25,7 +25,7 @@ validate-traces:
 	cargo build -p plasma-pilot-cli
 	target/debug/plasma-pilot-cli trace validate --dir examples/traces >/dev/null
 
-verify: fmt check test clippy validate-plugin validate-install-assets validate-traces smoke-trace-replay smoke-mcp gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-control-safety
+verify: fmt check test clippy validate-plugin validate-install-assets validate-traces smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-trace-replay smoke-mcp gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-control-safety
 	git diff --check -- . ':(exclude)target'
 
 smoke:
@@ -357,7 +357,7 @@ smoke-capture-backends:
 		exit 1
 	fi
 	target/debug/plasma-pilot-cli --socket "$$socket" capture-backends >"$$out"
-	jq -e '.type == "capture_backend_status" and ((.data.implemented_available_backend == null) or (.data.implemented_available_backend == "spectacle")) and (.data.screenshot_portal.setup_hint | type == "string") and (.data.kwin_metadata.setup_hint | type == "string") and (.data.spectacle.setup_hint | type == "string") and (.data.setup_hint | type == "string")' "$$out" >/dev/null
+	jq -e '.type == "capture_backend_status" and ((.data.implemented_available_backend == null) or (.data.implemented_available_backend == "spectacle") or (.data.implemented_available_backend == "portal_screenshot")) and (.data.screenshot_portal.setup_hint | type == "string") and (.data.kwin_metadata.setup_hint | type == "string") and (.data.spectacle.setup_hint | type == "string") and (.data.setup_hint | type == "string")' "$$out" >/dev/null
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "capture_backend_status"
 
 smoke-pointer-calibration:
