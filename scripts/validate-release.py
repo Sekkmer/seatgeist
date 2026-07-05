@@ -58,6 +58,8 @@ def main() -> None:
     makefile = read("Makefile")
     require_contains("Makefile", makefile, "package-release:")
     require_contains("Makefile", makefile, "scripts/package-release.sh")
+    require_contains("Makefile", makefile, "verify-release-artifacts: package-release")
+    require_contains("Makefile", makefile, "scripts/verify-release-artifacts.py")
 
     package_release = require_executable("scripts/package-release.sh")
     for needle in [
@@ -80,6 +82,20 @@ def main() -> None:
     ]:
         require_contains("scripts/package-release.sh", package_release, needle)
 
+    verify_release = require_executable("scripts/verify-release-artifacts.py")
+    for needle in [
+        "verify_checksum(bundle, bundle_checksum)",
+        "verify_checksum(source, source_checksum)",
+        "verify_bundle(bundle, manifest)",
+        "verify_source(source, manifest)",
+        "crates/seatgeistd/src/main.rs",
+        "plugin/.mcp.json",
+        "scripts/package-release.sh",
+        "scripts/verify-release-artifacts.py",
+        "target/",
+    ]:
+        require_contains("scripts/verify-release-artifacts.py", verify_release, needle)
+
     checklist = read("docs/release-checklist.md")
     require_contains(
         "docs/release-checklist.md",
@@ -89,7 +105,7 @@ def main() -> None:
     require_contains(
         "docs/release-checklist.md",
         checklist,
-        "- [~] Versioned local release artifact packaging exists through `make package-release` for binary/plugin and source archives; published signed artifacts are not produced yet.",
+        "- [~] Versioned local release artifact packaging and verification exist through `make verify-release-artifacts` for binary/plugin and source archives; published signed artifacts are not produced yet.",
     )
     require_contains(
         "docs/release-checklist.md",
