@@ -2296,17 +2296,117 @@ fn input_backend_setup_hint(
     }
 }
 
-fn ensure_executable_input_backend(preference: InputBackendPreference) -> Result<()> {
+trait InputExecutionBackend {
+    fn name(&self) -> &'static str;
+    fn type_text(&self, text: &str) -> Result<()>;
+    fn key_combo(&self, combo: &str) -> Result<usize>;
+    fn move_pointer(&self, point: Point, bounds: plasma_pilot_uinput::PointerBounds) -> Result<()>;
+    fn click_pointer(
+        &self,
+        point: Point,
+        bounds: plasma_pilot_uinput::PointerBounds,
+        button: PointerButton,
+        clicks: u8,
+    ) -> Result<()>;
+    fn drag_pointer(
+        &self,
+        from: Point,
+        to: Point,
+        bounds: plasma_pilot_uinput::PointerBounds,
+        button: PointerButton,
+        duration_ms: u64,
+    ) -> Result<()>;
+    fn scroll_pointer(
+        &self,
+        vertical: i32,
+        horizontal: i32,
+        bounds: plasma_pilot_uinput::PointerBounds,
+    ) -> Result<()>;
+}
+
+struct UinputInputExecutionBackend;
+
+impl InputExecutionBackend for UinputInputExecutionBackend {
+    fn name(&self) -> &'static str {
+        "uinput"
+    }
+
+    fn type_text(&self, text: &str) -> Result<()> {
+        plasma_pilot_uinput::type_text(text).map_err(|err| anyhow::anyhow!(err))
+    }
+
+    fn key_combo(&self, combo: &str) -> Result<usize> {
+        plasma_pilot_uinput::key_combo(combo).map_err(|err| anyhow::anyhow!(err))
+    }
+
+    fn move_pointer(&self, point: Point, bounds: plasma_pilot_uinput::PointerBounds) -> Result<()> {
+        plasma_pilot_uinput::move_pointer(point.x, point.y, bounds)
+            .map_err(|err| anyhow::anyhow!(err))
+    }
+
+    fn click_pointer(
+        &self,
+        point: Point,
+        bounds: plasma_pilot_uinput::PointerBounds,
+        button: PointerButton,
+        clicks: u8,
+    ) -> Result<()> {
+        plasma_pilot_uinput::click_pointer(
+            point.x,
+            point.y,
+            bounds,
+            pointer_button_to_uinput(button),
+            clicks,
+        )
+        .map_err(|err| anyhow::anyhow!(err))
+    }
+
+    fn drag_pointer(
+        &self,
+        from: Point,
+        to: Point,
+        bounds: plasma_pilot_uinput::PointerBounds,
+        button: PointerButton,
+        duration_ms: u64,
+    ) -> Result<()> {
+        plasma_pilot_uinput::drag_pointer(
+            from.x,
+            from.y,
+            to.x,
+            to.y,
+            bounds,
+            pointer_button_to_uinput(button),
+            duration_ms,
+        )
+        .map_err(|err| anyhow::anyhow!(err))
+    }
+
+    fn scroll_pointer(
+        &self,
+        vertical: i32,
+        horizontal: i32,
+        bounds: plasma_pilot_uinput::PointerBounds,
+    ) -> Result<()> {
+        plasma_pilot_uinput::scroll_pointer(vertical, horizontal, bounds)
+            .map_err(|err| anyhow::anyhow!(err))
+    }
+}
+
+fn input_execution_backend(
+    preference: InputBackendPreference,
+) -> Result<Box<dyn InputExecutionBackend>> {
     match preference {
-        InputBackendPreference::Auto | InputBackendPreference::Uinput => Ok(()),
+        InputBackendPreference::Auto | InputBackendPreference::Uinput => {
+            Ok(Box::new(UinputInputExecutionBackend))
+        }
         InputBackendPreference::PortalRemoteDesktop => {
             bail!(
-                "configured input backend portal_remote_desktop is not implemented for execution yet; configure input = \"auto\" or \"uinput\" for current control"
+                "configured input backend portal_remote_desktop has no input executor yet; use remote_desktop_eis_probe to validate consent/EIS, or configure input = \"auto\" or \"uinput\" for current control"
             )
         }
         InputBackendPreference::Libei => {
             bail!(
-                "configured input backend libei is not implemented for execution yet; configure input = \"auto\" or \"uinput\" for current control"
+                "configured input backend libei has no input executor yet; use remote_desktop_eis_probe to validate EIS handoff where available, or configure input = \"auto\" or \"uinput\" for current control"
             )
         }
     }
@@ -3820,15 +3920,16 @@ fn type_text(
     if request.text.chars().count() > 8192 {
         bail!("text must be at most 8192 characters");
     }
-    ensure_executable_input_backend(input_backend_preference)?;
-    plasma_pilot_uinput::type_text(&request.text).map_err(|err| anyhow::anyhow!(err))?;
+    let backend = input_execution_backend(input_backend_preference)?;
+    backend.type_text(&request.text)?;
     Ok(ActionResult {
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
         message: Some(format!(
-            "typed text length={}",
-            request.text.chars().count()
+            "typed text length={} backend={}",
+            request.text.chars().count(),
+            backend.name()
         )),
     })
 }
@@ -3840,14 +3941,16 @@ fn key_combo(
     if request.combo.trim().is_empty() {
         bail!("combo must be non-empty");
     }
-    ensure_executable_input_backend(input_backend_preference)?;
-    let key_count =
-        plasma_pilot_uinput::key_combo(&request.combo).map_err(|err| anyhow::anyhow!(err))?;
+    let backend = input_execution_backend(input_backend_preference)?;
+    let key_count = backend.key_combo(&request.combo)?;
     Ok(ActionResult {
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
-        message: Some(format!("sent key combo keys={key_count}")),
+        message: Some(format!(
+            "sent key combo keys={key_count} backend={}",
+            backend.name()
+        )),
     })
 }
 
@@ -3931,17 +4034,19 @@ fn move_pointer(
     active_window_state: &ActiveWindowState,
     input_backend_preference: InputBackendPreference,
 ) -> Result<ActionResult> {
-    ensure_executable_input_backend(input_backend_preference)?;
+    let backend = input_execution_backend(input_backend_preference)?;
     let (point, bounds) = resolve_pointer_point(request.point, active_window_state)?;
-    plasma_pilot_uinput::move_pointer(point.x, point.y, bounds)
-        .map_err(|err| anyhow::anyhow!(err))?;
+    backend.move_pointer(point, bounds)?;
     Ok(ActionResult {
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
         message: Some(format!(
-            "moved pointer x={:.0} y={:.0} space={:?}",
-            point.x, point.y, request.point.space
+            "moved pointer x={:.0} y={:.0} space={:?} backend={}",
+            point.x,
+            point.y,
+            request.point.space,
+            backend.name()
         )),
     })
 }
@@ -3954,23 +4059,21 @@ fn click_pointer(
     if request.clicks == 0 || request.clicks > 2 {
         bail!("clicks must be 1 or 2");
     }
-    ensure_executable_input_backend(input_backend_preference)?;
+    let backend = input_execution_backend(input_backend_preference)?;
     let (point, bounds) = resolve_pointer_point(request.point, active_window_state)?;
-    plasma_pilot_uinput::click_pointer(
-        point.x,
-        point.y,
-        bounds,
-        pointer_button_to_uinput(request.button),
-        request.clicks,
-    )
-    .map_err(|err| anyhow::anyhow!(err))?;
+    backend.click_pointer(point, bounds, request.button, request.clicks)?;
     Ok(ActionResult {
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
         message: Some(format!(
-            "clicked pointer button={:?} clicks={} x={:.0} y={:.0} space={:?}",
-            request.button, request.clicks, point.x, point.y, request.point.space
+            "clicked pointer button={:?} clicks={} x={:.0} y={:.0} space={:?} backend={}",
+            request.button,
+            request.clicks,
+            point.x,
+            point.y,
+            request.point.space,
+            backend.name()
         )),
     })
 }
@@ -3990,29 +4093,27 @@ fn drag_pointer(
             request.to.space
         );
     }
-    ensure_executable_input_backend(input_backend_preference)?;
+    let backend = input_execution_backend(input_backend_preference)?;
     let (from, bounds) = resolve_pointer_point(request.from, active_window_state)?;
     let (to, to_bounds) = resolve_pointer_point(request.to, active_window_state)?;
     if bounds != to_bounds {
         bail!("resolved drag pointer bounds changed while mapping coordinates");
     }
-    plasma_pilot_uinput::drag_pointer(
-        from.x,
-        from.y,
-        to.x,
-        to.y,
-        bounds,
-        pointer_button_to_uinput(request.button),
-        request.duration_ms,
-    )
-    .map_err(|err| anyhow::anyhow!(err))?;
+    backend.drag_pointer(from, to, bounds, request.button, request.duration_ms)?;
     Ok(ActionResult {
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
         message: Some(format!(
-            "dragged pointer button={:?} from={:.0},{:.0} to={:.0},{:.0} duration_ms={} space={:?}",
-            request.button, from.x, from.y, to.x, to.y, request.duration_ms, request.from.space
+            "dragged pointer button={:?} from={:.0},{:.0} to={:.0},{:.0} duration_ms={} space={:?} backend={}",
+            request.button,
+            from.x,
+            from.y,
+            to.x,
+            to.y,
+            request.duration_ms,
+            request.from.space,
+            backend.name()
         )),
     })
 }
@@ -4024,17 +4125,18 @@ fn scroll_pointer(
     if request.vertical == 0 && request.horizontal == 0 {
         bail!("scroll request must include a non-zero delta");
     }
-    ensure_executable_input_backend(input_backend_preference)?;
+    let backend = input_execution_backend(input_backend_preference)?;
     let bounds = physical_pointer_bounds()?;
-    plasma_pilot_uinput::scroll_pointer(request.vertical, request.horizontal, bounds)
-        .map_err(|err| anyhow::anyhow!(err))?;
+    backend.scroll_pointer(request.vertical, request.horizontal, bounds)?;
     Ok(ActionResult {
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
         message: Some(format!(
-            "scrolled pointer vertical={} horizontal={}",
-            request.vertical, request.horizontal
+            "scrolled pointer vertical={} horizontal={} backend={}",
+            request.vertical,
+            request.horizontal,
+            backend.name()
         )),
     })
 }
@@ -7438,19 +7540,35 @@ height = 40
     }
 
     #[test]
-    fn explicit_unimplemented_input_backends_fail_closed_before_execution() {
-        ensure_executable_input_backend(InputBackendPreference::Auto)
-            .expect("auto currently executes through uinput when available");
-        ensure_executable_input_backend(InputBackendPreference::Uinput)
-            .expect("explicit uinput currently executes through uinput when available");
+    fn input_execution_backend_routes_current_backends() {
+        assert_eq!(
+            input_execution_backend(InputBackendPreference::Auto)
+                .expect("auto currently executes through uinput")
+                .name(),
+            "uinput"
+        );
+        assert_eq!(
+            input_execution_backend(InputBackendPreference::Uinput)
+                .expect("explicit uinput currently executes through uinput")
+                .name(),
+            "uinput"
+        );
 
-        let err = ensure_executable_input_backend(InputBackendPreference::PortalRemoteDesktop)
-            .expect_err("portal execution is not implemented yet");
+        let portal_result = input_execution_backend(InputBackendPreference::PortalRemoteDesktop);
+        assert!(portal_result.is_err());
+        let err = portal_result
+            .err()
+            .expect("portal execution has no input executor yet");
         assert!(err.to_string().contains("portal_remote_desktop"));
+        assert!(err.to_string().contains("remote_desktop_eis_probe"));
 
-        let err = ensure_executable_input_backend(InputBackendPreference::Libei)
-            .expect_err("libei execution is not implemented yet");
+        let libei_result = input_execution_backend(InputBackendPreference::Libei);
+        assert!(libei_result.is_err());
+        let err = libei_result
+            .err()
+            .expect("libei execution has no input executor yet");
         assert!(err.to_string().contains("libei"));
+        assert!(err.to_string().contains("remote_desktop_eis_probe"));
     }
 
     #[test]
