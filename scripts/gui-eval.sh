@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
 	cat <<'USAGE'
-Usage: scripts/gui-eval.sh [all|status|session-preflight|observe|a11y-quality-status|a11y-focused-tree|a11y-find|a11y-text-attributes|clipboard-status|clipboard-denied|kwin-bridge-status|keymap-status|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|journal-artifacts|portal-screenshot|remote-desktop-probe|remote-desktop-eis-session|full-resolution-denied|control-safety]
+Usage: scripts/gui-eval.sh [all|status|session-preflight|observe|a11y-quality-status|a11y-focused-tree|a11y-find|a11y-text-attributes|semantic-denied|clipboard-status|clipboard-denied|kwin-bridge-status|keymap-status|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|journal-artifacts|portal-screenshot|remote-desktop-probe|remote-desktop-eis-session|full-resolution-denied|control-safety]
 
 Runs opt-in local GUI evals against a private PlasmaPilot daemon socket.
 The default `all` set avoids control actions. `control-safety` starts a private
@@ -19,7 +19,7 @@ if [[ "$case_name" == "--help" || "$case_name" == "-h" ]]; then
 fi
 
 case "$case_name" in
-	all | status | session-preflight | observe | a11y-quality-status | a11y-focused-tree | a11y-find | a11y-text-attributes | clipboard-status | clipboard-denied | kwin-bridge-status | keymap-status | screenshot-preview | screenshot-coordinate-map | screenshot-config-bounds | journal-artifacts | portal-screenshot | remote-desktop-probe | remote-desktop-eis-session | full-resolution-denied | control-safety) ;;
+	all | status | session-preflight | observe | a11y-quality-status | a11y-focused-tree | a11y-find | a11y-text-attributes | semantic-denied | clipboard-status | clipboard-denied | kwin-bridge-status | keymap-status | screenshot-preview | screenshot-coordinate-map | screenshot-config-bounds | journal-artifacts | portal-screenshot | remote-desktop-probe | remote-desktop-eis-session | full-resolution-denied | control-safety) ;;
 	*)
 		usage >&2
 		exit 2
@@ -380,6 +380,38 @@ eval_a11y_text_attributes() {
 	' "$run_dir/a11y-text-attributes.json" >/dev/null
 	cli journal tail --limit 20 --method accessibility_text_attributes --ok true >"$run_dir/a11y-text-attributes-journal.json"
 	jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/a11y-text-attributes-journal.json" >/dev/null
+}
+
+assert_semantic_denied() {
+	local method="$1"
+	local label="$2"
+	shift 2
+	if cli "$@" >"$run_dir/semantic-denied-$label.txt" 2>&1; then
+		cat "$run_dir/semantic-denied-$label.txt" >&2
+		return 1
+	fi
+	grep -Eq "PolicyPromptRequired|policy" "$run_dir/semantic-denied-$label.txt"
+	cli journal tail --limit 20 --method "$method" --ok false >"$run_dir/semantic-denied-$label-journal.json"
+	jq -e '
+		.type == "journal"
+		and any(.data[];
+			.safety_class == "control_semantic"
+			and .ok == false
+			and (.summary | contains("PolicyPromptRequired"))
+		)
+	' "$run_dir/semantic-denied-$label-journal.json" >/dev/null
+}
+
+eval_semantic_denied() {
+	assert_semantic_denied click_button click-button semantic click-button --name OK --max-nodes 128
+	assert_semantic_denied set_text_field set-text-field semantic set-text-field --name Search smoke-text --max-nodes 128
+	assert_semantic_denied focus_text_field focus-text-field semantic focus-text-field --name Search --max-nodes 128
+	assert_semantic_denied activate_tab activate-tab semantic activate-tab --name General --max-nodes 128
+	assert_semantic_denied activate_link activate-link semantic activate-link --name Help --max-nodes 128
+	assert_semantic_denied toggle_check toggle-check semantic toggle-check --name Enable --max-nodes 128
+	assert_semantic_denied set_value set-value semantic set-value --name Volume --value 0.5 --max-nodes 128
+	assert_semantic_denied select_item select-item semantic select-item --name Printer --max-nodes 128
+	assert_semantic_denied select_menu select-menu semantic select-menu --path File/Open --max-nodes 128
 }
 
 eval_clipboard_status() {
@@ -1012,6 +1044,7 @@ run_case() {
 		a11y-focused-tree) eval_a11y_focused_tree ;;
 		a11y-find) eval_a11y_find ;;
 		a11y-text-attributes) eval_a11y_text_attributes ;;
+		semantic-denied) eval_semantic_denied ;;
 		clipboard-status) eval_clipboard_status ;;
 		clipboard-denied) eval_clipboard_denied ;;
 		kwin-bridge-status) eval_kwin_bridge_status ;;
@@ -1029,7 +1062,7 @@ run_case() {
 }
 
 if [[ "$case_name" == "all" ]]; then
-	for eval_name in status session-preflight observe a11y-quality-status a11y-focused-tree a11y-find a11y-text-attributes clipboard-status clipboard-denied kwin-bridge-status keymap-status screenshot-preview screenshot-coordinate-map screenshot-config-bounds full-resolution-denied; do
+	for eval_name in status session-preflight observe a11y-quality-status a11y-focused-tree a11y-find a11y-text-attributes semantic-denied clipboard-status clipboard-denied kwin-bridge-status keymap-status screenshot-preview screenshot-coordinate-map screenshot-config-bounds full-resolution-denied; do
 		run_case "$eval_name"
 	done
 else
