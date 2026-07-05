@@ -239,6 +239,8 @@ eval_session_preflight() {
 eval_observe() {
 	cli observe >"$run_dir/observe.json"
 	jq -e '.type == "observation" and (.data.monitors | type == "array") and (.data.windows | type == "array")' "$run_dir/observe.json" >/dev/null
+	cli journal tail --limit 20 --method observe --ok true >"$run_dir/observe-journal.json"
+	jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/observe-journal.json" >/dev/null
 }
 
 eval_clipboard_status() {
