@@ -63,7 +63,7 @@ journal_tail_json="$run_dir/journal-tail.json"
 approval_file="$run_dir/approvals.jsonl"
 stamp="$(date +%s)"
 test_file="$run_dir/plasma-pilot-input-smoke-$stamp.txt"
-sentinel="plasma-pilot-input-smoke-$stamp"
+sentinel="plasma-pilot-input-smoke"
 window_id=""
 editor_pid=""
 app_id=""
@@ -86,7 +86,7 @@ guard_args=()
 
 cleanup() {
 	if [[ -n "${window_id:-}" && -S "$socket" ]]; then
-		cli focus --window "$window_id" >/dev/null 2>&1 || true
+		cli focus --window "$window_id" "${guard_args[@]}" >/dev/null 2>&1 || true
 		sleep 0.2
 		if [[ ${#guard_args[@]} -gt 0 ]]; then
 			cli input key-combo Alt+F4 "${guard_args[@]}" >/dev/null 2>&1 || true
@@ -163,9 +163,6 @@ if [[ -n "$app_id" ]]; then
 	guard_args+=(--expected-active-app "$app_id")
 fi
 
-cli focus --window "$window_id" >"$focus_json"
-jq -e '.type == "action"' "$focus_json" >/dev/null
-
 for _ in {1..50}; do
 	if cli active-window >"$active_json" 2>/dev/null \
 		&& jq -e --arg id "$window_id" --arg title "$basename" '
@@ -180,10 +177,13 @@ if ! jq -e --arg id "$window_id" --arg title "$basename" '
 	.type == "active_window"
 	and (.data.id == $id or ((.data.title // "") | contains($title)))
 ' "$active_json" >/dev/null 2>&1; then
-	echo "KWin active-window bridge did not report the test window; run make install-kwin-script and retry" >&2
+	echo "KWin active-window bridge did not report the launched test window as active; click or focus the $editor_name test window, run make install-kwin-script if needed, and retry" >&2
 	cat "$active_json" >&2 || true
 	exit 1
 fi
+
+cli focus --window "$window_id" "${guard_args[@]}" >"$focus_json"
+jq -e '.type == "action"' "$focus_json" >/dev/null
 
 cli input pointer-calibration >"$calibration_json"
 read -r click_x click_y < <(
@@ -221,9 +221,19 @@ cli input click-pointer \
 jq -e '.type == "action"' "$click_json" >/dev/null
 sleep 0.3
 
-cli input type-text "$sentinel" "${guard_args[@]}" >"$type_json"
-jq -e '.type == "action"' "$type_json" >/dev/null
-sleep 0.5
+type_chunks=("plasma-" "pilot-" "input-" "smoke")
+chunk_index=0
+for chunk in "${type_chunks[@]}"; do
+	chunk_index=$((chunk_index + 1))
+	chunk_json="$run_dir/type-$chunk_index.json"
+	if [[ "$chunk_index" == "1" ]]; then
+		chunk_json="$type_json"
+	fi
+	cli input type-text "$chunk" "${guard_args[@]}" >"$chunk_json"
+	jq -e '.type == "action"' "$chunk_json" >/dev/null
+	sleep 0.4
+done
+sleep 1.0
 
 cli input key-combo Ctrl+S "${guard_args[@]}" >"$save_json"
 jq -e '.type == "action"' "$save_json" >/dev/null
