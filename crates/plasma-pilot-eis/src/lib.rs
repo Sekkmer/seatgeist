@@ -565,6 +565,14 @@ pub enum LibeiSinkError {
     InteriorNulText,
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum LibeiExecutionError {
+    #[error("selected EIS device is not retained by live libei context: {device_id}")]
+    DeviceNotRetained { device_id: String },
+    #[error(transparent)]
+    Sink(#[from] LibeiSinkError),
+}
+
 #[repr(C)]
 pub struct Ei {
     _private: [u8; 0],
@@ -606,6 +614,8 @@ unsafe extern "C" {
     fn ei_event_get_seat(event: *mut EiEvent) -> *mut EiSeat;
     fn ei_seat_has_capability(seat: *mut EiSeat, capability: libc::c_uint) -> bool;
     fn ei_seat_bind_capabilities(seat: *mut EiSeat, ...);
+    fn ei_device_ref(device: *mut EiDevice) -> *mut EiDevice;
+    fn ei_device_unref(device: *mut EiDevice) -> *mut EiDevice;
     fn ei_device_get_name(device: *mut EiDevice) -> *const libc::c_char;
     fn ei_device_get_type(device: *mut EiDevice) -> libc::c_uint;
     fn ei_device_has_capability(device: *mut EiDevice, capability: libc::c_uint) -> bool;
@@ -629,8 +639,34 @@ unsafe extern "C" {
     );
 }
 
+struct RetainedLibeiDevice {
+    id: String,
+    device: NonNull<EiDevice>,
+}
+
+impl RetainedLibeiDevice {
+    unsafe fn from_event_device(device: *mut EiDevice) -> Option<Self> {
+        let device = NonNull::new(device)?;
+        // SAFETY: `device` is a non-null borrowed pointer from the current libei event.
+        let retained = unsafe { ei_device_ref(device.as_ptr()) };
+        let retained = NonNull::new(retained)?;
+        Some(Self {
+            id: libei_device_id(device.as_ptr()),
+            device: retained,
+        })
+    }
+}
+
+impl Drop for RetainedLibeiDevice {
+    fn drop(&mut self) {
+        // SAFETY: this wrapper owns one ref obtained through `ei_device_ref`.
+        unsafe { ei_device_unref(self.device.as_ptr()) };
+    }
+}
+
 pub struct LibeiSenderContext {
     context: NonNull<Ei>,
+    retained_devices: Vec<RetainedLibeiDevice>,
 }
 
 impl LibeiSenderContext {
@@ -657,7 +693,10 @@ impl LibeiSenderContext {
             });
         }
 
-        Ok(Self { context })
+        Ok(Self {
+            context,
+            retained_devices: Vec::new(),
+        })
     }
 
     pub fn event_fd(&self) -> RawFd {
@@ -688,11 +727,40 @@ impl LibeiSenderContext {
                 break;
             };
 
-            snapshots.push(libei_event_snapshot(event.as_ptr(), requested_capabilities));
+            let snapshot = libei_event_snapshot(event.as_ptr(), requested_capabilities);
+            self.update_retained_devices(event.as_ptr(), &snapshot);
+            snapshots.push(snapshot);
             // SAFETY: each event returned by ei_get_event must be unref'd once.
             unsafe { ei_event_unref(event.as_ptr()) };
         }
         snapshots
+    }
+
+    fn update_retained_devices(&mut self, event: *mut EiEvent, snapshot: &LibeiEventSnapshot) {
+        match snapshot {
+            LibeiEventSnapshot::DeviceResumed(_) => {
+                // SAFETY: libei permits retrieving the borrowed device for device events.
+                let device = unsafe { ei_event_get_device(event) };
+                // SAFETY: the event is still alive for this call, so the borrowed device can be ref'd.
+                if let Some(retained) = unsafe { RetainedLibeiDevice::from_event_device(device) } {
+                    self.retained_devices
+                        .retain(|existing| existing.id != retained.id);
+                    self.retained_devices.push(retained);
+                }
+            }
+            LibeiEventSnapshot::DevicePaused { device_id }
+            | LibeiEventSnapshot::DeviceRemoved { device_id } => {
+                self.retained_devices
+                    .retain(|retained| retained.id != device_id.as_str());
+            }
+            LibeiEventSnapshot::Disconnect | LibeiEventSnapshot::SeatRemoved => {
+                self.retained_devices.clear();
+            }
+            LibeiEventSnapshot::Connect
+            | LibeiEventSnapshot::SeatAdded { .. }
+            | LibeiEventSnapshot::DeviceAdded(_)
+            | LibeiEventSnapshot::Other { .. } => {}
+        }
     }
 }
 
@@ -712,8 +780,35 @@ impl EisEventSource for LibeiSenderContext {
 
 impl Drop for LibeiSenderContext {
     fn drop(&mut self) {
+        self.retained_devices.clear();
         // SAFETY: `context` is owned by this wrapper and released exactly once.
         unsafe { ei_unref(self.context.as_ptr()) };
+    }
+}
+
+impl EisSelectedDeviceExecutor for LibeiSenderContext {
+    type Error = LibeiExecutionError;
+
+    fn apply_plan_to_selected_device(
+        &mut self,
+        selection: &EisDeviceSelection,
+        plan: &EisActionPlan,
+    ) -> std::result::Result<(), Self::Error> {
+        let device = self
+            .retained_devices
+            .iter()
+            .find(|retained| retained.id == selection.device_id)
+            .map(|retained| retained.device)
+            .ok_or_else(|| LibeiExecutionError::DeviceNotRetained {
+                device_id: selection.device_id.clone(),
+            })?;
+        // SAFETY: `context` is live for this wrapper, and `device` is a retained
+        // non-null libei device reference owned by this wrapper.
+        let mut sink = unsafe { LibeiDeviceSink::from_raw(self.context.as_ptr(), device.as_ptr()) }
+            .ok_or_else(|| LibeiExecutionError::DeviceNotRetained {
+                device_id: selection.device_id.clone(),
+            })?;
+        apply_plan_to_sink(plan, &mut sink).map_err(LibeiExecutionError::Sink)
     }
 }
 
