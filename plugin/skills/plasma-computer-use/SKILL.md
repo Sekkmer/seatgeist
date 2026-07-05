@@ -8,7 +8,7 @@ Use terminal commands, files, APIs, and structured integrations first when they 
 When GUI state matters, use PlasmaPilot tools through MCP:
 
 1. Call `plasma.observe` before acting. Include a bounded screenshot only when visual state matters.
-2. Prefer `plasma.click_button`, `plasma.set_text_field`, `plasma.select_menu`, `plasma.select_item`, `plasma.activate_tab`, `plasma.activate_link`, `plasma.toggle_check`, `plasma.set_value`, and `plasma.focus_window` over raw coordinates.
+2. Prefer `plasma.click_button`, `plasma.focus_text_field`, `plasma.set_text_field`, `plasma.select_menu`, `plasma.select_item`, `plasma.activate_tab`, `plasma.activate_link`, `plasma.toggle_check`, `plasma.set_value`, and `plasma.focus_window` over raw coordinates.
 3. Use `plasma.a11y_focused_tree` or `plasma.a11y_find` before semantic actions when the target is not obvious from `plasma.observe`.
 4. Call `plasma.safety_status` before the first control action in a run. If `focus_guard=true`, include an active-window guard or expect the daemon to reject the action.
 5. Before pointer actions, call `plasma.pointer_calibration` and use only explicit `physical_pixel` coordinates.
@@ -22,6 +22,7 @@ When GUI state matters, use PlasmaPilot tools through MCP:
 Useful control tools:
 
 - `plasma.type_text` and `plasma.key_combo` for guarded text entry and shortcuts.
+- `plasma.focus_text_field` before guarded keyboard entry when AT-SPI exposes a named non-sensitive focusable text field.
 - `plasma.a11y_text_attributes` when a known non-sensitive text node needs formatting or attribute-run inspection before choosing an edit path.
 - `plasma.a11y_insert_text` only when a known non-sensitive `EditableText` node needs insertion at a specific character offset and high-level `plasma.set_text_field` is not appropriate.
 - `plasma.a11y_delete_text` only when a known non-sensitive `EditableText` node needs range deletion at specific character offsets.

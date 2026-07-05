@@ -969,14 +969,15 @@ Tasks:
 - Implement high-level tools:
   - [x] `pilot.click_button(name, app/window guard)`
   - [x] `pilot.set_text_field(name, text, app/window guard)`
+  - [x] `pilot.focus_text_field(name, app/window guard)` for focusing a non-sensitive text field before keyboard input.
   - [x] `pilot.select_menu(path, app/window guard)` for visible AT-SPI menu paths.
   - [x] `pilot.activate_tab(name, app/window guard)`
   - [x] `pilot.activate_link(name, app/window guard)` for AT-SPI links.
   - [x] `pilot.toggle_check(name, checked?, app/window guard)` for checkboxes, radio buttons, and checkable menu items.
   - [x] `pilot.set_value(name, value, app/window guard)` for sliders, spin buttons, scrollbars, and dials exposing AT-SPI Value.
   - [x] `pilot.select_item(name, app/window guard)` for list items, tree items, table rows, combo boxes, options, and menu-item-like choices exposing select or press.
-- [x] Use AT-SPI first for `click_button`, `set_text_field`, `select_menu`, `activate_tab`, `activate_link`, `toggle_check`, `set_value`, and `select_item`; screenshot+coordinate fallback remains future work and must only happen when safe.
-- [x] Add ambiguity refusal for `click_button`, `set_text_field`, `select_menu`, `activate_tab`, `activate_link`, `toggle_check`, `set_value`, and `select_item`. Current status: ambiguous semantic matches fail closed and return bounded candidate choices with node id, role, name, and action metadata so the caller can disambiguate; broader confidence scoring remains future work.
+- [x] Use AT-SPI first for `click_button`, `set_text_field`, `focus_text_field`, `select_menu`, `activate_tab`, `activate_link`, `toggle_check`, `set_value`, and `select_item`; screenshot+coordinate fallback remains future work and must only happen when safe.
+- [x] Add ambiguity refusal for `click_button`, `set_text_field`, `focus_text_field`, `select_menu`, `activate_tab`, `activate_link`, `toggle_check`, `set_value`, and `select_item`. Current status: ambiguous semantic matches fail closed and return bounded candidate choices with node id, role, name, and action metadata so the caller can disambiguate; broader confidence scoring remains future work.
 
 Acceptance criteria:
 

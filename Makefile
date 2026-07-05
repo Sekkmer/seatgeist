@@ -248,6 +248,8 @@ smoke-atspi:
 	grep -q "policy" "$$out"
 	if target/debug/plasma-pilot-cli --socket "$$socket" semantic set-text-field --name Search smoke-text --max-nodes 128 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
 	grep -q "policy" "$$out"
+	if target/debug/plasma-pilot-cli --socket "$$socket" semantic focus-text-field --name Search --max-nodes 128 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
+	grep -q "policy" "$$out"
 	if target/debug/plasma-pilot-cli --socket "$$socket" semantic activate-tab --name General --max-nodes 128 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
 	grep -q "policy" "$$out"
 	if target/debug/plasma-pilot-cli --socket "$$socket" semantic activate-link --name Help --max-nodes 128 >"$$out" 2>&1; then cat "$$out"; exit 1; fi
@@ -272,6 +274,7 @@ smoke-atspi:
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "accessibility_text_attributes"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "click_button"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "set_text_field"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "focus_text_field"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "activate_tab"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "activate_link"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 30 | grep -q "toggle_check"
@@ -426,6 +429,7 @@ smoke-mcp:
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.scroll_pointer")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.click_button")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.set_text_field")' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.focus_text_field")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.activate_tab")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.select_item")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "plasma.select_menu")' "$$out" >/dev/null

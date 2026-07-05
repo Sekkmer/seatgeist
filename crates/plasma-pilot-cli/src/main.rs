@@ -15,12 +15,12 @@ use libplasma_pilot::{
     ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest,
     CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
     DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest,
-    DaemonResponse, DragPointerRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest,
-    JournalTailRequest, KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton,
-    ReplayTrace, SafetyClass, ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest,
-    SelectItemRequest, SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest,
-    SetValueRequest, ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest,
-    default_approval_file_path, default_socket_path,
+    DaemonResponse, DragPointerRequest, FocusTextFieldRequest, FocusWindowRequest,
+    FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, MovePointerRequest,
+    ObserveRequest, Point, PointerButton, ReplayTrace, SafetyClass, ScreenshotRequest,
+    ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
+    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
+    WaitForChangeRequest, default_approval_file_path, default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -403,6 +403,22 @@ enum SemanticCommand {
         name: String,
         #[arg(value_name = "TEXT")]
         text: String,
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long)]
+        window_name_contains: Option<String>,
+        #[arg(long, default_value_t = 1024)]
+        max_nodes: usize,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
+    FocusTextField {
+        #[arg(long)]
+        name: String,
         #[arg(long)]
         app: Option<String>,
         #[arg(long)]
@@ -1086,6 +1102,31 @@ fn main() -> Result<()> {
             DaemonRequest::SetTextField(SetTextFieldRequest {
                 name,
                 text,
+                app,
+                window_name_contains,
+                max_nodes,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
+        )?,
+        Command::Semantic {
+            command:
+                SemanticCommand::FocusTextField {
+                    name,
+                    app,
+                    window_name_contains,
+                    max_nodes,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::FocusTextField(FocusTextFieldRequest {
+                name,
                 app,
                 window_name_contains,
                 max_nodes,

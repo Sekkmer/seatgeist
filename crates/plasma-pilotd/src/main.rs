@@ -20,17 +20,18 @@ use libplasma_pilot::{
     ActionResult, ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard, BackendCapability,
     CapabilitySet, CaptureBackendStatus, ClickButtonRequest, ClickPointerRequest,
     ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse,
-    DesktopObservation, DragPointerRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest,
-    HealthStatus, InputBackendStatus, JournalEntry, JournalWindowContext, KeyComboRequest,
-    KwinBridgeStatus, KwinMetadataStatus, LibeiStatus, MovePointerRequest, ObserveRequest,
-    PanicStopStatus, Point, PointerButton, PointerCalibrationPoint, PointerCalibrationStatus,
-    PointerMonitorCalibration, PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus,
-    SafetyClass, SafetyStatus, ScreenshotInfo, ScreenshotPortalStatus, ScreenshotRequest,
-    ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest, SelectItemRequest,
-    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, SpectacleStatus,
-    ToggleCheckRequest, ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest,
-    WaitForChangeResult, WindowGeometry, WindowInfo, current_egid, current_euid,
-    default_journal_path, default_panic_stop_path, default_socket_path,
+    DesktopObservation, DragPointerRequest, FocusTextFieldRequest, FocusWindowRequest,
+    FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus, JournalEntry,
+    JournalWindowContext, KeyComboRequest, KwinBridgeStatus, KwinMetadataStatus, LibeiStatus,
+    MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton,
+    PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
+    PointerPhysicalBounds, PolicyStatus, RemoteDesktopPortalStatus, SafetyClass, SafetyStatus,
+    ScreenshotInfo, ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest,
+    ScreenshotTransform, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
+    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, SpectacleStatus, ToggleCheckRequest,
+    ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult,
+    WindowGeometry, WindowInfo, current_egid, current_euid, default_journal_path,
+    default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -993,6 +994,12 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
             },
         },
         DaemonRequest::SetTextField(request) => match set_text_field(request) {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => DaemonResponse::Error {
+                message: format_error_chain(&err),
+            },
+        },
+        DaemonRequest::FocusTextField(request) => match focus_text_field(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
             Err(err) => DaemonResponse::Error {
                 message: format_error_chain(&err),
@@ -2041,6 +2048,7 @@ fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWin
         DaemonRequest::ScrollPointer(request) => request.guard.as_ref(),
         DaemonRequest::ClickButton(request) => request.guard.as_ref(),
         DaemonRequest::SetTextField(request) => request.guard.as_ref(),
+        DaemonRequest::FocusTextField(request) => request.guard.as_ref(),
         DaemonRequest::ActivateTab(request) => request.guard.as_ref(),
         DaemonRequest::ActivateLink(request) => request.guard.as_ref(),
         DaemonRequest::ToggleCheck(request) => request.guard.as_ref(),
@@ -2127,6 +2135,13 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
             }
         }
         DaemonRequest::SetTextField(request) => {
+            if secret_field_label(&request.name) {
+                SafetyClass::SecretField
+            } else {
+                SafetyClass::ControlSemantic
+            }
+        }
+        DaemonRequest::FocusTextField(request) => {
             if secret_field_label(&request.name) {
                 SafetyClass::SecretField
             } else {
@@ -3506,6 +3521,39 @@ fn set_text_field(request: SetTextFieldRequest) -> Result<ActionResult> {
     })
 }
 
+fn focus_text_field(request: FocusTextFieldRequest) -> Result<ActionResult> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        bail!("text field name must be non-empty");
+    }
+    if request.max_nodes == 0 {
+        bail!("max_nodes must be greater than zero");
+    }
+
+    let matches = accessibility_find(AccessibilityFindRequest {
+        role: None,
+        name_contains: Some(name.to_string()),
+        app: request.app.clone(),
+        window_name_contains: request.window_name_contains.clone(),
+        depth: 0,
+        max_results: 10,
+        max_nodes: request.max_nodes,
+    })?;
+    let target = resolve_focus_text_field_match(name, matches)?;
+    plasma_pilot_atspi::invoke(&target.id, libplasma_pilot::AccessibilityAction::Focus)
+        .map_err(|err| anyhow::anyhow!(err))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        message: Some(format!(
+            "focused text field name={} node={}",
+            target.name.as_deref().unwrap_or(name),
+            target.id
+        )),
+    })
+}
+
 fn activate_tab(request: ActivateTabRequest) -> Result<ActionResult> {
     let name = request.name.trim();
     if name.is_empty() {
@@ -4110,6 +4158,47 @@ fn resolve_text_field_match(
     let choices = semantic_choice_summary(&viable);
     bail!(
         "ambiguous text field match for name={name}: {} candidates; choices=[{choices}]",
+        viable.len()
+    );
+}
+
+fn resolve_focus_text_field_match(
+    name: &str,
+    matches: Vec<libplasma_pilot::AccessibilityNode>,
+) -> Result<libplasma_pilot::AccessibilityNode> {
+    let mut viable = matches
+        .into_iter()
+        .filter(|node| !node.sensitive)
+        .filter(is_text_field_candidate)
+        .filter(|node| {
+            node.actions
+                .contains(&libplasma_pilot::AccessibilityAction::Focus)
+        })
+        .collect::<Vec<_>>();
+    if viable.is_empty() {
+        bail!("no non-sensitive focusable text field matched name={name}");
+    }
+
+    let exact = viable
+        .iter()
+        .filter(|node| {
+            node.name
+                .as_deref()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !exact.is_empty() {
+        viable = exact;
+    }
+
+    if viable.len() == 1 {
+        return Ok(viable.remove(0));
+    }
+
+    let choices = semantic_choice_summary(&viable);
+    bail!(
+        "ambiguous focusable text field match for name={name}: {} candidates; choices=[{choices}]",
         viable.len()
     );
 }
@@ -6611,6 +6700,23 @@ height = 40
     }
 
     #[test]
+    fn focus_text_field_is_control_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::FocusTextField(FocusTextFieldRequest {
+                name: "Search".to_string(),
+                app: Some("kate".to_string()),
+                window_name_contains: Some("settings".to_string()),
+                max_nodes: 256,
+                guard: None,
+            }),
+        )
+        .expect_err("focus text field requires control approval by default");
+        assert!(err.to_string().contains("ControlSemantic"));
+    }
+
+    #[test]
     fn secret_text_field_uses_secret_field_policy() {
         let policy = PolicyEngine::new(PolicyConfig {
             default_control: ToolApprovalLevel::Allow,
@@ -6644,6 +6750,19 @@ height = 40
             }),
         )
         .expect("non-secret text fields still use default control policy");
+
+        let err = enforce_policy(
+            &policy,
+            &DaemonRequest::FocusTextField(FocusTextFieldRequest {
+                name: "Password".to_string(),
+                app: Some("login".to_string()),
+                window_name_contains: Some("sign in".to_string()),
+                max_nodes: 256,
+                guard: None,
+            }),
+        )
+        .expect_err("secret-looking focus targets use secret-field policy");
+        assert!(err.to_string().contains("SecretField"));
     }
 
     #[test]
@@ -6878,6 +6997,42 @@ height = 40
         let err = resolve_text_field_match("Password", vec![sensitive])
             .expect_err("sensitive text fields are not viable");
         assert!(err.to_string().contains("no non-sensitive"));
+    }
+
+    #[test]
+    fn focus_text_field_resolver_requires_focus_action() {
+        let err = resolve_focus_text_field_match("Search", vec![text_node("1", "Search")])
+            .expect_err("text fields without focus actions are not viable");
+        assert!(err.to_string().contains("focusable"));
+    }
+
+    #[test]
+    fn focus_text_field_resolver_prefers_exact_match() {
+        let target = resolve_focus_text_field_match(
+            "Search",
+            vec![
+                focusable_text_node("1", "Search everywhere"),
+                focusable_text_node("2", "Search"),
+            ],
+        )
+        .expect("exact focusable text field resolves");
+        assert_eq!(target.id, "2");
+    }
+
+    #[test]
+    fn focus_text_field_resolver_refuses_ambiguous_matches() {
+        let err = resolve_focus_text_field_match(
+            "Search",
+            vec![
+                focusable_text_node("1", "Search"),
+                focusable_text_node("2", "Search"),
+            ],
+        )
+        .expect_err("multiple exact focusable text fields are ambiguous");
+        let err = err.to_string();
+        assert!(err.contains("ambiguous"));
+        assert!(err.contains("choices=[id=1 role=text name=Search actions=set_text|focus"));
+        assert!(err.contains("id=2 role=text name=Search actions=set_text|focus"));
     }
 
     #[test]
@@ -7342,6 +7497,16 @@ height = 40
             actions: vec![libplasma_pilot::AccessibilityAction::SetText],
             children: Vec::new(),
         }
+    }
+
+    fn focusable_text_node(id: &str, name: &str) -> libplasma_pilot::AccessibilityNode {
+        let mut node = text_node(id, name);
+        node.available_actions = vec!["set text".to_string(), "grab focus".to_string()];
+        node.actions = vec![
+            libplasma_pilot::AccessibilityAction::SetText,
+            libplasma_pilot::AccessibilityAction::Focus,
+        ];
+        node
     }
 
     fn tab_node(id: &str, name: &str) -> libplasma_pilot::AccessibilityNode {

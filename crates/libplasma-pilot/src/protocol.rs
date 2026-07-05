@@ -513,6 +513,16 @@ pub struct SetTextFieldRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FocusTextFieldRequest {
+    pub name: String,
+    pub app: Option<String>,
+    pub window_name_contains: Option<String>,
+    pub max_nodes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivateTabRequest {
     pub name: String,
     pub app: Option<String>,
@@ -637,6 +647,7 @@ pub enum DaemonRequest {
     ScrollPointer(ScrollPointerRequest),
     ClickButton(ClickButtonRequest),
     SetTextField(SetTextFieldRequest),
+    FocusTextField(FocusTextFieldRequest),
     ActivateTab(ActivateTabRequest),
     ActivateLink(ActivateLinkRequest),
     ToggleCheck(ToggleCheckRequest),
@@ -688,6 +699,7 @@ impl DaemonRequest {
             Self::ScrollPointer(_) => "scroll_pointer",
             Self::ClickButton(_) => "click_button",
             Self::SetTextField(_) => "set_text_field",
+            Self::FocusTextField(_) => "focus_text_field",
             Self::ActivateTab(_) => "activate_tab",
             Self::ActivateLink(_) => "activate_link",
             Self::ToggleCheck(_) => "toggle_check",
@@ -1560,6 +1572,21 @@ mod tests {
         assert!(encoded.contains(r#""method":"set_text_field""#));
         assert!(encoded.contains(r#""name":"Search""#));
         assert!(encoded.contains(r#""text":"query""#));
+        assert!(encoded.contains(r#""app":"kate""#));
+    }
+
+    #[test]
+    fn serializes_focus_text_field_request() {
+        let request = DaemonRequest::FocusTextField(FocusTextFieldRequest {
+            name: "Search".to_string(),
+            app: Some("kate".to_string()),
+            window_name_contains: Some("settings".to_string()),
+            max_nodes: 512,
+            guard: None,
+        });
+        let encoded = serde_json::to_string(&request).expect("focus text field request serializes");
+        assert!(encoded.contains(r#""method":"focus_text_field""#));
+        assert!(encoded.contains(r#""name":"Search""#));
         assert!(encoded.contains(r#""app":"kate""#));
     }
 
