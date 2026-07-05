@@ -11,6 +11,7 @@ Run `make release-readiness` to summarize current blockers from local repo metad
 - [x] Policy-denied raw input, semantic control, clipboard read, full-resolution screenshot, and panic-stop paths are covered by tests, replay traces, or safe GUI evals.
 - [x] Arch Linux/KDE Plasma 6 operator installation docs exist.
 - [x] Plugin manifest, MCP config, skills, hook assets, and repo-local Codex marketplace entry validate locally.
+- [x] Local Codex install preflight exists as `make check-local-codex-install` for validating the operator's real marketplace source, installed plugin cache, and `seatgeist-*` launchers after install or checkout renames.
 - [~] Manual KDE Plasma 6 Wayland evals exist, but broader repeated passes are still required before a public v0.1 release.
 - [~] Versioned local release artifact packaging, standalone plugin bundle packaging, verification, clean-install validation, optional GPG signing, retained JSON release-evidence snapshots, and evidence-snapshot verification exist through `make verify-release-artifacts`, `make verify-release-install`, `make sign-release-artifacts`, `make verify-release-signatures`, `make write-release-evidence`, and `make verify-release-evidence`; public uploads and signed release tags are not done yet.
 - [x] Retained release-evidence snapshots are shape-checked by `make verify-release-evidence`.
@@ -33,14 +34,15 @@ The CI workflow runs only safe, non-opt-in gates. It does not send real desktop 
 3. Run `make check-public-name` and review the generated exact-name collision report.
 4. Run `make release-readiness` to capture the current blocker list before release work.
 5. Run `make verify` locally.
-6. Run `SEATGEIST_RELEASE_LIVE_EVALS_APPROVED=1 make release-live-evals` intentionally on the supported KDE Plasma 6 Wayland workstation and keep the generated `evidence.json` records. This target may open desktop apps, show portal consent dialogs, and send scoped input through Seatgeist policy gates.
-7. Create a signed release tag.
-8. Build and verify local release artifacts with `make verify-release-artifacts`.
-9. Verify a clean extraction/install smoke from the binary archive and standalone plugin archive with `make verify-release-install`.
-10. Sign the generated artifacts with `SEATGEIST_RELEASE_SIGNING_KEY=<key> make sign-release-artifacts`, then run `make verify-release-signatures`.
-11. Run `make write-release-evidence` to retain the JSON release-readiness report and portal Screenshot v3 diagnostic next to the release manifest.
-12. Run `make verify-release-evidence` to confirm the retained JSON snapshots are linked to the selected manifest and have the expected release-readiness and portal-diagnostic shape.
-13. Run `scripts/release-readiness.py --strict` and `scripts/release-external-preflight.py --strict`; both must report no blockers before upload.
-14. Upload the generated Seatgeist binary/plugin tarball, source tarball, manifest, checksums, detached signatures, signature checksum manifest, and release-evidence JSON snapshots from `target/seatgeist-release/`.
-15. Publish checksums and signatures for every uploaded artifact.
-16. Verify a clean install from the released artifacts on a separate release-test checkout or machine, not from the working tree.
+6. Run `make check-local-codex-install` on the target operator account after installing or refreshing the local Codex plugin.
+7. Run `SEATGEIST_RELEASE_LIVE_EVALS_APPROVED=1 make release-live-evals` intentionally on the supported KDE Plasma 6 Wayland workstation and keep the generated `evidence.json` records. This target may open desktop apps, show portal consent dialogs, and send scoped input through Seatgeist policy gates.
+8. Create a signed release tag.
+9. Build and verify local release artifacts with `make verify-release-artifacts`.
+10. Verify a clean extraction/install smoke from the binary archive and standalone plugin archive with `make verify-release-install`.
+11. Sign the generated artifacts with `SEATGEIST_RELEASE_SIGNING_KEY=<key> make sign-release-artifacts`, then run `make verify-release-signatures`.
+12. Run `make write-release-evidence` to retain the JSON release-readiness report and portal Screenshot v3 diagnostic next to the release manifest.
+13. Run `make verify-release-evidence` to confirm the retained JSON snapshots are linked to the selected manifest and have the expected release-readiness and portal-diagnostic shape.
+14. Run `scripts/release-readiness.py --strict` and `scripts/release-external-preflight.py --strict`; both must report no blockers before upload.
+15. Upload the generated Seatgeist binary/plugin tarball, source tarball, manifest, checksums, detached signatures, signature checksum manifest, and release-evidence JSON snapshots from `target/seatgeist-release/`.
+16. Publish checksums and signatures for every uploaded artifact.
+17. Verify a clean install from the released artifacts on a separate release-test checkout or machine, not from the working tree.

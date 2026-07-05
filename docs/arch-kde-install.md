@@ -192,9 +192,12 @@ Validate the plugin bundle:
 
 ```bash
 make validate-plugin
+make check-local-codex-install
 ```
 
 Install or load the repository `plugin/` directory through the Codex plugin workflow for the local Codex version. The plugin expects `seatgeist-mcp` on `PATH` and uses the daemon socket from `SEATGEIST_SOCKET` or the built-in default.
+
+`make check-local-codex-install` verifies the real local Codex config after install or checkout renames. It checks that the `seatgeist-local` marketplace source points at this checkout, the installed plugin cache validates, and the `seatgeist-*` launchers resolve without stale old-checkout symlinks.
 
 After Codex sees the plugin, review plugin hooks through Codex's normal hook trust flow before expecting the bundled Stop audit hook to run.
 

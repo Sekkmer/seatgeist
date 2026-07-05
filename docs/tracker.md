@@ -94,6 +94,7 @@ Current full-project estimate: `[~]` about one third complete. This estimate use
 - [x] Plugin manifest and bundled MCP config validate.
 - [x] Repo-local Codex marketplace entry exposes the `seatgeist` plugin from `./plugin`.
 - [x] `make smoke-codex-plugin-install` validates Codex marketplace discovery, local plugin install, installed skill/hook/MCP files, and `seatgeist-mcp --help` in an isolated `CODEX_HOME`.
+- [x] `make check-local-codex-install` validates the operator's real Codex config, installed plugin cache, and `seatgeist-*` launchers so checkout renames or stale symlinks are caught before live use.
 - [x] Four plugin skills describe current Seatgeist workflows and safety rules.
 - [x] Stop audit hook writes compact repo/journal audit summaries.
 - [~] Installed-plugin end-to-end use in a real Codex session is documented and scaffolded, but broader field validation remains partial.

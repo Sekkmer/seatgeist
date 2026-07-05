@@ -72,6 +72,8 @@ def main() -> None:
     require_contains("Makefile", makefile, "scripts/verify-release-evidence.py")
     require_contains("Makefile", makefile, "smoke-codex-plugin-install:")
     require_contains("Makefile", makefile, "scripts/smoke-codex-plugin-install.sh")
+    require_contains("Makefile", makefile, "check-local-codex-install:")
+    require_contains("Makefile", makefile, "scripts/check-local-codex-install.py --strict")
     require_contains("Makefile", makefile, "check-public-name:")
     require_contains("Makefile", makefile, "scripts/check-public-name.py")
     require_contains("Makefile", makefile, "release-readiness:")
@@ -130,6 +132,7 @@ def main() -> None:
         "scripts/release-external-preflight.py",
         "scripts/verify-release-evidence.py",
         "scripts/smoke-codex-plugin-install.sh",
+        "scripts/check-local-codex-install.py",
         "scripts/run-release-live-evals.sh",
         "target/",
     ]:
@@ -200,6 +203,21 @@ def main() -> None:
         "smoke-codex-plugin-install: ok",
     ]:
         require_contains("scripts/smoke-codex-plugin-install.sh", codex_plugin_smoke, needle)
+
+    local_codex_install = require_executable("scripts/check-local-codex-install.py")
+    for needle in [
+        "seatgeist_local_codex_install",
+        "seatgeist@seatgeist-local",
+        "seatgeist-local",
+        "marketplace_source",
+        "installed_plugin_cache",
+        "OLD_CHECKOUT_MARKERS",
+        "seatgeist-mcp",
+        "seatgeist-cli",
+        "seatgeistd",
+        "--strict",
+    ]:
+        require_contains("scripts/check-local-codex-install.py", local_codex_install, needle)
 
     release_live_evals = require_executable("scripts/run-release-live-evals.sh")
     for needle in [
@@ -301,6 +319,11 @@ def main() -> None:
     require_contains(
         "docs/release-checklist.md",
         checklist,
+        "Local Codex install preflight exists as `make check-local-codex-install`",
+    )
+    require_contains(
+        "docs/release-checklist.md",
+        checklist,
         "- [~] Versioned local release artifact packaging, standalone plugin bundle packaging, verification, clean-install validation, optional GPG signing, retained JSON release-evidence snapshots, and evidence-snapshot verification exist through `make verify-release-artifacts`, `make verify-release-install`, `make sign-release-artifacts`, `make verify-release-signatures`, `make write-release-evidence`, and `make verify-release-evidence`; public uploads and signed release tags are not done yet.",
     )
     require_contains(
@@ -323,6 +346,7 @@ def main() -> None:
     for needle in [
         "seatgeist@seatgeist-local",
         "make smoke-codex-plugin-install",
+        "make check-local-codex-install",
         "codex exec --sandbox read-only",
         "$seatgeist-desktop-triage",
         "SKILL_OK",
@@ -374,6 +398,7 @@ def main() -> None:
 
     arch_install = read("docs/arch-kde-install.md")
     require_contains("docs/arch-kde-install.md", arch_install, "make portal-screenshot-v3-status")
+    require_contains("docs/arch-kde-install.md", arch_install, "make check-local-codex-install")
     require_contains("docs/arch-kde-install.md", arch_install, "Screenshot v3")
     require_contains("docs/arch-kde-install.md", arch_install, "AvailableTargets")
 

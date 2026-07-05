@@ -63,6 +63,14 @@ codex exec --sandbox read-only -C "$PWD" 'Use $seatgeist-desktop-triage. Do not 
 
 This confirms Codex can discover the installed skill without exercising desktop control. Live MCP tool tests still require a running `seatgeistd` socket and should start with read-only tools such as readiness, safety status, observation, and journal tail before any input action.
 
+To check the real local Codex install after moving or renaming a checkout, run:
+
+```bash
+make check-local-codex-install
+```
+
+This reads `$CODEX_HOME` or `~/.codex`, verifies that the `seatgeist-local` marketplace source points at the current checkout, validates the installed plugin cache, and checks that `seatgeist-mcp`, `seatgeist-cli`, and `seatgeistd` resolve and are not stale links to an old checkout path.
+
 ## Validation
 
 Run the repo-local plugin validator:
@@ -78,6 +86,8 @@ make verify
 ```
 
 The validator checks manifest metadata, relative plugin paths, MCP server config, skill frontmatter, the required four skill names, the bundled Stop audit hook, and the hook's compact audit aggregation behavior.
+
+`make check-local-codex-install` is intentionally separate from `make verify` because it inspects the operator's personal Codex config and `PATH`, not only repository files.
 
 ## Hook Trust
 
