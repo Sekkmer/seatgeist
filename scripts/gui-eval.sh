@@ -167,17 +167,18 @@ prime_active_window_metadata() {
 	local active_json="$run_dir/${prefix}-active-window.json"
 	local active_err="$run_dir/${prefix}-active-window.err"
 	local windows_json="$run_dir/${prefix}-windows.json"
+	local bridge_status_json="$run_dir/${prefix}-kwin-bridge-status.json"
 	local focus_approval="$run_dir/${prefix}-focus-approval.json"
-	local focus_json="$run_dir/${prefix}-focus.json"
 
 	if cli active-window >"$active_json" 2>"$active_err" \
 		&& jq -e '.type == "active_window" and ((.data.title // "") != "" or (.data.id // "") != "")' "$active_json" >/dev/null; then
 		return 0
 	fi
 
+	cli kwin-bridge-status >"$bridge_status_json" 2>/dev/null || true
 	cli windows >"$windows_json"
-	local window_id
-	window_id="$(jq -r '
+	local -a candidate_window_ids
+	mapfile -t candidate_window_ids < <(jq -r '
 		[
 			.data[]
 			| select((.id // "") != "" and .geometry != null)
@@ -185,26 +186,40 @@ prime_active_window_metadata() {
 				(((.app_id // "") | ascii_downcase | contains("keepass")) | not)
 				and (((.title // "") | ascii_downcase | contains("password")) | not)
 			)
-		][0].id // empty
-	' "$windows_json")"
-	if [[ -z "$window_id" ]]; then
+			| .id
+		]
+		| .[:8][]
+	' "$windows_json")
+	if [[ "${#candidate_window_ids[@]}" -eq 0 ]]; then
 		return 1
 	fi
 
 	grant_approval control-semantic focus_window "gui-eval $prefix active-window prime" "$focus_approval"
-	cli focus --window "$window_id" >"$focus_json"
-	jq -e '.type == "action"' "$focus_json" >/dev/null
+	local window_id
+	local focus_json
+	local candidate_index=0
+	for window_id in "${candidate_window_ids[@]}"; do
+		focus_json="$run_dir/${prefix}-focus-${candidate_index}.json"
+		candidate_index=$((candidate_index + 1))
 
-	for _ in {1..50}; do
-		if cli active-window >"$active_json" 2>"$active_err" \
-			&& jq -e --arg id "$window_id" '
-				.type == "active_window"
-				and (.data.id == $id or ((.data.title // "") != ""))
-			' "$active_json" >/dev/null; then
-			return 0
+		if ! cli focus --window "$window_id" >"$focus_json" 2>"${focus_json%.json}.err"; then
+			continue
 		fi
-		sleep 0.1
+		jq -e '.type == "action"' "$focus_json" >/dev/null || continue
+
+		for _ in {1..50}; do
+			if cli active-window >"$active_json" 2>"$active_err" \
+				&& jq -e --arg id "$window_id" '
+					.type == "active_window"
+					and (.data.id == $id or ((.data.title // "") != ""))
+				' "$active_json" >/dev/null; then
+				cp "$focus_json" "$run_dir/${prefix}-focus.json"
+				return 0
+			fi
+			sleep 0.1
+		done
 	done
+	cli kwin-bridge-status >"$bridge_status_json" 2>/dev/null || true
 	return 1
 }
 
