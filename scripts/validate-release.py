@@ -66,6 +66,8 @@ def main() -> None:
     require_contains("Makefile", makefile, "scripts/sign-release-artifacts.sh")
     require_contains("Makefile", makefile, "verify-release-signatures:")
     require_contains("Makefile", makefile, "scripts/verify-release-signatures.sh")
+    require_contains("Makefile", makefile, "write-release-evidence:")
+    require_contains("Makefile", makefile, "scripts/write-release-evidence.sh")
     require_contains("Makefile", makefile, "check-public-name:")
     require_contains("Makefile", makefile, "scripts/check-public-name.py")
     require_contains("Makefile", makefile, "release-readiness:")
@@ -151,6 +153,15 @@ def main() -> None:
     ]:
         require_contains("scripts/verify-release-signatures.sh", verify_signatures, needle)
 
+    write_release_evidence = require_executable("scripts/write-release-evidence.sh")
+    for needle in [
+        "scripts/release-readiness.py --json",
+        "scripts/portal-screenshot-v3-status.py",
+        ".readiness.json",
+        ".portal-screenshot-v3-status.json",
+    ]:
+        require_contains("scripts/write-release-evidence.sh", write_release_evidence, needle)
+
     readiness = require_executable("scripts/release-readiness.py")
     for needle in [
         "release_readiness",
@@ -164,6 +175,7 @@ def main() -> None:
         "seatgeist_eval_evidence",
         "evidence.json",
         "latest release manifest is stale for the current commit",
+        "--json",
         "--strict",
     ]:
         require_contains("scripts/release-readiness.py", readiness, needle)
@@ -212,7 +224,12 @@ def main() -> None:
     require_contains(
         "docs/release-checklist.md",
         checklist,
-        "- [~] Versioned local release artifact packaging, standalone plugin bundle packaging, verification, clean-install validation, and optional GPG signing exist through `make verify-release-artifacts`, `make verify-release-install`, `make sign-release-artifacts`, and `make verify-release-signatures`; public uploads and signed release tags are not done yet.",
+        "- [~] Versioned local release artifact packaging, standalone plugin bundle packaging, verification, clean-install validation, optional GPG signing, and retained JSON release-evidence snapshots exist through `make verify-release-artifacts`, `make verify-release-install`, `make sign-release-artifacts`, `make verify-release-signatures`, and `make write-release-evidence`; public uploads and signed release tags are not done yet.",
+    )
+    require_contains(
+        "docs/release-checklist.md",
+        checklist,
+        "make write-release-evidence",
     )
     require_contains(
         "docs/release-checklist.md",
