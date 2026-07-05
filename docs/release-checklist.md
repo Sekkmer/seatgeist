@@ -12,7 +12,7 @@ This checklist defines the minimum evidence required before calling a public rel
 - [~] Manual KDE Plasma 6 Wayland evals exist, but broader repeated passes are still required before a public v0.1 release.
 - [~] Versioned release artifacts are not produced yet.
 - [ ] Add real public repository metadata before publishing, replacing placeholder `example.invalid` Cargo package URLs.
-- [ ] Add final license files matching the workspace `MIT OR Apache-2.0` declaration.
+- [x] Final license files match the workspace `MIT OR Apache-2.0` declaration.
 - [ ] Decide whether the public project name remains `PlasmaPilot` or moves to a backend-neutral name.
 - [ ] Run and record the opt-in live evals on the target KDE machine: KWrite/Kate input, KCalc visual input, Firefox localhost click, portal Screenshot, RemoteDesktop probe, and retained RemoteDesktop EIS session.
 - [ ] Document known unsupported paths for GNOME, wlroots/Sway, X11, kernel modules, OCR fallback, and native desktop approval UX.

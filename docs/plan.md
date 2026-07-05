@@ -1117,7 +1117,7 @@ cargo check --workspace
 - [x] Implement Phase 1.
 - [x] Implement Phase 2.
 - [x] Implement Phase 3. Current status: keyboard and pointer command paths including bounded pointer drag, uinput setup diagnostics/docs, portal/libei input backend probes, pointer calibration diagnostics, and guarded KWrite GUI input smoke exist.
-- [~] Add release hardening. Current status: GitHub Actions runs the safe `make verify` gate on push and pull requests, and `docs/release-checklist.md` records public-release blockers. Versioned artifacts, final public metadata, and broader manual release evidence remain incomplete.
+- [~] Add release hardening. Current status: GitHub Actions runs the safe `make verify` gate on push and pull requests, `docs/release-checklist.md` records public-release blockers, and `make validate-release` enforces the dual license files plus CI/release anchors. Versioned artifacts, final public metadata, and broader manual release evidence remain incomplete.
 
 ## 20. Definition of done for v0.1
 
