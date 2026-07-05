@@ -1,7 +1,7 @@
 SHELL := /usr/bin/bash
 .ONESHELL:
 
-.PHONY: fmt check test clippy validate-plugin validate-traces verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-trace-replay smoke-gui-input smoke-mcp gui-eval gui-eval-session-preflight gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-control-safety gui-eval-portal-screenshot gui-eval-remote-desktop-probe gui-eval-remote-desktop-eis-session install-kwin-script
+.PHONY: fmt check test clippy validate-plugin validate-traces verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-trace-replay smoke-gui-input smoke-mcp gui-eval gui-eval-status gui-eval-session-preflight gui-eval-observe gui-eval-clipboard-denied gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-screenshot-preview gui-eval-screenshot-coordinate-map gui-eval-screenshot-config-bounds gui-eval-full-resolution-denied gui-eval-control-safety gui-eval-portal-screenshot gui-eval-remote-desktop-probe gui-eval-remote-desktop-eis-session install-kwin-script
 
 fmt:
 	cargo fmt --all
@@ -503,14 +503,35 @@ smoke-mcp:
 gui-eval:
 	scripts/gui-eval.sh all
 
+gui-eval-status:
+	scripts/gui-eval.sh status
+
 gui-eval-session-preflight:
 	scripts/gui-eval.sh session-preflight
+
+gui-eval-observe:
+	scripts/gui-eval.sh observe
+
+gui-eval-clipboard-denied:
+	scripts/gui-eval.sh clipboard-denied
 
 gui-eval-kwin-bridge-status:
 	scripts/gui-eval.sh kwin-bridge-status
 
 gui-eval-keymap-status:
 	scripts/gui-eval.sh keymap-status
+
+gui-eval-screenshot-preview:
+	scripts/gui-eval.sh screenshot-preview
+
+gui-eval-screenshot-coordinate-map:
+	scripts/gui-eval.sh screenshot-coordinate-map
+
+gui-eval-screenshot-config-bounds:
+	scripts/gui-eval.sh screenshot-config-bounds
+
+gui-eval-full-resolution-denied:
+	scripts/gui-eval.sh full-resolution-denied
 
 gui-eval-control-safety:
 	scripts/gui-eval.sh control-safety

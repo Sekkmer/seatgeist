@@ -189,6 +189,20 @@ eval_clipboard_denied() {
 	grep -qi "policy" "$run_dir/clipboard-denied.txt"
 }
 
+portal_screenshot_cancelled() {
+	grep -qi "portal screenshot request was cancelled or ended without a screenshot" "$1"
+}
+
+skip_portal_screenshot_cancel() {
+	local eval_name="$1"
+	local err_file="$2"
+	if portal_screenshot_cancelled "$err_file" && [[ "${PLASMA_PILOT_PORTAL_SCREENSHOT_STRICT:-0}" != "1" ]]; then
+		echo "SKIP $eval_name: portal cancelled or ended the request without a screenshot"
+		return 0
+	fi
+	return 1
+}
+
 eval_kwin_bridge_status() {
 	cli kwin-bridge-status >"$run_dir/kwin-bridge-status.json"
 	jq -e '
@@ -254,7 +268,13 @@ eval_screenshot_preview() {
 		echo "SKIP screenshot-preview: spectacle is not available"
 		return 0
 	fi
-	cli screenshot --output "$run_dir/preview.png" >"$run_dir/screenshot-preview.json"
+	if ! cli screenshot --output "$run_dir/preview.png" >"$run_dir/screenshot-preview.json" 2>"$run_dir/screenshot-preview.err"; then
+		if skip_portal_screenshot_cancel "screenshot-preview" "$run_dir/screenshot-preview.err"; then
+			return 0
+		fi
+		cat "$run_dir/screenshot-preview.err" >&2
+		exit 1
+	fi
 	jq -e '
 		.type == "screenshot"
 		and .data.source_width >= .data.output_width
@@ -271,7 +291,13 @@ eval_screenshot_coordinate_map() {
 		echo "SKIP screenshot-coordinate-map: spectacle is not available"
 		return 0
 	fi
-	cli screenshot --output "$run_dir/coordinate-map.png" >"$run_dir/screenshot-coordinate-map.json"
+	if ! cli screenshot --output "$run_dir/coordinate-map.png" >"$run_dir/screenshot-coordinate-map.json" 2>"$run_dir/screenshot-coordinate-map.err"; then
+		if skip_portal_screenshot_cancel "screenshot-coordinate-map" "$run_dir/screenshot-coordinate-map.err"; then
+			return 0
+		fi
+		cat "$run_dir/screenshot-coordinate-map.err" >&2
+		exit 1
+	fi
 	jq -e '
 		.type == "screenshot"
 		and .data.output_width > 0
@@ -313,7 +339,13 @@ eval_screenshot_config_bounds() {
 		and .data.tile_max_edge == 640
 	' "$run_dir/screenshot-config-safety.json" >/dev/null
 
-	cli screenshot --output "$run_dir/config-preview.png" >"$run_dir/screenshot-config-preview.json"
+	if ! cli screenshot --output "$run_dir/config-preview.png" >"$run_dir/screenshot-config-preview.json" 2>"$run_dir/screenshot-config-preview.err"; then
+		if skip_portal_screenshot_cancel "screenshot-config-bounds" "$run_dir/screenshot-config-preview.err"; then
+			return 0
+		fi
+		cat "$run_dir/screenshot-config-preview.err" >&2
+		exit 1
+	fi
 	jq -e '
 		.type == "screenshot"
 		and .data.source_width >= .data.output_width
@@ -332,12 +364,18 @@ eval_screenshot_config_bounds() {
 	if (( tile_height > 1000 )); then
 		tile_height=1000
 	fi
-	cli screenshot-tile \
+	if ! cli screenshot-tile \
 		--output "$run_dir/config-tile.png" \
 		--x 0 \
 		--y 0 \
 		--width "$tile_width" \
-		--height "$tile_height" >"$run_dir/screenshot-config-tile.json"
+		--height "$tile_height" >"$run_dir/screenshot-config-tile.json" 2>"$run_dir/screenshot-config-tile.err"; then
+		if skip_portal_screenshot_cancel "screenshot-config-bounds tile" "$run_dir/screenshot-config-tile.err"; then
+			return 0
+		fi
+		cat "$run_dir/screenshot-config-tile.err" >&2
+		exit 1
+	fi
 	jq -e '
 		.type == "screenshot"
 		and .data.output_width <= 640
@@ -360,7 +398,7 @@ eval_portal_screenshot() {
 	fi
 
 	if ! cli screenshot --output "$run_dir/portal-screenshot.png" >"$run_dir/portal-screenshot.json" 2>"$run_dir/portal-screenshot.err"; then
-		if grep -qi "portal screenshot request was cancelled or ended without a screenshot" "$run_dir/portal-screenshot.err" && [[ "${PLASMA_PILOT_PORTAL_SCREENSHOT_STRICT:-0}" != "1" ]]; then
+		if portal_screenshot_cancelled "$run_dir/portal-screenshot.err" && [[ "${PLASMA_PILOT_PORTAL_SCREENSHOT_STRICT:-0}" != "1" ]]; then
 			echo "SKIP portal-screenshot: portal cancelled or ended the request without a screenshot"
 			return 0
 		fi
@@ -397,7 +435,7 @@ eval_portal_screenshot() {
 		--y 0 \
 		--width "$tile_width" \
 		--height "$tile_height" >"$run_dir/portal-screenshot-tile.json" 2>"$run_dir/portal-screenshot-tile.err"; then
-		if grep -qi "portal screenshot request was cancelled or ended without a screenshot" "$run_dir/portal-screenshot-tile.err" && [[ "${PLASMA_PILOT_PORTAL_SCREENSHOT_STRICT:-0}" != "1" ]]; then
+		if portal_screenshot_cancelled "$run_dir/portal-screenshot-tile.err" && [[ "${PLASMA_PILOT_PORTAL_SCREENSHOT_STRICT:-0}" != "1" ]]; then
 			echo "SKIP portal-screenshot tile: portal cancelled or ended the tile source request without a screenshot"
 			return 0
 		fi
