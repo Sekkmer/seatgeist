@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     env,
     fmt::{self, Display},
     fs,
@@ -25,10 +25,10 @@ use libplasma_pilot::{
     CaptureBackendStatus, ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest,
     ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse, DesktopObservation,
     DesktopSessionStatus, DragPointerRequest, FocusTextFieldRequest, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus, JournalEntry,
-    JournalWindowContext, KeyComboRequest, KwinBridgeStatus, KwinMetadataStatus, LibeiStatus,
-    MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton,
-    PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
+    FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus, JournalControlContext,
+    JournalEntry, JournalRequestedTarget, JournalWindowContext, KeyComboRequest, KwinBridgeStatus,
+    KwinMetadataStatus, LibeiStatus, MovePointerRequest, ObserveRequest, PanicStopStatus, Point,
+    PointerButton, PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
     PointerPhysicalBounds, PolicyStatus, RemoteDesktopEisProbe, RemoteDesktopEisSessionStatus,
     RemoteDesktopPersistMode, RemoteDesktopPortalStatus, RemoteDesktopSessionProbe,
     RemoteDesktopSessionProbeRequest, SafetyClass, SafetyStatus, ScreenshotInfo,
@@ -79,6 +79,7 @@ impl ActionJournal {
         context: JournalContext,
         response: &DaemonResponse,
     ) -> Result<()> {
+        let control = finalize_journal_control_context(context.control, response);
         let entry = JournalEntry {
             sequence: self.next_sequence()?,
             unix_time_ms: unix_time_ms()?,
@@ -87,6 +88,7 @@ impl ActionJournal {
             guard_present: context.guard_present,
             active_window_before: context.active_window_before,
             active_window_after: context.active_window_after,
+            control,
             ok: !matches!(response, DaemonResponse::Error { .. }),
             summary: summarize_response(response),
         };
@@ -118,6 +120,7 @@ struct JournalContext {
     guard_present: bool,
     active_window_before: Option<JournalWindowContext>,
     active_window_after: Option<JournalWindowContext>,
+    control: Option<JournalControlContext>,
 }
 
 const KWIN_BRIDGE_SERVICE: &str = "org.plasmapilot.KWinBridge";
@@ -863,11 +866,17 @@ fn journal_context_for_request(request: &DaemonRequest, runtime: &DaemonRuntime)
     let safety_class = safety_class_for_request(request);
     let active_window_before =
         active_window_context_for_safety_class(&safety_class, &runtime.active_window_state);
+    let control = journal_control_context_for_request(
+        request,
+        &safety_class,
+        runtime.input_backend_preference,
+    );
     JournalContext {
         safety_class,
         guard_present: active_window_guard_for_request(request).is_some(),
         active_window_before,
         active_window_after: None,
+        control,
     }
 }
 
@@ -882,6 +891,399 @@ fn active_window_context_for_safety_class(
         .ok()
         .flatten()
         .map(journal_window_context)
+}
+
+fn journal_control_context_for_request(
+    request: &DaemonRequest,
+    safety_class: &SafetyClass,
+    input_backend_preference: InputBackendPreference,
+) -> Option<JournalControlContext> {
+    if !is_control_safety_class(safety_class) {
+        return None;
+    }
+    Some(JournalControlContext {
+        action_id: None,
+        policy: None,
+        backend: journal_backend_for_request(request, input_backend_preference),
+        requested_target: journal_requested_target_for_request(request),
+    })
+}
+
+fn finalize_journal_control_context(
+    mut control: Option<JournalControlContext>,
+    response: &DaemonResponse,
+) -> Option<JournalControlContext> {
+    let context = control.as_mut()?;
+    if let DaemonResponse::Action(action) = response {
+        context.action_id = Some(action.id);
+    }
+    if context.policy.is_none() {
+        context.policy = Some(journal_policy_result(response));
+    }
+    if context.backend.is_none() {
+        context.backend = journal_backend_from_response(response);
+    }
+    control
+}
+
+fn journal_policy_result(response: &DaemonResponse) -> String {
+    match response {
+        DaemonResponse::Error { message } if message.starts_with("policy denied") => {
+            "denied".to_string()
+        }
+        DaemonResponse::Error { message } if message.starts_with("policy prompt required") => {
+            "prompt_required".to_string()
+        }
+        DaemonResponse::Error { .. } => "checked".to_string(),
+        _ => "allow".to_string(),
+    }
+}
+
+fn journal_backend_from_response(response: &DaemonResponse) -> Option<String> {
+    let DaemonResponse::Action(action) = response else {
+        return None;
+    };
+    let message = action.message.as_deref()?;
+    let backend = message
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("backend="))?
+        .trim_matches(|character: char| character == ',' || character == ';' || character == '.');
+    if backend.is_empty() {
+        None
+    } else {
+        Some(backend.to_string())
+    }
+}
+
+fn journal_backend_for_request(
+    request: &DaemonRequest,
+    input_backend_preference: InputBackendPreference,
+) -> Option<String> {
+    let backend = match request {
+        DaemonRequest::RemoteDesktopSessionProbe(_)
+        | DaemonRequest::RemoteDesktopEisProbe(_)
+        | DaemonRequest::RemoteDesktopEisStart(_) => "portal_remote_desktop",
+        DaemonRequest::FocusWindow(_) => "kwin",
+        DaemonRequest::AccessibilityInvoke(_)
+        | DaemonRequest::AccessibilitySetText(_)
+        | DaemonRequest::AccessibilityInsertText(_)
+        | DaemonRequest::AccessibilityDeleteText(_)
+        | DaemonRequest::AccessibilityCopyText(_)
+        | DaemonRequest::AccessibilityCutText(_)
+        | DaemonRequest::AccessibilityPasteText(_)
+        | DaemonRequest::AccessibilitySetCaret(_)
+        | DaemonRequest::AccessibilitySetSelection(_)
+        | DaemonRequest::ClickButton(_)
+        | DaemonRequest::SetTextField(_)
+        | DaemonRequest::FocusTextField(_)
+        | DaemonRequest::ActivateTab(_)
+        | DaemonRequest::ActivateLink(_)
+        | DaemonRequest::ToggleCheck(_)
+        | DaemonRequest::SetValue(_)
+        | DaemonRequest::SelectItem(_)
+        | DaemonRequest::SelectMenu(_) => "atspi",
+        DaemonRequest::TypeText(_)
+        | DaemonRequest::KeyCombo(_)
+        | DaemonRequest::MovePointer(_)
+        | DaemonRequest::ClickPointer(_)
+        | DaemonRequest::DragPointer(_)
+        | DaemonRequest::ScrollPointer(_) => {
+            return Some(input_backend_preference.status_name().to_string());
+        }
+        _ => return None,
+    };
+    Some(backend.to_string())
+}
+
+fn journal_requested_target_for_request(request: &DaemonRequest) -> Option<JournalRequestedTarget> {
+    let target = match request {
+        DaemonRequest::RemoteDesktopSessionProbe(request)
+        | DaemonRequest::RemoteDesktopEisProbe(request)
+        | DaemonRequest::RemoteDesktopEisStart(request) => {
+            let mut target = journal_target("remote_desktop_session");
+            target.add_bool("keyboard", request.keyboard);
+            target.add_bool("pointer", request.pointer);
+            target.add_bool("touchscreen", request.touchscreen);
+            if let Some(mode) = &request.persist_mode {
+                target.add("persist_mode", format!("{mode:?}"));
+            }
+            target
+        }
+        DaemonRequest::FocusWindow(request) => {
+            let mut target = journal_target("window");
+            target.add("window_id", &request.window_id);
+            target
+        }
+        DaemonRequest::AccessibilityInvoke(request) => {
+            let mut target = journal_target("accessibility_action");
+            target.add("node_id", &request.node_id);
+            target.add("action", format!("{:?}", request.action));
+            target.add_bool("destructive", request.destructive);
+            target
+        }
+        DaemonRequest::AccessibilitySetText(request) => {
+            let mut target = journal_target("accessibility_text_replace");
+            target.add("node_id", &request.node_id);
+            target.add("text_chars", request.text.chars().count().to_string());
+            target
+        }
+        DaemonRequest::AccessibilityInsertText(request) => {
+            let mut target = journal_target("accessibility_text_insert");
+            target.add("node_id", &request.node_id);
+            target.add("offset", request.offset.to_string());
+            target.add("text_chars", request.text.chars().count().to_string());
+            target
+        }
+        DaemonRequest::AccessibilityDeleteText(request) => journal_text_range_target(
+            "accessibility_text_delete",
+            &request.node_id,
+            request.start_offset,
+            request.end_offset,
+        ),
+        DaemonRequest::AccessibilityCopyText(request) => journal_text_range_target(
+            "accessibility_text_copy",
+            &request.node_id,
+            request.start_offset,
+            request.end_offset,
+        ),
+        DaemonRequest::AccessibilityCutText(request) => journal_text_range_target(
+            "accessibility_text_cut",
+            &request.node_id,
+            request.start_offset,
+            request.end_offset,
+        ),
+        DaemonRequest::AccessibilityPasteText(request) => {
+            let mut target = journal_target("accessibility_text_paste");
+            target.add("node_id", &request.node_id);
+            target.add("offset", request.offset.to_string());
+            target
+        }
+        DaemonRequest::AccessibilitySetCaret(request) => {
+            let mut target = journal_target("accessibility_caret");
+            target.add("node_id", &request.node_id);
+            target.add("offset", request.offset.to_string());
+            target
+        }
+        DaemonRequest::AccessibilitySetSelection(request) => {
+            let mut target = journal_target("accessibility_selection");
+            target.add("node_id", &request.node_id);
+            target.add("selection_num", request.selection_num.to_string());
+            target.add("start_offset", request.start_offset.to_string());
+            target.add("end_offset", request.end_offset.to_string());
+            target
+        }
+        DaemonRequest::TypeText(request) => {
+            let mut target = journal_target("keyboard_text");
+            target.add("text_chars", request.text.chars().count().to_string());
+            target
+        }
+        DaemonRequest::KeyCombo(request) => {
+            let mut target = journal_target("keyboard_combo");
+            target.add(
+                "key_count",
+                request
+                    .combo
+                    .split('+')
+                    .filter(|part| !part.trim().is_empty())
+                    .count()
+                    .to_string(),
+            );
+            target
+        }
+        DaemonRequest::MovePointer(request) => journal_point_target("pointer_move", &request.point),
+        DaemonRequest::ClickPointer(request) => {
+            let mut target = journal_point_target("pointer_click", &request.point);
+            target.add("button", format!("{:?}", request.button));
+            target.add("clicks", request.clicks.to_string());
+            target
+        }
+        DaemonRequest::DragPointer(request) => {
+            let mut target = journal_target("pointer_drag");
+            target.add_point("from", &request.from);
+            target.add_point("to", &request.to);
+            target.add("button", format!("{:?}", request.button));
+            target.add("duration_ms", request.duration_ms.to_string());
+            target
+        }
+        DaemonRequest::ScrollPointer(request) => {
+            let mut target = journal_target("pointer_scroll");
+            target.add("vertical", request.vertical.to_string());
+            target.add("horizontal", request.horizontal.to_string());
+            target
+        }
+        DaemonRequest::ClickButton(request) => {
+            let mut target = journal_named_semantic_target(
+                "semantic_button",
+                &request.name,
+                request.app.as_deref(),
+                request.window_name_contains.as_deref(),
+                request.max_nodes,
+            );
+            target.add_bool("destructive", request.destructive);
+            target
+        }
+        DaemonRequest::SetTextField(request) => {
+            let mut target = journal_named_semantic_target(
+                "semantic_text_field_set",
+                &request.name,
+                request.app.as_deref(),
+                request.window_name_contains.as_deref(),
+                request.max_nodes,
+            );
+            target.add("text_chars", request.text.chars().count().to_string());
+            target
+        }
+        DaemonRequest::FocusTextField(request) => journal_named_semantic_target(
+            "semantic_text_field_focus",
+            &request.name,
+            request.app.as_deref(),
+            request.window_name_contains.as_deref(),
+            request.max_nodes,
+        ),
+        DaemonRequest::ActivateTab(request) => journal_named_semantic_target(
+            "semantic_tab",
+            &request.name,
+            request.app.as_deref(),
+            request.window_name_contains.as_deref(),
+            request.max_nodes,
+        ),
+        DaemonRequest::ActivateLink(request) => journal_named_semantic_target(
+            "semantic_link",
+            &request.name,
+            request.app.as_deref(),
+            request.window_name_contains.as_deref(),
+            request.max_nodes,
+        ),
+        DaemonRequest::ToggleCheck(request) => {
+            let mut target = journal_named_semantic_target(
+                "semantic_check",
+                &request.name,
+                request.app.as_deref(),
+                request.window_name_contains.as_deref(),
+                request.max_nodes,
+            );
+            if let Some(checked) = request.checked {
+                target.add_bool("checked", checked);
+            }
+            target
+        }
+        DaemonRequest::SetValue(request) => {
+            let mut target = journal_named_semantic_target(
+                "semantic_value",
+                &request.name,
+                request.app.as_deref(),
+                request.window_name_contains.as_deref(),
+                request.max_nodes,
+            );
+            target.add("value", request.value.to_string());
+            target
+        }
+        DaemonRequest::SelectItem(request) => journal_named_semantic_target(
+            "semantic_item",
+            &request.name,
+            request.app.as_deref(),
+            request.window_name_contains.as_deref(),
+            request.max_nodes,
+        ),
+        DaemonRequest::SelectMenu(request) => {
+            let mut target = journal_target("semantic_menu");
+            target.add("path_len", request.path.len().to_string());
+            target.add_bool("destructive", request.destructive);
+            target.add("max_nodes", request.max_nodes.to_string());
+            if let Some(app) = request.app.as_deref() {
+                target.add("app", app);
+            }
+            if let Some(window) = request.window_name_contains.as_deref() {
+                target.add(
+                    "window_name_contains_chars",
+                    window.chars().count().to_string(),
+                );
+            }
+            target
+        }
+        _ => return None,
+    };
+    if target.fields.is_empty() && target.kind.is_empty() {
+        None
+    } else {
+        Some(target)
+    }
+}
+
+fn journal_text_range_target(
+    kind: &str,
+    node_id: &str,
+    start_offset: i32,
+    end_offset: i32,
+) -> JournalRequestedTarget {
+    let mut target = journal_target(kind);
+    target.add("node_id", node_id);
+    target.add("start_offset", start_offset.to_string());
+    target.add("end_offset", end_offset.to_string());
+    target
+}
+
+fn journal_point_target(kind: &str, point: &Point) -> JournalRequestedTarget {
+    let mut target = journal_target(kind);
+    target.add_point("", point);
+    target
+}
+
+fn journal_named_semantic_target(
+    kind: &str,
+    name: &str,
+    app: Option<&str>,
+    window_name_contains: Option<&str>,
+    max_nodes: usize,
+) -> JournalRequestedTarget {
+    let mut target = journal_target(kind);
+    target.add("name_chars", name.chars().count().to_string());
+    target.add("max_nodes", max_nodes.to_string());
+    if let Some(app) = app {
+        target.add("app", app);
+    }
+    if let Some(window) = window_name_contains {
+        target.add(
+            "window_name_contains_chars",
+            window.chars().count().to_string(),
+        );
+    }
+    target
+}
+
+fn journal_target(kind: impl Into<String>) -> JournalRequestedTarget {
+    JournalRequestedTarget {
+        kind: kind.into(),
+        fields: BTreeMap::new(),
+    }
+}
+
+trait JournalRequestedTargetExt {
+    fn add(&mut self, key: impl Into<String>, value: impl ToString);
+
+    fn add_bool(&mut self, key: impl Into<String>, value: bool);
+
+    fn add_point(&mut self, prefix: &str, point: &Point);
+}
+
+impl JournalRequestedTargetExt for JournalRequestedTarget {
+    fn add(&mut self, key: impl Into<String>, value: impl ToString) {
+        self.fields.insert(key.into(), value.to_string());
+    }
+
+    fn add_bool(&mut self, key: impl Into<String>, value: bool) {
+        self.add(key, value.to_string());
+    }
+
+    fn add_point(&mut self, prefix: &str, point: &Point) {
+        let separator = if prefix.is_empty() { "" } else { "_" };
+        self.add(format!("{prefix}{separator}x"), format!("{:.0}", point.x));
+        self.add(format!("{prefix}{separator}y"), format!("{:.0}", point.y));
+        self.add(
+            format!("{prefix}{separator}space"),
+            format!("{:?}", point.space),
+        );
+    }
 }
 
 fn journal_window_context(window: WindowInfo) -> JournalWindowContext {
@@ -7186,6 +7588,7 @@ mod tests {
                     guard_present: false,
                     active_window_before: None,
                     active_window_after: None,
+                    control: None,
                 },
                 &DaemonResponse::Health(HealthStatus {
                     service: "plasma-pilotd".to_string(),
@@ -7211,6 +7614,16 @@ mod tests {
                         app_id: Some("org.kde.konsole".to_string()),
                         title: "shell".to_string(),
                         monitor_id: Some("main".to_string()),
+                    }),
+                    control: Some(JournalControlContext {
+                        action_id: None,
+                        policy: None,
+                        backend: Some("kwin".to_string()),
+                        requested_target: Some({
+                            let mut target = journal_target("window");
+                            target.add("window_id", "window-2");
+                            target
+                        }),
                     }),
                 },
                 &DaemonResponse::Action(Box::new(ActionResult {
@@ -7244,6 +7657,21 @@ mod tests {
                 .and_then(|window| window.app_id.as_deref()),
             Some("org.kde.konsole")
         );
+        let control = entries[0]
+            .control
+            .as_ref()
+            .expect("control journal context is present");
+        assert_eq!(control.action_id, Some(Uuid::nil()));
+        assert_eq!(control.policy.as_deref(), Some("allow"));
+        assert_eq!(control.backend.as_deref(), Some("kwin"));
+        assert_eq!(
+            control
+                .requested_target
+                .as_ref()
+                .and_then(|target| target.fields.get("window_id"))
+                .map(String::as_str),
+            Some("window-2")
+        );
         assert!(entries[0].ok);
 
         let entries = journal
@@ -7254,6 +7682,38 @@ mod tests {
         assert!(entries[0].ok);
 
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn journal_control_context_redacts_text_payloads() {
+        let request = DaemonRequest::TypeText(TypeTextRequest {
+            text: "secret text".to_string(),
+            guard: Some(ActiveWindowGuard {
+                expected_window_id: None,
+                expected_app_id: Some("org.kde.kate".to_string()),
+                title_contains: None,
+            }),
+        });
+        let context = journal_control_context_for_request(
+            &request,
+            &SafetyClass::ControlKeyboard,
+            InputBackendPreference::Uinput,
+        )
+        .expect("keyboard control context is present");
+        let target = context
+            .requested_target
+            .expect("keyboard target metadata is present");
+
+        assert_eq!(context.backend.as_deref(), Some("uinput"));
+        assert_eq!(target.kind, "keyboard_text");
+        assert_eq!(
+            target.fields.get("text_chars").map(String::as_str),
+            Some("11")
+        );
+        assert!(
+            !target.fields.values().any(|value| value.contains("secret")),
+            "journal target metadata must not contain typed text"
+        );
     }
 
     #[test]

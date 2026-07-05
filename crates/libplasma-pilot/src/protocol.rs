@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -338,8 +338,29 @@ pub struct JournalEntry {
     pub active_window_before: Option<JournalWindowContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_window_after: Option<JournalWindowContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<JournalControlContext>,
     pub ok: bool,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalControlContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_target: Option<JournalRequestedTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalRequestedTarget {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fields: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1198,6 +1219,7 @@ mod tests {
         assert!(!entry.guard_present);
         assert_eq!(entry.active_window_before, None);
         assert_eq!(entry.active_window_after, None);
+        assert_eq!(entry.control, None);
     }
 
     #[test]
@@ -1220,6 +1242,15 @@ mod tests {
                 title: "shell".to_string(),
                 monitor_id: Some("main".to_string()),
             }),
+            control: Some(JournalControlContext {
+                action_id: Some(Uuid::nil()),
+                policy: Some("allow".to_string()),
+                backend: Some("kwin".to_string()),
+                requested_target: Some(JournalRequestedTarget {
+                    kind: "window".to_string(),
+                    fields: BTreeMap::from([("window_id".to_string(), "window-1".to_string())]),
+                }),
+            }),
             ok: false,
             summary: "policy denied".to_string(),
         };
@@ -1230,6 +1261,10 @@ mod tests {
         assert!(encoded.contains(r#""active_window_after""#));
         assert!(encoded.contains(r#""app_id":"org.kde.kate""#));
         assert!(encoded.contains(r#""app_id":"org.kde.konsole""#));
+        assert!(encoded.contains(r#""control""#));
+        assert!(encoded.contains(r#""policy":"allow""#));
+        assert!(encoded.contains(r#""backend":"kwin""#));
+        assert!(encoded.contains(r#""requested_target""#));
     }
 
     #[test]

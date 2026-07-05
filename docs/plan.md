@@ -739,9 +739,9 @@ Write JSONL records to:
 ~/.local/state/plasma-pilot/journal.jsonl
 ```
 
-Current implementation: `plasma-pilotd` appends compact request records containing `sequence`, `unix_time_ms`, `method`, `safety_class`, `guard_present`, best-effort `active_window_before` and `active_window_after` for control-class requests, `ok`, and `summary`. Screenshot and wait-for-change summaries include capture backend provenance while still storing only metadata and output paths, not image payloads. `plasma-pilot-cli journal tail --limit N` returns recent records through the daemon and supports `--method <name>` and `--ok <true|false>` filters. Existing journal lines without the context fields remain parseable. Smoke tests pass target-local journal paths and verify `0600` file permissions.
+Current implementation: `plasma-pilotd` appends compact request records containing `sequence`, `unix_time_ms`, `method`, `safety_class`, `guard_present`, best-effort `active_window_before` and `active_window_after` for control-class requests, optional structured `control` metadata, `ok`, and `summary`. Control metadata includes the action id when an action result exists, policy outcome, backend provenance, and a compact `requested_target` object with non-content fields such as coordinates, node ids, offsets, text length, key count, semantic-name length, app filters, and requested backend/device hints. It does not store typed text, replacement text, clipboard contents, screenshots, or semantic target names. Screenshot and wait-for-change summaries include capture backend provenance while still storing only metadata and output paths, not image payloads. `plasma-pilot-cli journal tail --limit N` returns recent records through the daemon and supports `--method <name>` and `--ok <true|false>` filters. Existing journal lines without the context fields remain parseable. Smoke tests pass target-local journal paths and verify `0600` file permissions.
 
-Future journal expansion should preserve the compact tail format while adding the remaining richer action context below for control operations:
+The remaining future journal work should preserve the compact tail format while adding explicit client/tool identity and optional path/hash fields only when the operator enables them:
 
 Each record:
 
