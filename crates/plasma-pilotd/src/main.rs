@@ -5332,7 +5332,7 @@ fn resolve_click_button_match(
         return Ok(viable.remove(0));
     }
 
-    let choices = semantic_choice_summary(&viable);
+    let choices = semantic_choice_summary(name, &viable);
     bail!(
         "ambiguous button match for name={name}: {} candidates; choices=[{choices}]",
         viable.len()
@@ -5365,7 +5365,7 @@ fn resolve_menu_path_match(
         return Ok(candidates.remove(0));
     }
 
-    let choices = semantic_menu_choice_summary(&candidates);
+    let choices = semantic_menu_choice_summary(path, &candidates);
     bail!(
         "ambiguous menu path={} matched {} candidates; choices=[{choices}]",
         path.join("/"),
@@ -5409,7 +5409,7 @@ fn resolve_tab_match(
         return Ok((node, action));
     }
 
-    let choices = semantic_choice_summary(&viable);
+    let choices = semantic_choice_summary(name, &viable);
     bail!(
         "ambiguous tab match for name={name}: {} candidates; choices=[{choices}]",
         viable.len()
@@ -5452,7 +5452,7 @@ fn resolve_link_match(
         return Ok((node, action));
     }
 
-    let choices = semantic_choice_summary(&viable);
+    let choices = semantic_choice_summary(name, &viable);
     bail!(
         "ambiguous link match for name={name}: {} candidates; choices=[{choices}]",
         viable.len()
@@ -5495,7 +5495,7 @@ fn resolve_check_match(
         return Ok((node, action));
     }
 
-    let choices = semantic_choice_summary(&viable);
+    let choices = semantic_choice_summary(name, &viable);
     bail!(
         "ambiguous check match for name={name}: {} candidates; choices=[{choices}]",
         viable.len()
@@ -5532,7 +5532,7 @@ fn resolve_value_match(
         return Ok(viable.remove(0));
     }
 
-    let choices = semantic_choice_summary(&viable);
+    let choices = semantic_choice_summary(name, &viable);
     bail!(
         "ambiguous value control match for name={name}: {} candidates; choices=[{choices}]",
         viable.len()
@@ -5575,7 +5575,7 @@ fn resolve_select_item_match(
         return Ok((node, action));
     }
 
-    let choices = semantic_choice_summary(&viable);
+    let choices = semantic_choice_summary(name, &viable);
     bail!(
         "ambiguous item match for name={name}: {} candidates; choices=[{choices}]",
         viable.len()
@@ -5673,7 +5673,7 @@ fn resolve_text_field_match(
         return Ok(viable.remove(0));
     }
 
-    let choices = semantic_choice_summary(&viable);
+    let choices = semantic_choice_summary(name, &viable);
     bail!(
         "ambiguous text field match for name={name}: {} candidates; choices=[{choices}]",
         viable.len()
@@ -5714,33 +5714,41 @@ fn resolve_focus_text_field_match(
         return Ok(viable.remove(0));
     }
 
-    let choices = semantic_choice_summary(&viable);
+    let choices = semantic_choice_summary(name, &viable);
     bail!(
         "ambiguous focusable text field match for name={name}: {} candidates; choices=[{choices}]",
         viable.len()
     );
 }
 
-fn semantic_choice_summary(nodes: &[libplasma_pilot::AccessibilityNode]) -> String {
+fn semantic_choice_summary(query: &str, nodes: &[libplasma_pilot::AccessibilityNode]) -> String {
     let mut choices = nodes
         .iter()
         .take(SEMANTIC_CHOICE_LIMIT)
-        .map(semantic_node_choice)
+        .map(|node| semantic_node_choice(query, node))
         .collect::<Vec<_>>();
     append_omitted_choice_count(&mut choices, nodes.len());
     choices.join("; ")
 }
 
 fn semantic_menu_choice_summary(
+    path: &[String],
     candidates: &[(
         libplasma_pilot::AccessibilityNode,
         libplasma_pilot::AccessibilityAction,
     )],
 ) -> String {
+    let query = path.last().map(String::as_str).unwrap_or_default();
     let mut choices = candidates
         .iter()
         .take(SEMANTIC_CHOICE_LIMIT)
-        .map(|(node, action)| format!("{} action={}", semantic_node_choice(node), action.as_str()))
+        .map(|(node, action)| {
+            format!(
+                "{} action={}",
+                semantic_node_choice(query, node),
+                action.as_str()
+            )
+        })
         .collect::<Vec<_>>();
     append_omitted_choice_count(&mut choices, candidates.len());
     choices.join("; ")
@@ -5752,8 +5760,9 @@ fn append_omitted_choice_count(choices: &mut Vec<String>, total: usize) {
     }
 }
 
-fn semantic_node_choice(node: &libplasma_pilot::AccessibilityNode) -> String {
+fn semantic_node_choice(query: &str, node: &libplasma_pilot::AccessibilityNode) -> String {
     let name = node.name.as_deref().unwrap_or("<unnamed>");
+    let score = semantic_name_match_score(query, node.name.as_deref());
     let actions = if node.actions.is_empty() {
         "none".to_string()
     } else {
@@ -5764,9 +5773,30 @@ fn semantic_node_choice(node: &libplasma_pilot::AccessibilityNode) -> String {
             .join("|")
     };
     format!(
-        "id={} role={} name={} actions={actions}",
+        "id={} role={} name={} score={score:.2} actions={actions}",
         node.id, node.role, name
     )
+}
+
+fn semantic_name_match_score(query: &str, candidate: Option<&str>) -> f64 {
+    let query = query.trim().to_ascii_lowercase();
+    let Some(candidate) = candidate else {
+        return 0.0;
+    };
+    let candidate = candidate.trim().to_ascii_lowercase();
+    if query.is_empty() || candidate.is_empty() {
+        return 0.0;
+    }
+    if candidate == query {
+        return 1.0;
+    }
+    if candidate.starts_with(&query) {
+        return 0.85;
+    }
+    if candidate.contains(&query) {
+        return 0.65;
+    }
+    0.0
 }
 
 fn is_menu_item_candidate(node: &libplasma_pilot::AccessibilityNode) -> bool {
@@ -9598,8 +9628,8 @@ height = 40
         .expect_err("multiple exact matches are ambiguous");
         let err = err.to_string();
         assert!(err.contains("ambiguous"));
-        assert!(err.contains("choices=[id=1 role=button name=Open actions=press"));
-        assert!(err.contains("id=2 role=button name=Open actions=press"));
+        assert!(err.contains("choices=[id=1 role=button name=Open score=1.00 actions=press"));
+        assert!(err.contains("id=2 role=button name=Open score=1.00 actions=press"));
     }
 
     #[test]
@@ -9633,8 +9663,8 @@ height = 40
         .expect_err("multiple exact text fields are ambiguous");
         let err = err.to_string();
         assert!(err.contains("ambiguous"));
-        assert!(err.contains("choices=[id=1 role=text name=Search actions=set_text"));
-        assert!(err.contains("id=2 role=text name=Search actions=set_text"));
+        assert!(err.contains("choices=[id=1 role=text name=Search score=1.00 actions=set_text"));
+        assert!(err.contains("id=2 role=text name=Search score=1.00 actions=set_text"));
     }
 
     #[test]
@@ -9678,8 +9708,10 @@ height = 40
         .expect_err("multiple exact focusable text fields are ambiguous");
         let err = err.to_string();
         assert!(err.contains("ambiguous"));
-        assert!(err.contains("choices=[id=1 role=text name=Search actions=set_text|focus"));
-        assert!(err.contains("id=2 role=text name=Search actions=set_text|focus"));
+        assert!(
+            err.contains("choices=[id=1 role=text name=Search score=1.00 actions=set_text|focus")
+        );
+        assert!(err.contains("id=2 role=text name=Search score=1.00 actions=set_text|focus"));
     }
 
     #[test]
@@ -9710,8 +9742,12 @@ height = 40
         .expect_err("multiple exact tabs are ambiguous");
         let err = err.to_string();
         assert!(err.contains("ambiguous"));
-        assert!(err.contains("choices=[id=1 role=page tab name=General actions=press|select"));
-        assert!(err.contains("id=2 role=page tab name=General actions=press|select"));
+        assert!(
+            err.contains(
+                "choices=[id=1 role=page tab name=General score=1.00 actions=press|select"
+            )
+        );
+        assert!(err.contains("id=2 role=page tab name=General score=1.00 actions=press|select"));
     }
 
     #[test]
@@ -9751,8 +9787,8 @@ height = 40
             .expect_err("multiple exact links are ambiguous");
         let err = err.to_string();
         assert!(err.contains("ambiguous"));
-        assert!(err.contains("choices=[id=1 role=link name=Open actions=press"));
-        assert!(err.contains("id=2 role=link name=Open actions=press"));
+        assert!(err.contains("choices=[id=1 role=link name=Open score=1.00 actions=press"));
+        assert!(err.contains("id=2 role=link name=Open score=1.00 actions=press"));
     }
 
     #[test]
@@ -9791,8 +9827,12 @@ height = 40
         .expect_err("multiple exact checks are ambiguous");
         let err = err.to_string();
         assert!(err.contains("ambiguous"));
-        assert!(err.contains("choices=[id=1 role=check box name=Enable feature actions=press"));
-        assert!(err.contains("id=2 role=check box name=Enable feature actions=press"));
+        assert!(
+            err.contains(
+                "choices=[id=1 role=check box name=Enable feature score=1.00 actions=press"
+            )
+        );
+        assert!(err.contains("id=2 role=check box name=Enable feature score=1.00 actions=press"));
     }
 
     #[test]
@@ -9880,8 +9920,10 @@ height = 40
         .expect_err("multiple exact items are ambiguous");
         let err = err.to_string();
         assert!(err.contains("ambiguous"));
-        assert!(err.contains("choices=[id=1 role=list item name=Printer actions=select"));
-        assert!(err.contains("id=2 role=list item name=Printer actions=select"));
+        assert!(
+            err.contains("choices=[id=1 role=list item name=Printer score=1.00 actions=select")
+        );
+        assert!(err.contains("id=2 role=list item name=Printer score=1.00 actions=select"));
     }
 
     #[test]
@@ -9938,8 +9980,10 @@ height = 40
         .expect_err("duplicate visible menu paths are ambiguous");
         let err = err.to_string();
         assert!(err.contains("ambiguous"));
-        assert!(err.contains("choices=[id=open1 role=menu item name=Open actions=press|select"));
-        assert!(err.contains("id=open2 role=menu item name=Open actions=press|select"));
+        assert!(err.contains(
+            "choices=[id=open1 role=menu item name=Open score=1.00 actions=press|select"
+        ));
+        assert!(err.contains("id=open2 role=menu item name=Open score=1.00 actions=press|select"));
         assert!(err.contains("action=select"));
     }
 
@@ -9949,11 +9993,29 @@ height = 40
             .map(|index| button_node(&format!("button-{index}"), "Open"))
             .collect::<Vec<_>>();
 
-        let summary = semantic_choice_summary(&choices);
-        assert!(summary.contains("id=button-1 role=button name=Open actions=press"));
-        assert!(summary.contains("id=button-5 role=button name=Open actions=press"));
+        let summary = semantic_choice_summary("Open", &choices);
+        assert!(summary.contains("id=button-1 role=button name=Open score=1.00 actions=press"));
+        assert!(summary.contains("id=button-5 role=button name=Open score=1.00 actions=press"));
         assert!(!summary.contains("id=button-6"));
         assert!(summary.contains("+2 more"));
+    }
+
+    #[test]
+    fn semantic_choice_summary_scores_name_quality() {
+        let choices = vec![
+            button_node("exact", "Open"),
+            button_node("prefix", "Open Recent"),
+            button_node("contains", "Reopen"),
+            button_node("missing-name", ""),
+        ];
+
+        let summary = semantic_choice_summary("Open", &choices);
+        assert!(summary.contains("id=exact role=button name=Open score=1.00 actions=press"));
+        assert!(
+            summary.contains("id=prefix role=button name=Open Recent score=0.85 actions=press")
+        );
+        assert!(summary.contains("id=contains role=button name=Reopen score=0.65 actions=press"));
+        assert!(summary.contains("id=missing-name role=button name= score=0.00 actions=press"));
     }
 
     #[test]
