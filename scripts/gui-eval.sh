@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
 	cat <<'USAGE'
-Usage: scripts/gui-eval.sh [all|status|observe|clipboard-denied|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|portal-screenshot|full-resolution-denied|control-safety]
+Usage: scripts/gui-eval.sh [all|status|observe|clipboard-denied|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|portal-screenshot|remote-desktop-probe|full-resolution-denied|control-safety]
 
 Runs opt-in local GUI evals against a private PlasmaPilot daemon socket.
 The default `all` set avoids control actions. `control-safety` starts a private
@@ -19,7 +19,7 @@ if [[ "$case_name" == "--help" || "$case_name" == "-h" ]]; then
 fi
 
 case "$case_name" in
-	all | status | observe | clipboard-denied | screenshot-preview | screenshot-coordinate-map | screenshot-config-bounds | portal-screenshot | full-resolution-denied | control-safety) ;;
+	all | status | observe | clipboard-denied | screenshot-preview | screenshot-coordinate-map | screenshot-config-bounds | portal-screenshot | remote-desktop-probe | full-resolution-denied | control-safety) ;;
 	*)
 		usage >&2
 		exit 2
@@ -99,7 +99,7 @@ CONFIG
 else
 	daemon_args=(--socket "$socket" --journal "$journal" --panic-stop-file "$panic_stop_file")
 fi
-if [[ "$case_name" == "control-safety" ]]; then
+if [[ "$case_name" == "control-safety" || "$case_name" == "remote-desktop-probe" ]]; then
 	daemon_args+=(--approval-file "$approval_file")
 fi
 target/debug/plasma-pilotd "${daemon_args[@]}" >"$log" 2>&1 &
@@ -275,6 +275,54 @@ eval_portal_screenshot() {
 	jq -e '.type == "journal" and any(.data[]; .summary | contains("backend=portal_screenshot"))' "$run_dir/portal-screenshot-journal.json" >/dev/null
 }
 
+eval_remote_desktop_probe() {
+	cli input backends >"$run_dir/remote-desktop-backends.json"
+	if ! jq -e '.type == "input_backend_status" and .data.remote_desktop_portal.remote_desktop_interface_available == true' "$run_dir/remote-desktop-backends.json" >/dev/null; then
+		echo "SKIP remote-desktop-probe: xdg-desktop-portal RemoteDesktop interface is not visible"
+		return 0
+	fi
+
+	cli active-window >"$run_dir/remote-desktop-active-window.json" 2>"$run_dir/remote-desktop-active-window.err" || true
+	active_title="$(jq -r '.data.title // empty' "$run_dir/remote-desktop-active-window.json" 2>/dev/null || true)"
+	active_id="$(jq -r '.data.id // empty' "$run_dir/remote-desktop-active-window.json" 2>/dev/null || true)"
+	if [[ -z "$active_title" && -z "$active_id" ]]; then
+		echo "SKIP remote-desktop-probe: active-window guard metadata is unavailable"
+		return 0
+	fi
+
+	guard_args=()
+	if [[ -n "$active_title" ]]; then
+		guard_args+=(--active-title-contains "$active_title")
+	else
+		guard_args+=(--expected-active-window "$active_id")
+	fi
+
+	cli approve \
+		--approval-file "$approval_file" \
+		--safety-class control-pointer \
+		--method remote_desktop_session_probe \
+		--ttl-ms 120000 \
+		--reason "gui-eval remote-desktop-probe" >"$run_dir/remote-desktop-approval.json"
+	jq -e '.method == "remote_desktop_session_probe" and .safety_class == "control_pointer"' "$run_dir/remote-desktop-approval.json" >/dev/null
+	test "$(stat -c '%a' "$approval_file")" = "600"
+
+	if ! cli input remote-desktop-probe --keyboard --pointer --timeout-ms 120000 "${guard_args[@]}" >"$run_dir/remote-desktop-probe.json" 2>"$run_dir/remote-desktop-probe.err"; then
+		cat "$run_dir/remote-desktop-probe.err" >&2
+		exit 1
+	fi
+	jq -e '
+		.type == "remote_desktop_session_probe"
+		and (.data.requested_devices | index("keyboard"))
+		and (.data.requested_devices | index("pointer"))
+		and .data.transient_session_closed == true
+	' "$run_dir/remote-desktop-probe.json" >/dev/null
+	if [[ "${PLASMA_PILOT_REMOTE_DESKTOP_STRICT:-0}" == "1" ]]; then
+		jq -e '.data.started == true and (.data.selected_devices | length) >= 1' "$run_dir/remote-desktop-probe.json" >/dev/null
+	fi
+	cli journal tail --limit 20 --method remote_desktop_session_probe --ok true >"$run_dir/remote-desktop-journal.json"
+	jq -e '.type == "journal" and any(.data[]; .summary | contains("remote desktop session probe"))' "$run_dir/remote-desktop-journal.json" >/dev/null
+}
+
 eval_full_resolution_denied() {
 	if cli screenshot --output "$run_dir/full-resolution-denied.png" --full-resolution >"$run_dir/full-resolution-denied.txt" 2>&1; then
 		echo "full-resolution screenshot unexpectedly succeeded without explicit approval" >&2
@@ -340,6 +388,7 @@ run_case() {
 		screenshot-coordinate-map) eval_screenshot_coordinate_map ;;
 		screenshot-config-bounds) eval_screenshot_config_bounds ;;
 		portal-screenshot) eval_portal_screenshot ;;
+		remote-desktop-probe) eval_remote_desktop_probe ;;
 		full-resolution-denied) eval_full_resolution_denied ;;
 		control-safety) eval_control_safety ;;
 	esac
