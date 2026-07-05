@@ -43,6 +43,50 @@
       "expect_ok": true
     },
     {
+      "label": "uinput-status",
+      "request": {
+        "method": "uinput_status"
+      },
+      "expect_response_type": "uinput_status",
+      "expect_ok": true,
+      "expect_json": [
+        {
+          "pointer": "/data/available",
+          "value_type": "boolean"
+        },
+        {
+          "pointer": "/data/setup_hint",
+          "value_type": "string"
+        }
+      ]
+    },
+    {
+      "label": "capture-backend-status",
+      "request": {
+        "method": "capture_backend_status"
+      },
+      "expect_response_type": "capture_backend_status",
+      "expect_ok": true,
+      "expect_json": [
+        {
+          "pointer": "/data/screenshot_portal/setup_hint",
+          "value_type": "string"
+        },
+        {
+          "pointer": "/data/kwin_metadata/setup_hint",
+          "value_type": "string"
+        },
+        {
+          "pointer": "/data/spectacle/setup_hint",
+          "value_type": "string"
+        },
+        {
+          "pointer": "/data/setup_hint",
+          "value_type": "string"
+        }
+      ]
+    },
+    {
       "label": "input-backend-keymap-status",
       "request": {
         "method": "input_backend_status"
