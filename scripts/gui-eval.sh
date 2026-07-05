@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
 	cat <<'USAGE'
-Usage: scripts/gui-eval.sh [all|status|session-preflight|observe|clipboard-denied|kwin-bridge-status|keymap-status|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|portal-screenshot|remote-desktop-probe|remote-desktop-eis-session|full-resolution-denied|control-safety]
+Usage: scripts/gui-eval.sh [all|status|session-preflight|observe|clipboard-denied|kwin-bridge-status|keymap-status|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|journal-artifacts|portal-screenshot|remote-desktop-probe|remote-desktop-eis-session|full-resolution-denied|control-safety]
 
 Runs opt-in local GUI evals against a private PlasmaPilot daemon socket.
 The default `all` set avoids control actions. `control-safety` starts a private
@@ -19,7 +19,7 @@ if [[ "$case_name" == "--help" || "$case_name" == "-h" ]]; then
 fi
 
 case "$case_name" in
-	all | status | session-preflight | observe | clipboard-denied | kwin-bridge-status | keymap-status | screenshot-preview | screenshot-coordinate-map | screenshot-config-bounds | portal-screenshot | remote-desktop-probe | remote-desktop-eis-session | full-resolution-denied | control-safety) ;;
+	all | status | session-preflight | observe | clipboard-denied | kwin-bridge-status | keymap-status | screenshot-preview | screenshot-coordinate-map | screenshot-config-bounds | journal-artifacts | portal-screenshot | remote-desktop-probe | remote-desktop-eis-session | full-resolution-denied | control-safety) ;;
 	*)
 		usage >&2
 		exit 2
@@ -84,12 +84,15 @@ mkdir -p "$run_dir"
 chmod 700 "$run_dir"
 
 cargo build -p plasma-pilotd -p plasma-pilot-cli
-if [[ "$case_name" == "all" || "$case_name" == "screenshot-config-bounds" ]]; then
+if [[ "$case_name" == "all" || "$case_name" == "screenshot-config-bounds" || "$case_name" == "journal-artifacts" ]]; then
 	cat >"$config_file" <<CONFIG
 [daemon]
 socket = "$socket"
 journal = "$journal"
 panic_stop_file = "$panic_stop_file"
+
+[journal]
+include_artifact_metadata = $([[ "$case_name" == "journal-artifacts" ]] && echo true || echo false)
 
 [safety]
 preview_max_edge = 800
@@ -383,6 +386,57 @@ eval_screenshot_config_bounds() {
 		and .data.transform.source_origin_x == 0
 		and .data.transform.source_origin_y == 0
 	' "$run_dir/screenshot-config-tile.json" >/dev/null
+}
+
+eval_journal_artifacts() {
+	cli capture-backends >"$run_dir/journal-artifacts-capture-backends.json"
+	if ! jq -e '.type == "capture_backend_status" and (.data.implemented_available_backend | type == "string")' "$run_dir/journal-artifacts-capture-backends.json" >/dev/null; then
+		echo "SKIP journal-artifacts: no screenshot backend is available"
+		return 0
+	fi
+
+	if ! cli safety-status >"$run_dir/journal-artifacts-safety.json"; then
+		echo "journal-artifacts could not read safety status" >&2
+		exit 1
+	fi
+	jq -e '
+		.type == "safety_status"
+		and .data.preview_max_edge == 800
+	' "$run_dir/journal-artifacts-safety.json" >/dev/null
+
+	screenshot_path="$run_dir/journal-artifact-preview.png"
+	if ! cli screenshot --output "$screenshot_path" >"$run_dir/journal-artifacts-screenshot.json" 2>"$run_dir/journal-artifacts-screenshot.err"; then
+		if skip_portal_screenshot_cancel "journal-artifacts" "$run_dir/journal-artifacts-screenshot.err"; then
+			return 0
+		fi
+		cat "$run_dir/journal-artifacts-screenshot.err" >&2
+		exit 1
+	fi
+	test -s "$screenshot_path"
+	jq -e --arg path "$screenshot_path" '
+		.type == "screenshot"
+		and .data.path == $path
+		and .data.output_width <= 800
+		and .data.output_height <= 800
+	' "$run_dir/journal-artifacts-screenshot.json" >/dev/null
+
+	artifact_sha="$(sha256sum "$screenshot_path" | awk '{print $1}')"
+	artifact_bytes="$(stat -c '%s' "$screenshot_path")"
+	cli journal tail --limit 20 --method screenshot --ok true >"$run_dir/journal-artifacts-journal.json"
+	jq -e --arg path "$screenshot_path" --arg sha "$artifact_sha" --argjson bytes "$artifact_bytes" '
+		.type == "journal"
+		and any(.data[];
+			.method == "screenshot"
+			and .ok == true
+			and (.artifacts | type == "array")
+			and any(.artifacts[];
+				.kind == "screenshot"
+				and .path == $path
+				and .sha256 == $sha
+				and .bytes == $bytes
+			)
+		)
+	' "$run_dir/journal-artifacts-journal.json" >/dev/null
 }
 
 eval_portal_screenshot() {
@@ -704,6 +758,7 @@ run_case() {
 		screenshot-preview) eval_screenshot_preview ;;
 		screenshot-coordinate-map) eval_screenshot_coordinate_map ;;
 		screenshot-config-bounds) eval_screenshot_config_bounds ;;
+		journal-artifacts) eval_journal_artifacts ;;
 		portal-screenshot) eval_portal_screenshot ;;
 		remote-desktop-probe) eval_remote_desktop_probe ;;
 		remote-desktop-eis-session) eval_remote_desktop_eis_session ;;

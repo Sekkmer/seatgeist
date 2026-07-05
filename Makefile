@@ -1,7 +1,7 @@
 SHELL := /usr/bin/bash
 .ONESHELL:
 
-.PHONY: fmt check test clippy validate-plugin validate-install-assets validate-traces verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-trace-replay smoke-gui-input smoke-mcp gui-eval gui-eval-status gui-eval-session-preflight gui-eval-observe gui-eval-clipboard-denied gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-screenshot-preview gui-eval-screenshot-coordinate-map gui-eval-screenshot-config-bounds gui-eval-full-resolution-denied gui-eval-control-safety gui-eval-text-editor-input gui-eval-kcalc-visual gui-eval-firefox-localhost-button gui-eval-portal-screenshot gui-eval-remote-desktop-probe gui-eval-remote-desktop-eis-session install-kwin-script
+.PHONY: fmt check test clippy validate-plugin validate-install-assets validate-traces verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-trace-replay smoke-gui-input smoke-mcp gui-eval gui-eval-status gui-eval-session-preflight gui-eval-observe gui-eval-clipboard-denied gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-screenshot-preview gui-eval-screenshot-coordinate-map gui-eval-screenshot-config-bounds gui-eval-journal-artifacts gui-eval-full-resolution-denied gui-eval-control-safety gui-eval-text-editor-input gui-eval-kcalc-visual gui-eval-firefox-localhost-button gui-eval-portal-screenshot gui-eval-remote-desktop-probe gui-eval-remote-desktop-eis-session install-kwin-script
 
 fmt:
 	cargo fmt --all
@@ -532,6 +532,9 @@ gui-eval-screenshot-coordinate-map:
 
 gui-eval-screenshot-config-bounds:
 	scripts/gui-eval.sh screenshot-config-bounds
+
+gui-eval-journal-artifacts:
+	scripts/gui-eval.sh journal-artifacts
 
 gui-eval-full-resolution-denied:
 	scripts/gui-eval.sh full-resolution-denied
