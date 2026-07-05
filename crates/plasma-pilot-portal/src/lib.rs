@@ -339,6 +339,55 @@ pub struct PortalRemoteDesktopStart {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortalRemoteDesktopRequestResponse {
+    pub response: PortalResponseCode,
+    pub session_handle: Option<String>,
+    pub devices: Option<u32>,
+    pub clipboard_enabled: Option<bool>,
+    pub restore_token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortalRemoteDesktopOptions {
+    pub create_session: PortalCreateSessionOptions,
+    pub select_devices: PortalSelectDevicesOptions,
+    pub start: PortalStartOptions,
+}
+
+impl PortalRemoteDesktopOptions {
+    pub fn new(
+        create_handle_token: impl Into<String>,
+        session_handle_token: impl Into<String>,
+        select_handle_token: impl Into<String>,
+        start_handle_token: impl Into<String>,
+    ) -> Self {
+        Self {
+            create_session: PortalCreateSessionOptions::new(
+                create_handle_token,
+                session_handle_token,
+            ),
+            select_devices: PortalSelectDevicesOptions::new(select_handle_token),
+            start: PortalStartOptions::new(start_handle_token),
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.create_session.validate()?;
+        self.select_devices.validate()?;
+        self.start.validate()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortalRemoteDesktopSessionStart {
+    pub create_request_path: String,
+    pub select_request_path: String,
+    pub start_request_path: String,
+    pub session: PortalRemoteDesktopSession,
+    pub start: PortalRemoteDesktopStart,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortalRequestResponse {
     pub response: PortalResponseCode,
     pub uri: Option<String>,
@@ -356,6 +405,21 @@ pub trait PortalScreenshotTransport {
     fn unique_sender_name(&mut self) -> Result<String>;
     fn call_screenshot(&mut self, options: &PortalScreenshotOptions) -> Result<String>;
     fn wait_for_response(&mut self, handle_path: &str) -> Result<PortalRequestResponse>;
+}
+
+pub trait PortalRemoteDesktopTransport {
+    fn unique_sender_name(&mut self) -> Result<String>;
+    fn call_create_session(&mut self, options: &PortalCreateSessionOptions) -> Result<String>;
+    fn call_select_devices(
+        &mut self,
+        session_handle: &str,
+        options: &PortalSelectDevicesOptions,
+    ) -> Result<String>;
+    fn call_start(&mut self, session_handle: &str, options: &PortalStartOptions) -> Result<String>;
+    fn wait_for_response(
+        &mut self,
+        handle_path: &str,
+    ) -> Result<PortalRemoteDesktopRequestResponse>;
 }
 
 pub fn screenshot_busctl_call(options: &PortalScreenshotOptions) -> Result<BusctlPortalCall> {
@@ -516,6 +580,60 @@ where
     }))
 }
 
+pub fn request_remote_desktop_session<T>(
+    transport: &mut T,
+    options: &PortalRemoteDesktopOptions,
+) -> Result<Option<PortalRemoteDesktopSessionStart>>
+where
+    T: PortalRemoteDesktopTransport,
+{
+    options.validate()?;
+    let sender = transport.unique_sender_name()?;
+    let expected_session_path =
+        expected_session_path(&sender, &options.create_session.session_handle_token)?;
+
+    let create_request_path = transport.call_create_session(&options.create_session)?;
+    validate_request_path(&create_request_path)?;
+    let create_response = transport.wait_for_response(&create_request_path)?;
+    let Some(session) = parse_remote_desktop_session_handle(
+        create_response.response,
+        create_response.session_handle.as_deref(),
+        &expected_session_path,
+    )?
+    else {
+        return Ok(None);
+    };
+
+    let select_request_path =
+        transport.call_select_devices(&session.actual_session_path, &options.select_devices)?;
+    validate_request_path(&select_request_path)?;
+    let select_response = transport.wait_for_response(&select_request_path)?;
+    if !parse_remote_desktop_select_response(select_response.response) {
+        return Ok(None);
+    }
+
+    let start_request_path = transport.call_start(&session.actual_session_path, &options.start)?;
+    validate_request_path(&start_request_path)?;
+    let start_response = transport.wait_for_response(&start_request_path)?;
+    let Some(start) = parse_remote_desktop_start_response(
+        start_response.response,
+        start_response.devices,
+        start_response.clipboard_enabled,
+        start_response.restore_token.as_deref(),
+    )?
+    else {
+        return Ok(None);
+    };
+
+    Ok(Some(PortalRemoteDesktopSessionStart {
+        create_request_path,
+        select_request_path,
+        start_request_path,
+        session,
+        start,
+    }))
+}
+
 pub async fn request_screenshot_zbus(
     options: &PortalScreenshotOptions,
     response_timeout: Duration,
@@ -569,6 +687,98 @@ pub async fn request_screenshot_zbus(
     }))
 }
 
+pub async fn request_remote_desktop_session_zbus(
+    options: &PortalRemoteDesktopOptions,
+    response_timeout: Duration,
+) -> Result<Option<PortalRemoteDesktopSessionStart>> {
+    options.validate()?;
+    let connection = zbus::Connection::session()
+        .await
+        .map_err(|err| PortalContractError::Transport(format!("connect session bus: {err}")))?;
+    let sender = connection
+        .unique_name()
+        .ok_or_else(|| {
+            PortalContractError::Transport(
+                "session bus did not assign a unique sender name".to_string(),
+            )
+        })?
+        .as_str()
+        .to_string();
+    let expected_session_path =
+        expected_session_path(&sender, &options.create_session.session_handle_token)?;
+
+    let expected_create_request_path =
+        expected_request_path(&sender, &options.create_session.handle_token)?;
+    let mut create_response_stream =
+        subscribe_request_response(&connection, expected_create_request_path.clone()).await?;
+    let create_request_path = call_remote_desktop_create_session_zbus(&connection, options).await?;
+    validate_request_path(&create_request_path)?;
+    if create_request_path != expected_create_request_path {
+        create_response_stream =
+            subscribe_request_response(&connection, create_request_path.clone()).await?;
+    }
+    let create_response =
+        wait_for_remote_desktop_zbus_response(&mut create_response_stream, response_timeout)
+            .await?;
+    let Some(session) = parse_remote_desktop_session_handle(
+        create_response.response,
+        create_response.session_handle.as_deref(),
+        &expected_session_path,
+    )?
+    else {
+        return Ok(None);
+    };
+
+    let expected_select_request_path =
+        expected_request_path(&sender, &options.select_devices.handle_token)?;
+    let mut select_response_stream =
+        subscribe_request_response(&connection, expected_select_request_path.clone()).await?;
+    let select_request_path =
+        call_remote_desktop_select_devices_zbus(&connection, &session.actual_session_path, options)
+            .await?;
+    validate_request_path(&select_request_path)?;
+    if select_request_path != expected_select_request_path {
+        select_response_stream =
+            subscribe_request_response(&connection, select_request_path.clone()).await?;
+    }
+    let select_response =
+        wait_for_remote_desktop_zbus_response(&mut select_response_stream, response_timeout)
+            .await?;
+    if !parse_remote_desktop_select_response(select_response.response) {
+        return Ok(None);
+    }
+
+    let expected_start_request_path = expected_request_path(&sender, &options.start.handle_token)?;
+    let mut start_response_stream =
+        subscribe_request_response(&connection, expected_start_request_path.clone()).await?;
+    let start_request_path =
+        call_remote_desktop_start_zbus(&connection, &session.actual_session_path, options).await?;
+    validate_request_path(&start_request_path)?;
+    if start_request_path != expected_start_request_path {
+        start_response_stream =
+            subscribe_request_response(&connection, start_request_path.clone()).await?;
+    }
+    let start_response =
+        wait_for_remote_desktop_zbus_response(&mut start_response_stream, response_timeout).await?;
+    let Some(start) = parse_remote_desktop_start_response(
+        start_response.response,
+        start_response.devices,
+        start_response.clipboard_enabled,
+        start_response.restore_token.as_deref(),
+    )?
+    else {
+        return Ok(None);
+    };
+
+    Ok(Some(PortalRemoteDesktopSessionStart {
+        create_request_path,
+        select_request_path,
+        start_request_path,
+        session,
+        start,
+    }))
+}
+
 async fn request_proxy_for_path(
     connection: &zbus::Connection,
     handle_path: String,
@@ -581,6 +791,17 @@ async fn request_proxy_for_path(
     )
     .await
     .map_err(|err| PortalContractError::Transport(format!("create Request proxy: {err}")))
+}
+
+async fn subscribe_request_response(
+    connection: &zbus::Connection,
+    handle_path: String,
+) -> Result<zbus::proxy::SignalStream<'static>> {
+    request_proxy_for_path(connection, handle_path)
+        .await?
+        .receive_signal(RESPONSE_SIGNAL)
+        .await
+        .map_err(|err| PortalContractError::Transport(format!("subscribe Request response: {err}")))
 }
 
 async fn call_screenshot_zbus(
@@ -609,6 +830,94 @@ async fn call_screenshot_zbus(
         )
         .await
         .map_err(|err| PortalContractError::Transport(format!("call Screenshot: {err}")))?;
+    Ok(handle.to_string())
+}
+
+async fn remote_desktop_proxy(connection: &zbus::Connection) -> Result<zbus::Proxy<'_>> {
+    zbus::Proxy::new(
+        connection,
+        DESKTOP_BUS_NAME,
+        DESKTOP_OBJECT_PATH,
+        REMOTE_DESKTOP_INTERFACE,
+    )
+    .await
+    .map_err(|err| PortalContractError::Transport(format!("create RemoteDesktop proxy: {err}")))
+}
+
+async fn call_remote_desktop_create_session_zbus(
+    connection: &zbus::Connection,
+    options: &PortalRemoteDesktopOptions,
+) -> Result<String> {
+    let portal_proxy = remote_desktop_proxy(connection).await?;
+    let mut vardict = HashMap::<&str, Value<'_>>::new();
+    vardict.insert(
+        "handle_token",
+        Value::new(options.create_session.handle_token.as_str()),
+    );
+    vardict.insert(
+        "session_handle_token",
+        Value::new(options.create_session.session_handle_token.as_str()),
+    );
+    let handle: OwnedObjectPath = portal_proxy
+        .call(CREATE_SESSION_METHOD, &(vardict))
+        .await
+        .map_err(|err| PortalContractError::Transport(format!("call CreateSession: {err}")))?;
+    Ok(handle.to_string())
+}
+
+async fn call_remote_desktop_select_devices_zbus(
+    connection: &zbus::Connection,
+    session_handle: &str,
+    options: &PortalRemoteDesktopOptions,
+) -> Result<String> {
+    let portal_proxy = remote_desktop_proxy(connection).await?;
+    let session_handle = OwnedObjectPath::try_from(session_handle.to_string())
+        .map_err(|err| PortalContractError::Transport(format!("invalid session handle: {err}")))?;
+    let mut vardict = HashMap::<&str, Value<'_>>::new();
+    vardict.insert(
+        "handle_token",
+        Value::new(options.select_devices.handle_token.as_str()),
+    );
+    if let Some(types) = options.select_devices.types {
+        vardict.insert("types", Value::new(types.bits()));
+    }
+    if let Some(restore_token) = &options.select_devices.restore_token {
+        vardict.insert("restore_token", Value::new(restore_token.as_str()));
+    }
+    if let Some(persist_mode) = options.select_devices.persist_mode {
+        vardict.insert("persist_mode", Value::new(persist_mode.value()));
+    }
+    let handle: OwnedObjectPath = portal_proxy
+        .call(SELECT_DEVICES_METHOD, &(session_handle, vardict))
+        .await
+        .map_err(|err| PortalContractError::Transport(format!("call SelectDevices: {err}")))?;
+    Ok(handle.to_string())
+}
+
+async fn call_remote_desktop_start_zbus(
+    connection: &zbus::Connection,
+    session_handle: &str,
+    options: &PortalRemoteDesktopOptions,
+) -> Result<String> {
+    let portal_proxy = remote_desktop_proxy(connection).await?;
+    let session_handle = OwnedObjectPath::try_from(session_handle.to_string())
+        .map_err(|err| PortalContractError::Transport(format!("invalid session handle: {err}")))?;
+    let mut vardict = HashMap::<&str, Value<'_>>::new();
+    vardict.insert(
+        "handle_token",
+        Value::new(options.start.handle_token.as_str()),
+    );
+    let handle: OwnedObjectPath = portal_proxy
+        .call(
+            START_METHOD,
+            &(
+                session_handle,
+                options.start.parent_window.as_str(),
+                vardict,
+            ),
+        )
+        .await
+        .map_err(|err| PortalContractError::Transport(format!("call Start: {err}")))?;
     Ok(handle.to_string())
 }
 
@@ -645,6 +954,62 @@ async fn wait_for_zbus_response(
         response: PortalResponseCode::try_from(response)?,
         uri,
     })
+}
+
+async fn wait_for_remote_desktop_zbus_response(
+    response_stream: &mut zbus::proxy::SignalStream<'_>,
+    response_timeout: Duration,
+) -> Result<PortalRemoteDesktopRequestResponse> {
+    let message = tokio::time::timeout(
+        response_timeout,
+        poll_fn(|context| Pin::new(&mut *response_stream).poll_next(context)),
+    )
+    .await
+    .map_err(|_| {
+        PortalContractError::Transport(format!(
+            "timed out waiting {}ms for portal Request response",
+            response_timeout.as_millis()
+        ))
+    })?
+    .ok_or_else(|| {
+        PortalContractError::Transport("portal Request response stream ended".to_string())
+    })?;
+    let (response, results): (u32, HashMap<String, OwnedValue>) =
+        message.body().deserialize().map_err(|err| {
+            PortalContractError::Transport(format!("decode Request response signal: {err}"))
+        })?;
+
+    Ok(PortalRemoteDesktopRequestResponse {
+        response: PortalResponseCode::try_from(response)?,
+        session_handle: owned_string_result(&results, "session_handle")?,
+        devices: owned_u32_result(&results, "devices")?,
+        clipboard_enabled: owned_bool_result(&results, "clipboard_enabled")?,
+        restore_token: owned_string_result(&results, "restore_token")?,
+    })
+}
+
+fn owned_string_result(results: &HashMap<String, OwnedValue>, key: &str) -> Result<Option<String>> {
+    results
+        .get(key)
+        .map(|value| String::try_from(&**value))
+        .transpose()
+        .map_err(|err| PortalContractError::Transport(format!("decode portal {key} result: {err}")))
+}
+
+fn owned_u32_result(results: &HashMap<String, OwnedValue>, key: &str) -> Result<Option<u32>> {
+    results
+        .get(key)
+        .map(|value| u32::try_from(&**value))
+        .transpose()
+        .map_err(|err| PortalContractError::Transport(format!("decode portal {key} result: {err}")))
+}
+
+fn owned_bool_result(results: &HashMap<String, OwnedValue>, key: &str) -> Result<Option<bool>> {
+    results
+        .get(key)
+        .map(|value| bool::try_from(&**value))
+        .transpose()
+        .map_err(|err| PortalContractError::Transport(format!("decode portal {key} result: {err}")))
 }
 
 pub fn expected_request_path(sender_unique_name: &str, handle_token: &str) -> Result<String> {
@@ -766,6 +1131,10 @@ pub fn parse_remote_desktop_session_handle(
         }
         PortalResponseCode::Cancelled | PortalResponseCode::Other => Ok(None),
     }
+}
+
+pub fn parse_remote_desktop_select_response(response: PortalResponseCode) -> bool {
+    matches!(response, PortalResponseCode::Success)
 }
 
 pub fn parse_remote_desktop_start_response(
@@ -892,6 +1261,109 @@ mod tests {
         fn wait_for_response(&mut self, handle_path: &str) -> Result<PortalRequestResponse> {
             self.waited_handle = Some(handle_path.to_string());
             Ok(self.response.clone())
+        }
+    }
+
+    #[derive(Debug)]
+    struct MockRemoteDesktopTransport {
+        sender: String,
+        create_handle: String,
+        select_handle: String,
+        start_handle: String,
+        responses: Vec<PortalRemoteDesktopRequestResponse>,
+        calls: Vec<String>,
+        waited_handles: Vec<String>,
+    }
+
+    impl MockRemoteDesktopTransport {
+        fn success() -> Self {
+            Self {
+                sender: ":1.42".to_string(),
+                create_handle: "/org/freedesktop/portal/desktop/request/1_42/plasma_pilot_create"
+                    .to_string(),
+                select_handle: "/org/freedesktop/portal/desktop/request/1_42/plasma_pilot_select"
+                    .to_string(),
+                start_handle: "/org/freedesktop/portal/desktop/request/1_42/plasma_pilot_start"
+                    .to_string(),
+                responses: vec![
+                    PortalRemoteDesktopRequestResponse {
+                        response: PortalResponseCode::Success,
+                        session_handle: Some(
+                            "/org/freedesktop/portal/desktop/session/1_42/plasma_pilot_session"
+                                .to_string(),
+                        ),
+                        devices: None,
+                        clipboard_enabled: None,
+                        restore_token: None,
+                    },
+                    PortalRemoteDesktopRequestResponse {
+                        response: PortalResponseCode::Success,
+                        session_handle: None,
+                        devices: None,
+                        clipboard_enabled: None,
+                        restore_token: None,
+                    },
+                    PortalRemoteDesktopRequestResponse {
+                        response: PortalResponseCode::Success,
+                        session_handle: None,
+                        devices: Some(RemoteDesktopDeviceTypes::keyboard_pointer().bits()),
+                        clipboard_enabled: Some(true),
+                        restore_token: Some("restore_next".to_string()),
+                    },
+                ],
+                calls: Vec::new(),
+                waited_handles: Vec::new(),
+            }
+        }
+    }
+
+    impl PortalRemoteDesktopTransport for MockRemoteDesktopTransport {
+        fn unique_sender_name(&mut self) -> Result<String> {
+            Ok(self.sender.clone())
+        }
+
+        fn call_create_session(&mut self, options: &PortalCreateSessionOptions) -> Result<String> {
+            self.calls.push(format!(
+                "create:{}:{}",
+                options.handle_token, options.session_handle_token
+            ));
+            Ok(self.create_handle.clone())
+        }
+
+        fn call_select_devices(
+            &mut self,
+            session_handle: &str,
+            options: &PortalSelectDevicesOptions,
+        ) -> Result<String> {
+            self.calls.push(format!(
+                "select:{session_handle}:{}:{}",
+                options.handle_token,
+                options
+                    .types
+                    .map(RemoteDesktopDeviceTypes::bits)
+                    .unwrap_or(0)
+            ));
+            Ok(self.select_handle.clone())
+        }
+
+        fn call_start(
+            &mut self,
+            session_handle: &str,
+            options: &PortalStartOptions,
+        ) -> Result<String> {
+            self.calls.push(format!(
+                "start:{session_handle}:{}:{}",
+                options.handle_token, options.parent_window
+            ));
+            Ok(self.start_handle.clone())
+        }
+
+        fn wait_for_response(
+            &mut self,
+            handle_path: &str,
+        ) -> Result<PortalRemoteDesktopRequestResponse> {
+            self.waited_handles.push(handle_path.to_string());
+            Ok(self.responses.remove(0))
         }
     }
 
@@ -1140,6 +1612,76 @@ mod tests {
                 "handle_token",
                 "s",
                 "plasma_pilot_start",
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runs_remote_desktop_session_lifecycle_with_transport() -> Result<()> {
+        let mut transport = MockRemoteDesktopTransport::success();
+        let mut options = PortalRemoteDesktopOptions::new(
+            "plasma_pilot_create",
+            "plasma_pilot_session",
+            "plasma_pilot_select",
+            "plasma_pilot_start",
+        );
+        options.select_devices.types = Some(RemoteDesktopDeviceTypes::keyboard_pointer());
+        options.start.parent_window = "wayland:test-window".to_string();
+
+        let result = request_remote_desktop_session(&mut transport, &options)?
+            .expect("session should start");
+        assert_eq!(
+            result.session.expected_session_path,
+            "/org/freedesktop/portal/desktop/session/1_42/plasma_pilot_session"
+        );
+        assert_eq!(
+            result.session.actual_session_path,
+            "/org/freedesktop/portal/desktop/session/1_42/plasma_pilot_session"
+        );
+        assert_eq!(
+            result.start.devices,
+            RemoteDesktopDeviceTypes::keyboard_pointer()
+        );
+        assert!(result.start.clipboard_enabled);
+        assert_eq!(result.start.restore_token.as_deref(), Some("restore_next"));
+        assert_eq!(
+            transport.waited_handles,
+            vec![
+                "/org/freedesktop/portal/desktop/request/1_42/plasma_pilot_create",
+                "/org/freedesktop/portal/desktop/request/1_42/plasma_pilot_select",
+                "/org/freedesktop/portal/desktop/request/1_42/plasma_pilot_start",
+            ]
+        );
+        assert_eq!(
+            transport.calls,
+            vec![
+                "create:plasma_pilot_create:plasma_pilot_session",
+                "select:/org/freedesktop/portal/desktop/session/1_42/plasma_pilot_session:plasma_pilot_select:3",
+                "start:/org/freedesktop/portal/desktop/session/1_42/plasma_pilot_session:plasma_pilot_start:wayland:test-window",
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stops_remote_desktop_lifecycle_when_select_is_cancelled() -> Result<()> {
+        let mut transport = MockRemoteDesktopTransport::success();
+        transport.responses[1].response = PortalResponseCode::Cancelled;
+        let options = PortalRemoteDesktopOptions::new(
+            "plasma_pilot_create",
+            "plasma_pilot_session",
+            "plasma_pilot_select",
+            "plasma_pilot_start",
+        );
+
+        assert!(request_remote_desktop_session(&mut transport, &options)?.is_none());
+        assert_eq!(transport.calls.len(), 2);
+        assert_eq!(
+            transport.waited_handles,
+            vec![
+                "/org/freedesktop/portal/desktop/request/1_42/plasma_pilot_create",
+                "/org/freedesktop/portal/desktop/request/1_42/plasma_pilot_select",
             ]
         );
         Ok(())
