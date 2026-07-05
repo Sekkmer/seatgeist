@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
 	cat <<'USAGE'
-Usage: scripts/gui-eval.sh [all|status|observe|clipboard-denied|screenshot-preview|screenshot-coordinate-map|full-resolution-denied|control-safety]
+Usage: scripts/gui-eval.sh [all|status|observe|clipboard-denied|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|full-resolution-denied|control-safety]
 
 Runs opt-in local GUI evals against a private PlasmaPilot daemon socket.
 The default `all` set avoids control actions. `control-safety` starts a private
@@ -19,7 +19,7 @@ if [[ "$case_name" == "--help" || "$case_name" == "-h" ]]; then
 fi
 
 case "$case_name" in
-	all | status | observe | clipboard-denied | screenshot-preview | screenshot-coordinate-map | full-resolution-denied | control-safety) ;;
+	all | status | observe | clipboard-denied | screenshot-preview | screenshot-coordinate-map | screenshot-config-bounds | full-resolution-denied | control-safety) ;;
 	*)
 		usage >&2
 		exit 2
@@ -41,13 +41,28 @@ log="$run_dir/daemon.log"
 journal="$run_dir/journal.jsonl"
 panic_stop_file="$run_dir/panic-stop.flag"
 approval_file="$run_dir/approvals.jsonl"
+config_file="$run_dir/config.toml"
 
 rm -rf "$run_dir" "$socket_dir"
 mkdir -p "$run_dir"
 chmod 700 "$run_dir"
 
 cargo build -p plasma-pilotd -p plasma-pilot-cli
-daemon_args=(--socket "$socket" --journal "$journal" --panic-stop-file "$panic_stop_file")
+if [[ "$case_name" == "all" || "$case_name" == "screenshot-config-bounds" ]]; then
+	cat >"$config_file" <<CONFIG
+[daemon]
+socket = "$socket"
+journal = "$journal"
+panic_stop_file = "$panic_stop_file"
+
+[safety]
+preview_max_edge = 800
+tile_max_edge = 640
+CONFIG
+	daemon_args=(--config "$config_file")
+else
+	daemon_args=(--socket "$socket" --journal "$journal" --panic-stop-file "$panic_stop_file")
+fi
 if [[ "$case_name" == "control-safety" ]]; then
 	daemon_args+=(--approval-file "$approval_file")
 fi
@@ -149,6 +164,52 @@ eval_screenshot_coordinate_map() {
 	' "$run_dir/screenshot-coordinate-map.json" >/dev/null
 }
 
+eval_screenshot_config_bounds() {
+	if ! command -v spectacle >/dev/null 2>&1; then
+		echo "SKIP screenshot-config-bounds: spectacle is not available"
+		return 0
+	fi
+	cli safety-status >"$run_dir/screenshot-config-safety.json"
+	jq -e '
+		.type == "safety_status"
+		and .data.preview_max_edge == 800
+		and .data.tile_max_edge == 640
+	' "$run_dir/screenshot-config-safety.json" >/dev/null
+
+	cli screenshot --output "$run_dir/config-preview.png" >"$run_dir/screenshot-config-preview.json"
+	jq -e '
+		.type == "screenshot"
+		and .data.source_width >= .data.output_width
+		and .data.source_height >= .data.output_height
+		and .data.output_width <= 800
+		and .data.output_height <= 800
+	' "$run_dir/screenshot-config-preview.json" >/dev/null
+
+	source_width="$(jq -r '.data.source_width' "$run_dir/screenshot-config-preview.json")"
+	source_height="$(jq -r '.data.source_height' "$run_dir/screenshot-config-preview.json")"
+	tile_width="$source_width"
+	tile_height="$source_height"
+	if (( tile_width > 1200 )); then
+		tile_width=1200
+	fi
+	if (( tile_height > 1000 )); then
+		tile_height=1000
+	fi
+	cli screenshot-tile \
+		--output "$run_dir/config-tile.png" \
+		--x 0 \
+		--y 0 \
+		--width "$tile_width" \
+		--height "$tile_height" >"$run_dir/screenshot-config-tile.json"
+	jq -e '
+		.type == "screenshot"
+		and .data.output_width <= 640
+		and .data.output_height <= 640
+		and .data.transform.source_origin_x == 0
+		and .data.transform.source_origin_y == 0
+	' "$run_dir/screenshot-config-tile.json" >/dev/null
+}
+
 eval_full_resolution_denied() {
 	if cli screenshot --output "$run_dir/full-resolution-denied.png" --full-resolution >"$run_dir/full-resolution-denied.txt" 2>&1; then
 		echo "full-resolution screenshot unexpectedly succeeded without explicit approval" >&2
@@ -212,13 +273,14 @@ run_case() {
 		clipboard-denied) eval_clipboard_denied ;;
 		screenshot-preview) eval_screenshot_preview ;;
 		screenshot-coordinate-map) eval_screenshot_coordinate_map ;;
+		screenshot-config-bounds) eval_screenshot_config_bounds ;;
 		full-resolution-denied) eval_full_resolution_denied ;;
 		control-safety) eval_control_safety ;;
 	esac
 }
 
 if [[ "$case_name" == "all" ]]; then
-	for eval_name in status observe clipboard-denied screenshot-preview screenshot-coordinate-map full-resolution-denied; do
+	for eval_name in status observe clipboard-denied screenshot-preview screenshot-coordinate-map screenshot-config-bounds full-resolution-denied; do
 		run_case "$eval_name"
 	done
 else
