@@ -1,7 +1,7 @@
 SHELL := /usr/bin/bash
 .ONESHELL:
 
-.PHONY: fmt check test clippy validate-plugin validate-traces verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-trace-replay smoke-gui-input smoke-mcp gui-eval gui-eval-control-safety gui-eval-portal-screenshot gui-eval-remote-desktop-probe install-kwin-script
+.PHONY: fmt check test clippy validate-plugin validate-traces verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-trace-replay smoke-gui-input smoke-mcp gui-eval gui-eval-control-safety gui-eval-portal-screenshot gui-eval-remote-desktop-probe gui-eval-remote-desktop-eis-session install-kwin-script
 
 fmt:
 	cargo fmt --all
@@ -511,6 +511,9 @@ gui-eval-portal-screenshot:
 
 gui-eval-remote-desktop-probe:
 	scripts/gui-eval.sh remote-desktop-probe
+
+gui-eval-remote-desktop-eis-session:
+	scripts/gui-eval.sh remote-desktop-eis-session
 
 install-kwin-script:
 	set -euo pipefail

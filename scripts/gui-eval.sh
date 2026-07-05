@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
 	cat <<'USAGE'
-Usage: scripts/gui-eval.sh [all|status|observe|clipboard-denied|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|portal-screenshot|remote-desktop-probe|full-resolution-denied|control-safety]
+Usage: scripts/gui-eval.sh [all|status|observe|clipboard-denied|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|portal-screenshot|remote-desktop-probe|remote-desktop-eis-session|full-resolution-denied|control-safety]
 
 Runs opt-in local GUI evals against a private PlasmaPilot daemon socket.
 The default `all` set avoids control actions. `control-safety` starts a private
@@ -19,7 +19,7 @@ if [[ "$case_name" == "--help" || "$case_name" == "-h" ]]; then
 fi
 
 case "$case_name" in
-	all | status | observe | clipboard-denied | screenshot-preview | screenshot-coordinate-map | screenshot-config-bounds | portal-screenshot | remote-desktop-probe | full-resolution-denied | control-safety) ;;
+	all | status | observe | clipboard-denied | screenshot-preview | screenshot-coordinate-map | screenshot-config-bounds | portal-screenshot | remote-desktop-probe | remote-desktop-eis-session | full-resolution-denied | control-safety) ;;
 	*)
 		usage >&2
 		exit 2
@@ -99,8 +99,11 @@ CONFIG
 else
 	daemon_args=(--socket "$socket" --journal "$journal" --panic-stop-file "$panic_stop_file")
 fi
-if [[ "$case_name" == "control-safety" || "$case_name" == "remote-desktop-probe" ]]; then
+if [[ "$case_name" == "control-safety" || "$case_name" == "remote-desktop-probe" || "$case_name" == "remote-desktop-eis-session" ]]; then
 	daemon_args+=(--approval-file "$approval_file")
+fi
+if [[ "$case_name" == "remote-desktop-eis-session" ]]; then
+	daemon_args+=(--input-backend portal_remote_desktop)
 fi
 target/debug/plasma-pilotd "${daemon_args[@]}" >"$log" 2>&1 &
 pid=$!
@@ -323,6 +326,106 @@ eval_remote_desktop_probe() {
 	jq -e '.type == "journal" and any(.data[]; .summary | contains("remote desktop session probe"))' "$run_dir/remote-desktop-journal.json" >/dev/null
 }
 
+eval_remote_desktop_eis_session() {
+	cli input backends >"$run_dir/remote-desktop-eis-backends-before.json"
+	if ! jq -e '.type == "input_backend_status" and .data.remote_desktop_portal.remote_desktop_interface_available == true' "$run_dir/remote-desktop-eis-backends-before.json" >/dev/null; then
+		echo "SKIP remote-desktop-eis-session: xdg-desktop-portal RemoteDesktop interface is not visible"
+		return 0
+	fi
+
+	cli active-window >"$run_dir/remote-desktop-eis-active-window.json" 2>"$run_dir/remote-desktop-eis-active-window.err" || true
+	active_title="$(jq -r '.data.title // empty' "$run_dir/remote-desktop-eis-active-window.json" 2>/dev/null || true)"
+	active_id="$(jq -r '.data.id // empty' "$run_dir/remote-desktop-eis-active-window.json" 2>/dev/null || true)"
+	if [[ -z "$active_title" && -z "$active_id" ]]; then
+		echo "SKIP remote-desktop-eis-session: active-window guard metadata is unavailable"
+		return 0
+	fi
+
+	guard_args=()
+	if [[ -n "$active_title" ]]; then
+		guard_args+=(--active-title-contains "$active_title")
+	else
+		guard_args+=(--expected-active-window "$active_id")
+	fi
+
+	cli approve \
+		--approval-file "$approval_file" \
+		--safety-class control-pointer \
+		--method remote_desktop_eis_start \
+		--ttl-ms 120000 \
+		--reason "gui-eval remote-desktop-eis-session start" >"$run_dir/remote-desktop-eis-start-approval.json"
+	jq -e '.method == "remote_desktop_eis_start" and .safety_class == "control_pointer"' "$run_dir/remote-desktop-eis-start-approval.json" >/dev/null
+	cli approve \
+		--approval-file "$approval_file" \
+		--safety-class control-pointer \
+		--method scroll_pointer \
+		--ttl-ms 120000 \
+		--reason "gui-eval remote-desktop-eis-session minimal input" >"$run_dir/remote-desktop-eis-scroll-approval.json"
+	jq -e '.method == "scroll_pointer" and .safety_class == "control_pointer"' "$run_dir/remote-desktop-eis-scroll-approval.json" >/dev/null
+	test "$(stat -c '%a' "$approval_file")" = "600"
+
+	if ! cli input remote-desktop-eis-start --keyboard --pointer --timeout-ms 120000 "${guard_args[@]}" >"$run_dir/remote-desktop-eis-start.json" 2>"$run_dir/remote-desktop-eis-start.err"; then
+		cat "$run_dir/remote-desktop-eis-start.err" >&2
+		exit 1
+	fi
+	jq -e '.type == "remote_desktop_eis_session_status"' "$run_dir/remote-desktop-eis-start.json" >/dev/null
+	if ! jq -e '.data.active == true' "$run_dir/remote-desktop-eis-start.json" >/dev/null; then
+		if [[ "${PLASMA_PILOT_REMOTE_DESKTOP_EIS_STRICT:-0}" == "1" ]]; then
+			echo "remote-desktop-eis-session did not start in strict mode" >&2
+			cat "$run_dir/remote-desktop-eis-start.json" >&2
+			exit 1
+		fi
+		echo "SKIP remote-desktop-eis-session: portal cancelled or ended before a stored EIS session was active"
+		cli input remote-desktop-eis-stop >"$run_dir/remote-desktop-eis-stop-after-cancel.json"
+		return 0
+	fi
+
+	cli input remote-desktop-eis-session-status >"$run_dir/remote-desktop-eis-status.json"
+	jq -e '
+		.type == "remote_desktop_eis_session_status"
+		and .data.active == true
+		and (.data.selected_devices | index("keyboard"))
+		and (.data.selected_devices | index("pointer"))
+	' "$run_dir/remote-desktop-eis-status.json" >/dev/null
+	cli input backends >"$run_dir/remote-desktop-eis-backends-active.json"
+	jq -e '
+		.type == "input_backend_status"
+		and .data.configured_backend == "portal_remote_desktop"
+		and .data.implemented_available_backend == "portal_remote_desktop"
+	' "$run_dir/remote-desktop-eis-backends-active.json" >/dev/null
+
+	scroll_ok=0
+	if cli input scroll-pointer --vertical 1 "${guard_args[@]}" >"$run_dir/remote-desktop-eis-scroll.json" 2>"$run_dir/remote-desktop-eis-scroll.err"; then
+		scroll_ok=1
+		jq -e '.type == "action" and (.data.message | contains("backend=portal_remote_desktop"))' "$run_dir/remote-desktop-eis-scroll.json" >/dev/null
+	else
+		if [[ "${PLASMA_PILOT_REMOTE_DESKTOP_EIS_INPUT_STRICT:-0}" == "1" ]]; then
+			cat "$run_dir/remote-desktop-eis-scroll.err" >&2
+			cli input remote-desktop-eis-stop >"$run_dir/remote-desktop-eis-stop-after-scroll-failure.json" || true
+			exit 1
+		fi
+		if ! grep -Eiq 'EIS|readiness|resumed|capabilit|selected device|connected session' "$run_dir/remote-desktop-eis-scroll.err"; then
+			cat "$run_dir/remote-desktop-eis-scroll.err" >&2
+			cli input remote-desktop-eis-stop >"$run_dir/remote-desktop-eis-stop-after-unexpected-scroll-failure.json" || true
+			exit 1
+		fi
+	fi
+
+	cli input remote-desktop-eis-stop >"$run_dir/remote-desktop-eis-stop.json"
+	jq -e '.type == "remote_desktop_eis_session_status" and .data.active == false' "$run_dir/remote-desktop-eis-stop.json" >/dev/null
+	cli journal tail --limit 40 --method remote_desktop_eis_start --ok true >"$run_dir/remote-desktop-eis-start-journal.json"
+	jq -e '.type == "journal" and any(.data[]; .summary | contains("remote desktop EIS session"))' "$run_dir/remote-desktop-eis-start-journal.json" >/dev/null
+	cli journal tail --limit 40 --method remote_desktop_eis_stop --ok true >"$run_dir/remote-desktop-eis-stop-journal.json"
+	jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/remote-desktop-eis-stop-journal.json" >/dev/null
+	if [[ "$scroll_ok" == "1" ]]; then
+		cli journal tail --limit 40 --method scroll_pointer --ok true >"$run_dir/remote-desktop-eis-scroll-journal.json"
+		jq -e '.type == "journal" and any(.data[]; .summary | contains("backend=portal_remote_desktop"))' "$run_dir/remote-desktop-eis-scroll-journal.json" >/dev/null
+	else
+		cli journal tail --limit 40 --method scroll_pointer --ok false >"$run_dir/remote-desktop-eis-scroll-journal.json"
+		jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/remote-desktop-eis-scroll-journal.json" >/dev/null
+	fi
+}
+
 eval_full_resolution_denied() {
 	if cli screenshot --output "$run_dir/full-resolution-denied.png" --full-resolution >"$run_dir/full-resolution-denied.txt" 2>&1; then
 		echo "full-resolution screenshot unexpectedly succeeded without explicit approval" >&2
@@ -389,6 +492,7 @@ run_case() {
 		screenshot-config-bounds) eval_screenshot_config_bounds ;;
 		portal-screenshot) eval_portal_screenshot ;;
 		remote-desktop-probe) eval_remote_desktop_probe ;;
+		remote-desktop-eis-session) eval_remote_desktop_eis_session ;;
 		full-resolution-denied) eval_full_resolution_denied ;;
 		control-safety) eval_control_safety ;;
 	esac
