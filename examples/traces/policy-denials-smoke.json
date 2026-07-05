@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "description": "Safe deny-by-default replay trace for verifying protected actions fail closed before backend side effects.",
+  "steps": [
+    {
+      "label": "full-resolution-screenshot-denied",
+      "request": {
+        "method": "screenshot",
+        "output": "/tmp/plasma-pilot-denied-full-resolution.png",
+        "max_edge": null,
+        "full_resolution": true
+      },
+      "expect_response_type": "error",
+      "expect_ok": false
+    },
+    {
+      "label": "clipboard-read-denied",
+      "request": {
+        "method": "clipboard_get",
+        "max_bytes": 64
+      },
+      "expect_response_type": "error",
+      "expect_ok": false
+    },
+    {
+      "label": "focus-window-denied",
+      "request": {
+        "method": "focus_window",
+        "window_id": "plasma-pilot-nonexistent-window"
+      },
+      "expect_response_type": "error",
+      "expect_ok": false
+    }
+  ]
+}

@@ -402,6 +402,46 @@ fn cli_replays_trace_against_real_daemon() -> Result<()> {
 }
 
 #[test]
+fn cli_replays_policy_denial_trace_against_real_daemon() -> Result<()> {
+    let daemon = DaemonFixture::start()?;
+    let trace_path = workspace_root().join("examples/traces/policy-denials-smoke.json");
+    let trace: ReplayTrace = serde_json::from_str(
+        &fs::read_to_string(&trace_path).context("read checked-in policy denial trace fixture")?,
+    )
+    .context("parse checked-in policy denial trace fixture")?;
+    assert_eq!(trace.version, 1);
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let report = daemon.cli_value(&["trace", "replay", "--file", &trace_arg])?;
+    assert_eq!(report["type"], "trace_replay");
+    assert_eq!(report["trace_version"], 1);
+    assert_eq!(
+        report["steps"]
+            .as_array()
+            .context("trace report steps are an array")?
+            .len(),
+        trace.steps.len()
+    );
+    assert!(
+        report["steps"]
+            .as_array()
+            .context("trace report steps are an array")?
+            .iter()
+            .all(|step| step["response_type"] == "error" && step["ok"] == false)
+    );
+    assert_eq!(report["steps"][0]["method"], "screenshot");
+    assert_eq!(report["steps"][1]["method"], "clipboard_get");
+    assert_eq!(report["steps"][2]["method"], "focus_window");
+
+    let journal = daemon.cli_json(&["journal", "tail", "--limit", "10", "--ok", "false"])?;
+    let DaemonResponse::Journal(entries) = journal else {
+        bail!("expected journal response, got {journal:?}");
+    };
+    assert_methods(&entries, &["screenshot", "clipboard_get", "focus_window"]);
+    assert!(entries.iter().all(|entry| !entry.ok));
+    Ok(())
+}
+
+#[test]
 fn cli_validates_trace_without_daemon() -> Result<()> {
     let trace_path = workspace_root().join("examples/traces/status-smoke.json");
     let trace_arg = trace_path.to_string_lossy().into_owned();
