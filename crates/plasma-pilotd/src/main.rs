@@ -2207,6 +2207,7 @@ fn eis_capability_names(capabilities: &[plasma_pilot_eis::EisCapability]) -> Vec
         .iter()
         .map(|capability| match capability {
             plasma_pilot_eis::EisCapability::PointerAbsolute => "pointer_absolute",
+            plasma_pilot_eis::EisCapability::Keyboard => "keyboard",
             plasma_pilot_eis::EisCapability::Button => "button",
             plasma_pilot_eis::EisCapability::Scroll => "scroll",
             plasma_pilot_eis::EisCapability::Text => "text",
@@ -2833,11 +2834,14 @@ where
         self.execute_plan(plan)
     }
 
-    fn key_combo(&mut self, _combo: &str) -> Result<usize> {
-        bail!(
-            "configured input backend {} has no EIS key-combo planner yet; keymap-aware routing must land before EIS keyboard shortcuts are enabled",
-            self.backend_name
-        )
+    fn key_combo(&mut self, combo: &str) -> Result<usize> {
+        let codes =
+            plasma_pilot_uinput::parse_key_combo(combo).map_err(|err| anyhow::anyhow!(err))?;
+        let plan = plasma_pilot_eis::plan_key_combo_evdev(EIS_PLAN_SEQUENCE, &codes)
+            .map_err(|err| anyhow::anyhow!(err))?;
+        let key_count = codes.len();
+        self.execute_plan(plan)?;
+        Ok(key_count)
     }
 
     fn move_pointer(
@@ -2923,11 +2927,14 @@ where
         self.execute_plan(plan)
     }
 
-    fn key_combo(&mut self, _combo: &str) -> Result<usize> {
-        bail!(
-            "configured input backend {} has no EIS key-combo planner yet; keymap-aware routing must land before EIS keyboard shortcuts are enabled",
-            self.backend_name
-        )
+    fn key_combo(&mut self, combo: &str) -> Result<usize> {
+        let codes =
+            plasma_pilot_uinput::parse_key_combo(combo).map_err(|err| anyhow::anyhow!(err))?;
+        let plan = plasma_pilot_eis::plan_key_combo_evdev(EIS_PLAN_SEQUENCE, &codes)
+            .map_err(|err| anyhow::anyhow!(err))?;
+        let key_count = codes.len();
+        self.execute_plan(plan)?;
+        Ok(key_count)
     }
 
     fn move_pointer(
@@ -8379,12 +8386,14 @@ height = 40
         assert_eq!(
             eis_capability_names(&[
                 plasma_pilot_eis::EisCapability::PointerAbsolute,
+                plasma_pilot_eis::EisCapability::Keyboard,
                 plasma_pilot_eis::EisCapability::Button,
                 plasma_pilot_eis::EisCapability::Scroll,
                 plasma_pilot_eis::EisCapability::Text,
             ]),
             vec![
                 "pointer_absolute".to_string(),
+                "keyboard".to_string(),
                 "button".to_string(),
                 "scroll".to_string(),
                 "text".to_string(),
@@ -8698,14 +8707,75 @@ height = 40
     }
 
     #[test]
-    fn explicit_eis_key_combos_fail_until_keymap_planning_lands() {
-        let store = PortalEisSessionStore::<MockEisSource>::default();
-        let mut libei = input_execution_backend_with_store(InputBackendPreference::Libei, &store)
-            .expect("libei backend routes through stored EIS sessions");
-        let err = libei
-            .key_combo("Ctrl+L")
-            .expect_err("EIS key combo support is not implemented yet");
-        assert!(err.to_string().contains("keymap-aware"));
+    fn explicit_eis_key_combos_execute_through_stored_session() {
+        let mut source = MockEisSource::default();
+        source.push_plan(vec![
+            plasma_pilot_eis::LibeiEventSnapshot::Connect,
+            plasma_pilot_eis::LibeiEventSnapshot::SeatAdded {
+                capabilities: vec![plasma_pilot_eis::EisCapability::Keyboard],
+                bound_capabilities: vec![plasma_pilot_eis::EisCapability::Keyboard],
+            },
+            plasma_pilot_eis::LibeiEventSnapshot::DeviceResumed(plasma_pilot_eis::EisDeviceInfo {
+                id: "keyboard-device".to_string(),
+                name: Some("Keyboard Device".to_string()),
+                kind: plasma_pilot_eis::EisDeviceKind::Virtual,
+                resumed: true,
+                capabilities: vec![plasma_pilot_eis::EisCapability::Keyboard],
+                regions: Vec::new(),
+            }),
+        ]);
+        let runtime = plasma_pilot_eis::EisSessionRuntime::new(source);
+        let session = DaemonPortalEisSession::from_runtime(
+            portal_session_start_fixture(),
+            "/org/freedesktop/portal/desktop/session/1/session".to_string(),
+            runtime,
+        );
+        let store = PortalEisSessionStore::default();
+        store.replace(session).expect("store ready session");
+
+        {
+            let mut libei =
+                input_execution_backend_with_store(InputBackendPreference::Libei, &store)
+                    .expect("libei backend routes through stored EIS sessions");
+            assert_eq!(
+                libei
+                    .key_combo("Ctrl+L")
+                    .expect("stored session executes key combo"),
+                2
+            );
+            assert_eq!(libei.name(), "libei");
+        }
+
+        let stored = store.inner.lock().expect("store lock");
+        let session = stored.as_ref().expect("stored session remains active");
+        assert_eq!(session.runtime.source().executed_plans.len(), 1);
+        let executed = &session.runtime.source().executed_plans[0];
+        assert_eq!(executed.selection.device_id, "keyboard-device");
+        assert!(matches!(
+            executed.events.as_slice(),
+            [
+                plasma_pilot_eis::EisEvent::StartEmulating { .. },
+                plasma_pilot_eis::EisEvent::KeyboardKey {
+                    keycode: 29,
+                    is_press: true,
+                },
+                plasma_pilot_eis::EisEvent::KeyboardKey {
+                    keycode: 38,
+                    is_press: true,
+                },
+                plasma_pilot_eis::EisEvent::Frame,
+                plasma_pilot_eis::EisEvent::KeyboardKey {
+                    keycode: 38,
+                    is_press: false,
+                },
+                plasma_pilot_eis::EisEvent::KeyboardKey {
+                    keycode: 29,
+                    is_press: false,
+                },
+                plasma_pilot_eis::EisEvent::Frame,
+                plasma_pilot_eis::EisEvent::StopEmulating,
+            ]
+        ));
     }
 
     #[test]

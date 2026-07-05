@@ -12,6 +12,7 @@ pub const BTN_LEFT: u32 = 0x110;
 pub const BTN_RIGHT: u32 = 0x111;
 pub const BTN_MIDDLE: u32 = 0x112;
 pub const EI_CAP_POINTER_ABSOLUTE: u32 = 1 << 1;
+pub const EI_CAP_KEYBOARD: u32 = 1 << 2;
 pub const EI_CAP_BUTTON: u32 = 1 << 5;
 pub const EI_CAP_SCROLL: u32 = 1 << 4;
 pub const EI_CAP_TEXT: u32 = 1 << 6;
@@ -27,6 +28,7 @@ pub struct EisActionPlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EisCapability {
     PointerAbsolute,
+    Keyboard,
     Button,
     Scroll,
     Text,
@@ -410,6 +412,7 @@ pub enum EisEvent {
     StopEmulating,
     Frame,
     PointerMotionAbsolute { x: f64, y: f64 },
+    KeyboardKey { keycode: u32, is_press: bool },
     Button { button: u32, is_press: bool },
     ScrollDiscrete { x: i32, y: i32 },
     ScrollStop { stop_x: bool, stop_y: bool },
@@ -422,6 +425,8 @@ pub enum EisPlanError {
     EmptyText,
     #[error("clicks must be 1 or 2")]
     InvalidClickCount,
+    #[error("key combo must contain at least one key")]
+    EmptyKeyCombo,
     #[error("scroll request must include a non-zero delta")]
     EmptyScroll,
 }
@@ -506,6 +511,7 @@ fn region_covering_points<'a>(
 pub fn capability_to_libei(capability: EisCapability) -> u32 {
     match capability {
         EisCapability::PointerAbsolute => EI_CAP_POINTER_ABSOLUTE,
+        EisCapability::Keyboard => EI_CAP_KEYBOARD,
         EisCapability::Button => EI_CAP_BUTTON,
         EisCapability::Scroll => EI_CAP_SCROLL,
         EisCapability::Text => EI_CAP_TEXT,
@@ -515,6 +521,7 @@ pub fn capability_to_libei(capability: EisCapability) -> u32 {
 pub fn capabilities_from_libei_bits(bits: u32) -> Vec<EisCapability> {
     [
         EisCapability::PointerAbsolute,
+        EisCapability::Keyboard,
         EisCapability::Button,
         EisCapability::Scroll,
         EisCapability::Text,
@@ -531,6 +538,11 @@ pub trait EisEventSink {
     fn stop_emulating(&mut self) -> std::result::Result<(), Self::Error>;
     fn frame(&mut self) -> std::result::Result<(), Self::Error>;
     fn pointer_motion_absolute(&mut self, x: f64, y: f64) -> std::result::Result<(), Self::Error>;
+    fn keyboard_key(
+        &mut self,
+        keycode: u32,
+        is_press: bool,
+    ) -> std::result::Result<(), Self::Error>;
     fn button(&mut self, button: u32, is_press: bool) -> std::result::Result<(), Self::Error>;
     fn scroll_discrete(&mut self, x: i32, y: i32) -> std::result::Result<(), Self::Error>;
     fn scroll_stop(&mut self, stop_x: bool, stop_y: bool) -> std::result::Result<(), Self::Error>;
@@ -550,6 +562,9 @@ where
             EisEvent::StopEmulating => sink.stop_emulating()?,
             EisEvent::Frame => sink.frame()?,
             EisEvent::PointerMotionAbsolute { x, y } => sink.pointer_motion_absolute(*x, *y)?,
+            EisEvent::KeyboardKey { keycode, is_press } => {
+                sink.keyboard_key(*keycode, *is_press)?
+            }
             EisEvent::Button { button, is_press } => sink.button(*button, *is_press)?,
             EisEvent::ScrollDiscrete { x, y } => sink.scroll_discrete(*x, *y)?,
             EisEvent::ScrollStop { stop_x, stop_y } => sink.scroll_stop(*stop_x, *stop_y)?,
@@ -629,6 +644,7 @@ unsafe extern "C" {
     fn ei_device_stop_emulating(device: *mut EiDevice);
     fn ei_device_frame(device: *mut EiDevice, time: u64);
     fn ei_device_pointer_motion_absolute(device: *mut EiDevice, x: f64, y: f64);
+    fn ei_device_keyboard_key(device: *mut EiDevice, keycode: u32, is_press: bool);
     fn ei_device_button_button(device: *mut EiDevice, button: u32, is_press: bool);
     fn ei_device_scroll_discrete(device: *mut EiDevice, x: i32, y: i32);
     fn ei_device_scroll_stop(device: *mut EiDevice, stop_x: bool, stop_y: bool);
@@ -1059,9 +1075,10 @@ fn libei_region(region: *mut EiRegion) -> EisRegion {
     }
 }
 
-fn known_capabilities() -> [EisCapability; 4] {
+fn known_capabilities() -> [EisCapability; 5] {
     [
         EisCapability::PointerAbsolute,
+        EisCapability::Keyboard,
         EisCapability::Button,
         EisCapability::Scroll,
         EisCapability::Text,
@@ -1093,6 +1110,16 @@ impl EisEventSink for LibeiDeviceSink<'_> {
     fn pointer_motion_absolute(&mut self, x: f64, y: f64) -> std::result::Result<(), Self::Error> {
         // SAFETY: `device` is guaranteed valid by `from_raw` for this sink's lifetime.
         unsafe { ei_device_pointer_motion_absolute(self.device.as_ptr(), x, y) };
+        Ok(())
+    }
+
+    fn keyboard_key(
+        &mut self,
+        keycode: u32,
+        is_press: bool,
+    ) -> std::result::Result<(), Self::Error> {
+        // SAFETY: `device` is guaranteed valid by `from_raw` for this sink's lifetime.
+        unsafe { ei_device_keyboard_key(self.device.as_ptr(), keycode, is_press) };
         Ok(())
     }
 
@@ -1144,6 +1171,35 @@ pub fn plan_text_utf8(sequence: u32, text: impl Into<String>) -> Result<EisActio
             EisEvent::Frame,
             EisEvent::StopEmulating,
         ],
+    })
+}
+
+pub fn plan_key_combo_evdev(sequence: u32, keycodes: &[u16]) -> Result<EisActionPlan> {
+    if keycodes.is_empty() {
+        return Err(EisPlanError::EmptyKeyCombo);
+    }
+
+    let mut events = Vec::with_capacity(keycodes.len() * 2 + 4);
+    events.push(EisEvent::StartEmulating { sequence });
+    for keycode in keycodes {
+        events.push(EisEvent::KeyboardKey {
+            keycode: u32::from(*keycode),
+            is_press: true,
+        });
+    }
+    events.push(EisEvent::Frame);
+    for keycode in keycodes.iter().rev() {
+        events.push(EisEvent::KeyboardKey {
+            keycode: u32::from(*keycode),
+            is_press: false,
+        });
+    }
+    events.push(EisEvent::Frame);
+    events.push(EisEvent::StopEmulating);
+
+    Ok(EisActionPlan {
+        required_capabilities: vec![EisCapability::Keyboard],
+        events,
     })
 }
 
@@ -1377,6 +1433,15 @@ mod tests {
             Ok(())
         }
 
+        fn keyboard_key(
+            &mut self,
+            keycode: u32,
+            is_press: bool,
+        ) -> std::result::Result<(), Self::Error> {
+            self.calls.push(format!("key:{keycode}:{is_press}"));
+            Ok(())
+        }
+
         fn button(&mut self, button: u32, is_press: bool) -> std::result::Result<(), Self::Error> {
             self.calls.push(format!("button:{button}:{is_press}"));
             Ok(())
@@ -1430,6 +1495,14 @@ mod tests {
             &mut self,
             _x: f64,
             _y: f64,
+        ) -> std::result::Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn keyboard_key(
+            &mut self,
+            _keycode: u32,
+            _is_press: bool,
         ) -> std::result::Result<(), Self::Error> {
             Ok(())
         }
@@ -1512,13 +1585,20 @@ mod tests {
             capability_to_libei(EisCapability::PointerAbsolute),
             EI_CAP_POINTER_ABSOLUTE
         );
+        assert_eq!(
+            capability_to_libei(EisCapability::Keyboard),
+            EI_CAP_KEYBOARD
+        );
         assert_eq!(capability_to_libei(EisCapability::Button), EI_CAP_BUTTON);
         assert_eq!(capability_to_libei(EisCapability::Scroll), EI_CAP_SCROLL);
         assert_eq!(capability_to_libei(EisCapability::Text), EI_CAP_TEXT);
         assert_eq!(
-            capabilities_from_libei_bits(EI_CAP_POINTER_ABSOLUTE | EI_CAP_BUTTON | EI_CAP_TEXT),
+            capabilities_from_libei_bits(
+                EI_CAP_POINTER_ABSOLUTE | EI_CAP_KEYBOARD | EI_CAP_BUTTON | EI_CAP_TEXT
+            ),
             vec![
                 EisCapability::PointerAbsolute,
+                EisCapability::Keyboard,
                 EisCapability::Button,
                 EisCapability::Text,
             ]
@@ -1953,6 +2033,50 @@ mod tests {
             ]
         );
         assert_eq!(plan_text_utf8(1, ""), Err(EisPlanError::EmptyText));
+    }
+
+    #[test]
+    fn plans_key_combo_with_evdev_codes() {
+        let plan = plan_key_combo_evdev(8, &[29, 42, 38]).expect("key combo plan");
+
+        assert_eq!(plan.required_capabilities, vec![EisCapability::Keyboard]);
+        assert_eq!(
+            plan.events,
+            vec![
+                EisEvent::StartEmulating { sequence: 8 },
+                EisEvent::KeyboardKey {
+                    keycode: 29,
+                    is_press: true
+                },
+                EisEvent::KeyboardKey {
+                    keycode: 42,
+                    is_press: true
+                },
+                EisEvent::KeyboardKey {
+                    keycode: 38,
+                    is_press: true
+                },
+                EisEvent::Frame,
+                EisEvent::KeyboardKey {
+                    keycode: 38,
+                    is_press: false
+                },
+                EisEvent::KeyboardKey {
+                    keycode: 42,
+                    is_press: false
+                },
+                EisEvent::KeyboardKey {
+                    keycode: 29,
+                    is_press: false
+                },
+                EisEvent::Frame,
+                EisEvent::StopEmulating,
+            ]
+        );
+        assert_eq!(
+            plan_key_combo_evdev(1, &[]),
+            Err(EisPlanError::EmptyKeyCombo)
+        );
     }
 
     #[test]

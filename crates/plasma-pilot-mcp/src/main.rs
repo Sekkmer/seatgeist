@@ -1212,11 +1212,11 @@ fn tool_definitions() -> Vec<Value> {
         tool(
             "plasma.type_text",
             "Type Text",
-            "Type US-keyboard-mapped text through the Linux uinput backend. This is policy-gated keyboard control and summaries report text length only.",
+            "Type text through the configured input executor. uinput uses the local US-keyboard map; explicit portal/libei backends use the stored EIS text capability when ready. This is policy-gated keyboard control and summaries report text length only.",
             object_schema(
                 with_guard_properties(vec![(
                     "text",
-                    json!({"type": "string", "description": "Text to type. Current uinput backend supports US keyboard ASCII plus newline and tab."}),
+                    json!({"type": "string", "description": "Text to type. uinput supports US keyboard ASCII plus newline and tab; EIS execution uses the text capability."}),
                 )]),
                 vec!["text"],
             ),
@@ -1224,7 +1224,7 @@ fn tool_definitions() -> Vec<Value> {
         tool(
             "plasma.key_combo",
             "Key Combo",
-            "Send a key combination through the Linux uinput backend, such as Ctrl+L or Alt+F4. This is policy-gated keyboard control.",
+            "Send a named evdev key combination through the configured input executor, such as Ctrl+L or Alt+F4. This is policy-gated keyboard control.",
             object_schema(
                 with_guard_properties(vec![(
                     "combo",

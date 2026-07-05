@@ -844,7 +844,7 @@ fn shifted(code: u16) -> KeyStroke {
     KeyStroke { code, shift: true }
 }
 
-fn parse_key_combo(combo: &str) -> Result<Vec<u16>> {
+pub fn parse_key_combo(combo: &str) -> Result<Vec<u16>> {
     let parts = combo
         .split('+')
         .map(str::trim)
