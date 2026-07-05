@@ -10,7 +10,13 @@
       },
       "expect_response_type": "error",
       "expect_ok": false,
-      "expect_error_contains": "policy prompt required for ControlKeyboard"
+      "expect_error_contains": "policy prompt required for ControlKeyboard",
+      "expect_json": [
+        {
+          "pointer": "/data/kind",
+          "equals": "policy_prompt_required"
+        }
+      ]
     },
     {
       "label": "key-combo-denied",
@@ -20,7 +26,13 @@
       },
       "expect_response_type": "error",
       "expect_ok": false,
-      "expect_error_contains": "policy prompt required for ControlKeyboard"
+      "expect_error_contains": "policy prompt required for ControlKeyboard",
+      "expect_json": [
+        {
+          "pointer": "/data/kind",
+          "equals": "policy_prompt_required"
+        }
+      ]
     },
     {
       "label": "move-pointer-denied",
@@ -34,7 +46,13 @@
       },
       "expect_response_type": "error",
       "expect_ok": false,
-      "expect_error_contains": "policy prompt required for ControlPointer"
+      "expect_error_contains": "policy prompt required for ControlPointer",
+      "expect_json": [
+        {
+          "pointer": "/data/kind",
+          "equals": "policy_prompt_required"
+        }
+      ]
     },
     {
       "label": "click-pointer-denied",
@@ -50,7 +68,13 @@
       },
       "expect_response_type": "error",
       "expect_ok": false,
-      "expect_error_contains": "policy prompt required for ControlPointer"
+      "expect_error_contains": "policy prompt required for ControlPointer",
+      "expect_json": [
+        {
+          "pointer": "/data/kind",
+          "equals": "policy_prompt_required"
+        }
+      ]
     },
     {
       "label": "drag-pointer-denied",
@@ -71,7 +95,13 @@
       },
       "expect_response_type": "error",
       "expect_ok": false,
-      "expect_error_contains": "policy prompt required for ControlPointer"
+      "expect_error_contains": "policy prompt required for ControlPointer",
+      "expect_json": [
+        {
+          "pointer": "/data/kind",
+          "equals": "policy_prompt_required"
+        }
+      ]
     },
     {
       "label": "scroll-pointer-denied",
@@ -82,7 +112,13 @@
       },
       "expect_response_type": "error",
       "expect_ok": false,
-      "expect_error_contains": "policy prompt required for ControlPointer"
+      "expect_error_contains": "policy prompt required for ControlPointer",
+      "expect_json": [
+        {
+          "pointer": "/data/kind",
+          "equals": "policy_prompt_required"
+        }
+      ]
     },
     {
       "label": "remote-desktop-session-probe-denied",
@@ -95,7 +131,13 @@
       },
       "expect_response_type": "error",
       "expect_ok": false,
-      "expect_error_contains": "policy prompt required for ControlPointer"
+      "expect_error_contains": "policy prompt required for ControlPointer",
+      "expect_json": [
+        {
+          "pointer": "/data/kind",
+          "equals": "policy_prompt_required"
+        }
+      ]
     },
     {
       "label": "remote-desktop-eis-probe-denied",
@@ -108,7 +150,13 @@
       },
       "expect_response_type": "error",
       "expect_ok": false,
-      "expect_error_contains": "policy prompt required for ControlPointer"
+      "expect_error_contains": "policy prompt required for ControlPointer",
+      "expect_json": [
+        {
+          "pointer": "/data/kind",
+          "equals": "policy_prompt_required"
+        }
+      ]
     },
     {
       "label": "remote-desktop-eis-start-denied",
@@ -121,7 +169,13 @@
       },
       "expect_response_type": "error",
       "expect_ok": false,
-      "expect_error_contains": "policy prompt required for ControlPointer"
+      "expect_error_contains": "policy prompt required for ControlPointer",
+      "expect_json": [
+        {
+          "pointer": "/data/kind",
+          "equals": "policy_prompt_required"
+        }
+      ]
     }
   ]
 }

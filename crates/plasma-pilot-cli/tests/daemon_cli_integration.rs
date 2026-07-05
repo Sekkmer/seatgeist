@@ -982,24 +982,29 @@ fn cli_validates_policy_denial_trace_expectations() -> Result<()> {
         report["steps"][0]["expect_error_contains"],
         "policy prompt required for FullResolutionScreenshot"
     );
+    assert_eq!(report["steps"][0]["expect_json_count"], 1);
     assert_eq!(
         report["steps"][1]["expect_error_contains"],
         "policy prompt required for ClipboardRead"
     );
+    assert_eq!(report["steps"][1]["expect_json_count"], 1);
     assert_eq!(
         report["steps"][2]["expect_error_contains"],
         "policy prompt required for ControlSemantic"
     );
+    assert_eq!(report["steps"][2]["expect_json_count"], 1);
     assert_eq!(report["steps"][3]["method"], "accessibility_set_caret");
     assert_eq!(
         report["steps"][3]["expect_error_contains"],
         "policy prompt required for ControlSemantic"
     );
+    assert_eq!(report["steps"][3]["expect_json_count"], 1);
     assert_eq!(report["steps"][4]["method"], "accessibility_set_selection");
     assert_eq!(
         report["steps"][4]["expect_error_contains"],
         "policy prompt required for ControlSemantic"
     );
+    assert_eq!(report["steps"][4]["expect_json_count"], 1);
     Ok(())
 }
 
@@ -1022,31 +1027,37 @@ fn cli_validates_input_denial_trace_expectations() -> Result<()> {
         report["steps"][0]["expect_error_contains"],
         "policy prompt required for ControlKeyboard"
     );
+    assert_eq!(report["steps"][0]["expect_json_count"], 1);
     assert_eq!(report["steps"][2]["method"], "move_pointer");
     assert_eq!(
         report["steps"][2]["expect_error_contains"],
         "policy prompt required for ControlPointer"
     );
+    assert_eq!(report["steps"][2]["expect_json_count"], 1);
     assert_eq!(report["steps"][5]["method"], "scroll_pointer");
     assert_eq!(
         report["steps"][5]["expect_error_contains"],
         "policy prompt required for ControlPointer"
     );
+    assert_eq!(report["steps"][5]["expect_json_count"], 1);
     assert_eq!(report["steps"][6]["method"], "remote_desktop_session_probe");
     assert_eq!(
         report["steps"][6]["expect_error_contains"],
         "policy prompt required for ControlPointer"
     );
+    assert_eq!(report["steps"][6]["expect_json_count"], 1);
     assert_eq!(report["steps"][7]["method"], "remote_desktop_eis_probe");
     assert_eq!(
         report["steps"][7]["expect_error_contains"],
         "policy prompt required for ControlPointer"
     );
+    assert_eq!(report["steps"][7]["expect_json_count"], 1);
     assert_eq!(report["steps"][8]["method"], "remote_desktop_eis_start");
     assert_eq!(
         report["steps"][8]["expect_error_contains"],
         "policy prompt required for ControlPointer"
     );
+    assert_eq!(report["steps"][8]["expect_json_count"], 1);
     Ok(())
 }
 

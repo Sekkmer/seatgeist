@@ -13,7 +13,7 @@ pub use protocol::{
     ClipboardText, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS,
     DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
     DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonClientIdentity, DaemonRequest, DaemonRequestEnvelope,
-    DaemonResponse, DesktopObservation, DesktopSessionStatus, DragPointerRequest,
+    DaemonResponse, DesktopObservation, DesktopSessionStatus, DragPointerRequest, ErrorKind,
     FocusTextFieldRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus,
     InputBackendStatus, JournalArtifactContext, JournalClientContext, JournalControlContext,
     JournalEntry, JournalRequestedTarget, JournalTailRequest, JournalWindowContext,

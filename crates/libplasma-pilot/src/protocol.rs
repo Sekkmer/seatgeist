@@ -1037,7 +1037,7 @@ pub enum DaemonResponse {
     AccessibilityTextAttributes(AccessibilityTextAttributes),
     Journal(Vec<JournalEntry>),
     Action(Box<ActionResult>),
-    Error { message: String },
+    Error { kind: ErrorKind, message: String },
 }
 
 impl DaemonResponse {
@@ -1078,6 +1078,25 @@ impl DaemonResponse {
     pub fn ok(&self) -> bool {
         !matches!(self, Self::Error { .. })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorKind {
+    PolicyPromptRequired,
+    PolicyDenied,
+    AppDenied,
+    FocusGuard,
+    HumanInputPause,
+    PanicStop,
+    RateLimited,
+    PortalUnavailable,
+    BackendUnavailable,
+    BackendFailed,
+    AccessibilityUnavailable,
+    AccessibilityWeakTree,
+    Validation,
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1912,10 +1931,15 @@ mod tests {
         assert!(health.ok());
 
         let error = DaemonResponse::Error {
+            kind: ErrorKind::PolicyDenied,
             message: "denied".to_string(),
         };
         assert_eq!(error.response_type(), "error");
         assert!(!error.ok());
+        let encoded = serde_json::to_string(&error).expect("error response serializes");
+        assert!(encoded.contains(r#""type":"error""#));
+        assert!(encoded.contains(r#""kind":"policy_denied""#));
+        assert!(encoded.contains(r#""message":"denied""#));
     }
 
     #[test]

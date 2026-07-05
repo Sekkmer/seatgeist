@@ -25,7 +25,7 @@ use libplasma_pilot::{
     ActiveWindowGuard, BackendCapability, CapabilitySet, CaptureBackendStatus, ClickButtonRequest,
     ClickPointerRequest, ClipboardBackendStatus, ClipboardGetRequest, ClipboardText,
     CoordinateSpace, DaemonClientIdentity, DaemonRequest, DaemonRequestEnvelope, DaemonResponse,
-    DesktopObservation, DesktopSessionStatus, DragPointerRequest, FocusTextFieldRequest,
+    DesktopObservation, DesktopSessionStatus, DragPointerRequest, ErrorKind, FocusTextFieldRequest,
     FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus,
     JournalArtifactContext, JournalClientContext, JournalControlContext, JournalEntry,
     JournalRequestedTarget, JournalWindowContext, KeyComboRequest, KwinBridgeStatus,
@@ -1087,12 +1087,14 @@ fn finalize_journal_control_context(
 
 fn journal_policy_result(response: &DaemonResponse) -> String {
     match response {
-        DaemonResponse::Error { message } if message.starts_with("policy denied") => {
-            "denied".to_string()
-        }
-        DaemonResponse::Error { message } if message.starts_with("policy prompt required") => {
-            "prompt_required".to_string()
-        }
+        DaemonResponse::Error {
+            kind: ErrorKind::PolicyDenied,
+            ..
+        } => "denied".to_string(),
+        DaemonResponse::Error {
+            kind: ErrorKind::PolicyPromptRequired,
+            ..
+        } => "prompt_required".to_string(),
         DaemonResponse::Error { .. } => "checked".to_string(),
         _ => "allow".to_string(),
     }
@@ -1533,29 +1535,20 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
     if let Err(err) =
         enforce_policy_with_approvals(&runtime.policy, &runtime.approval_store, &request)
     {
-        return DaemonResponse::Error {
-            message: format_error_chain(&err),
-        };
+        let kind = policy_error_kind(&err);
+        return daemon_error_with_kind(err, kind);
     }
     if let Err(err) = enforce_panic_stop(&runtime.panic_stop, &request) {
-        return DaemonResponse::Error {
-            message: format_error_chain(&err),
-        };
+        return daemon_error_with_kind(err, ErrorKind::PanicStop);
     }
     if let Err(err) = enforce_human_input_pause(&runtime.safety_settings, &request) {
-        return DaemonResponse::Error {
-            message: format_error_chain(&err),
-        };
+        return daemon_error_with_kind(err, ErrorKind::HumanInputPause);
     }
     if let Err(err) = enforce_required_focus_guard(&runtime.safety_settings, &request) {
-        return DaemonResponse::Error {
-            message: format_error_chain(&err),
-        };
+        return daemon_error_with_kind(err, ErrorKind::FocusGuard);
     }
     if let Err(err) = enforce_active_window_guard(&runtime.active_window_state, &request) {
-        return DaemonResponse::Error {
-            message: format_error_chain(&err),
-        };
+        return daemon_error_with_kind(err, ErrorKind::FocusGuard);
     }
     if let Err(err) = enforce_app_policy(
         &runtime.active_window_state,
@@ -1563,14 +1556,10 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
         &runtime.app_policy,
         &request,
     ) {
-        return DaemonResponse::Error {
-            message: format_error_chain(&err),
-        };
+        return daemon_error_with_kind(err, ErrorKind::AppDenied);
     }
     if let Err(err) = enforce_control_rate_limit(&runtime.control_rate_limiter, &request) {
-        return DaemonResponse::Error {
-            message: format_error_chain(&err),
-        };
+        return daemon_error_with_kind(err, ErrorKind::RateLimited);
     }
 
     match request {
@@ -1585,9 +1574,7 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
         DaemonRequest::SafetyStatus => {
             match safety_status(&runtime.safety_settings, &runtime.journal.settings) {
                 Ok(status) => DaemonResponse::SafetyStatus(status),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::DesktopSessionStatus => {
@@ -1597,9 +1584,7 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
         DaemonRequest::SetPanicStop(request) => {
             match set_panic_stop(&runtime.panic_stop, request) {
                 Ok(status) => DaemonResponse::PanicStop(status),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::KwinBridgeStatus => {
@@ -1609,16 +1594,12 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 runtime.kwin_bridge_registered,
             ) {
                 Ok(status) => DaemonResponse::KwinBridgeStatus(status),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::UinputStatus => match uinput_status() {
             Ok(status) => DaemonResponse::UinputStatus(status),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::InputBackendStatus => {
             match input_backend_status(
@@ -1627,49 +1608,37 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 &runtime.xkb_keymap_config,
             ) {
                 Ok(status) => DaemonResponse::InputBackendStatus(status),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::RemoteDesktopSessionProbe(request) => {
             match remote_desktop_session_probe(request).await {
                 Ok(status) => DaemonResponse::RemoteDesktopSessionProbe(status),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::RemoteDesktopEisProbe(request) => {
             match remote_desktop_eis_probe(request).await {
                 Ok(status) => DaemonResponse::RemoteDesktopEisProbe(status),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::RemoteDesktopEisStart(request) => {
             match remote_desktop_eis_start(request, &runtime.portal_eis_session_store).await {
                 Ok(status) => DaemonResponse::RemoteDesktopEisSessionStatus(status),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::RemoteDesktopEisSessionStatus => {
             match runtime.portal_eis_session_store.status() {
                 Ok(status) => DaemonResponse::RemoteDesktopEisSessionStatus(status),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::RemoteDesktopEisStop => {
             match remote_desktop_eis_stop(&runtime.portal_eis_session_store) {
                 Ok(status) => DaemonResponse::RemoteDesktopEisSessionStatus(status),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::CaptureBackendStatus => {
@@ -1677,27 +1646,19 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
         }
         DaemonRequest::PointerCalibration => match pointer_calibration_status() {
             Ok(status) => DaemonResponse::PointerCalibration(status),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::ListMonitors => match list_monitors() {
             Ok(monitors) => DaemonResponse::Monitors(monitors),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::ListWindows => match list_windows(&runtime.window_list_state) {
             Ok(windows) => DaemonResponse::Windows(windows),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::ActiveWindow => match active_window(&runtime.active_window_state) {
             Ok(window) => DaemonResponse::ActiveWindow(window),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::Observe(request) => {
             match observe_desktop(
@@ -1709,33 +1670,25 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
             .await
             {
                 Ok(observation) => DaemonResponse::Observation(Box::new(observation)),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::Screenshot(request) => {
             match capture_screenshot(request, &runtime.safety_settings).await {
                 Ok(info) => DaemonResponse::Screenshot(info),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::ScreenshotTile(request) => {
             match capture_screenshot_tile(request, &runtime.safety_settings).await {
                 Ok(info) => DaemonResponse::Screenshot(info),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::WaitForChange(request) => {
             match wait_for_change(request, &runtime.safety_settings).await {
                 Ok(result) => DaemonResponse::WaitForChange(Box::new(result)),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::ClipboardBackendStatus => {
@@ -1743,15 +1696,11 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
         }
         DaemonRequest::ClipboardGet(request) => match clipboard_get_text(request) {
             Ok(text) => DaemonResponse::ClipboardText(text),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::ClipboardSet(request) => match clipboard_set_text(&request.text) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::AccessibilityQualityStatus => {
             DaemonResponse::AccessibilityQualityStatus(accessibility_quality_status())
@@ -1759,83 +1708,59 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
         DaemonRequest::FocusedAccessibilityTree(request) => {
             match focused_accessibility_tree(request) {
                 Ok(tree) => DaemonResponse::AccessibilityTree(tree),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::AccessibilityFind(request) => match accessibility_find(request) {
             Ok(matches) => DaemonResponse::AccessibilityMatches(matches),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::AccessibilityTextAttributes(request) => {
             match accessibility_text_attributes(request) {
                 Ok(attributes) => DaemonResponse::AccessibilityTextAttributes(attributes),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::AccessibilityInvoke(request) => match accessibility_invoke(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::AccessibilitySetText(request) => match accessibility_set_text(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::AccessibilityInsertText(request) => {
             match accessibility_insert_text(request) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::AccessibilityDeleteText(request) => {
             match accessibility_delete_text(request) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::AccessibilityCopyText(request) => match accessibility_copy_text(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::AccessibilityCutText(request) => match accessibility_cut_text(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::AccessibilityPasteText(request) => match accessibility_paste_text(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::AccessibilitySetCaret(request) => match accessibility_set_caret(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::AccessibilitySetSelection(request) => {
             match accessibility_set_selection(request) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::TypeText(request) => {
@@ -1845,9 +1770,7 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 &runtime.portal_eis_session_store,
             ) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::KeyCombo(request) => {
@@ -1858,9 +1781,7 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 &runtime.portal_eis_session_store,
             ) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::MovePointer(request) => {
@@ -1871,9 +1792,7 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 &runtime.portal_eis_session_store,
             ) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::ClickPointer(request) => {
@@ -1884,9 +1803,7 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 &runtime.portal_eis_session_store,
             ) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::DragPointer(request) => {
@@ -1897,9 +1814,7 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 &runtime.portal_eis_session_store,
             ) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::ScrollPointer(request) => {
@@ -1909,64 +1824,44 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 &runtime.portal_eis_session_store,
             ) {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::ClickButton(request) => match click_button(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::SetTextField(request) => match set_text_field(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::FocusTextField(request) => match focus_text_field(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::ActivateTab(request) => match activate_tab(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::ActivateLink(request) => match activate_link(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::ToggleCheck(request) => match toggle_check(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::SetValue(request) => match set_value(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::SelectItem(request) => match select_item(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::SelectMenu(request) => match select_menu(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
         DaemonRequest::JournalTail(request) => {
             match runtime.journal.tail_filtered(
@@ -1975,16 +1870,12 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 request.ok,
             ) {
                 Ok(entries) => DaemonResponse::Journal(entries),
-                Err(err) => DaemonResponse::Error {
-                    message: format_error_chain(&err),
-                },
+                Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::FocusWindow(request) => match focus_window(request) {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
+            Err(err) => daemon_error(err),
         },
     }
 }
@@ -7533,6 +7424,86 @@ fn format_error_chain(err: &Error) -> String {
         .join(": ")
 }
 
+fn daemon_error(err: Error) -> DaemonResponse {
+    let message = format_error_chain(&err);
+    DaemonResponse::Error {
+        kind: classify_error_message(&message),
+        message,
+    }
+}
+
+fn daemon_error_with_kind(err: Error, kind: ErrorKind) -> DaemonResponse {
+    DaemonResponse::Error {
+        kind,
+        message: format_error_chain(&err),
+    }
+}
+
+fn policy_error_kind(err: &Error) -> ErrorKind {
+    let message = format_error_chain(err);
+    if message.starts_with("policy prompt required") {
+        ErrorKind::PolicyPromptRequired
+    } else if message.starts_with("policy denied") {
+        ErrorKind::PolicyDenied
+    } else {
+        ErrorKind::Unknown
+    }
+}
+
+fn classify_error_message(message: &str) -> ErrorKind {
+    let lower = message.to_ascii_lowercase();
+    if lower.starts_with("policy prompt required") {
+        ErrorKind::PolicyPromptRequired
+    } else if lower.starts_with("policy denied") {
+        ErrorKind::PolicyDenied
+    } else if lower.contains("app policy") {
+        ErrorKind::AppDenied
+    } else if lower.contains("active-window guard") || lower.contains("focus guard") {
+        ErrorKind::FocusGuard
+    } else if lower.contains("human input activity signal is fresh") {
+        ErrorKind::HumanInputPause
+    } else if lower.contains("panic-stop is active") {
+        ErrorKind::PanicStop
+    } else if lower.contains("rate limit") || lower.contains("rate-limited") {
+        ErrorKind::RateLimited
+    } else if lower.contains("xdg-desktop-portal remotedesktop is not available")
+        || lower.contains("portal remotedesktop is not available")
+    {
+        ErrorKind::PortalUnavailable
+    } else if lower.contains("at-spi")
+        || lower.contains("accessibility bus")
+        || lower.contains("accessibility tree")
+    {
+        if lower.contains("max_nodes exhausted")
+            || lower.contains("generic")
+            || lower.contains("flat")
+            || lower.contains("weak")
+        {
+            ErrorKind::AccessibilityWeakTree
+        } else {
+            ErrorKind::AccessibilityUnavailable
+        }
+    } else if lower.contains("not available")
+        || lower.contains("no executable")
+        || lower.contains("requires a stored remotedesktop eis session")
+        || lower.contains("/dev/uinput")
+    {
+        ErrorKind::BackendUnavailable
+    } else if lower.starts_with("invalid ")
+        || lower.starts_with("unsupported ")
+        || lower.starts_with("expected ")
+        || lower.contains(" must ")
+        || lower.contains(" out of bounds")
+    {
+        ErrorKind::Validation
+    } else if lower.contains("failed") || lower.contains("timed out") || lower.contains("could not")
+    {
+        ErrorKind::BackendFailed
+    } else {
+        ErrorKind::Unknown
+    }
+}
+
 fn append_journal_entry(path: &Path, entry: &JournalEntry) -> Result<()> {
     let parent = path
         .parent()
@@ -7822,7 +7793,9 @@ fn summarize_response(response: &DaemonResponse) -> String {
             .message
             .clone()
             .unwrap_or_else(|| format!("action {}", result.id)),
-        DaemonResponse::Error { message } => format!("error: {message}"),
+        DaemonResponse::Error { kind, message } => {
+            format!("error kind={kind:?}: {message}")
+        }
     }
 }
 
@@ -9396,6 +9369,49 @@ mod tests {
                 .contains("human input activity signal is fresh")
         );
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn classifies_operator_visible_error_causes() {
+        let cases = [
+            (
+                "policy prompt required for ControlPointer, but no matching approval grant is available",
+                ErrorKind::PolicyPromptRequired,
+            ),
+            (
+                "policy denied ClipboardRead: configured deny",
+                ErrorKind::PolicyDenied,
+            ),
+            (
+                "app policy denied active window app org.kde.konsole",
+                ErrorKind::AppDenied,
+            ),
+            (
+                "active-window guard failed: expected app id org.kde.kate, got org.kde.konsole",
+                ErrorKind::FocusGuard,
+            ),
+            (
+                "human input activity signal is fresh at /tmp/pilot; refusing ControlKeyboard until quiet for 1000ms",
+                ErrorKind::HumanInputPause,
+            ),
+            (
+                "xdg-desktop-portal RemoteDesktop is not available: org.freedesktop.portal.Desktop is missing",
+                ErrorKind::PortalUnavailable,
+            ),
+            (
+                "accessibility tree max_nodes exhausted",
+                ErrorKind::AccessibilityWeakTree,
+            ),
+            (
+                "invalid AT-SPI node id: bad",
+                ErrorKind::AccessibilityUnavailable,
+            ),
+            ("unsupported key name: Hyper", ErrorKind::Validation),
+        ];
+
+        for (message, kind) in cases {
+            assert_eq!(classify_error_message(message), kind, "{message}");
+        }
     }
 
     #[test]

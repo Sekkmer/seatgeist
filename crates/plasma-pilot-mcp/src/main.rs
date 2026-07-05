@@ -877,7 +877,7 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             .message
             .clone()
             .unwrap_or_else(|| format!("action {} ok={}", result.id, result.ok)),
-        DaemonResponse::Error { message } => message.clone(),
+        DaemonResponse::Error { kind, message } => format!("error kind={kind:?}: {message}"),
     }
 }
 
@@ -3918,11 +3918,16 @@ mod tests {
     #[test]
     fn daemon_errors_become_tool_errors() {
         let response = DaemonResponse::Error {
+            kind: libplasma_pilot::ErrorKind::PolicyDenied,
             message: "policy denied".to_string(),
         };
         let result = tool_result_from_daemon("plasma.focus_window", &response);
         assert_eq!(result["isError"], true);
-        assert_eq!(result["content"][0]["text"], "policy denied");
+        assert_eq!(
+            result["content"][0]["text"],
+            "error kind=PolicyDenied: policy denied"
+        );
+        assert_eq!(result["structuredContent"]["data"]["kind"], "policy_denied");
     }
 
     fn assert_default_screenshot_path(path: &Path, kind: &str) {

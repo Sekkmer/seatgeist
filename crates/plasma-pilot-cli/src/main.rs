@@ -1722,7 +1722,9 @@ fn active_window_guard(
 fn print_daemon_response(socket: &PathBuf, request: DaemonRequest) -> Result<()> {
     let response = send_request(socket, request)?;
     match response {
-        DaemonResponse::Error { message } => bail!("daemon returned error: {message}"),
+        DaemonResponse::Error { kind, message } => {
+            bail!("daemon returned {kind:?} error: {message}")
+        }
         response => println!("{}", serde_json::to_string_pretty(&response)?),
     }
     Ok(())
@@ -2025,8 +2027,8 @@ fn replay_trace_steps(socket: &PathBuf, trace: &ReplayTrace) -> Result<Vec<serde
         }
         if let Some(expected_error) = &step.expect_error_contains {
             match &response {
-                DaemonResponse::Error { message } if message.contains(expected_error) => {}
-                DaemonResponse::Error { message } => {
+                DaemonResponse::Error { message, .. } if message.contains(expected_error) => {}
+                DaemonResponse::Error { message, .. } => {
                     bail!(
                         "trace {} expected error containing {expected_error:?}, got {message:?}",
                         trace_step_context(index, step)
