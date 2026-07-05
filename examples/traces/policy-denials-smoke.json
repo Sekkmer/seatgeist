@@ -33,6 +33,30 @@
       "expect_response_type": "error",
       "expect_ok": false,
       "expect_error_contains": "policy prompt required for ControlSemantic"
+    },
+    {
+      "label": "accessibility-set-caret-denied",
+      "request": {
+        "method": "accessibility_set_caret",
+        "node_id": "atspi://:1.42/org/a11y/atspi/accessible/7",
+        "offset": 0
+      },
+      "expect_response_type": "error",
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlSemantic"
+    },
+    {
+      "label": "accessibility-set-selection-denied",
+      "request": {
+        "method": "accessibility_set_selection",
+        "node_id": "atspi://:1.42/org/a11y/atspi/accessible/7",
+        "selection_num": 0,
+        "start_offset": 0,
+        "end_offset": 1
+      },
+      "expect_response_type": "error",
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlSemantic"
     }
   ]
 }

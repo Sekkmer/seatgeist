@@ -815,7 +815,7 @@ fn cli_validates_policy_denial_trace_expectations() -> Result<()> {
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).context("parse trace validation report")?;
     assert_eq!(report["type"], "trace_validation");
-    assert_eq!(report["step_count"], 3);
+    assert_eq!(report["step_count"], 5);
     assert_eq!(report["steps"][0]["method"], "screenshot");
     assert_eq!(
         report["steps"][0]["expect_error_contains"],
@@ -827,6 +827,16 @@ fn cli_validates_policy_denial_trace_expectations() -> Result<()> {
     );
     assert_eq!(
         report["steps"][2]["expect_error_contains"],
+        "policy prompt required for ControlSemantic"
+    );
+    assert_eq!(report["steps"][3]["method"], "accessibility_set_caret");
+    assert_eq!(
+        report["steps"][3]["expect_error_contains"],
+        "policy prompt required for ControlSemantic"
+    );
+    assert_eq!(report["steps"][4]["method"], "accessibility_set_selection");
+    assert_eq!(
+        report["steps"][4]["expect_error_contains"],
         "policy prompt required for ControlSemantic"
     );
     Ok(())
