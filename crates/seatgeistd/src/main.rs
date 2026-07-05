@@ -4665,7 +4665,8 @@ async fn capture_screenshot_portal(
     safety_settings: &SafetySettings,
 ) -> Result<Option<ScreenshotInfo>> {
     let handle_token = format!("seatgeist_{}", Uuid::new_v4().simple());
-    let options = seatgeist_portal::PortalScreenshotOptions::new(handle_token);
+    let mut options = seatgeist_portal::PortalScreenshotOptions::new(handle_token);
+    options.interactive = request.portal_interactive;
     let Some(capture) =
         seatgeist_portal::request_screenshot_zbus(&options, PORTAL_SCREENSHOT_RESPONSE_TIMEOUT)
             .await
@@ -4832,7 +4833,7 @@ async fn capture_screenshot_tile(
 ) -> Result<ScreenshotInfo> {
     validate_tile_request(&request)?;
     prepare_screenshot_output(&request.output)?;
-    let capture = capture_tile_source(&request.output).await?;
+    let capture = capture_tile_source(&request.output, request.portal_interactive).await?;
 
     let (source_width, source_height) = read_png_dimensions_with_retry(&capture.path)
         .with_context(|| format!("read screenshot dimensions from {}", capture.path.display()))?;
@@ -4871,11 +4872,11 @@ async fn capture_screenshot_tile(
     Ok(info)
 }
 
-async fn capture_tile_source(output: &Path) -> Result<TileCaptureSource> {
+async fn capture_tile_source(output: &Path, portal_interactive: bool) -> Result<TileCaptureSource> {
     let screenshot_portal = screenshot_portal_status();
     let spectacle_available = command_exists("spectacle");
     if tile_capture_backend(&screenshot_portal, spectacle_available) == Some("portal_screenshot") {
-        match capture_tile_source_portal().await {
+        match capture_tile_source_portal(portal_interactive).await {
             Ok(Some(capture)) => return Ok(capture),
             Ok(None) => {
                 bail!(
@@ -4898,9 +4899,10 @@ async fn capture_tile_source(output: &Path) -> Result<TileCaptureSource> {
     capture_tile_source_spectacle(output)
 }
 
-async fn capture_tile_source_portal() -> Result<Option<TileCaptureSource>> {
+async fn capture_tile_source_portal(portal_interactive: bool) -> Result<Option<TileCaptureSource>> {
     let handle_token = format!("seatgeist_{}", Uuid::new_v4().simple());
-    let options = seatgeist_portal::PortalScreenshotOptions::new(handle_token);
+    let mut options = seatgeist_portal::PortalScreenshotOptions::new(handle_token);
+    options.interactive = portal_interactive;
     let Some(capture) =
         seatgeist_portal::request_screenshot_zbus(&options, PORTAL_SCREENSHOT_RESPONSE_TIMEOUT)
             .await
@@ -4955,6 +4957,7 @@ async fn wait_for_change(
         output: request.output.clone(),
         max_edge: request.max_edge.or(Some(safety_settings.preview_max_edge)),
         full_resolution: false,
+        portal_interactive: false,
     };
 
     let baseline_info = capture_screenshot(screenshot_request(), safety_settings).await?;
@@ -8810,6 +8813,7 @@ mod tests {
                 output: temp_test_path("bounded-screenshot.png"),
                 max_edge: Some(1600),
                 full_resolution: false,
+                portal_interactive: false,
             }),
         )
         .expect("bounded screenshot requests are allowed by default");
@@ -8865,6 +8869,7 @@ mod tests {
                 output: temp_test_path("full-resolution-screenshot.png"),
                 max_edge: None,
                 full_resolution: true,
+                portal_interactive: false,
             }),
         )
         .expect_err("full-resolution screenshots require approval by default");
@@ -8881,6 +8886,7 @@ mod tests {
                     output: temp_test_path("full-resolution-observe.png"),
                     max_edge: None,
                     full_resolution: true,
+                    portal_interactive: false,
                 }),
             }),
         )
@@ -8897,6 +8903,7 @@ mod tests {
                 output: temp_test_path("allowed-full-resolution-screenshot.png"),
                 max_edge: None,
                 full_resolution: true,
+                portal_interactive: false,
             }),
         )
         .expect("explicit full-resolution screenshot override allows capture");

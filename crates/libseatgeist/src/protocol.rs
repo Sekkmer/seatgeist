@@ -512,6 +512,8 @@ pub struct ScreenshotRequest {
     pub output: PathBuf,
     pub max_edge: Option<u32>,
     pub full_resolution: bool,
+    #[serde(default)]
+    pub portal_interactive: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -522,6 +524,8 @@ pub struct ScreenshotTileRequest {
     pub width: u32,
     pub height: u32,
     pub max_edge: Option<u32>,
+    #[serde(default)]
+    pub portal_interactive: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1181,11 +1185,13 @@ mod tests {
             output: PathBuf::from("/tmp/seatgeist.png"),
             max_edge: Some(1600),
             full_resolution: false,
+            portal_interactive: true,
         });
         let encoded = serde_json::to_string(&request).expect("screenshot request serializes");
         assert!(encoded.contains(r#""method":"screenshot""#));
         assert!(encoded.contains(r#"/tmp/seatgeist.png"#));
         assert!(encoded.contains(r#""max_edge":1600"#));
+        assert!(encoded.contains(r#""portal_interactive":true"#));
     }
 
     #[test]
@@ -1211,11 +1217,13 @@ mod tests {
             width: 800,
             height: 600,
             max_edge: Some(400),
+            portal_interactive: true,
         });
         let encoded = serde_json::to_string(&request).expect("tile request serializes");
         assert!(encoded.contains(r#""method":"screenshot_tile""#));
         assert!(encoded.contains(r#""x":100"#));
         assert!(encoded.contains(r#""max_edge":400"#));
+        assert!(encoded.contains(r#""portal_interactive":true"#));
     }
 
     #[test]
@@ -2043,6 +2051,7 @@ mod tests {
                 output: PathBuf::from("/tmp/observe.png"),
                 max_edge: Some(1200),
                 full_resolution: false,
+                portal_interactive: false,
             }),
         });
         let encoded = serde_json::to_string(&request).expect("observe request serializes");

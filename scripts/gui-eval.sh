@@ -889,13 +889,22 @@ eval_portal_screenshot() {
 		exit 1
 	fi
 
+	local portal_interactive_args=()
 	if ! cli screenshot --output "$run_dir/portal-screenshot.png" >"$run_dir/portal-screenshot.json" 2>"$run_dir/portal-screenshot.err"; then
 		if portal_screenshot_cancelled "$run_dir/portal-screenshot.err" && [[ "${SEATGEIST_PORTAL_SCREENSHOT_STRICT:-0}" != "1" ]]; then
-			skip_eval "portal-screenshot: portal cancelled or ended the request without a screenshot"
-			return 0
+			portal_interactive_args=(--portal-interactive)
+			if ! cli screenshot --portal-interactive --output "$run_dir/portal-screenshot.png" >"$run_dir/portal-screenshot.json" 2>"$run_dir/portal-screenshot-interactive.err"; then
+				if portal_screenshot_cancelled "$run_dir/portal-screenshot-interactive.err" && [[ "${SEATGEIST_PORTAL_SCREENSHOT_STRICT:-0}" != "1" ]]; then
+					skip_eval "portal-screenshot: portal cancelled or ended both noninteractive and interactive requests without a screenshot"
+					return 0
+				fi
+				cat "$run_dir/portal-screenshot-interactive.err" >&2
+				exit 1
+			fi
+		else
+			cat "$run_dir/portal-screenshot.err" >&2
+			exit 1
 		fi
-		cat "$run_dir/portal-screenshot.err" >&2
-		exit 1
 	fi
 	test -s "$run_dir/portal-screenshot.png"
 	jq -e '
@@ -922,6 +931,7 @@ eval_portal_screenshot() {
 		tile_height=600
 	fi
 	if ! cli screenshot-tile \
+		"${portal_interactive_args[@]}" \
 		--output "$run_dir/portal-screenshot-tile.png" \
 		--x 0 \
 		--y 0 \

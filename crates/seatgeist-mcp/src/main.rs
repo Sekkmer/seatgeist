@@ -285,6 +285,8 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                         .map(u64_to_u32)
                         .transpose()?,
                     full_resolution: optional_bool(arguments, "full_resolution")?.unwrap_or(false),
+                    portal_interactive: optional_bool(arguments, "portal_interactive")?
+                        .unwrap_or(false),
                 }),
                 None => None,
             };
@@ -301,6 +303,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 .map(u64_to_u32)
                 .transpose()?,
             full_resolution: optional_bool(arguments, "full_resolution")?.unwrap_or(false),
+            portal_interactive: optional_bool(arguments, "portal_interactive")?.unwrap_or(false),
         })),
         "seatgeist.screenshot_tile" => Ok(DaemonRequest::ScreenshotTile(ScreenshotTileRequest {
             output: optional_output_path(arguments, "output", "tile")?,
@@ -311,6 +314,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
             max_edge: optional_u64(arguments, "max_edge")?
                 .map(u64_to_u32)
                 .transpose()?,
+            portal_interactive: optional_bool(arguments, "portal_interactive")?.unwrap_or(false),
         })),
         "seatgeist.wait_for_change" => Ok(DaemonRequest::WaitForChange(WaitForChangeRequest {
             output: optional_output_path(arguments, "output", "wait-for-change")?,
@@ -1187,6 +1191,10 @@ fn tool_definitions() -> Vec<Value> {
                         "full_resolution",
                         json!({"type": "boolean", "description": "Capture the source image without downscaling. This is policy-gated separately and prompts by default."}),
                     ),
+                    (
+                        "portal_interactive",
+                        json!({"type": "boolean", "description": "When the portal Screenshot backend is selected, ask the portal to offer interactive capture UI. Defaults to false."}),
+                    ),
                 ],
                 vec![],
             ),
@@ -1209,6 +1217,10 @@ fn tool_definitions() -> Vec<Value> {
                         "full_resolution",
                         json!({"type": "boolean", "description": "Capture the source image without downscaling. This is policy-gated separately and prompts by default."}),
                     ),
+                    (
+                        "portal_interactive",
+                        json!({"type": "boolean", "description": "When the portal Screenshot backend is selected, ask the portal to offer interactive capture UI. Defaults to false."}),
+                    ),
                 ],
                 vec![],
             ),
@@ -1230,6 +1242,10 @@ fn tool_definitions() -> Vec<Value> {
                     (
                         "max_edge",
                         json!({"type": "integer", "minimum": 1, "description": "Output max edge in pixels. Defaults to the daemon safety config."}),
+                    ),
+                    (
+                        "portal_interactive",
+                        json!({"type": "boolean", "description": "When the portal Screenshot backend is selected for the tile source, ask the portal to offer interactive capture UI. Defaults to false."}),
                     ),
                 ],
                 vec!["x", "y", "width", "height"],
@@ -2888,6 +2904,7 @@ mod tests {
                 width: 640,
                 height: 480,
                 max_edge: Some(320),
+                portal_interactive: false,
             })
         );
     }
@@ -2901,6 +2918,7 @@ mod tests {
             assert_default_screenshot_path(&request.output, "screenshot");
             assert_eq!(request.max_edge, None);
             assert!(!request.full_resolution);
+            assert!(!request.portal_interactive);
         }
 
         let request = daemon_request_for_tool(
@@ -2917,6 +2935,7 @@ mod tests {
         if let DaemonRequest::ScreenshotTile(request) = request {
             assert_default_screenshot_path(&request.output, "tile");
             assert_eq!(request.max_edge, None);
+            assert!(!request.portal_interactive);
         }
 
         let request = daemon_request_for_tool("seatgeist.wait_for_change", &json!({}))
@@ -2945,6 +2964,7 @@ mod tests {
                 output: "/tmp/screen.png".into(),
                 max_edge: None,
                 full_resolution: false,
+                portal_interactive: false,
             })
         );
 
@@ -2967,6 +2987,7 @@ mod tests {
                 width: 640,
                 height: 480,
                 max_edge: None,
+                portal_interactive: false,
             })
         );
 
@@ -2983,6 +3004,7 @@ mod tests {
                     output: "/tmp/observe.png".into(),
                     max_edge: None,
                     full_resolution: false,
+                    portal_interactive: false,
                 }),
             })
         );
@@ -3001,6 +3023,50 @@ mod tests {
                 timeout_ms: DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS,
                 interval_ms: DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
                 threshold: DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
+            })
+        );
+    }
+
+    #[test]
+    fn maps_portal_interactive_screenshot_arguments() {
+        assert_eq!(
+            daemon_request_for_tool(
+                "seatgeist.screenshot",
+                &json!({
+                    "output": "/tmp/screen.png",
+                    "portal_interactive": true
+                }),
+            )
+            .expect("screenshot args map"),
+            DaemonRequest::Screenshot(ScreenshotRequest {
+                output: "/tmp/screen.png".into(),
+                max_edge: None,
+                full_resolution: false,
+                portal_interactive: true,
+            })
+        );
+
+        assert_eq!(
+            daemon_request_for_tool(
+                "seatgeist.screenshot_tile",
+                &json!({
+                    "output": "/tmp/tile.png",
+                    "x": 10,
+                    "y": 20,
+                    "width": 640,
+                    "height": 480,
+                    "portal_interactive": true
+                }),
+            )
+            .expect("tile args map"),
+            DaemonRequest::ScreenshotTile(ScreenshotTileRequest {
+                output: "/tmp/tile.png".into(),
+                x: 10,
+                y: 20,
+                width: 640,
+                height: 480,
+                max_edge: None,
+                portal_interactive: true,
             })
         );
     }
@@ -4025,6 +4091,7 @@ mod tests {
                     output: "/tmp/observe.png".into(),
                     max_edge: Some(1200),
                     full_resolution: false,
+                    portal_interactive: false,
                 }),
             })
         );

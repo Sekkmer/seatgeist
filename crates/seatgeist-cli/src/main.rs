@@ -61,6 +61,8 @@ enum Command {
         max_edge: Option<u32>,
         #[arg(long)]
         full_resolution: bool,
+        #[arg(long)]
+        portal_interactive: bool,
     },
     ScreenshotTile {
         #[arg(long)]
@@ -75,6 +77,8 @@ enum Command {
         height: u32,
         #[arg(long)]
         max_edge: Option<u32>,
+        #[arg(long)]
+        portal_interactive: bool,
     },
     Observe {
         #[arg(long)]
@@ -83,6 +87,8 @@ enum Command {
         max_edge: Option<u32>,
         #[arg(long)]
         full_resolution: bool,
+        #[arg(long)]
+        portal_interactive: bool,
     },
     WaitForChange {
         #[arg(long)]
@@ -707,6 +713,7 @@ fn main() -> Result<()> {
             output,
             max_edge,
             full_resolution,
+            portal_interactive,
         } => {
             let output = screenshot_output_or_default(output, "screenshot")?;
             print_daemon_response(
@@ -715,6 +722,7 @@ fn main() -> Result<()> {
                     output,
                     max_edge: if full_resolution { None } else { max_edge },
                     full_resolution,
+                    portal_interactive,
                 }),
             )?;
         }
@@ -725,6 +733,7 @@ fn main() -> Result<()> {
             width,
             height,
             max_edge,
+            portal_interactive,
         } => {
             let output = screenshot_output_or_default(output, "tile")?;
             print_daemon_response(
@@ -736,6 +745,7 @@ fn main() -> Result<()> {
                     width,
                     height,
                     max_edge,
+                    portal_interactive,
                 }),
             )?;
         }
@@ -743,6 +753,7 @@ fn main() -> Result<()> {
             screenshot_output,
             max_edge,
             full_resolution,
+            portal_interactive,
         } => print_daemon_response(
             &socket,
             DaemonRequest::Observe(ObserveRequest {
@@ -750,6 +761,7 @@ fn main() -> Result<()> {
                     output: output.into(),
                     max_edge: if full_resolution { None } else { max_edge },
                     full_resolution,
+                    portal_interactive,
                 }),
             }),
         )?,
