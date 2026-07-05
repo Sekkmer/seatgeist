@@ -14,7 +14,7 @@ Phase 1 first slice is implemented:
 - `plasma-pilotd` binds a Unix socket, enforces restrictive socket directory/socket permissions, and rejects clients from another UID using Unix peer credentials.
 - The daemon serves newline-delimited JSON requests for `health`, `capabilities`, and `policy_status`.
 - `plasma-pilot-cli doctor`, `capabilities`, and `policy-status` call the daemon over the Unix socket.
-- `make smoke` starts a temporary daemon, calls the CLI health/capability/policy commands, and verifies socket directory/socket modes.
+- `make smoke` starts a temporary daemon, calls the CLI health/capability/policy/session/readiness/journal commands, verifies socket directory/socket/journal modes, and is included in `make verify`.
 - The daemon and CLI can capture a full-screen PNG through Spectacle when run in the host KDE session. The smoke capture on this workstation returned a 7680x4320 source image.
 - Screenshot output now defaults to a bounded preview. On the 8K workstation, the default CLI screenshot produced a 1600x900 PNG with source/output dimensions and scale metadata. Full-resolution screenshot requests are explicit and policy-gated separately; they prompt/fail closed by default until the daemon is started with full-resolution screenshot approval.
 - Direct CLI screenshot commands and MCP screenshot tools now have a safe default output location: `plasma-pilot-cli screenshot`, `screenshot-tile`, `wait-for-change`, MCP `plasma.screenshot`, `plasma.screenshot_tile`, and `plasma.wait_for_change` write timestamped PNGs under `$XDG_RUNTIME_DIR/plasma-pilot/screenshots/` or the daemon-compatible `/run/user/<uid>/plasma-pilot/screenshots/` fallback when the output path is omitted.
