@@ -41,6 +41,34 @@
       },
       "expect_response_type": "desktop_session_status",
       "expect_ok": true
+    },
+    {
+      "label": "remote-desktop-eis-session-status-inactive",
+      "request": {
+        "method": "remote_desktop_eis_session_status"
+      },
+      "expect_response_type": "remote_desktop_eis_session_status",
+      "expect_ok": true,
+      "expect_json": [
+        {
+          "pointer": "/data/active",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "label": "remote-desktop-eis-stop-inactive",
+      "request": {
+        "method": "remote_desktop_eis_stop"
+      },
+      "expect_response_type": "remote_desktop_eis_session_status",
+      "expect_ok": true,
+      "expect_json": [
+        {
+          "pointer": "/data/active",
+          "equals": false
+        }
+      ]
     }
   ]
 }

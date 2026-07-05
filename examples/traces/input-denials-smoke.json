@@ -109,6 +109,19 @@
       "expect_response_type": "error",
       "expect_ok": false,
       "expect_error_contains": "policy prompt required for ControlPointer"
+    },
+    {
+      "label": "remote-desktop-eis-start-denied",
+      "request": {
+        "method": "remote_desktop_eis_start",
+        "keyboard": true,
+        "pointer": true,
+        "touchscreen": false,
+        "timeout_ms": 1000
+      },
+      "expect_response_type": "error",
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlPointer"
     }
   ]
 }
