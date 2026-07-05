@@ -136,6 +136,16 @@ pub trait EisEventSource {
     fn dispatch_pending_for_plan(&mut self, plan: &EisActionPlan) -> Vec<LibeiEventSnapshot>;
 }
 
+pub trait EisSelectedDeviceExecutor {
+    type Error;
+
+    fn apply_plan_to_selected_device(
+        &mut self,
+        selection: &EisDeviceSelection,
+        plan: &EisActionPlan,
+    ) -> std::result::Result<(), Self::Error>;
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EisPlanReadiness {
     pub snapshots: Vec<LibeiEventSnapshot>,
@@ -156,6 +166,20 @@ pub enum EisExecutionReadinessError {
 pub struct EisExecutionReadiness {
     pub snapshots: Vec<LibeiEventSnapshot>,
     pub selection: std::result::Result<EisDeviceSelection, EisExecutionReadinessError>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EisExecutedPlan {
+    pub snapshots: Vec<LibeiEventSnapshot>,
+    pub selection: EisDeviceSelection,
+}
+
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum EisPlanExecutionError<E> {
+    #[error(transparent)]
+    Readiness(#[from] EisExecutionReadinessError),
+    #[error("EIS selected-device executor failed: {0}")]
+    Executor(E),
 }
 
 pub struct EisSessionRuntime<S = LibeiSenderContext> {
@@ -223,6 +247,30 @@ impl<S: EisEventSource> EisSessionRuntime<S> {
             snapshots,
             selection,
         }
+    }
+}
+
+impl<S> EisSessionRuntime<S>
+where
+    S: EisEventSource + EisSelectedDeviceExecutor,
+{
+    pub fn execute_ready_plan(
+        &mut self,
+        plan: &EisActionPlan,
+    ) -> std::result::Result<EisExecutedPlan, EisPlanExecutionError<S::Error>> {
+        let snapshots = self.source.dispatch_pending_for_plan(plan);
+        self.state.apply_snapshots(snapshots.iter());
+        let selection = self
+            .state
+            .execution_readiness_for_plan(plan)
+            .map_err(EisPlanExecutionError::Readiness)?;
+        self.source
+            .apply_plan_to_selected_device(&selection, plan)
+            .map_err(EisPlanExecutionError::Executor)?;
+        Ok(EisExecutedPlan {
+            snapshots,
+            selection,
+        })
     }
 }
 
@@ -1130,6 +1178,19 @@ mod tests {
         event_fd: RawFd,
         pending_batches: VecDeque<Vec<LibeiEventSnapshot>>,
         plan_batches: VecDeque<Vec<LibeiEventSnapshot>>,
+        executed_plans: Vec<MockExecutedPlan>,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct MockExecutedPlan {
+        selection: EisDeviceSelection,
+        events: Vec<EisEvent>,
+    }
+
+    #[derive(Debug, Clone, Error, PartialEq, Eq)]
+    enum MockExecutionError {
+        #[error("mock executor rejected selected device")]
+        RejectedDevice,
     }
 
     impl MockEventSource {
@@ -1160,6 +1221,25 @@ mod tests {
 
         fn dispatch_pending_for_plan(&mut self, _plan: &EisActionPlan) -> Vec<LibeiEventSnapshot> {
             self.plan_batches.pop_front().unwrap_or_default()
+        }
+    }
+
+    impl EisSelectedDeviceExecutor for MockEventSource {
+        type Error = MockExecutionError;
+
+        fn apply_plan_to_selected_device(
+            &mut self,
+            selection: &EisDeviceSelection,
+            plan: &EisActionPlan,
+        ) -> std::result::Result<(), Self::Error> {
+            if selection.device_id == "rejected" {
+                return Err(MockExecutionError::RejectedDevice);
+            }
+            self.executed_plans.push(MockExecutedPlan {
+                selection: selection.clone(),
+                events: plan.events.clone(),
+            });
+            Ok(())
         }
     }
 
@@ -1662,6 +1742,96 @@ mod tests {
                 matched_region: Some(region(0.0, 0.0, 100.0, 100.0)),
             }
         );
+    }
+
+    #[test]
+    fn session_runtime_executes_plan_only_after_readiness() {
+        let plan = plan_text_utf8(1, "hello").expect("text plan");
+        let mut source = MockEventSource::default();
+        source.push_plan(vec![
+            LibeiEventSnapshot::Connect,
+            LibeiEventSnapshot::SeatAdded {
+                capabilities: vec![EisCapability::Text],
+                bound_capabilities: vec![EisCapability::Text],
+            },
+            LibeiEventSnapshot::DeviceResumed(device(
+                "text",
+                true,
+                vec![EisCapability::Text],
+                vec![],
+            )),
+        ]);
+        let mut runtime = EisSessionRuntime::new(source);
+
+        let report = runtime.execute_ready_plan(&plan).expect("plan executes");
+
+        assert_eq!(report.snapshots.len(), 3);
+        assert_eq!(report.selection.device_id, "text");
+        assert_eq!(runtime.source().executed_plans.len(), 1);
+        assert_eq!(
+            runtime.source().executed_plans[0].selection.device_id,
+            "text"
+        );
+        assert_eq!(runtime.source().executed_plans[0].events, plan.events);
+    }
+
+    #[test]
+    fn session_runtime_does_not_execute_without_readiness() {
+        let plan = plan_text_utf8(1, "hello").expect("text plan");
+        let mut source = MockEventSource::default();
+        source.push_plan(vec![
+            LibeiEventSnapshot::SeatAdded {
+                capabilities: vec![EisCapability::Text],
+                bound_capabilities: vec![EisCapability::Text],
+            },
+            LibeiEventSnapshot::DeviceResumed(device(
+                "text",
+                true,
+                vec![EisCapability::Text],
+                vec![],
+            )),
+        ]);
+        let mut runtime = EisSessionRuntime::new(source);
+
+        let err = runtime
+            .execute_ready_plan(&plan)
+            .expect_err("readiness failure prevents execution");
+
+        assert_eq!(
+            err,
+            EisPlanExecutionError::Readiness(EisExecutionReadinessError::NotConnected)
+        );
+        assert!(runtime.source().executed_plans.is_empty());
+    }
+
+    #[test]
+    fn session_runtime_reports_executor_failure() {
+        let plan = plan_text_utf8(1, "hello").expect("text plan");
+        let mut source = MockEventSource::default();
+        source.push_plan(vec![
+            LibeiEventSnapshot::Connect,
+            LibeiEventSnapshot::SeatAdded {
+                capabilities: vec![EisCapability::Text],
+                bound_capabilities: vec![EisCapability::Text],
+            },
+            LibeiEventSnapshot::DeviceResumed(device(
+                "rejected",
+                true,
+                vec![EisCapability::Text],
+                vec![],
+            )),
+        ]);
+        let mut runtime = EisSessionRuntime::new(source);
+
+        let err = runtime
+            .execute_ready_plan(&plan)
+            .expect_err("executor failure is surfaced");
+
+        assert_eq!(
+            err,
+            EisPlanExecutionError::Executor(MockExecutionError::RejectedDevice)
+        );
+        assert!(runtime.source().executed_plans.is_empty());
     }
 
     #[test]
