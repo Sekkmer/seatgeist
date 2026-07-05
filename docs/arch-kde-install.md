@@ -129,6 +129,7 @@ The matching safe smoke targets are:
 
 ```bash
 make smoke
+make smoke-trace-replay
 make smoke-mcp
 make smoke-capture-backends
 make smoke-uinput-status

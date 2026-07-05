@@ -1,7 +1,7 @@
 SHELL := /usr/bin/bash
 .ONESHELL:
 
-.PHONY: fmt check test clippy validate-plugin verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-gui-input smoke-mcp gui-eval gui-eval-control-safety install-kwin-script
+.PHONY: fmt check test clippy validate-plugin verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-trace-replay smoke-gui-input smoke-mcp gui-eval gui-eval-control-safety install-kwin-script
 
 fmt:
 	cargo fmt --all
@@ -372,6 +372,35 @@ smoke-pointer-calibration:
 	target/debug/plasma-pilot-cli --socket "$$socket" input pointer-calibration >"$$out"
 	jq -e '.type == "pointer_calibration" and .data.coordinate_space == "physical_pixel" and (.data.monitors | length) >= 1 and (.data.sample_points | length) >= 3' "$$out" >/dev/null
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "pointer_calibration"
+
+smoke-trace-replay:
+	set -euo pipefail
+	socket="/tmp/plasma-pilot-trace-smoke/plasma-pilotd.sock"
+	log="target/plasma-pilot-trace-smoke-daemon.log"
+	journal="target/plasma-pilot-trace-smoke-journal.jsonl"
+	out="target/plasma-pilot-trace-smoke.json"
+	rm -rf /tmp/plasma-pilot-trace-smoke "$$log" "$$journal" "$$out"
+	cargo build -p plasma-pilotd -p plasma-pilot-cli
+	target/debug/plasma-pilotd --socket "$$socket" --journal "$$journal" >"$$log" 2>&1 &
+	pid=$$!
+	cleanup() {
+		kill "$$pid" 2>/dev/null || true
+		wait "$$pid" 2>/dev/null || true
+	}
+	trap cleanup EXIT
+	for _ in {1..50}; do
+		if [[ -S "$$socket" ]]; then
+			break
+		fi
+		sleep 0.1
+	done
+	if [[ ! -S "$$socket" ]]; then
+		cat "$$log"
+		exit 1
+	fi
+	target/debug/plasma-pilot-cli --socket "$$socket" trace replay --file examples/traces/status-smoke.json >"$$out"
+	jq -e '.type == "trace_replay" and .trace_version == 1 and (.steps | length) == 5 and all(.steps[]; .ok == true) and any(.steps[]; .method == "safety_status")' "$$out" >/dev/null
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 --method safety_status --ok true | jq -e '.type == "journal" and (.data | length) >= 1' >/dev/null
 
 smoke-gui-input:
 	scripts/gui-input-smoke.sh text-editor
