@@ -41,6 +41,7 @@ socket="$socket_dir/seatgeistd.sock"
 log="$run_dir/daemon.log"
 journal="$run_dir/journal.jsonl"
 approval_file="$run_dir/approvals.jsonl"
+config_file="$run_dir/config.toml"
 web_root="$run_dir/web"
 profile_dir="$run_dir/firefox-profile"
 http_log="$run_dir/http.log"
@@ -64,6 +65,10 @@ app_id=""
 rm -rf "$run_dir" "$socket_dir"
 mkdir -p "$web_root" "$profile_dir"
 chmod 700 "$run_dir" "$profile_dir"
+cat >"$config_file" <<'TOML'
+[safety]
+require_focus_guard = false
+TOML
 
 cat >"$web_root/index.html" <<'HTML'
 <!doctype html>
@@ -169,7 +174,7 @@ http_pid=$!
 
 cargo build -p seatgeistd -p seatgeist-cli
 
-target/debug/seatgeistd --socket "$socket" --journal "$journal" --approval-file "$approval_file" >"$log" 2>&1 &
+target/debug/seatgeistd --socket "$socket" --journal "$journal" --approval-file "$approval_file" --config "$config_file" >"$log" 2>&1 &
 daemon_pid=$!
 
 cli() {
@@ -269,6 +274,9 @@ if [[ -n "$app_id" ]]; then
 	guard_args+=(--expected-active-app "$app_id")
 fi
 
+cli focus --window "$window_id" >"$focus_json"
+jq -e '.type == "action"' "$focus_json" >/dev/null
+
 for _ in {1..80}; do
 	if cli active-window >"$active_json" 2>/dev/null \
 		&& jq -e --arg id "$window_id" '
@@ -287,9 +295,6 @@ if ! jq -e --arg id "$window_id" '
 	cat "$active_json" >&2 || true
 	exit 1
 fi
-
-cli focus --window "$window_id" "${guard_args[@]}" >"$focus_json"
-jq -e '.type == "action"' "$focus_json" >/dev/null
 sleep 0.3
 
 button_x="$(jq -r '((.geometry.width * 0.50) | floor)' "$window_json")"

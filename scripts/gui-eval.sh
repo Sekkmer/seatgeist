@@ -105,7 +105,7 @@ if [[ "$case_name" == "all" || "$case_name" == "kwin-bridge-status" || "$case_na
 fi
 
 cargo build -p seatgeistd -p seatgeist-cli
-if [[ "$case_name" == "all" || "$case_name" == "screenshot-config-bounds" || "$case_name" == "journal-artifacts" ]]; then
+if [[ "$case_name" == "all" || "$case_name" == "screenshot-config-bounds" || "$case_name" == "journal-artifacts" || "$case_name" == "remote-desktop-probe" || "$case_name" == "remote-desktop-eis-session" ]]; then
 	cat >"$config_file" <<CONFIG
 [daemon]
 socket = "$socket"
@@ -118,6 +118,7 @@ include_artifact_metadata = $([[ "$case_name" == "journal-artifacts" ]] && echo 
 [safety]
 preview_max_edge = 800
 tile_max_edge = 640
+require_focus_guard = $([[ "$case_name" == "remote-desktop-probe" || "$case_name" == "remote-desktop-eis-session" ]] && echo false || echo true)
 CONFIG
 	daemon_args=(--config "$config_file")
 else
@@ -145,6 +146,66 @@ fi
 
 cli() {
 	target/debug/seatgeist-cli --socket "$socket" "$@"
+}
+
+grant_approval() {
+	local safety_class="$1"
+	local method="$2"
+	local reason="$3"
+	local output="$4"
+	cli approve \
+		--approval-file "$approval_file" \
+		--safety-class "$safety_class" \
+		--method "$method" \
+		--ttl-ms 120000 \
+		--reason "$reason" >"$output"
+	jq -e --arg method "$method" '.method == $method' "$output" >/dev/null
+}
+
+prime_active_window_metadata() {
+	local prefix="$1"
+	local active_json="$run_dir/${prefix}-active-window.json"
+	local active_err="$run_dir/${prefix}-active-window.err"
+	local windows_json="$run_dir/${prefix}-windows.json"
+	local focus_approval="$run_dir/${prefix}-focus-approval.json"
+	local focus_json="$run_dir/${prefix}-focus.json"
+
+	if cli active-window >"$active_json" 2>"$active_err" \
+		&& jq -e '.type == "active_window" and ((.data.title // "") != "" or (.data.id // "") != "")' "$active_json" >/dev/null; then
+		return 0
+	fi
+
+	cli windows >"$windows_json"
+	local window_id
+	window_id="$(jq -r '
+		[
+			.data[]
+			| select((.id // "") != "" and .geometry != null)
+			| select(
+				(((.app_id // "") | ascii_downcase | contains("keepass")) | not)
+				and (((.title // "") | ascii_downcase | contains("password")) | not)
+			)
+		][0].id // empty
+	' "$windows_json")"
+	if [[ -z "$window_id" ]]; then
+		return 1
+	fi
+
+	grant_approval control-semantic focus_window "gui-eval $prefix active-window prime" "$focus_approval"
+	cli focus --window "$window_id" >"$focus_json"
+	jq -e '.type == "action"' "$focus_json" >/dev/null
+
+	for _ in {1..50}; do
+		if cli active-window >"$active_json" 2>"$active_err" \
+			&& jq -e --arg id "$window_id" '
+				.type == "active_window"
+				and (.data.id == $id or ((.data.title // "") != ""))
+			' "$active_json" >/dev/null; then
+			return 0
+		fi
+		sleep 0.1
+	done
+	return 1
 }
 
 eval_status() {
@@ -882,7 +943,7 @@ eval_remote_desktop_probe() {
 		return 0
 	fi
 
-	cli active-window >"$run_dir/remote-desktop-active-window.json" 2>"$run_dir/remote-desktop-active-window.err" || true
+	prime_active_window_metadata "remote-desktop" || true
 	active_title="$(jq -r '.data.title // empty' "$run_dir/remote-desktop-active-window.json" 2>/dev/null || true)"
 	active_id="$(jq -r '.data.id // empty' "$run_dir/remote-desktop-active-window.json" 2>/dev/null || true)"
 	if [[ -z "$active_title" && -z "$active_id" ]]; then
@@ -897,12 +958,7 @@ eval_remote_desktop_probe() {
 		guard_args+=(--expected-active-window "$active_id")
 	fi
 
-	cli approve \
-		--approval-file "$approval_file" \
-		--safety-class control-pointer \
-		--method remote_desktop_session_probe \
-		--ttl-ms 120000 \
-		--reason "gui-eval remote-desktop-probe" >"$run_dir/remote-desktop-approval.json"
+	grant_approval control-pointer remote_desktop_session_probe "gui-eval remote-desktop-probe" "$run_dir/remote-desktop-approval.json"
 	jq -e '.method == "remote_desktop_session_probe" and .safety_class == "control_pointer"' "$run_dir/remote-desktop-approval.json" >/dev/null
 	test "$(stat -c '%a' "$approval_file")" = "600"
 
@@ -930,7 +986,7 @@ eval_remote_desktop_eis_session() {
 		return 0
 	fi
 
-	cli active-window >"$run_dir/remote-desktop-eis-active-window.json" 2>"$run_dir/remote-desktop-eis-active-window.err" || true
+	prime_active_window_metadata "remote-desktop-eis" || true
 	active_title="$(jq -r '.data.title // empty' "$run_dir/remote-desktop-eis-active-window.json" 2>/dev/null || true)"
 	active_id="$(jq -r '.data.id // empty' "$run_dir/remote-desktop-eis-active-window.json" 2>/dev/null || true)"
 	if [[ -z "$active_title" && -z "$active_id" ]]; then
@@ -945,26 +1001,11 @@ eval_remote_desktop_eis_session() {
 		guard_args+=(--expected-active-window "$active_id")
 	fi
 
-	cli approve \
-		--approval-file "$approval_file" \
-		--safety-class control-pointer \
-		--method remote_desktop_eis_start \
-		--ttl-ms 120000 \
-		--reason "gui-eval remote-desktop-eis-session start" >"$run_dir/remote-desktop-eis-start-approval.json"
+	grant_approval control-pointer remote_desktop_eis_start "gui-eval remote-desktop-eis-session start" "$run_dir/remote-desktop-eis-start-approval.json"
 	jq -e '.method == "remote_desktop_eis_start" and .safety_class == "control_pointer"' "$run_dir/remote-desktop-eis-start-approval.json" >/dev/null
-	cli approve \
-		--approval-file "$approval_file" \
-		--safety-class control-pointer \
-		--method scroll_pointer \
-		--ttl-ms 120000 \
-		--reason "gui-eval remote-desktop-eis-session minimal input" >"$run_dir/remote-desktop-eis-scroll-approval.json"
+	grant_approval control-pointer scroll_pointer "gui-eval remote-desktop-eis-session minimal input" "$run_dir/remote-desktop-eis-scroll-approval.json"
 	jq -e '.method == "scroll_pointer" and .safety_class == "control_pointer"' "$run_dir/remote-desktop-eis-scroll-approval.json" >/dev/null
-	cli approve \
-		--approval-file "$approval_file" \
-		--safety-class control-keyboard \
-		--method key_combo \
-		--ttl-ms 120000 \
-		--reason "gui-eval remote-desktop-eis-session keyboard input" >"$run_dir/remote-desktop-eis-key-combo-approval.json"
+	grant_approval control-keyboard key_combo "gui-eval remote-desktop-eis-session keyboard input" "$run_dir/remote-desktop-eis-key-combo-approval.json"
 	jq -e '.method == "key_combo" and .safety_class == "control_keyboard"' "$run_dir/remote-desktop-eis-key-combo-approval.json" >/dev/null
 	test "$(stat -c '%a' "$approval_file")" = "600"
 

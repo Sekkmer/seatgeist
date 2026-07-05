@@ -40,6 +40,7 @@ socket="$socket_dir/seatgeistd.sock"
 log="$run_dir/daemon.log"
 journal="$run_dir/journal.jsonl"
 approval_file="$run_dir/approvals.jsonl"
+config_file="$run_dir/config.toml"
 windows_json="$run_dir/windows.json"
 window_json="$run_dir/window.json"
 active_json="$run_dir/active-window.json"
@@ -58,10 +59,14 @@ app_id=""
 rm -rf "$run_dir" "$socket_dir"
 mkdir -p "$run_dir"
 chmod 700 "$run_dir"
+cat >"$config_file" <<'TOML'
+[safety]
+require_focus_guard = false
+TOML
 
 cargo build -p seatgeistd -p seatgeist-cli
 
-target/debug/seatgeistd --socket "$socket" --journal "$journal" --approval-file "$approval_file" >"$log" 2>&1 &
+target/debug/seatgeistd --socket "$socket" --journal "$journal" --approval-file "$approval_file" --config "$config_file" >"$log" 2>&1 &
 daemon_pid=$!
 
 cli() {
@@ -143,6 +148,9 @@ if [[ -n "$app_id" ]]; then
 	guard_args+=(--expected-active-app "$app_id")
 fi
 
+cli focus --window "$window_id" >"$focus_json"
+jq -e '.type == "action"' "$focus_json" >/dev/null
+
 for _ in {1..50}; do
 	if cli active-window >"$active_json" 2>/dev/null \
 		&& jq -e --arg id "$window_id" '
@@ -163,9 +171,6 @@ if ! jq -e --arg id "$window_id" '
 	cat "$active_json" >&2 || true
 	exit 1
 fi
-
-cli focus --window "$window_id" "${guard_args[@]}" >"$focus_json"
-jq -e '.type == "action"' "$focus_json" >/dev/null
 
 cli input key-combo Escape "${guard_args[@]}" >"$clear_json"
 jq -e '.type == "action"' "$clear_json" >/dev/null
