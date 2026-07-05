@@ -118,28 +118,38 @@ def check_simple_json_registry(registry: str, name: str, url: str, timeout: floa
     }
 
 
-def check_github(name: str, timeout: float) -> dict[str, Any]:
-    query = urllib.parse.urlencode({"q": f"{name} in:name", "per_page": "10"})
+def check_github_names(names: list[str], timeout: float) -> list[dict[str, Any]]:
+    query = urllib.parse.urlencode({"q": "seatgeist in:name", "per_page": "50"})
     url = f"https://api.github.com/search/repositories?{query}"
     status, value, error = request_json(url, timeout)
-    exact_matches: list[str] = []
+    matches_by_name = {name.lower(): [] for name in names}
     if isinstance(value, dict):
         for item in value.get("items", []):
-            if isinstance(item, dict) and str(item.get("name", "")).lower() == name.lower():
+            if not isinstance(item, dict):
+                continue
+            item_name = str(item.get("name", "")).lower()
+            if item_name in matches_by_name:
                 full_name = item.get("full_name")
                 if isinstance(full_name, str):
-                    exact_matches.append(full_name)
-    api_ok_without_exact_match = status is not None and 200 <= status < 300 and not exact_matches
-    state = "taken" if exact_matches else registry_state(404 if api_ok_without_exact_match else status, error)
-    return {
-        "registry": "github-repositories",
-        "name": name,
-        "url": url,
-        "status_code": status,
-        "state": state,
-        "exact_matches": exact_matches,
-        "error": error,
-    }
+                    matches_by_name[item_name].append(full_name)
+
+    checks = []
+    for name in names:
+        exact_matches = matches_by_name[name.lower()]
+        api_ok_without_exact_match = status is not None and 200 <= status < 300 and not exact_matches
+        state = "taken" if exact_matches else registry_state(404 if api_ok_without_exact_match else status, error)
+        checks.append(
+            {
+                "registry": "github-repositories",
+                "name": name,
+                "url": url,
+                "status_code": status,
+                "state": state,
+                "exact_matches": exact_matches,
+                "error": error,
+            }
+        )
+    return checks
 
 
 def build_report(names: list[str], timeout: float) -> dict[str, Any]:
@@ -164,7 +174,7 @@ def build_report(names: list[str], timeout: float) -> dict[str, Any]:
                 timeout,
             )
         )
-        checks.append(check_github(name, timeout))
+    checks.extend(check_github_names(names, timeout))
 
     collisions = [check for check in checks if check["state"] == "taken"]
     errors = [check for check in checks if check["state"] == "error"]
