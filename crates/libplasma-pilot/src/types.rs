@@ -214,6 +214,7 @@ pub enum BackendCapability {
     DaemonHealth,
     DaemonPolicyStatus,
     DaemonSafetyStatus,
+    DaemonDesktopSessionStatus,
     Screenshot,
     MonitorMetadata,
     WindowList,

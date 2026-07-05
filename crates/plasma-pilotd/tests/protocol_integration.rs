@@ -171,6 +171,7 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
     assert!(capabilities.contains(&libplasma_pilot::BackendCapability::DaemonHealth));
     assert!(capabilities.contains(&libplasma_pilot::BackendCapability::DaemonPolicyStatus));
     assert!(capabilities.contains(&libplasma_pilot::BackendCapability::DaemonSafetyStatus));
+    assert!(capabilities.contains(&libplasma_pilot::BackendCapability::DaemonDesktopSessionStatus));
 
     let safety = daemon.request(&DaemonRequest::SafetyStatus)?;
     assert_eq!(

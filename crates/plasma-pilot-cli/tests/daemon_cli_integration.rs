@@ -107,6 +107,7 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
     assert!(capabilities.contains(&BackendCapability::DaemonHealth));
     assert!(capabilities.contains(&BackendCapability::DaemonPolicyStatus));
     assert!(capabilities.contains(&BackendCapability::DaemonSafetyStatus));
+    assert!(capabilities.contains(&BackendCapability::DaemonDesktopSessionStatus));
 
     let policy = daemon.cli_json(&["policy-status"])?;
     assert_eq!(

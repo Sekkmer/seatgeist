@@ -2306,6 +2306,7 @@ fn current_capabilities() -> Vec<BackendCapability> {
         BackendCapability::DaemonHealth,
         BackendCapability::DaemonPolicyStatus,
         BackendCapability::DaemonSafetyStatus,
+        BackendCapability::DaemonDesktopSessionStatus,
     ];
     if command_exists("spectacle") || screenshot_portal_status().screenshot_interface_available {
         capabilities.push(BackendCapability::Screenshot);
