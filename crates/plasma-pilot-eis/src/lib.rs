@@ -142,6 +142,22 @@ pub struct EisPlanReadiness {
     pub selection: std::result::Result<EisDeviceSelection, EisDeviceSelectionError>,
 }
 
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum EisExecutionReadinessError {
+    #[error("EIS session is not connected")]
+    NotConnected,
+    #[error("EIS session has not bound required capabilities: {missing:?}")]
+    MissingBoundCapabilities { missing: Vec<EisCapability> },
+    #[error(transparent)]
+    DeviceSelection(#[from] EisDeviceSelectionError),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EisExecutionReadiness {
+    pub snapshots: Vec<LibeiEventSnapshot>,
+    pub selection: std::result::Result<EisDeviceSelection, EisExecutionReadinessError>,
+}
+
 pub struct EisSessionRuntime<S = LibeiSenderContext> {
     source: S,
     state: EisRuntimeState,
@@ -194,6 +210,16 @@ impl<S: EisEventSource> EisSessionRuntime<S> {
         self.state.apply_snapshots(snapshots.iter());
         let selection = self.state.select_device_for_plan(plan);
         EisPlanReadiness {
+            snapshots,
+            selection,
+        }
+    }
+
+    pub fn refresh_execution_readiness(&mut self, plan: &EisActionPlan) -> EisExecutionReadiness {
+        let snapshots = self.source.dispatch_pending_for_plan(plan);
+        self.state.apply_snapshots(snapshots.iter());
+        let selection = self.state.execution_readiness_for_plan(plan);
+        EisExecutionReadiness {
             snapshots,
             selection,
         }
@@ -278,6 +304,26 @@ impl EisRuntimeState {
         plan: &EisActionPlan,
     ) -> std::result::Result<EisDeviceSelection, EisDeviceSelectionError> {
         select_resumed_device_for_plan(plan, &self.devices)
+    }
+
+    pub fn execution_readiness_for_plan(
+        &self,
+        plan: &EisActionPlan,
+    ) -> std::result::Result<EisDeviceSelection, EisExecutionReadinessError> {
+        if !self.connected {
+            return Err(EisExecutionReadinessError::NotConnected);
+        }
+
+        let missing = unique_capabilities(&plan.required_capabilities)
+            .into_iter()
+            .filter(|capability| !self.bound_capabilities.contains(capability))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(EisExecutionReadinessError::MissingBoundCapabilities { missing });
+        }
+
+        self.select_device_for_plan(plan)
+            .map_err(EisExecutionReadinessError::DeviceSelection)
     }
 
     fn clear_connection(&mut self) {
@@ -1527,6 +1573,95 @@ mod tests {
             Err(EisDeviceSelectionError::NoCapableResumedDevice)
         );
         assert!(runtime.state().devices().is_empty());
+    }
+
+    #[test]
+    fn execution_readiness_requires_connected_session() {
+        let plan = plan_text_utf8(1, "hello").expect("text plan");
+        let mut state = EisRuntimeState::new();
+        state.apply_snapshots(
+            [
+                LibeiEventSnapshot::SeatAdded {
+                    capabilities: vec![EisCapability::Text],
+                    bound_capabilities: vec![EisCapability::Text],
+                },
+                LibeiEventSnapshot::DeviceResumed(device(
+                    "text",
+                    true,
+                    vec![EisCapability::Text],
+                    vec![],
+                )),
+            ]
+            .iter(),
+        );
+
+        assert_eq!(
+            state.execution_readiness_for_plan(&plan),
+            Err(EisExecutionReadinessError::NotConnected)
+        );
+    }
+
+    #[test]
+    fn execution_readiness_requires_bound_capabilities() {
+        let plan = plan_pointer_click_absolute(1, point(25.0, 25.0), PointerButton::Left, 1)
+            .expect("click plan");
+        let mut state = EisRuntimeState::new();
+        state.apply_snapshots(
+            [
+                LibeiEventSnapshot::Connect,
+                LibeiEventSnapshot::SeatAdded {
+                    capabilities: vec![EisCapability::PointerAbsolute, EisCapability::Button],
+                    bound_capabilities: vec![EisCapability::PointerAbsolute],
+                },
+                LibeiEventSnapshot::DeviceResumed(device(
+                    "pointer",
+                    true,
+                    vec![EisCapability::PointerAbsolute, EisCapability::Button],
+                    vec![region(0.0, 0.0, 100.0, 100.0)],
+                )),
+            ]
+            .iter(),
+        );
+
+        assert_eq!(
+            state.execution_readiness_for_plan(&plan),
+            Err(EisExecutionReadinessError::MissingBoundCapabilities {
+                missing: vec![EisCapability::Button],
+            })
+        );
+    }
+
+    #[test]
+    fn session_runtime_reports_execution_readiness() {
+        let plan = plan_pointer_click_absolute(1, point(20.0, 20.0), PointerButton::Left, 1)
+            .expect("click plan");
+        let mut source = MockEventSource::default();
+        source.push_plan(vec![
+            LibeiEventSnapshot::Connect,
+            LibeiEventSnapshot::SeatAdded {
+                capabilities: vec![EisCapability::PointerAbsolute, EisCapability::Button],
+                bound_capabilities: vec![EisCapability::PointerAbsolute, EisCapability::Button],
+            },
+            LibeiEventSnapshot::DeviceResumed(device(
+                "pointer",
+                true,
+                vec![EisCapability::PointerAbsolute, EisCapability::Button],
+                vec![region(0.0, 0.0, 100.0, 100.0)],
+            )),
+        ]);
+        let mut runtime = EisSessionRuntime::new(source);
+
+        let readiness = runtime.refresh_execution_readiness(&plan);
+
+        assert_eq!(readiness.snapshots.len(), 3);
+        assert_eq!(
+            readiness.selection.expect("selection"),
+            EisDeviceSelection {
+                device_id: "pointer".to_string(),
+                device_name: Some("device pointer".to_string()),
+                matched_region: Some(region(0.0, 0.0, 100.0, 100.0)),
+            }
+        );
     }
 
     #[test]

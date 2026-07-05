@@ -1887,11 +1887,11 @@ impl<S: plasma_pilot_eis::EisEventSource> DaemonPortalEisSession<S> {
     }
 
     #[cfg(test)]
-    fn refresh_for_plan(
+    fn refresh_execution_readiness(
         &mut self,
         plan: &plasma_pilot_eis::EisActionPlan,
-    ) -> plasma_pilot_eis::EisPlanReadiness {
-        self.runtime.refresh_for_plan(plan)
+    ) -> plasma_pilot_eis::EisExecutionReadiness {
+        self.runtime.refresh_execution_readiness(plan)
     }
 }
 
@@ -7638,16 +7638,21 @@ height = 40
     fn daemon_portal_eis_session_reports_plan_readiness() {
         let plan = plasma_pilot_eis::plan_text_utf8(1, "hello").expect("text plan");
         let mut source = MockEisSource::default();
-        source.push_plan(vec![plasma_pilot_eis::LibeiEventSnapshot::DeviceResumed(
-            plasma_pilot_eis::EisDeviceInfo {
+        source.push_plan(vec![
+            plasma_pilot_eis::LibeiEventSnapshot::Connect,
+            plasma_pilot_eis::LibeiEventSnapshot::SeatAdded {
+                capabilities: vec![plasma_pilot_eis::EisCapability::Text],
+                bound_capabilities: vec![plasma_pilot_eis::EisCapability::Text],
+            },
+            plasma_pilot_eis::LibeiEventSnapshot::DeviceResumed(plasma_pilot_eis::EisDeviceInfo {
                 id: "text-device".to_string(),
                 name: Some("Text Device".to_string()),
                 kind: plasma_pilot_eis::EisDeviceKind::Virtual,
                 resumed: true,
                 capabilities: vec![plasma_pilot_eis::EisCapability::Text],
                 regions: Vec::new(),
-            },
-        )]);
+            }),
+        ]);
         let runtime = plasma_pilot_eis::EisSessionRuntime::new(source);
         let mut session = DaemonPortalEisSession::from_runtime(
             portal_session_start_fixture(),
@@ -7655,7 +7660,7 @@ height = 40
             runtime,
         );
 
-        let readiness = session.refresh_for_plan(&plan);
+        let readiness = session.refresh_execution_readiness(&plan);
 
         assert_eq!(
             readiness.selection.expect("selection"),
