@@ -169,6 +169,7 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
             preview_max_edge: 1600,
             tile_max_edge: 1600,
             screenshot_redaction_count: 0,
+            journal_artifact_metadata_enabled: false,
         })
     );
 
@@ -295,6 +296,9 @@ socket = "__SOCKET__"
 journal = "__JOURNAL__"
 panic_stop_file = "__PANIC_STOP__"
 
+[journal]
+include_artifact_metadata = true
+
 [safety]
 require_focus_guard = false
 human_input_quiet_ms = 2500
@@ -318,6 +322,7 @@ tile_max_edge = 2048
             preview_max_edge: 1024,
             tile_max_edge: 2048,
             screenshot_redaction_count: 0,
+            journal_artifact_metadata_enabled: true,
         })
     );
     Ok(())

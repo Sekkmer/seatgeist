@@ -109,6 +109,9 @@ socket = "__SOCKET__"
 journal = "__JOURNAL__"
 panic_stop_file = "__PANIC_STOP__"
 
+[journal]
+include_artifact_metadata = true
+
 [policy]
 default_observe = "allow"
 default_control = "deny"
@@ -155,6 +158,7 @@ tile_max_edge = 2048
             preview_max_edge: 1024,
             tile_max_edge: 2048,
             screenshot_redaction_count: 0,
+            journal_artifact_metadata_enabled: true,
         })
     );
     Ok(())
@@ -211,6 +215,7 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
             preview_max_edge: 1600,
             tile_max_edge: 1600,
             screenshot_redaction_count: 0,
+            journal_artifact_metadata_enabled: false,
         })
     );
 

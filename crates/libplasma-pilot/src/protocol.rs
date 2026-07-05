@@ -49,6 +49,8 @@ pub struct SafetyStatus {
     pub preview_max_edge: u32,
     pub tile_max_edge: u32,
     pub screenshot_redaction_count: usize,
+    #[serde(default)]
+    pub journal_artifact_metadata_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1365,6 +1367,7 @@ mod tests {
             preview_max_edge: 1600,
             tile_max_edge: 1600,
             screenshot_redaction_count: 2,
+            journal_artifact_metadata_enabled: true,
         });
         let encoded = serde_json::to_string(&response).expect("safety response serializes");
         assert!(encoded.contains(r#""type":"safety_status""#));
@@ -1372,6 +1375,7 @@ mod tests {
         assert!(encoded.contains(r#""control_rate_limit_per_minute":120"#));
         assert!(encoded.contains(r#""preview_max_edge":1600"#));
         assert!(encoded.contains(r#""tile_max_edge":1600"#));
+        assert!(encoded.contains(r#""journal_artifact_metadata_enabled":true"#));
         assert_eq!(response.response_type(), "safety_status");
 
         let status = DaemonRequest::PanicStopStatus;

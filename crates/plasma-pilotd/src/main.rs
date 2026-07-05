@@ -1490,12 +1490,14 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
         DaemonRequest::PolicyStatus => {
             DaemonResponse::PolicyStatus(policy_status_from_config(runtime.policy.config()))
         }
-        DaemonRequest::SafetyStatus => match safety_status(&runtime.safety_settings) {
-            Ok(status) => DaemonResponse::SafetyStatus(status),
-            Err(err) => DaemonResponse::Error {
-                message: format_error_chain(&err),
-            },
-        },
+        DaemonRequest::SafetyStatus => {
+            match safety_status(&runtime.safety_settings, &runtime.journal.settings) {
+                Ok(status) => DaemonResponse::SafetyStatus(status),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
         DaemonRequest::DesktopSessionStatus => {
             DaemonResponse::DesktopSessionStatus(desktop_session_status_from_env(std::env::vars()))
         }
@@ -1914,7 +1916,10 @@ fn policy_status_from_config(config: &PolicyConfig) -> PolicyStatus {
     }
 }
 
-fn safety_status(settings: &SafetySettings) -> Result<SafetyStatus> {
+fn safety_status(
+    settings: &SafetySettings,
+    journal_settings: &JournalSettings,
+) -> Result<SafetyStatus> {
     let (human_input_signal_fresh, human_input_signal_age_ms) = human_input_signal_state(settings)?;
     Ok(SafetyStatus {
         require_focus_guard: settings.require_focus_guard,
@@ -1927,6 +1932,7 @@ fn safety_status(settings: &SafetySettings) -> Result<SafetyStatus> {
         preview_max_edge: settings.preview_max_edge,
         tile_max_edge: settings.tile_max_edge,
         screenshot_redaction_count: settings.screenshot_redactions.len(),
+        journal_artifact_metadata_enabled: journal_settings.include_artifact_metadata,
     })
 }
 
@@ -7172,7 +7178,7 @@ fn summarize_response(response: &DaemonResponse) -> String {
         }
         DaemonResponse::PolicyStatus(_) => "policy status".to_string(),
         DaemonResponse::SafetyStatus(status) => format!(
-            "safety focus_guard={} human_pause={} human_fresh={} control_rate_limit_per_minute={} preview_max_edge={} tile_max_edge={} redactions={}",
+            "safety focus_guard={} human_pause={} human_fresh={} control_rate_limit_per_minute={} preview_max_edge={} tile_max_edge={} redactions={} journal_artifacts={}",
             status.require_focus_guard,
             status.pause_on_human_input,
             status.human_input_signal_fresh,
@@ -7182,7 +7188,8 @@ fn summarize_response(response: &DaemonResponse) -> String {
                 .unwrap_or_else(|| "disabled".to_string()),
             status.preview_max_edge,
             status.tile_max_edge,
-            status.screenshot_redaction_count
+            status.screenshot_redaction_count,
+            status.journal_artifact_metadata_enabled
         ),
         DaemonResponse::DesktopSessionStatus(status) => format!(
             "desktop session type={} desktop={} dbus={} runtime={}",

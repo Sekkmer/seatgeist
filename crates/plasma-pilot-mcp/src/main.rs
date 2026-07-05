@@ -645,7 +645,7 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status.default_clipboard_write
         ),
         DaemonResponse::SafetyStatus(status) => format!(
-            "focus_guard={} human_pause={} human_signal_fresh={} human_quiet_ms={} control_rate_limit_per_minute={} preview_max_edge={} tile_max_edge={} redactions={}",
+            "focus_guard={} human_pause={} human_signal_fresh={} human_quiet_ms={} control_rate_limit_per_minute={} preview_max_edge={} tile_max_edge={} redactions={} journal_artifacts={}",
             status.require_focus_guard,
             status.pause_on_human_input,
             status.human_input_signal_fresh,
@@ -656,7 +656,8 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
                 .unwrap_or_else(|| "disabled".to_string()),
             status.preview_max_edge,
             status.tile_max_edge,
-            status.screenshot_redaction_count
+            status.screenshot_redaction_count,
+            status.journal_artifact_metadata_enabled
         ),
         DaemonResponse::DesktopSessionStatus(status) => format!(
             "desktop session type={} desktop={} kde={} wayland={} display={} dbus={} runtime={}",
@@ -878,7 +879,7 @@ fn tool_definitions() -> Vec<Value> {
         tool(
             "plasma.safety_status",
             "Safety Status",
-            "Read active daemon safety gates such as focus guards, human-input pause, and screenshot redaction count.",
+            "Read active daemon safety gates, screenshot bounds/redactions, and journal artifact metadata state.",
             object_schema(vec![], vec![]),
         ),
         tool(
@@ -2273,6 +2274,7 @@ mod tests {
                 preview_max_edge: 1600,
                 tile_max_edge: 1600,
                 screenshot_redaction_count: 2,
+                journal_artifact_metadata_enabled: true,
             }),
         );
         assert!(text.contains("focus_guard=true"));
@@ -2281,6 +2283,7 @@ mod tests {
         assert!(text.contains("preview_max_edge=1600"));
         assert!(text.contains("tile_max_edge=1600"));
         assert!(text.contains("redactions=2"));
+        assert!(text.contains("journal_artifacts=true"));
     }
 
     #[test]
