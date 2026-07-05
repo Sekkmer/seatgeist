@@ -604,11 +604,15 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status.default_clipboard_write
         ),
         DaemonResponse::SafetyStatus(status) => format!(
-            "focus_guard={} human_pause={} human_signal_fresh={} human_quiet_ms={} redactions={}",
+            "focus_guard={} human_pause={} human_signal_fresh={} human_quiet_ms={} control_rate_limit_per_minute={} redactions={}",
             status.require_focus_guard,
             status.pause_on_human_input,
             status.human_input_signal_fresh,
             status.human_input_quiet_ms,
+            status
+                .control_rate_limit_per_minute
+                .map(|limit| limit.to_string())
+                .unwrap_or_else(|| "disabled".to_string()),
             status.screenshot_redaction_count
         ),
         DaemonResponse::DesktopSessionStatus(status) => format!(
@@ -1903,11 +1907,13 @@ mod tests {
                 human_input_quiet_ms: 2500,
                 human_input_signal_fresh: true,
                 human_input_signal_age_ms: Some(100),
+                control_rate_limit_per_minute: Some(120),
                 screenshot_redaction_count: 2,
             }),
         );
         assert!(text.contains("focus_guard=true"));
         assert!(text.contains("human_signal_fresh=true"));
+        assert!(text.contains("control_rate_limit_per_minute=120"));
         assert!(text.contains("redactions=2"));
     }
 

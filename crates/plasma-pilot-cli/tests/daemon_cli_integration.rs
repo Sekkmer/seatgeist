@@ -133,6 +133,7 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
             human_input_quiet_ms: 1500,
             human_input_signal_fresh: false,
             human_input_signal_age_ms: None,
+            control_rate_limit_per_minute: Some(120),
             screenshot_redaction_count: 0,
         })
     );

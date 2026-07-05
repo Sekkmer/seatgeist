@@ -35,6 +35,7 @@ require_focus_guard = true
 pause_on_human_input = false
 human_input_activity_file = "$XDG_RUNTIME_DIR/plasma-pilot/human-input-active"
 human_input_quiet_ms = 1500
+control_rate_limit_per_minute = 120
 
 [[safety.redact_regions]]
 x = 0
@@ -73,7 +74,9 @@ When `[safety].require_focus_guard = true`, every control-class request must inc
 
 When `[safety].pause_on_human_input = true`, the daemon checks `human_input_activity_file` before control-class requests. If the file exists and its mtime is newer than `human_input_quiet_ms`, control is refused before backend execution. This is a file-backed signal for a future KDE/libinput watcher; observe, status, policy, and journal requests are unaffected.
 
-Use `plasma-pilot-cli safety-status` or MCP `plasma.safety_status` to verify the active safety gates before attempting control. The response includes focus-guard enforcement, human-input pause state, whether the activity signal is currently fresh, the quiet interval, the optional signal-file path, and the count of configured screenshot redaction regions without exposing redaction geometry. Use `plasma-pilot-cli desktop-session-status` or MCP `plasma.desktop_session_status` when diagnosing KDE, Wayland, DBus, portal, KWin, or AT-SPI setup; it reports sanitized session values and boolean DBus/runtime presence instead of raw paths.
+`[safety].control_rate_limit_per_minute` defaults to `120` and caps accepted control-class daemon requests over a rolling 60-second window. Set it to `0` only for a tightly scoped local development daemon. Observe, status, policy, and journal requests are unaffected, and denied preflight requests do not consume the control budget.
+
+Use `plasma-pilot-cli safety-status` or MCP `plasma.safety_status` to verify the active safety gates before attempting control. The response includes focus-guard enforcement, human-input pause state, whether the activity signal is currently fresh, the quiet interval, the optional signal-file path, the control rate limit, and the count of configured screenshot redaction regions without exposing redaction geometry. Use `plasma-pilot-cli desktop-session-status` or MCP `plasma.desktop_session_status` when diagnosing KDE, Wayland, DBus, portal, KWin, or AT-SPI setup; it reports sanitized session values and boolean DBus/runtime presence instead of raw paths.
 
 `[[safety.redact_regions]]` entries define physical-pixel source screenshot rectangles. The daemon maps each rectangle through the screenshot transform and black-fills the matching output pixels before returning screenshot, screenshot-tile, observe screenshot, or wait-for-change outputs. Zero-size regions are ignored.
 

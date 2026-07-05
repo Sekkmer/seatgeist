@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     env, fs,
     fs::OpenOptions,
     io::Write,
@@ -46,6 +47,8 @@ static SCREENSHOT_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 const SEMANTIC_CHOICE_LIMIT: usize = 5;
 const DEFAULT_REQUIRE_FOCUS_GUARD: bool = true;
 const DEFAULT_HUMAN_INPUT_QUIET_MS: u64 = 1500;
+const DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE: u32 = 120;
+const CONTROL_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 struct ActionJournal {
@@ -198,6 +201,49 @@ impl PanicStopState {
             }
         }
         Ok(self.status())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ControlRateLimiter {
+    limit_per_minute: Option<u32>,
+    accepted: Arc<Mutex<VecDeque<Instant>>>,
+}
+
+impl ControlRateLimiter {
+    fn new(limit_per_minute: Option<u32>) -> Self {
+        Self {
+            limit_per_minute,
+            accepted: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    fn check(&self, safety_class: &SafetyClass) -> Result<()> {
+        let Some(limit) = self.limit_per_minute else {
+            return Ok(());
+        };
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        let now = Instant::now();
+        let mut accepted = self
+            .accepted
+            .lock()
+            .map_err(|_| anyhow::anyhow!("control rate-limit lock is poisoned"))?;
+        while accepted
+            .front()
+            .is_some_and(|timestamp| now.duration_since(*timestamp) >= CONTROL_RATE_LIMIT_WINDOW)
+        {
+            accepted.pop_front();
+        }
+        if accepted.len() >= limit {
+            bail!(
+                "control rate limit exceeded for {:?}: {} accepted control requests in {}s; wait or adjust safety.control_rate_limit_per_minute",
+                safety_class,
+                limit,
+                CONTROL_RATE_LIMIT_WINDOW.as_secs()
+            );
+        }
+        accepted.push_back(now);
+        Ok(())
     }
 }
 
@@ -433,6 +479,7 @@ struct SafetyFileConfig {
     pause_on_human_input: Option<bool>,
     human_input_activity_file: Option<String>,
     human_input_quiet_ms: Option<u64>,
+    control_rate_limit_per_minute: Option<u32>,
     redact_regions: Option<Vec<RedactRegionFileConfig>>,
 }
 
@@ -450,6 +497,7 @@ struct SafetySettings {
     pause_on_human_input: bool,
     human_input_activity_file: Option<PathBuf>,
     human_input_quiet_ms: u64,
+    control_rate_limit_per_minute: Option<u32>,
     screenshot_redactions: Vec<RedactRegion>,
 }
 
@@ -578,6 +626,9 @@ async fn run(
         kwin_bridge_registered,
         journal,
         panic_stop,
+        control_rate_limiter: ControlRateLimiter::new(
+            safety_settings.control_rate_limit_per_minute,
+        ),
         approval_store,
         policy,
         app_policy,
@@ -634,6 +685,7 @@ struct DaemonRuntime {
     kwin_bridge_registered: bool,
     journal: ActionJournal,
     panic_stop: PanicStopState,
+    control_rate_limiter: ControlRateLimiter,
     approval_store: ApprovalStore,
     policy: PolicyEngine,
     app_policy: AppPolicy,
@@ -756,6 +808,11 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
     if let Err(err) =
         enforce_app_policy(&runtime.active_window_state, &runtime.app_policy, &request)
     {
+        return DaemonResponse::Error {
+            message: format_error_chain(&err),
+        };
+    }
+    if let Err(err) = enforce_control_rate_limit(&runtime.control_rate_limiter, &request) {
         return DaemonResponse::Error {
             message: format_error_chain(&err),
         };
@@ -1100,6 +1157,7 @@ fn safety_status(settings: &SafetySettings) -> Result<SafetyStatus> {
         human_input_quiet_ms: settings.human_input_quiet_ms,
         human_input_signal_fresh,
         human_input_signal_age_ms,
+        control_rate_limit_per_minute: settings.control_rate_limit_per_minute,
         screenshot_redaction_count: settings.screenshot_redactions.len(),
     })
 }
@@ -1327,6 +1385,10 @@ fn safety_settings(file_safety: Option<&SafetyFileConfig>) -> Result<SafetySetti
         human_input_quiet_ms: file_safety
             .and_then(|safety| safety.human_input_quiet_ms)
             .unwrap_or(DEFAULT_HUMAN_INPUT_QUIET_MS),
+        control_rate_limit_per_minute: file_safety
+            .and_then(|safety| safety.control_rate_limit_per_minute)
+            .map(|limit| if limit == 0 { None } else { Some(limit) })
+            .unwrap_or(Some(DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE)),
         screenshot_redactions,
     })
 }
@@ -1924,6 +1986,14 @@ fn enforce_human_input_pause(settings: &SafetySettings, request: &DaemonRequest)
         );
     }
     Ok(())
+}
+
+fn enforce_control_rate_limit(limiter: &ControlRateLimiter, request: &DaemonRequest) -> Result<()> {
+    let safety_class = safety_class_for_request(request);
+    if !is_control_safety_class(&safety_class) {
+        return Ok(());
+    }
+    limiter.check(&safety_class)
 }
 
 fn human_input_signal_state(settings: &SafetySettings) -> Result<(bool, Option<u64>)> {
@@ -4744,10 +4814,14 @@ fn summarize_response(response: &DaemonResponse) -> String {
         }
         DaemonResponse::PolicyStatus(_) => "policy status".to_string(),
         DaemonResponse::SafetyStatus(status) => format!(
-            "safety focus_guard={} human_pause={} human_fresh={} redactions={}",
+            "safety focus_guard={} human_pause={} human_fresh={} control_rate_limit_per_minute={} redactions={}",
             status.require_focus_guard,
             status.pause_on_human_input,
             status.human_input_signal_fresh,
+            status
+                .control_rate_limit_per_minute
+                .map(|limit| limit.to_string())
+                .unwrap_or_else(|| "disabled".to_string()),
             status.screenshot_redaction_count
         ),
         DaemonResponse::DesktopSessionStatus(status) => format!(
@@ -5452,6 +5526,7 @@ mod tests {
                 pause_on_human_input: None,
                 human_input_activity_file: None,
                 human_input_quiet_ms: None,
+                control_rate_limit_per_minute: None,
                 redact_regions: None,
             }))
             .expect("empty safety config resolves")
@@ -5463,6 +5538,7 @@ mod tests {
                 pause_on_human_input: None,
                 human_input_activity_file: None,
                 human_input_quiet_ms: None,
+                control_rate_limit_per_minute: None,
                 redact_regions: None,
             }))
             .expect("explicit focus guard opt-out resolves")
@@ -5477,6 +5553,7 @@ mod tests {
             pause_on_human_input: None,
             human_input_activity_file: None,
             human_input_quiet_ms: None,
+            control_rate_limit_per_minute: None,
             redact_regions: Some(vec![
                 RedactRegionFileConfig {
                     x: 10,
@@ -5515,6 +5592,7 @@ mod tests {
             pause_on_human_input: Some(true),
             human_input_activity_file: Some(path_text.clone()),
             human_input_quiet_ms: Some(2500),
+            control_rate_limit_per_minute: None,
             redact_regions: None,
         }))
         .expect("human input pause settings resolve");
@@ -5525,6 +5603,38 @@ mod tests {
             Some(PathBuf::from(path_text))
         );
         assert_eq!(settings.human_input_quiet_ms, 2500);
+    }
+
+    #[test]
+    fn safety_settings_from_config_resolves_control_rate_limit() {
+        assert_eq!(
+            safety_settings(None)
+                .expect("default safety settings resolve")
+                .control_rate_limit_per_minute,
+            Some(DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE)
+        );
+
+        let disabled = safety_settings(Some(&SafetyFileConfig {
+            require_focus_guard: None,
+            pause_on_human_input: None,
+            human_input_activity_file: None,
+            human_input_quiet_ms: None,
+            control_rate_limit_per_minute: Some(0),
+            redact_regions: None,
+        }))
+        .expect("disabled rate-limit setting resolves");
+        assert_eq!(disabled.control_rate_limit_per_minute, None);
+
+        let custom = safety_settings(Some(&SafetyFileConfig {
+            require_focus_guard: None,
+            pause_on_human_input: None,
+            human_input_activity_file: None,
+            human_input_quiet_ms: None,
+            control_rate_limit_per_minute: Some(3),
+            redact_regions: None,
+        }))
+        .expect("custom rate-limit setting resolves");
+        assert_eq!(custom.control_rate_limit_per_minute, Some(3));
     }
 
     #[test]
@@ -5666,6 +5776,7 @@ mod tests {
             pause_on_human_input: false,
             human_input_activity_file: None,
             human_input_quiet_ms: DEFAULT_HUMAN_INPUT_QUIET_MS,
+            control_rate_limit_per_minute: Some(DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE),
             screenshot_redactions: Vec::new(),
         };
 
@@ -5688,6 +5799,7 @@ mod tests {
             pause_on_human_input: false,
             human_input_activity_file: None,
             human_input_quiet_ms: DEFAULT_HUMAN_INPUT_QUIET_MS,
+            control_rate_limit_per_minute: Some(DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE),
             screenshot_redactions: Vec::new(),
         };
 
@@ -5734,6 +5846,7 @@ mod tests {
             pause_on_human_input: false,
             human_input_activity_file: None,
             human_input_quiet_ms: DEFAULT_HUMAN_INPUT_QUIET_MS,
+            control_rate_limit_per_minute: Some(DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE),
             screenshot_redactions: Vec::new(),
         };
 
@@ -5762,6 +5875,7 @@ mod tests {
             pause_on_human_input: true,
             human_input_activity_file: Some(path.clone()),
             human_input_quiet_ms: 60_000,
+            control_rate_limit_per_minute: Some(DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE),
             screenshot_redactions: Vec::new(),
         };
 
@@ -5789,6 +5903,7 @@ mod tests {
             pause_on_human_input: true,
             human_input_activity_file: Some(missing_path),
             human_input_quiet_ms: 60_000,
+            control_rate_limit_per_minute: Some(DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE),
             screenshot_redactions: Vec::new(),
         };
         enforce_human_input_pause(&settings, &DaemonRequest::ListWindows)
@@ -5809,6 +5924,7 @@ mod tests {
             pause_on_human_input: true,
             human_input_activity_file: Some(path.clone()),
             human_input_quiet_ms: 0,
+            control_rate_limit_per_minute: Some(DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE),
             screenshot_redactions: Vec::new(),
         };
         std::thread::sleep(Duration::from_millis(2));
@@ -5821,6 +5937,29 @@ mod tests {
         )
         .expect("quiet human input signal does not block control");
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn control_rate_limiter_blocks_excess_control_requests_only() {
+        let limiter = ControlRateLimiter::new(Some(2));
+        enforce_control_rate_limit(&limiter, &DaemonRequest::ListWindows)
+            .expect("observe request is not rate-limited");
+        let request = DaemonRequest::TypeText(TypeTextRequest {
+            text: "hello".to_string(),
+            guard: None,
+        });
+
+        enforce_control_rate_limit(&limiter, &request).expect("first control request is allowed");
+        enforce_control_rate_limit(&limiter, &request).expect("second control request is allowed");
+        let err = enforce_control_rate_limit(&limiter, &request)
+            .expect_err("third control request exceeds limit");
+        assert!(err.to_string().contains("control rate limit exceeded"));
+
+        let disabled = ControlRateLimiter::new(None);
+        for _ in 0..3 {
+            enforce_control_rate_limit(&disabled, &request)
+                .expect("disabled control rate limit never blocks");
+        }
     }
 
     #[test]
@@ -5853,6 +5992,7 @@ require_focus_guard = true
 pause_on_human_input = true
 human_input_activity_file = "$XDG_RUNTIME_DIR/plasma-pilot/human-input-active"
 human_input_quiet_ms = 2500
+control_rate_limit_per_minute = 60
 
 [[safety.redact_regions]]
 x = 10
@@ -5899,6 +6039,7 @@ height = 40
             Some("$XDG_RUNTIME_DIR/plasma-pilot/human-input-active")
         );
         assert_eq!(safety.human_input_quiet_ms, Some(2500));
+        assert_eq!(safety.control_rate_limit_per_minute, Some(60));
         assert_eq!(
             safety
                 .redact_regions

@@ -12,6 +12,7 @@ Default rules:
 - Focus guards should be supplied for pointer, keyboard, and semantic control actions whenever the caller has active-window context.
 - Daemon requests are journaled as compact JSONL records with restrictive file permissions. Journal entries include safety class and guard/context metadata, but must not store raw request payload text or screenshot contents.
 - Daemon requests pass through the policy engine before execution; prompt-level decisions fail closed unless a configured approval file contains a matching unexpired method/safety-class grant.
+- Accepted control-class requests are rate-limited by `[safety].control_rate_limit_per_minute`, which defaults to `120` over a rolling 60-second window. Observe/status requests are not counted.
 - The daemon reads optional path and policy defaults from `~/.config/plasma-pilot/config.toml` or `--config` / `PLASMA_PILOT_CONFIG`. Explicit CLI/env approval flags override file policy defaults for intentional local sessions.
 - Approval files are opt-in through `--approval-file`, `PLASMA_PILOT_APPROVAL_FILE`, or `[daemon].approval_file`; the daemon rejects approval files that are not regular files, not owned by the daemon uid, readable/writable/executable by group or other, or located in a parent directory writable by group or other.
 - Configured app deny rules block control-class actions before backend execution. If an app allow list is configured, control-class actions require a matching app id; deny rules take precedence.
