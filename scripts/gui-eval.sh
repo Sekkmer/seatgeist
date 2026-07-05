@@ -276,6 +276,45 @@ eval_portal_screenshot() {
 	' "$run_dir/portal-screenshot.json" >/dev/null
 	cli journal tail --limit 20 --method screenshot --ok true >"$run_dir/portal-screenshot-journal.json"
 	jq -e '.type == "journal" and any(.data[]; .summary | contains("backend=portal_screenshot"))' "$run_dir/portal-screenshot-journal.json" >/dev/null
+
+	source_width="$(jq -r '.data.source_width' "$run_dir/portal-screenshot.json")"
+	source_height="$(jq -r '.data.source_height' "$run_dir/portal-screenshot.json")"
+	tile_width="$source_width"
+	tile_height="$source_height"
+	if (( tile_width > 800 )); then
+		tile_width=800
+	fi
+	if (( tile_height > 600 )); then
+		tile_height=600
+	fi
+	if ! cli screenshot-tile \
+		--output "$run_dir/portal-screenshot-tile.png" \
+		--x 0 \
+		--y 0 \
+		--width "$tile_width" \
+		--height "$tile_height" >"$run_dir/portal-screenshot-tile.json" 2>"$run_dir/portal-screenshot-tile.err"; then
+		if grep -qi "portal screenshot request was cancelled or ended without a screenshot" "$run_dir/portal-screenshot-tile.err" && [[ "${PLASMA_PILOT_PORTAL_SCREENSHOT_STRICT:-0}" != "1" ]]; then
+			echo "SKIP portal-screenshot tile: portal cancelled or ended the tile source request without a screenshot"
+			return 0
+		fi
+		cat "$run_dir/portal-screenshot-tile.err" >&2
+		exit 1
+	fi
+	test -s "$run_dir/portal-screenshot-tile.png"
+	jq -e '
+		.type == "screenshot"
+		and .data.backend == "portal_screenshot"
+		and .data.source_width >= .data.output_width
+		and .data.source_height >= .data.output_height
+		and .data.output_width <= 800
+		and .data.output_height <= 600
+		and .data.transform.source_origin_x == 0
+		and .data.transform.source_origin_y == 0
+		and .data.transform.scale_x > 0
+		and .data.transform.scale_y > 0
+	' "$run_dir/portal-screenshot-tile.json" >/dev/null
+	cli journal tail --limit 20 --method screenshot_tile --ok true >"$run_dir/portal-screenshot-tile-journal.json"
+	jq -e '.type == "journal" and any(.data[]; .summary | contains("backend=portal_screenshot"))' "$run_dir/portal-screenshot-tile-journal.json" >/dev/null
 }
 
 eval_remote_desktop_probe() {
