@@ -8,9 +8,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use libplasma_pilot::{
-    BackendCapability, CapabilitySet, DaemonRequest, DaemonResponse, DesktopSessionStatus,
-    HealthStatus, JournalEntry, PanicStopStatus, PolicyStatus, ReplayTrace, SafetyStatus,
-    ToolApprovalLevel, TraceStep, UinputStatus,
+    BackendCapability, CapabilitySet, ClipboardGetRequest, DaemonRequest, DaemonResponse,
+    DesktopSessionStatus, HealthStatus, JournalEntry, PanicStopStatus, PolicyStatus, ReplayTrace,
+    SafetyStatus, ToolApprovalLevel, TraceStep, UinputStatus,
 };
 use std::os::unix::fs::PermissionsExt;
 
@@ -551,6 +551,124 @@ fn cli_validate_rejects_unknown_expected_response_type() -> Result<()> {
 }
 
 #[test]
+fn cli_validate_rejects_contradictory_error_expectations() -> Result<()> {
+    let root = unique_temp_dir();
+    fs::create_dir_all(&root).context("create integration temp dir")?;
+
+    let non_error_response_trace = root.join("non-error-response-trace.json");
+    let trace = ReplayTrace {
+        version: 1,
+        description: Some("contradictory response type trace".to_string()),
+        steps: vec![TraceStep {
+            label: Some("health-error-text".to_string()),
+            request: DaemonRequest::Health,
+            expect_response_type: Some("health".to_string()),
+            expect_ok: None,
+            expect_error_contains: Some("policy prompt required".to_string()),
+        }],
+    };
+    fs::write(
+        &non_error_response_trace,
+        serde_json::to_string_pretty(&trace).context("serialize bad trace")?,
+    )
+    .context("write bad trace file")?;
+
+    let trace_arg = non_error_response_trace.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+        .args(["trace", "validate", "--file", &trace_arg])
+        .output()
+        .context("run plasma-pilot-cli trace validate")?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(r#"trace step 0 label="health-error-text" method=health"#),
+        "stderr did not include trace step context: {stderr}"
+    );
+    assert!(
+        stderr.contains("expects error text but expect_response_type is health"),
+        "stderr did not include response-type contradiction: {stderr}"
+    );
+
+    let ok_true_trace = root.join("ok-true-error-trace.json");
+    let trace = ReplayTrace {
+        version: 1,
+        description: Some("contradictory ok trace".to_string()),
+        steps: vec![TraceStep {
+            label: Some("ok-error-text".to_string()),
+            request: DaemonRequest::ClipboardGet(ClipboardGetRequest {
+                max_bytes: Some(64),
+            }),
+            expect_response_type: Some("error".to_string()),
+            expect_ok: Some(true),
+            expect_error_contains: Some("policy prompt required".to_string()),
+        }],
+    };
+    fs::write(
+        &ok_true_trace,
+        serde_json::to_string_pretty(&trace).context("serialize bad trace")?,
+    )
+    .context("write bad trace file")?;
+
+    let trace_arg = ok_true_trace.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+        .args(["trace", "validate", "--file", &trace_arg])
+        .output()
+        .context("run plasma-pilot-cli trace validate")?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(r#"trace step 0 label="ok-error-text" method=clipboard_get"#),
+        "stderr did not include trace step context: {stderr}"
+    );
+    assert!(
+        stderr.contains("expects error text but expect_ok is true"),
+        "stderr did not include ok contradiction: {stderr}"
+    );
+
+    let empty_error_trace = root.join("empty-error-trace.json");
+    let trace = ReplayTrace {
+        version: 1,
+        description: Some("empty error expectation trace".to_string()),
+        steps: vec![TraceStep {
+            label: Some("empty-error-text".to_string()),
+            request: DaemonRequest::ClipboardGet(ClipboardGetRequest {
+                max_bytes: Some(64),
+            }),
+            expect_response_type: Some("error".to_string()),
+            expect_ok: Some(false),
+            expect_error_contains: Some("   ".to_string()),
+        }],
+    };
+    fs::write(
+        &empty_error_trace,
+        serde_json::to_string_pretty(&trace).context("serialize bad trace")?,
+    )
+    .context("write bad trace file")?;
+
+    let trace_arg = empty_error_trace.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+        .args(["trace", "validate", "--file", &trace_arg])
+        .output()
+        .context("run plasma-pilot-cli trace validate")?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(r#"trace step 0 label="empty-error-text" method=clipboard_get"#),
+        "stderr did not include trace step context: {stderr}"
+    );
+    assert!(
+        stderr.contains("expect_error_contains must not be empty"),
+        "stderr did not include empty error detail: {stderr}"
+    );
+
+    fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+#[test]
 fn cli_replay_errors_include_step_label_and_method() -> Result<()> {
     let daemon = DaemonFixture::start()?;
     let trace_path = daemon.root.join("bad-status-trace.json");
@@ -595,11 +713,13 @@ fn cli_replay_errors_include_step_context_for_error_expectations() -> Result<()>
         version: 1,
         description: Some("intentionally mismatched error expectation trace".to_string()),
         steps: vec![TraceStep {
-            label: Some("bad-health-error".to_string()),
-            request: DaemonRequest::Health,
-            expect_response_type: Some("health".to_string()),
-            expect_ok: Some(true),
-            expect_error_contains: Some("policy prompt required".to_string()),
+            label: Some("bad-clipboard-error".to_string()),
+            request: DaemonRequest::ClipboardGet(ClipboardGetRequest {
+                max_bytes: Some(64),
+            }),
+            expect_response_type: Some("error".to_string()),
+            expect_ok: Some(false),
+            expect_error_contains: Some("full resolution".to_string()),
         }],
     };
     fs::write(
@@ -614,13 +734,11 @@ fn cli_replay_errors_include_step_context_for_error_expectations() -> Result<()>
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains(r#"trace step 0 label="bad-health-error" method=health"#),
+        stderr.contains(r#"trace step 0 label="bad-clipboard-error" method=clipboard_get"#),
         "stderr did not include trace step context: {stderr}"
     );
     assert!(
-        stderr.contains(
-            r#"expected error containing "policy prompt required", got response type health"#
-        ),
+        stderr.contains(r#"expected error containing "full resolution""#),
         "stderr did not include error-expectation mismatch detail: {stderr}"
     );
     Ok(())

@@ -1459,6 +1459,28 @@ fn validate_trace(trace: &ReplayTrace) -> Result<()> {
                 trace_step_context(index, step)
             );
         }
+        if let Some(expected_error) = &step.expect_error_contains {
+            if expected_error.trim().is_empty() {
+                bail!(
+                    "trace {} expect_error_contains must not be empty",
+                    trace_step_context(index, step)
+                );
+            }
+            if let Some(expected_response_type) = &step.expect_response_type
+                && expected_response_type != "error"
+            {
+                bail!(
+                    "trace {} expects error text but expect_response_type is {expected_response_type}",
+                    trace_step_context(index, step)
+                );
+            }
+            if step.expect_ok == Some(true) {
+                bail!(
+                    "trace {} expects error text but expect_ok is true",
+                    trace_step_context(index, step)
+                );
+            }
+        }
     }
     Ok(())
 }
