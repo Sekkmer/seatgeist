@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "description": "Safe journal-tail replay trace for verifying compact default journal records and filters.",
+  "steps": [
+    {
+      "label": "health-for-journal",
+      "request": {
+        "method": "health"
+      },
+      "expect_response_type": "health",
+      "expect_ok": true
+    },
+    {
+      "label": "policy-for-journal",
+      "request": {
+        "method": "policy_status"
+      },
+      "expect_response_type": "policy_status",
+      "expect_ok": true
+    },
+    {
+      "label": "journal-tail-health-filter",
+      "request": {
+        "method": "journal_tail",
+        "limit": 10,
+        "method_filter": "health",
+        "ok": true
+      },
+      "expect_response_type": "journal",
+      "expect_ok": true,
+      "expect_json": [
+        {
+          "pointer": "/data",
+          "value_type": "array"
+        },
+        {
+          "pointer": "/data/0/method",
+          "equals": "health"
+        },
+        {
+          "pointer": "/data/0/ok",
+          "equals": true
+        },
+        {
+          "pointer": "/data/0/client/tool",
+          "equals": "plasma-pilot-cli"
+        },
+        {
+          "pointer": "/data/0/safety_class",
+          "equals": "policy"
+        },
+        {
+          "pointer": "/data/0/summary",
+          "value_type": "string"
+        },
+        {
+          "pointer": "/data/0/control",
+          "exists": false
+        },
+        {
+          "pointer": "/data/0/artifacts",
+          "exists": false
+        }
+      ]
+    }
+  ]
+}

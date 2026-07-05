@@ -681,6 +681,21 @@ fn cli_replays_trace_directory_against_real_daemon() -> Result<()> {
         traces.iter().any(|trace| {
             trace["file"]
                 .as_str()
+                .is_some_and(|path| path.ends_with("journal-tail-smoke.json"))
+                && trace["steps"].as_array().is_some_and(|steps| {
+                    steps.len() == 3
+                        && steps.iter().all(|step| step["ok"] == true)
+                        && steps.iter().any(|step| {
+                            step["method"] == "journal_tail" && step["response_type"] == "journal"
+                        })
+                })
+        }),
+        "journal-tail replay trace did not report compact journal output: {traces:?}"
+    );
+    assert!(
+        traces.iter().any(|trace| {
+            trace["file"]
+                .as_str()
                 .is_some_and(|path| path.ends_with("policy-denials-smoke.json"))
                 && trace["steps"].as_array().is_some_and(|steps| {
                     steps
@@ -898,6 +913,28 @@ fn cli_validate_directory_rejects_empty_trace_set() -> Result<()> {
     );
 
     fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+#[test]
+fn cli_validates_journal_tail_trace_expectations() -> Result<()> {
+    let trace_path = workspace_root().join("examples/traces/journal-tail-smoke.json");
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+        .args(["trace", "validate", "--file", &trace_arg])
+        .output()
+        .context("run plasma-pilot-cli trace validate")?;
+    require_success(&["trace", "validate"], &output)?;
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("parse trace validation report")?;
+    assert_eq!(report["type"], "trace_validation");
+    assert_eq!(report["step_count"], 3);
+    assert_eq!(report["steps"][0]["method"], "health");
+    assert_eq!(report["steps"][1]["method"], "policy_status");
+    assert_eq!(report["steps"][2]["method"], "journal_tail");
+    assert_eq!(report["steps"][2]["expect_response_type"], "journal");
+    assert_eq!(report["steps"][2]["expect_json_count"], 8);
     Ok(())
 }
 
