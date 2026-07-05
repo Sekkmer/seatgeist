@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
 	cat <<'USAGE'
-Usage: scripts/gui-eval.sh [all|status|observe|clipboard-denied|keymap-status|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|portal-screenshot|remote-desktop-probe|remote-desktop-eis-session|full-resolution-denied|control-safety]
+Usage: scripts/gui-eval.sh [all|status|observe|clipboard-denied|kwin-bridge-status|keymap-status|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|portal-screenshot|remote-desktop-probe|remote-desktop-eis-session|full-resolution-denied|control-safety]
 
 Runs opt-in local GUI evals against a private PlasmaPilot daemon socket.
 The default `all` set avoids control actions. `control-safety` starts a private
@@ -19,7 +19,7 @@ if [[ "$case_name" == "--help" || "$case_name" == "-h" ]]; then
 fi
 
 case "$case_name" in
-	all | status | observe | clipboard-denied | keymap-status | screenshot-preview | screenshot-coordinate-map | screenshot-config-bounds | portal-screenshot | remote-desktop-probe | remote-desktop-eis-session | full-resolution-denied | control-safety) ;;
+	all | status | observe | clipboard-denied | kwin-bridge-status | keymap-status | screenshot-preview | screenshot-coordinate-map | screenshot-config-bounds | portal-screenshot | remote-desktop-probe | remote-desktop-eis-session | full-resolution-denied | control-safety) ;;
 	*)
 		usage >&2
 		exit 2
@@ -143,6 +143,22 @@ eval_clipboard_denied() {
 		exit 1
 	fi
 	grep -qi "policy" "$run_dir/clipboard-denied.txt"
+}
+
+eval_kwin_bridge_status() {
+	cli kwin-bridge-status >"$run_dir/kwin-bridge-status.json"
+	jq -e '
+		.type == "kwin_bridge_status"
+		and (.data.dbus_service_registered | type == "boolean")
+		and (.data.active_window_update_seen | type == "boolean")
+		and (.data.package_installed | type == "boolean")
+		and (
+			(.data.script_enabled | type == "boolean")
+			or (.data.script_enabled == null)
+		)
+	' "$run_dir/kwin-bridge-status.json" >/dev/null
+	cli journal tail --limit 20 --method kwin_bridge_status --ok true >"$run_dir/kwin-bridge-status-journal.json"
+	jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/kwin-bridge-status-journal.json" >/dev/null
 }
 
 eval_keymap_status() {
@@ -600,6 +616,7 @@ run_case() {
 		status) eval_status ;;
 		observe) eval_observe ;;
 		clipboard-denied) eval_clipboard_denied ;;
+		kwin-bridge-status) eval_kwin_bridge_status ;;
 		keymap-status) eval_keymap_status ;;
 		screenshot-preview) eval_screenshot_preview ;;
 		screenshot-coordinate-map) eval_screenshot_coordinate_map ;;
@@ -613,7 +630,7 @@ run_case() {
 }
 
 if [[ "$case_name" == "all" ]]; then
-	for eval_name in status observe clipboard-denied keymap-status screenshot-preview screenshot-coordinate-map screenshot-config-bounds full-resolution-denied; do
+	for eval_name in status observe clipboard-denied kwin-bridge-status keymap-status screenshot-preview screenshot-coordinate-map screenshot-config-bounds full-resolution-denied; do
 		run_case "$eval_name"
 	done
 else
