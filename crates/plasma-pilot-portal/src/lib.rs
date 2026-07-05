@@ -19,6 +19,7 @@ pub enum PortalContractError {
     MissingScreenshotUri,
     UnsupportedUri(String),
     InvalidPercentEncoding(String),
+    Transport(String),
 }
 
 impl fmt::Display for PortalContractError {
@@ -52,6 +53,7 @@ impl fmt::Display for PortalContractError {
             Self::InvalidPercentEncoding(uri) => {
                 write!(formatter, "invalid percent-encoding in portal uri: {uri}")
             }
+            Self::Transport(message) => write!(formatter, "portal transport failed: {message}"),
         }
     }
 }
@@ -148,6 +150,26 @@ pub struct BusctlPortalCall {
     pub args: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortalRequestResponse {
+    pub response: PortalResponseCode,
+    pub uri: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortalScreenshotCapture {
+    pub expected_handle_path: String,
+    pub actual_handle_path: String,
+    pub uri: String,
+    pub path: PathBuf,
+}
+
+pub trait PortalScreenshotTransport {
+    fn unique_sender_name(&mut self) -> Result<String>;
+    fn call_screenshot(&mut self, options: &PortalScreenshotOptions) -> Result<String>;
+    fn wait_for_response(&mut self, handle_path: &str) -> Result<PortalRequestResponse>;
+}
+
 pub fn screenshot_busctl_call(options: &PortalScreenshotOptions) -> Result<BusctlPortalCall> {
     options.validate()?;
     let mut args = vec![
@@ -189,6 +211,31 @@ pub fn request_response_match_rule(handle_path: &str) -> String {
     )
 }
 
+pub fn request_screenshot<T>(
+    transport: &mut T,
+    options: &PortalScreenshotOptions,
+) -> Result<Option<PortalScreenshotCapture>>
+where
+    T: PortalScreenshotTransport,
+{
+    options.validate()?;
+    let sender = transport.unique_sender_name()?;
+    let expected_handle_path = expected_request_path(&sender, &options.handle_token)?;
+    let actual_handle_path = transport.call_screenshot(options)?;
+    validate_request_path(&actual_handle_path)?;
+    let response = transport.wait_for_response(&actual_handle_path)?;
+    let Some(uri) = parse_screenshot_uri(response.response, response.uri.as_deref())? else {
+        return Ok(None);
+    };
+    let path = file_uri_to_path(&uri)?;
+    Ok(Some(PortalScreenshotCapture {
+        expected_handle_path,
+        actual_handle_path,
+        uri,
+        path,
+    }))
+}
+
 pub fn expected_request_path(sender_unique_name: &str, handle_token: &str) -> Result<String> {
     validate_handle_token(handle_token)?;
     let sender = sender_unique_name.trim();
@@ -202,6 +249,31 @@ pub fn expected_request_path(sender_unique_name: &str, handle_token: &str) -> Re
     Ok(format!(
         "{REQUEST_PATH_PREFIX}/{sender_path_element}/{handle_token}"
     ))
+}
+
+pub fn validate_request_path(path: &str) -> Result<()> {
+    let Some(rest) = path.strip_prefix(REQUEST_PATH_PREFIX) else {
+        return Err(PortalContractError::Transport(format!(
+            "request handle path is outside portal request namespace: {path}"
+        )));
+    };
+    let rest = rest
+        .strip_prefix('/')
+        .ok_or_else(|| PortalContractError::Transport(format!("malformed request path: {path}")))?;
+    let mut parts = rest.split('/');
+    let sender = parts.next().ok_or_else(|| {
+        PortalContractError::Transport(format!("missing sender in request path: {path}"))
+    })?;
+    let token = parts.next().ok_or_else(|| {
+        PortalContractError::Transport(format!("missing token in request path: {path}"))
+    })?;
+    if parts.next().is_some() {
+        return Err(PortalContractError::Transport(format!(
+            "request path has too many elements: {path}"
+        )));
+    }
+    validate_handle_token(sender)?;
+    validate_handle_token(token)
 }
 
 pub fn parse_screenshot_uri(
@@ -284,6 +356,47 @@ fn hex_value(byte: u8) -> Option<u8> {
 mod tests {
     use super::*;
 
+    #[derive(Debug)]
+    struct MockScreenshotTransport {
+        sender: String,
+        returned_handle: String,
+        response: PortalRequestResponse,
+        called_options: Option<PortalScreenshotOptions>,
+        waited_handle: Option<String>,
+    }
+
+    impl MockScreenshotTransport {
+        fn success() -> Self {
+            Self {
+                sender: ":1.42".to_string(),
+                returned_handle: "/org/freedesktop/portal/desktop/request/1_42/plasma_pilot_abc"
+                    .to_string(),
+                response: PortalRequestResponse {
+                    response: PortalResponseCode::Success,
+                    uri: Some("file:///run/user/1000/doc/abc/screen%20shot.png".to_string()),
+                },
+                called_options: None,
+                waited_handle: None,
+            }
+        }
+    }
+
+    impl PortalScreenshotTransport for MockScreenshotTransport {
+        fn unique_sender_name(&mut self) -> Result<String> {
+            Ok(self.sender.clone())
+        }
+
+        fn call_screenshot(&mut self, options: &PortalScreenshotOptions) -> Result<String> {
+            self.called_options = Some(options.clone());
+            Ok(self.returned_handle.clone())
+        }
+
+        fn wait_for_response(&mut self, handle_path: &str) -> Result<PortalRequestResponse> {
+            self.waited_handle = Some(handle_path.to_string());
+            Ok(self.response.clone())
+        }
+    }
+
     #[test]
     fn validates_handle_tokens_as_object_path_elements() {
         assert!(validate_handle_token("plasma_pilot_123").is_ok());
@@ -298,6 +411,22 @@ mod tests {
         assert!(matches!(
             validate_handle_token("bad/token"),
             Err(PortalContractError::InvalidHandleToken(_))
+        ));
+    }
+
+    #[test]
+    fn validates_request_handle_paths() {
+        assert!(
+            validate_request_path("/org/freedesktop/portal/desktop/request/1_42/plasma_pilot_abc")
+                .is_ok()
+        );
+        assert!(matches!(
+            validate_request_path("/org/freedesktop/portal/desktop/request/1-42/plasma_pilot_abc"),
+            Err(PortalContractError::InvalidHandleToken(_))
+        ));
+        assert!(matches!(
+            validate_request_path("/not/portal/request"),
+            Err(PortalContractError::Transport(_))
         ));
     }
 
@@ -380,6 +509,90 @@ mod tests {
             None
         );
         Ok(())
+    }
+
+    #[test]
+    fn request_screenshot_runs_lifecycle_and_decodes_result() -> Result<()> {
+        let mut transport = MockScreenshotTransport::success();
+        let options = PortalScreenshotOptions::new("plasma_pilot_abc");
+
+        let capture = request_screenshot(&mut transport, &options)?.expect("capture succeeds");
+
+        assert_eq!(
+            capture.expected_handle_path,
+            "/org/freedesktop/portal/desktop/request/1_42/plasma_pilot_abc"
+        );
+        assert_eq!(capture.actual_handle_path, capture.expected_handle_path);
+        assert_eq!(
+            capture.uri,
+            "file:///run/user/1000/doc/abc/screen%20shot.png"
+        );
+        assert_eq!(
+            capture.path,
+            PathBuf::from("/run/user/1000/doc/abc/screen shot.png")
+        );
+        assert_eq!(transport.called_options.as_ref(), Some(&options));
+        assert_eq!(
+            transport.waited_handle.as_deref(),
+            Some("/org/freedesktop/portal/desktop/request/1_42/plasma_pilot_abc")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn request_screenshot_uses_returned_handle_when_portal_differs_from_expected() -> Result<()> {
+        let mut transport = MockScreenshotTransport::success();
+        transport.returned_handle =
+            "/org/freedesktop/portal/desktop/request/compat/plasma_pilot_abc".to_string();
+
+        let capture = request_screenshot(
+            &mut transport,
+            &PortalScreenshotOptions::new("plasma_pilot_abc"),
+        )?
+        .expect("capture succeeds");
+
+        assert_eq!(
+            capture.expected_handle_path,
+            "/org/freedesktop/portal/desktop/request/1_42/plasma_pilot_abc"
+        );
+        assert_eq!(capture.actual_handle_path, transport.returned_handle);
+        assert_eq!(
+            transport.waited_handle.as_deref(),
+            Some("/org/freedesktop/portal/desktop/request/compat/plasma_pilot_abc")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn request_screenshot_returns_none_when_cancelled() -> Result<()> {
+        let mut transport = MockScreenshotTransport::success();
+        transport.response = PortalRequestResponse {
+            response: PortalResponseCode::Cancelled,
+            uri: None,
+        };
+
+        assert_eq!(
+            request_screenshot(
+                &mut transport,
+                &PortalScreenshotOptions::new("plasma_pilot_abc")
+            )?,
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn request_screenshot_rejects_invalid_returned_handle() {
+        let mut transport = MockScreenshotTransport::success();
+        transport.returned_handle = "/invalid/request/path".to_string();
+
+        assert!(matches!(
+            request_screenshot(
+                &mut transport,
+                &PortalScreenshotOptions::new("plasma_pilot_abc")
+            ),
+            Err(PortalContractError::Transport(_))
+        ));
     }
 
     #[test]
