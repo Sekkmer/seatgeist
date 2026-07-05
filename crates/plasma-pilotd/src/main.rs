@@ -27,14 +27,14 @@ use libplasma_pilot::{
     JournalWindowContext, KeyComboRequest, KwinBridgeStatus, KwinMetadataStatus, LibeiStatus,
     MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton,
     PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
-    PointerPhysicalBounds, PolicyStatus, RemoteDesktopPersistMode, RemoteDesktopPortalStatus,
-    RemoteDesktopSessionProbe, RemoteDesktopSessionProbeRequest, SafetyClass, SafetyStatus,
-    ScreenshotInfo, ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest,
-    ScreenshotTransform, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
-    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, SpectacleStatus, ToggleCheckRequest,
-    ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult,
-    WindowGeometry, WindowInfo, current_egid, current_euid, default_journal_path,
-    default_panic_stop_path, default_socket_path,
+    PointerPhysicalBounds, PolicyStatus, RemoteDesktopEisProbe, RemoteDesktopPersistMode,
+    RemoteDesktopPortalStatus, RemoteDesktopSessionProbe, RemoteDesktopSessionProbeRequest,
+    SafetyClass, SafetyStatus, ScreenshotInfo, ScreenshotPortalStatus, ScreenshotRequest,
+    ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest, SelectItemRequest,
+    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, SpectacleStatus,
+    ToggleCheckRequest, ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest,
+    WaitForChangeResult, WindowGeometry, WindowInfo, current_egid, current_euid,
+    default_journal_path, default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -940,6 +940,14 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 },
             }
         }
+        DaemonRequest::RemoteDesktopEisProbe(request) => {
+            match remote_desktop_eis_probe(request).await {
+                Ok(status) => DaemonResponse::RemoteDesktopEisProbe(status),
+                Err(err) => DaemonResponse::Error {
+                    message: format_error_chain(&err),
+                },
+            }
+        }
         DaemonRequest::CaptureBackendStatus => {
             DaemonResponse::CaptureBackendStatus(capture_backend_status())
         }
@@ -1707,20 +1715,7 @@ async fn remote_desktop_session_probe(
         );
     }
 
-    let requested_devices = remote_desktop_requested_devices(&request);
-    let device_types = remote_desktop_device_types(&request)?;
-    let timeout = remote_desktop_probe_timeout(request.timeout_ms)?;
-    let token_seed = Uuid::new_v4().simple().to_string();
-    let mut options = plasma_pilot_portal::PortalRemoteDesktopOptions::new(
-        format!("plasma_pilot_create_{token_seed}"),
-        format!("plasma_pilot_session_{token_seed}"),
-        format!("plasma_pilot_select_{token_seed}"),
-        format!("plasma_pilot_start_{token_seed}"),
-    );
-    options.select_devices.types = Some(device_types);
-    options.select_devices.restore_token = request.restore_token;
-    options.select_devices.persist_mode = request.persist_mode.map(remote_desktop_persist_mode);
-    options.start.parent_window = request.parent_window.unwrap_or_default();
+    let (requested_devices, options, timeout) = remote_desktop_probe_setup(request)?;
 
     let result = plasma_pilot_portal::request_remote_desktop_session_zbus(&options, timeout)
         .await
@@ -1756,6 +1751,88 @@ async fn remote_desktop_session_probe(
         transient_session_closed: true,
         setup_hint: "transient portal RemoteDesktop session reached Start; PlasmaPilot closed it after the probe and did not call ConnectToEIS or send input".to_string(),
     })
+}
+
+async fn remote_desktop_eis_probe(
+    request: RemoteDesktopSessionProbeRequest,
+) -> Result<RemoteDesktopEisProbe> {
+    let portal_status = remote_desktop_portal_status();
+    if !portal_status.remote_desktop_interface_available {
+        bail!(
+            "xdg-desktop-portal RemoteDesktop is not available: {}",
+            portal_status.setup_hint
+        );
+    }
+
+    let (requested_devices, options, timeout) = remote_desktop_probe_setup(request)?;
+    let result = plasma_pilot_portal::request_remote_desktop_eis_zbus(
+        &options,
+        &plasma_pilot_portal::PortalConnectToEisOptions::new(),
+        timeout,
+    )
+    .await
+    .context("request transient portal RemoteDesktop EIS connection")?;
+    let Some(session) = result else {
+        return Ok(RemoteDesktopEisProbe {
+            started: false,
+            eis_connected: false,
+            requested_devices,
+            selected_devices: Vec::new(),
+            clipboard_enabled: false,
+            restore_token: None,
+            session_handle: None,
+            create_request_path: None,
+            select_request_path: None,
+            start_request_path: None,
+            eis_fd_closed: true,
+            transient_session_closed: true,
+            setup_hint:
+                "portal RemoteDesktop interaction was cancelled or ended before EIS connected"
+                    .to_string(),
+        });
+    };
+
+    let plasma_pilot_portal::PortalRemoteDesktopEisSession { session_start, eis } = session;
+    drop(eis.fd);
+    Ok(RemoteDesktopEisProbe {
+        started: true,
+        eis_connected: true,
+        requested_devices,
+        selected_devices: remote_desktop_device_names(session_start.start.devices),
+        clipboard_enabled: session_start.start.clipboard_enabled,
+        restore_token: session_start.start.restore_token,
+        session_handle: Some(eis.session_handle),
+        create_request_path: Some(session_start.create_request_path),
+        select_request_path: Some(session_start.select_request_path),
+        start_request_path: Some(session_start.start_request_path),
+        eis_fd_closed: true,
+        transient_session_closed: true,
+        setup_hint: "transient portal RemoteDesktop session reached Start, connected to EIS, closed the EIS FD, and sent no input".to_string(),
+    })
+}
+
+fn remote_desktop_probe_setup(
+    request: RemoteDesktopSessionProbeRequest,
+) -> Result<(
+    Vec<String>,
+    plasma_pilot_portal::PortalRemoteDesktopOptions,
+    Duration,
+)> {
+    let requested_devices = remote_desktop_requested_devices(&request);
+    let device_types = remote_desktop_device_types(&request)?;
+    let timeout = remote_desktop_probe_timeout(request.timeout_ms)?;
+    let token_seed = Uuid::new_v4().simple().to_string();
+    let mut options = plasma_pilot_portal::PortalRemoteDesktopOptions::new(
+        format!("plasma_pilot_create_{token_seed}"),
+        format!("plasma_pilot_session_{token_seed}"),
+        format!("plasma_pilot_select_{token_seed}"),
+        format!("plasma_pilot_start_{token_seed}"),
+    );
+    options.select_devices.types = Some(device_types);
+    options.select_devices.restore_token = request.restore_token;
+    options.select_devices.persist_mode = request.persist_mode.map(remote_desktop_persist_mode);
+    options.start.parent_window = request.parent_window.unwrap_or_default();
+    Ok((requested_devices, options, timeout))
 }
 
 fn remote_desktop_requested_devices(request: &RemoteDesktopSessionProbeRequest) -> Vec<String> {
@@ -2551,6 +2628,7 @@ fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWin
         DaemonRequest::TypeText(request) => request.guard.as_ref(),
         DaemonRequest::KeyCombo(request) => request.guard.as_ref(),
         DaemonRequest::RemoteDesktopSessionProbe(request) => request.guard.as_ref(),
+        DaemonRequest::RemoteDesktopEisProbe(request) => request.guard.as_ref(),
         DaemonRequest::MovePointer(request) => request.guard.as_ref(),
         DaemonRequest::ClickPointer(request) => request.guard.as_ref(),
         DaemonRequest::DragPointer(request) => request.guard.as_ref(),
@@ -2611,7 +2689,8 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         }
         DaemonRequest::ClipboardGet(_) => SafetyClass::ClipboardRead,
         DaemonRequest::ClipboardSet(_) => SafetyClass::ClipboardWrite,
-        DaemonRequest::RemoteDesktopSessionProbe(request) => {
+        DaemonRequest::RemoteDesktopSessionProbe(request)
+        | DaemonRequest::RemoteDesktopEisProbe(request) => {
             if request.pointer || request.touchscreen {
                 SafetyClass::ControlPointer
             } else {
@@ -5447,6 +5526,20 @@ fn summarize_response(response: &DaemonResponse) -> String {
             status.clipboard_enabled,
             status.transient_session_closed
         ),
+        DaemonResponse::RemoteDesktopEisProbe(status) => format!(
+            "remote desktop EIS probe started={} eis_connected={} requested={} selected={} clipboard={} fd_closed={} transient_closed={}",
+            status.started,
+            status.eis_connected,
+            status.requested_devices.join("+"),
+            if status.selected_devices.is_empty() {
+                "none".to_string()
+            } else {
+                status.selected_devices.join("+")
+            },
+            status.clipboard_enabled,
+            status.eis_fd_closed,
+            status.transient_session_closed
+        ),
         DaemonResponse::CaptureBackendStatus(status) => format!(
             "capture backends preferred={} implemented={} portal_screenshot={} portal_screencast={} kwin_metadata={} spectacle={}",
             status
@@ -7111,6 +7204,40 @@ height = 40
             });
         assert_eq!(
             safety_class_for_request(&keyboard_only),
+            SafetyClass::ControlKeyboard
+        );
+
+        let eis_request = DaemonRequest::RemoteDesktopEisProbe(RemoteDesktopSessionProbeRequest {
+            keyboard: true,
+            pointer: true,
+            touchscreen: false,
+            restore_token: None,
+            persist_mode: None,
+            parent_window: None,
+            timeout_ms: 30_000,
+            guard: None,
+        });
+        assert_eq!(
+            safety_class_for_request(&eis_request),
+            SafetyClass::ControlPointer
+        );
+        let err = enforce_policy(&policy, &eis_request)
+            .expect_err("remote desktop EIS probe prompts by default");
+        assert!(err.to_string().contains("ControlPointer"));
+
+        let keyboard_only_eis =
+            DaemonRequest::RemoteDesktopEisProbe(RemoteDesktopSessionProbeRequest {
+                keyboard: true,
+                pointer: false,
+                touchscreen: false,
+                restore_token: None,
+                persist_mode: None,
+                parent_window: None,
+                timeout_ms: 30_000,
+                guard: None,
+            });
+        assert_eq!(
+            safety_class_for_request(&keyboard_only_eis),
             SafetyClass::ControlKeyboard
         );
     }

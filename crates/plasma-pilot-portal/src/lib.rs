@@ -423,6 +423,12 @@ pub struct PortalRemoteDesktopOwnedEisConnection {
     pub fd: OwnedFd,
 }
 
+#[derive(Debug)]
+pub struct PortalRemoteDesktopEisSession {
+    pub session_start: PortalRemoteDesktopSessionStart,
+    pub eis: PortalRemoteDesktopOwnedEisConnection,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortalRequestResponse {
     pub response: PortalResponseCode,
@@ -723,14 +729,7 @@ pub async fn connect_remote_desktop_eis_zbus(
     let connection = zbus::Connection::session()
         .await
         .map_err(|err| PortalContractError::Transport(format!("connect session bus: {err}")))?;
-    let fd = call_remote_desktop_connect_to_eis_zbus(&connection, session_handle, options).await?;
-    if fd.as_raw_fd() < 0 {
-        return Err(PortalContractError::InvalidFileDescriptor(fd.as_raw_fd()));
-    }
-    Ok(PortalRemoteDesktopOwnedEisConnection {
-        session_handle: session_handle.to_string(),
-        fd,
-    })
+    connect_remote_desktop_eis_on_connection(&connection, session_handle, options).await
 }
 
 pub async fn request_screenshot_zbus(
@@ -794,6 +793,39 @@ pub async fn request_remote_desktop_session_zbus(
     let connection = zbus::Connection::session()
         .await
         .map_err(|err| PortalContractError::Transport(format!("connect session bus: {err}")))?;
+    request_remote_desktop_session_on_connection(&connection, options, response_timeout).await
+}
+
+pub async fn request_remote_desktop_eis_zbus(
+    options: &PortalRemoteDesktopOptions,
+    connect_options: &PortalConnectToEisOptions,
+    response_timeout: Duration,
+) -> Result<Option<PortalRemoteDesktopEisSession>> {
+    options.validate()?;
+    let connection = zbus::Connection::session()
+        .await
+        .map_err(|err| PortalContractError::Transport(format!("connect session bus: {err}")))?;
+    let Some(session_start) =
+        request_remote_desktop_session_on_connection(&connection, options, response_timeout)
+            .await?
+    else {
+        return Ok(None);
+    };
+    let eis = connect_remote_desktop_eis_on_connection(
+        &connection,
+        &session_start.session.actual_session_path,
+        connect_options,
+    )
+    .await?;
+
+    Ok(Some(PortalRemoteDesktopEisSession { session_start, eis }))
+}
+
+async fn request_remote_desktop_session_on_connection(
+    connection: &zbus::Connection,
+    options: &PortalRemoteDesktopOptions,
+    response_timeout: Duration,
+) -> Result<Option<PortalRemoteDesktopSessionStart>> {
     let sender = connection
         .unique_name()
         .ok_or_else(|| {
@@ -809,12 +841,12 @@ pub async fn request_remote_desktop_session_zbus(
     let expected_create_request_path =
         expected_request_path(&sender, &options.create_session.handle_token)?;
     let mut create_response_stream =
-        subscribe_request_response(&connection, expected_create_request_path.clone()).await?;
-    let create_request_path = call_remote_desktop_create_session_zbus(&connection, options).await?;
+        subscribe_request_response(connection, expected_create_request_path.clone()).await?;
+    let create_request_path = call_remote_desktop_create_session_zbus(connection, options).await?;
     validate_request_path(&create_request_path)?;
     if create_request_path != expected_create_request_path {
         create_response_stream =
-            subscribe_request_response(&connection, create_request_path.clone()).await?;
+            subscribe_request_response(connection, create_request_path.clone()).await?;
     }
     let create_response =
         wait_for_remote_desktop_zbus_response(&mut create_response_stream, response_timeout)
@@ -831,14 +863,14 @@ pub async fn request_remote_desktop_session_zbus(
     let expected_select_request_path =
         expected_request_path(&sender, &options.select_devices.handle_token)?;
     let mut select_response_stream =
-        subscribe_request_response(&connection, expected_select_request_path.clone()).await?;
+        subscribe_request_response(connection, expected_select_request_path.clone()).await?;
     let select_request_path =
-        call_remote_desktop_select_devices_zbus(&connection, &session.actual_session_path, options)
+        call_remote_desktop_select_devices_zbus(connection, &session.actual_session_path, options)
             .await?;
     validate_request_path(&select_request_path)?;
     if select_request_path != expected_select_request_path {
         select_response_stream =
-            subscribe_request_response(&connection, select_request_path.clone()).await?;
+            subscribe_request_response(connection, select_request_path.clone()).await?;
     }
     let select_response =
         wait_for_remote_desktop_zbus_response(&mut select_response_stream, response_timeout)
@@ -849,13 +881,13 @@ pub async fn request_remote_desktop_session_zbus(
 
     let expected_start_request_path = expected_request_path(&sender, &options.start.handle_token)?;
     let mut start_response_stream =
-        subscribe_request_response(&connection, expected_start_request_path.clone()).await?;
+        subscribe_request_response(connection, expected_start_request_path.clone()).await?;
     let start_request_path =
-        call_remote_desktop_start_zbus(&connection, &session.actual_session_path, options).await?;
+        call_remote_desktop_start_zbus(connection, &session.actual_session_path, options).await?;
     validate_request_path(&start_request_path)?;
     if start_request_path != expected_start_request_path {
         start_response_stream =
-            subscribe_request_response(&connection, start_request_path.clone()).await?;
+            subscribe_request_response(connection, start_request_path.clone()).await?;
     }
     let start_response =
         wait_for_remote_desktop_zbus_response(&mut start_response_stream, response_timeout).await?;
@@ -876,6 +908,21 @@ pub async fn request_remote_desktop_session_zbus(
         session,
         start,
     }))
+}
+
+async fn connect_remote_desktop_eis_on_connection(
+    connection: &zbus::Connection,
+    session_handle: &str,
+    options: &PortalConnectToEisOptions,
+) -> Result<PortalRemoteDesktopOwnedEisConnection> {
+    let fd = call_remote_desktop_connect_to_eis_zbus(connection, session_handle, options).await?;
+    if fd.as_raw_fd() < 0 {
+        return Err(PortalContractError::InvalidFileDescriptor(fd.as_raw_fd()));
+    }
+    Ok(PortalRemoteDesktopOwnedEisConnection {
+        session_handle: session_handle.to_string(),
+        fd,
+    })
 }
 
 async fn request_proxy_for_path(

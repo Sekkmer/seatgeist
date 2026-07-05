@@ -187,6 +187,28 @@ enum InputCommand {
         #[arg(long)]
         active_title_contains: Option<String>,
     },
+    RemoteDesktopEisProbe {
+        #[arg(long)]
+        keyboard: bool,
+        #[arg(long)]
+        pointer: bool,
+        #[arg(long)]
+        touchscreen: bool,
+        #[arg(long)]
+        restore_token: Option<String>,
+        #[arg(long)]
+        persist_mode: Option<String>,
+        #[arg(long)]
+        parent_window: Option<String>,
+        #[arg(long, default_value_t = DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS)]
+        timeout_ms: u64,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
     MovePointer {
         #[arg(long)]
         x: f64,
@@ -772,6 +794,43 @@ fn main() -> Result<()> {
             print_daemon_response(
                 &socket,
                 DaemonRequest::RemoteDesktopSessionProbe(RemoteDesktopSessionProbeRequest {
+                    keyboard: if any_device_flag { keyboard } else { true },
+                    pointer: if any_device_flag { pointer } else { true },
+                    touchscreen,
+                    restore_token,
+                    persist_mode: persist_mode
+                        .as_deref()
+                        .map(parse_remote_desktop_persist_mode)
+                        .transpose()?,
+                    parent_window,
+                    timeout_ms,
+                    guard: active_window_guard(
+                        expected_active_window,
+                        expected_active_app,
+                        active_title_contains,
+                    ),
+                }),
+            )?;
+        }
+        Command::Input {
+            command:
+                InputCommand::RemoteDesktopEisProbe {
+                    keyboard,
+                    pointer,
+                    touchscreen,
+                    restore_token,
+                    persist_mode,
+                    parent_window,
+                    timeout_ms,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                },
+        } => {
+            let any_device_flag = keyboard || pointer || touchscreen;
+            print_daemon_response(
+                &socket,
+                DaemonRequest::RemoteDesktopEisProbe(RemoteDesktopSessionProbeRequest {
                     keyboard: if any_device_flag { keyboard } else { true },
                     pointer: if any_device_flag { pointer } else { true },
                     touchscreen,

@@ -476,7 +476,7 @@ fn cli_replays_input_denial_trace_against_real_daemon() -> Result<()> {
     )
     .context("parse checked-in input denial trace fixture")?;
     assert_eq!(trace.version, 1);
-    assert_eq!(trace.steps.len(), 7);
+    assert_eq!(trace.steps.len(), 8);
     assert!(
         trace
             .steps
@@ -631,7 +631,7 @@ fn cli_replays_trace_directory_against_real_daemon() -> Result<()> {
                 .as_str()
                 .is_some_and(|path| path.ends_with("input-denials-smoke.json"))
                 && trace["steps"].as_array().is_some_and(|steps| {
-                    steps.len() == 7
+                    steps.len() == 8
                         && steps
                             .iter()
                             .all(|step| step["response_type"] == "error" && step["ok"] == false)
@@ -640,6 +640,9 @@ fn cli_replays_trace_directory_against_real_daemon() -> Result<()> {
                         && steps
                             .iter()
                             .any(|step| step["method"] == "remote_desktop_session_probe")
+                        && steps
+                            .iter()
+                            .any(|step| step["method"] == "remote_desktop_eis_probe")
                 })
         }),
         "input denial replay trace did not report keyboard/pointer/RemoteDesktop denials: {traces:?}"
@@ -870,7 +873,7 @@ fn cli_validates_input_denial_trace_expectations() -> Result<()> {
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).context("parse trace validation report")?;
     assert_eq!(report["type"], "trace_validation");
-    assert_eq!(report["step_count"], 7);
+    assert_eq!(report["step_count"], 8);
     assert_eq!(report["steps"][0]["method"], "type_text");
     assert_eq!(
         report["steps"][0]["expect_error_contains"],
@@ -889,6 +892,11 @@ fn cli_validates_input_denial_trace_expectations() -> Result<()> {
     assert_eq!(report["steps"][6]["method"], "remote_desktop_session_probe");
     assert_eq!(
         report["steps"][6]["expect_error_contains"],
+        "policy prompt required for ControlPointer"
+    );
+    assert_eq!(report["steps"][7]["method"], "remote_desktop_eis_probe");
+    assert_eq!(
+        report["steps"][7]["expect_error_contains"],
         "policy prompt required for ControlPointer"
     );
     Ok(())

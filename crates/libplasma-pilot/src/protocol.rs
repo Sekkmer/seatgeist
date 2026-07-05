@@ -155,6 +155,30 @@ pub struct RemoteDesktopSessionProbe {
     pub setup_hint: String,
 }
 
+pub type RemoteDesktopEisProbeRequest = RemoteDesktopSessionProbeRequest;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteDesktopEisProbe {
+    pub started: bool,
+    pub eis_connected: bool,
+    pub requested_devices: Vec<String>,
+    pub selected_devices: Vec<String>,
+    pub clipboard_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_handle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_request_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select_request_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_request_path: Option<String>,
+    pub eis_fd_closed: bool,
+    pub transient_session_closed: bool,
+    pub setup_hint: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureBackendStatus {
     pub screenshot_portal: ScreenshotPortalStatus,
@@ -724,6 +748,7 @@ pub enum DaemonRequest {
     UinputStatus,
     InputBackendStatus,
     RemoteDesktopSessionProbe(RemoteDesktopSessionProbeRequest),
+    RemoteDesktopEisProbe(RemoteDesktopEisProbeRequest),
     CaptureBackendStatus,
     PointerCalibration,
     ListMonitors,
@@ -780,6 +805,7 @@ impl DaemonRequest {
             Self::UinputStatus => "uinput_status",
             Self::InputBackendStatus => "input_backend_status",
             Self::RemoteDesktopSessionProbe(_) => "remote_desktop_session_probe",
+            Self::RemoteDesktopEisProbe(_) => "remote_desktop_eis_probe",
             Self::CaptureBackendStatus => "capture_backend_status",
             Self::PointerCalibration => "pointer_calibration",
             Self::ListMonitors => "list_monitors",
@@ -837,6 +863,7 @@ pub enum DaemonResponse {
     UinputStatus(UinputStatus),
     InputBackendStatus(InputBackendStatus),
     RemoteDesktopSessionProbe(RemoteDesktopSessionProbe),
+    RemoteDesktopEisProbe(RemoteDesktopEisProbe),
     CaptureBackendStatus(CaptureBackendStatus),
     PointerCalibration(PointerCalibrationStatus),
     Monitors(Vec<MonitorInfo>),
@@ -867,6 +894,7 @@ impl DaemonResponse {
             Self::UinputStatus(_) => "uinput_status",
             Self::InputBackendStatus(_) => "input_backend_status",
             Self::RemoteDesktopSessionProbe(_) => "remote_desktop_session_probe",
+            Self::RemoteDesktopEisProbe(_) => "remote_desktop_eis_probe",
             Self::CaptureBackendStatus(_) => "capture_backend_status",
             Self::PointerCalibration(_) => "pointer_calibration",
             Self::Monitors(_) => "monitors",
@@ -1378,6 +1406,51 @@ mod tests {
         assert!(encoded.contains(r#""type":"remote_desktop_session_probe""#));
         assert!(encoded.contains(r#""selected_devices":["pointer"]"#));
         assert_eq!(response.response_type(), "remote_desktop_session_probe");
+    }
+
+    #[test]
+    fn serializes_remote_desktop_eis_probe() {
+        let request = DaemonRequest::RemoteDesktopEisProbe(RemoteDesktopEisProbeRequest {
+            keyboard: true,
+            pointer: true,
+            touchscreen: false,
+            restore_token: None,
+            persist_mode: Some(RemoteDesktopPersistMode::DoNotPersist),
+            parent_window: None,
+            timeout_ms: 30_000,
+            guard: Some(ActiveWindowGuard {
+                expected_window_id: None,
+                expected_app_id: Some("org.kde.kwrite".to_string()),
+                title_contains: Some("scratch".to_string()),
+            }),
+        });
+        let encoded =
+            serde_json::to_string(&request).expect("remote desktop EIS probe request serializes");
+        assert!(encoded.contains(r#""method":"remote_desktop_eis_probe""#));
+        assert!(encoded.contains(r#""persist_mode":"do_not_persist""#));
+        assert!(encoded.contains(r#""expected_app_id":"org.kde.kwrite""#));
+
+        let response = DaemonResponse::RemoteDesktopEisProbe(RemoteDesktopEisProbe {
+            started: true,
+            eis_connected: true,
+            requested_devices: vec!["keyboard".to_string(), "pointer".to_string()],
+            selected_devices: vec!["keyboard".to_string(), "pointer".to_string()],
+            clipboard_enabled: false,
+            restore_token: None,
+            session_handle: Some("/org/freedesktop/portal/desktop/session/1_42/p".to_string()),
+            create_request_path: None,
+            select_request_path: None,
+            start_request_path: None,
+            eis_fd_closed: true,
+            transient_session_closed: true,
+            setup_hint: "EIS probe completed without input".to_string(),
+        });
+        let encoded =
+            serde_json::to_string(&response).expect("remote desktop EIS probe response serializes");
+        assert!(encoded.contains(r#""type":"remote_desktop_eis_probe""#));
+        assert!(encoded.contains(r#""eis_connected":true"#));
+        assert!(encoded.contains(r#""eis_fd_closed":true"#));
+        assert_eq!(response.response_type(), "remote_desktop_eis_probe");
     }
 
     #[test]
