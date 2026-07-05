@@ -10,6 +10,8 @@ Checklist tracker: `docs/tracker.md` records done, partial, and remaining work u
 
 Release checklist: `docs/release-checklist.md` records public-release blocking evidence, CI scope, and release-cut steps.
 
+Unsupported paths: `docs/unsupported-paths.md` records what the current KDE-first release does not support yet.
+
 ## 1. One-sentence goal
 
 Build **PlasmaPilot**, a local Linux/KDE desktop-control substrate that lets Codex CLI safely observe and operate the user’s KDE Plasma desktop through a Codex plugin, MCP tools, skills, hooks, a CLI, and a privileged local daemon.
@@ -1117,7 +1119,7 @@ cargo check --workspace
 - [x] Implement Phase 1.
 - [x] Implement Phase 2.
 - [x] Implement Phase 3. Current status: keyboard and pointer command paths including bounded pointer drag, uinput setup diagnostics/docs, portal/libei input backend probes, pointer calibration diagnostics, and guarded KWrite GUI input smoke exist.
-- [~] Add release hardening. Current status: GitHub Actions runs the safe `make verify` gate on push and pull requests, `docs/release-checklist.md` records public-release blockers, and `make validate-release` enforces the dual license files plus CI/release anchors. Versioned artifacts, final public metadata, and broader manual release evidence remain incomplete.
+- [~] Add release hardening. Current status: GitHub Actions runs the safe `make verify` gate on push and pull requests, `docs/release-checklist.md` records public-release blockers, `docs/unsupported-paths.md` documents unsupported public paths, and `make validate-release` enforces the dual license files plus CI/release anchors. Versioned artifacts, final public metadata, and broader manual release evidence remain incomplete.
 
 ## 20. Definition of done for v0.1
 

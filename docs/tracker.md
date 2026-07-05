@@ -132,6 +132,7 @@ Current full-project estimate: `[~]` about one third complete. This estimate use
 - [~] Backend traits already allow KDE, Wayland/X11, mock, uinput, portal/libei, and future implementations to coexist.
 - [~] KDE is the only first-class desktop target right now.
 - [~] Backend-neutral public naming is open; current leading candidates are `DeskPilot`, `DesktopPilot`, `PilotDesk`, and `SeatPilot`, while `PlasmaPilot` remains the KDE-first working name.
+- [x] Unsupported public paths are documented for GNOME, wlroots/Sway, X11, kernel modules, OCR fallback, custom KDE/KWin work, and native desktop approval UX.
 - [ ] GNOME backend is not implemented.
 - [ ] Public project naming/positioning is not finalized.
 - [ ] Hardening for public distribution, packaging, signing, and support expectations is not done.

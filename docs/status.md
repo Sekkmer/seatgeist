@@ -4,6 +4,8 @@ Checklist tracker: `docs/tracker.md` records done, partial, and remaining work u
 
 Release checklist: `docs/release-checklist.md` records public-release blocking evidence, CI scope, and release-cut steps.
 
+Unsupported paths: `docs/unsupported-paths.md` records what the current KDE-first release does not support yet.
+
 ## 2026-07-04
 
 Phase 0 scaffold is present:
@@ -133,6 +135,7 @@ Phase 1 first slice is implemented:
 - `docs/arch-kde-install.md` now provides the consolidated Arch Linux + KDE Plasma 6 operator install runbook, including package prerequisites, binary installation, user service setup, KWin bridge enablement, safe diagnostics, optional uinput, Codex plugin validation, approval flow, and troubleshooting.
 - `.github/workflows/ci.yml` now runs the safe `make verify` gate on push and pull requests with the linked libei/xkbcommon development packages installed, and `docs/release-checklist.md` records the public-release blockers that remain after CI.
 - `LICENSE-MIT`, `LICENSE-APACHE`, `scripts/validate-release.py`, and `make validate-release` now enforce that the repository has license files matching the workspace `MIT OR Apache-2.0` declaration and that the CI/release-checklist public-readiness anchors remain present. `make verify` runs this release validation.
+- `docs/unsupported-paths.md` now documents unsupported public paths for GNOME, wlroots/Sway, X11, kernel modules, custom KDE/KWin work, screenshot/OCR fallback, native desktop approval UX, and backend-neutral packaging. `make validate-release` checks that these release-boundary anchors remain present.
 - `make smoke-gui-input` now validates real policy-gated uinput control in a disposable KWrite/Kate document. It starts a private daemon with an approval file, grants only the focus, click, type, and save methods it uses, focuses the test window through KWin, requires an active-window guard, maps a safe window point to physical pixels through pointer calibration, clicks, types a sentinel, saves, verifies file content, and checks the journal.
 - The host GUI smoke exposed and fixed the initial keyboard mapping bug where text typing assumed evdev letter codes were contiguous; the uinput backend now uses explicit US evdev letter mappings.
 - AT-SPI run-attribute mutation if a supported interface is identified, KWin-native capture backends, broader live KDE evals, and portal clipboard integration if a stable interface appears remain future work.
