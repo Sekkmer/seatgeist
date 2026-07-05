@@ -18,6 +18,7 @@ pub const EI_CAP_SCROLL: u32 = 1 << 4;
 pub const EI_CAP_TEXT: u32 = 1 << 6;
 pub const EI_DEVICE_TYPE_VIRTUAL: u32 = 1;
 pub const EI_DEVICE_TYPE_PHYSICAL: u32 = 2;
+pub const XKB_EVDEV_OFFSET: u32 = 8;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EisActionPlan {
@@ -432,6 +433,12 @@ pub enum EisPlanError {
     EmptyKeysymText,
     #[error("character {character:?} does not map to an XKB keysym")]
     UnmappedKeysym { character: char },
+    #[error("XKB keymap name field {field} contains an interior NUL byte")]
+    InvalidXkbKeymapName { field: &'static str },
+    #[error("xkbcommon failed to create a context")]
+    CreateXkbContext,
+    #[error("xkbcommon failed to create a keymap")]
+    CreateXkbKeymap,
     #[error("scroll request must include a non-zero delta")]
     EmptyScroll,
 }
@@ -665,7 +672,156 @@ unsafe extern "C" {
 
 #[link(name = "xkbcommon")]
 unsafe extern "C" {
+    fn xkb_context_new(flags: libc::c_uint) -> *mut XkbContext;
+    fn xkb_context_unref(context: *mut XkbContext);
+    fn xkb_keymap_new_from_names(
+        context: *mut XkbContext,
+        names: *const XkbRuleNames,
+        flags: libc::c_uint,
+    ) -> *mut XkbKeymapRaw;
+    fn xkb_keymap_unref(keymap: *mut XkbKeymapRaw);
+    fn xkb_keymap_min_keycode(keymap: *mut XkbKeymapRaw) -> u32;
+    fn xkb_keymap_max_keycode(keymap: *mut XkbKeymapRaw) -> u32;
+    fn xkb_keymap_key_get_syms_by_level(
+        keymap: *mut XkbKeymapRaw,
+        key: u32,
+        layout: u32,
+        level: u32,
+        syms_out: *mut *const u32,
+    ) -> libc::c_int;
     fn xkb_utf32_to_keysym(ucs: u32) -> u32;
+}
+
+#[repr(C)]
+pub struct XkbContext {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct XkbKeymapRaw {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+struct XkbRuleNames {
+    rules: *const libc::c_char,
+    model: *const libc::c_char,
+    layout: *const libc::c_char,
+    variant: *const libc::c_char,
+    options: *const libc::c_char,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct XkbKeymapNames<'a> {
+    pub rules: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub layout: Option<&'a str>,
+    pub variant: Option<&'a str>,
+    pub options: Option<&'a str>,
+}
+
+impl<'a> XkbKeymapNames<'a> {
+    pub fn us_pc105() -> Self {
+        Self {
+            rules: None,
+            model: Some("pc105"),
+            layout: Some("us"),
+            variant: None,
+            options: Some(""),
+        }
+    }
+}
+
+pub struct XkbKeymap {
+    keymap: NonNull<XkbKeymapRaw>,
+    context: NonNull<XkbContext>,
+}
+
+impl XkbKeymap {
+    pub fn new_from_names(names: XkbKeymapNames<'_>) -> Result<Self> {
+        let rules = optional_cstring("rules", names.rules)?;
+        let model = optional_cstring("model", names.model)?;
+        let layout = optional_cstring("layout", names.layout)?;
+        let variant = optional_cstring("variant", names.variant)?;
+        let options = optional_cstring("options", names.options)?;
+        let names = XkbRuleNames {
+            rules: optional_cstring_ptr(&rules),
+            model: optional_cstring_ptr(&model),
+            layout: optional_cstring_ptr(&layout),
+            variant: optional_cstring_ptr(&variant),
+            options: optional_cstring_ptr(&options),
+        };
+
+        // SAFETY: flags value 0 is the documented "no flags" value.
+        let context = unsafe { xkb_context_new(0) };
+        let context = NonNull::new(context).ok_or(EisPlanError::CreateXkbContext)?;
+
+        // SAFETY: `context` is valid, and every pointer in `names` is either NULL or points to
+        // a NUL-terminated CString that lives until the call returns.
+        let keymap = unsafe { xkb_keymap_new_from_names(context.as_ptr(), &names, 0) };
+        let Some(keymap) = NonNull::new(keymap) else {
+            // SAFETY: `context` was returned by xkb_context_new and has not been unref'd yet.
+            unsafe { xkb_context_unref(context.as_ptr()) };
+            return Err(EisPlanError::CreateXkbKeymap);
+        };
+
+        Ok(Self { keymap, context })
+    }
+
+    pub fn evdev_keycode_for_keysym_level0(&self, keysym: u32) -> Option<u16> {
+        // SAFETY: `self.keymap` is a valid keymap for the lifetime of this wrapper.
+        let min = unsafe { xkb_keymap_min_keycode(self.keymap.as_ptr()) };
+        // SAFETY: `self.keymap` is a valid keymap for the lifetime of this wrapper.
+        let max = unsafe { xkb_keymap_max_keycode(self.keymap.as_ptr()) };
+        for xkb_keycode in min..=max {
+            if self.keycode_level0_contains_keysym(xkb_keycode, keysym)
+                && let Some(evdev_keycode) = xkb_keycode_to_evdev(xkb_keycode)
+            {
+                return Some(evdev_keycode);
+            }
+        }
+        None
+    }
+
+    fn keycode_level0_contains_keysym(&self, keycode: u32, keysym: u32) -> bool {
+        let mut syms = ptr::null();
+        // SAFETY: `self.keymap` is valid; `syms` is an out-pointer owned by xkbcommon for this
+        // keymap, and we only read `count` elements before the next xkbcommon call.
+        let count = unsafe {
+            xkb_keymap_key_get_syms_by_level(self.keymap.as_ptr(), keycode, 0, 0, &mut syms)
+        };
+        if count <= 0 || syms.is_null() {
+            return false;
+        }
+        // SAFETY: xkbcommon returned `count` symbols at `syms` for this keymap lookup.
+        let syms = unsafe { std::slice::from_raw_parts(syms, count as usize) };
+        syms.contains(&keysym)
+    }
+}
+
+impl Drop for XkbKeymap {
+    fn drop(&mut self) {
+        // SAFETY: both pointers are owned by this wrapper and unref'd exactly once.
+        unsafe {
+            xkb_keymap_unref(self.keymap.as_ptr());
+            xkb_context_unref(self.context.as_ptr());
+        }
+    }
+}
+
+fn optional_cstring(field: &'static str, value: Option<&str>) -> Result<Option<CString>> {
+    value
+        .map(|value| CString::new(value).map_err(|_| EisPlanError::InvalidXkbKeymapName { field }))
+        .transpose()
+}
+
+fn optional_cstring_ptr(value: &Option<CString>) -> *const libc::c_char {
+    value.as_ref().map_or(ptr::null(), |value| value.as_ptr())
+}
+
+pub fn xkb_keycode_to_evdev(xkb_keycode: u32) -> Option<u16> {
+    let evdev_keycode = xkb_keycode.checked_sub(XKB_EVDEV_OFFSET)?;
+    u16::try_from(evdev_keycode).ok()
 }
 
 struct RetainedLibeiDevice {
@@ -2187,6 +2343,30 @@ mod tests {
         assert_eq!(
             plan_text_as_keysyms(1, ""),
             Err(EisPlanError::EmptyKeysymText)
+        );
+    }
+
+    #[test]
+    fn maps_us_xkb_level0_keysyms_to_evdev_codes() {
+        let keymap = XkbKeymap::new_from_names(XkbKeymapNames::us_pc105()).expect("us xkb keymap");
+
+        assert_eq!(xkb_keycode_to_evdev(38), Some(30));
+        assert_eq!(xkb_keycode_to_evdev(7), None);
+        assert_eq!(keymap.evdev_keycode_for_keysym_level0(0x61), Some(30));
+        assert_eq!(keymap.evdev_keycode_for_keysym_level0(0x6c), Some(38));
+        assert_eq!(keymap.evdev_keycode_for_keysym_level0(0x20), Some(57));
+        assert_eq!(keymap.evdev_keycode_for_keysym_level0(u32::MAX), None);
+    }
+
+    #[test]
+    fn rejects_interior_nul_xkb_keymap_names() {
+        assert_eq!(
+            XkbKeymap::new_from_names(XkbKeymapNames {
+                layout: Some("u\0s"),
+                ..XkbKeymapNames::us_pc105()
+            })
+            .err(),
+            Some(EisPlanError::InvalidXkbKeymapName { field: "layout" })
         );
     }
 
