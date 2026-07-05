@@ -155,11 +155,16 @@ def validate_hooks(path: Path) -> None:
 
 
 def validate_hook_summary_script(path: Path) -> None:
+    old_dont_write_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
     spec = importlib.util.spec_from_file_location("plasma_audit_summary", path)
-    if spec is None or spec.loader is None:
-        fail("PlasmaPilot hook script cannot be imported")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        if spec is None or spec.loader is None:
+            fail("PlasmaPilot hook script cannot be imported")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = old_dont_write_bytecode
     summarize_journal = getattr(module, "summarize_journal", None)
     if not callable(summarize_journal):
         fail("PlasmaPilot hook script must expose summarize_journal")

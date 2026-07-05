@@ -620,9 +620,7 @@ Initial hook goals:
 - After PlasmaPilot actions, append a local audit record.
 - On `Stop`, summarize actions taken and any denied actions.
 
-Initial `hooks.json` should be conservative and may be a placeholder until exact Codex hook command schema is validated in the current installed Codex version.
-
-Current scaffold note: `plugin/hooks/hooks.json` intentionally contains no active hooks. This avoids shipping untrusted lifecycle commands before the hook behavior and trust flow are tested locally. `plugin/.codex-plugin/plugin.json` does not override the hook path; the bundle relies on default `hooks/hooks.json` discovery while the skeleton is disabled.
+Current hook implementation: `plugin/hooks/hooks.json` enables one conservative Codex `Stop` command hook. After Codex's normal `/hooks` trust review, it runs `plugin/hooks/plasma_audit_summary.py` from the git root and writes `target/plasma-pilot-hook-audit/latest.json`. The hook is fail-open, ignores prompt/hook stdin, and records only repo status, HEAD/branch, recent compact PlasmaPilot journal metadata, failure/control/unguarded-control counts, method and safety-class counts, and compact active-window context. `make validate-plugin` verifies the hook command, timeout, script import, and audit aggregation behavior.
 
 ## 13. Safety and threat model
 
