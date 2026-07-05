@@ -821,6 +821,8 @@ eval_full_resolution_denied() {
 		echo "full-resolution screenshot wrote output despite policy denial" >&2
 		exit 1
 	fi
+	cli journal tail --limit 20 --method screenshot --ok false >"$run_dir/full-resolution-denied-journal.json"
+	jq -e '.type == "journal" and any(.data[]; .summary | contains("FullResolutionScreenshot"))' "$run_dir/full-resolution-denied-journal.json" >/dev/null
 }
 
 eval_control_safety() {
