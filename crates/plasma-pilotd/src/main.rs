@@ -1036,7 +1036,7 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
             }
         }
         DaemonRequest::ScreenshotTile(request) => {
-            match capture_screenshot_tile(request, &runtime.safety_settings) {
+            match capture_screenshot_tile(request, &runtime.safety_settings).await {
                 Ok(info) => DaemonResponse::Screenshot(info),
                 Err(err) => DaemonResponse::Error {
                     message: format_error_chain(&err),
@@ -2436,6 +2436,16 @@ fn implemented_capture_backend(
     spectacle_available.then(|| "spectacle".to_string())
 }
 
+fn tile_capture_backend(
+    screenshot_portal: &ScreenshotPortalStatus,
+    spectacle_available: bool,
+) -> Option<&'static str> {
+    if screenshot_portal.screenshot_interface_available {
+        return Some("portal_screenshot");
+    }
+    spectacle_available.then_some("spectacle")
+}
+
 fn capture_backend_setup_hint(
     preferred: Option<&str>,
     implemented: Option<&str>,
@@ -3807,41 +3817,26 @@ fn screenshot_info_from_capture(
     Ok(info)
 }
 
-fn capture_screenshot_tile(
+#[derive(Debug)]
+struct TileCaptureSource {
+    path: PathBuf,
+    backend: &'static str,
+    cleanup_after_use: bool,
+}
+
+async fn capture_screenshot_tile(
     request: ScreenshotTileRequest,
     safety_settings: &SafetySettings,
 ) -> Result<ScreenshotInfo> {
-    let _guard = SCREENSHOT_CAPTURE_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .map_err(|_| anyhow::anyhow!("screenshot capture lock is poisoned"))?;
     validate_tile_request(&request)?;
     prepare_screenshot_output(&request.output)?;
-    if !command_exists("spectacle") {
-        bail!("spectacle command is not available for KDE screenshot capture");
-    }
+    let capture = capture_tile_source(&request.output).await?;
 
-    let capture_output = temporary_capture_path(&request.output);
-    prepare_screenshot_output(&capture_output)?;
-    let status = Command::new("spectacle")
-        .args(["-b", "-f", "-n", "-o"])
-        .arg(&capture_output)
-        .status()
-        .context("run spectacle screenshot backend")?;
-    if !status.success() {
-        bail!("spectacle screenshot backend exited with status {status}");
-    }
-
-    let (source_width, source_height) = read_png_dimensions_with_retry(&capture_output)
-        .with_context(|| {
-            format!(
-                "read screenshot dimensions from {}",
-                capture_output.display()
-            )
-        })?;
+    let (source_width, source_height) = read_png_dimensions_with_retry(&capture.path)
+        .with_context(|| format!("read screenshot dimensions from {}", capture.path.display()))?;
     validate_tile_bounds(&request, source_width, source_height)?;
     let (output_width, output_height) = write_tile_preview(
-        &capture_output,
+        &capture.path,
         &request,
         request.max_edge.unwrap_or(safety_settings.tile_max_edge),
     )?;
@@ -3850,7 +3845,7 @@ fn capture_screenshot_tile(
 
     let info = ScreenshotInfo {
         path: request.output,
-        backend: "spectacle".to_string(),
+        backend: capture.backend.to_string(),
         source_width,
         source_height,
         output_width,
@@ -3868,8 +3863,82 @@ fn capture_screenshot_tile(
     };
     apply_screenshot_redactions(&info, &safety_settings.screenshot_redactions)?;
 
-    fs::remove_file(&capture_output).ok();
+    if capture.cleanup_after_use {
+        fs::remove_file(&capture.path).ok();
+    }
     Ok(info)
+}
+
+async fn capture_tile_source(output: &Path) -> Result<TileCaptureSource> {
+    let screenshot_portal = screenshot_portal_status();
+    let spectacle_available = command_exists("spectacle");
+    if tile_capture_backend(&screenshot_portal, spectacle_available) == Some("portal_screenshot") {
+        match capture_tile_source_portal().await {
+            Ok(Some(capture)) => return Ok(capture),
+            Ok(None) => {
+                bail!(
+                    "portal screenshot request was cancelled or ended without a screenshot; not falling back to Spectacle"
+                );
+            }
+            Err(err) => {
+                if !spectacle_available {
+                    return Err(err)
+                        .context("portal screenshot backend failed and Spectacle is unavailable");
+                }
+                warn!(
+                    error = %err,
+                    "portal screenshot backend failed for tile capture; falling back to Spectacle"
+                );
+            }
+        }
+    }
+
+    capture_tile_source_spectacle(output)
+}
+
+async fn capture_tile_source_portal() -> Result<Option<TileCaptureSource>> {
+    let handle_token = format!("plasma_pilot_{}", Uuid::new_v4().simple());
+    let options = plasma_pilot_portal::PortalScreenshotOptions::new(handle_token);
+    let Some(capture) =
+        plasma_pilot_portal::request_screenshot_zbus(&options, PORTAL_SCREENSHOT_RESPONSE_TIMEOUT)
+            .await
+            .map_err(|err| anyhow::anyhow!(err))?
+    else {
+        return Ok(None);
+    };
+
+    Ok(Some(TileCaptureSource {
+        path: capture.path,
+        backend: "portal_screenshot",
+        cleanup_after_use: false,
+    }))
+}
+
+fn capture_tile_source_spectacle(output: &Path) -> Result<TileCaptureSource> {
+    let _guard = SCREENSHOT_CAPTURE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| anyhow::anyhow!("screenshot capture lock is poisoned"))?;
+    if !command_exists("spectacle") {
+        bail!("spectacle command is not available for KDE screenshot capture");
+    }
+
+    let capture_output = temporary_capture_path(output);
+    prepare_screenshot_output(&capture_output)?;
+    let status = Command::new("spectacle")
+        .args(["-b", "-f", "-n", "-o"])
+        .arg(&capture_output)
+        .status()
+        .context("run spectacle screenshot backend")?;
+    if !status.success() {
+        bail!("spectacle screenshot backend exited with status {status}");
+    }
+
+    Ok(TileCaptureSource {
+        path: capture_output,
+        backend: "spectacle",
+        cleanup_after_use: true,
+    })
 }
 
 async fn wait_for_change(
@@ -8865,6 +8934,23 @@ height = 40
             Some("spectacle")
         );
         assert_eq!(implemented_capture_backend(&portal, false), None);
+    }
+
+    #[test]
+    fn tile_capture_backend_prefers_portal_then_spectacle() {
+        let portal = screenshot_portal_status_fixture(true, true);
+        assert_eq!(
+            tile_capture_backend(&portal, true),
+            Some("portal_screenshot")
+        );
+        assert_eq!(
+            tile_capture_backend(&portal, false),
+            Some("portal_screenshot")
+        );
+
+        let portal = screenshot_portal_status_fixture(false, true);
+        assert_eq!(tile_capture_backend(&portal, true), Some("spectacle"));
+        assert_eq!(tile_capture_backend(&portal, false), None);
     }
 
     #[test]
