@@ -382,7 +382,8 @@ smoke-trace-replay:
 	denial_out="target/plasma-pilot-trace-denial-smoke.json"
 	status_validate_out="target/plasma-pilot-trace-status-validate-smoke.json"
 	denial_validate_out="target/plasma-pilot-trace-denial-validate-smoke.json"
-	rm -rf /tmp/plasma-pilot-trace-smoke "$$log" "$$journal" "$$status_out" "$$denial_out" "$$status_validate_out" "$$denial_validate_out"
+	denied_capture="/tmp/plasma-pilot-denied-full-resolution.png"
+	rm -rf /tmp/plasma-pilot-trace-smoke "$$log" "$$journal" "$$status_out" "$$denial_out" "$$status_validate_out" "$$denial_validate_out" "$$denied_capture"
 	cargo build -p plasma-pilotd -p plasma-pilot-cli
 	target/debug/plasma-pilot-cli trace validate --file examples/traces/status-smoke.json >"$$status_validate_out"
 	jq -e '.type == "trace_validation" and .trace_version == 1 and .step_count == 5 and any(.steps[]; .method == "safety_status")' "$$status_validate_out" >/dev/null
@@ -393,6 +394,7 @@ smoke-trace-replay:
 	cleanup() {
 		kill "$$pid" 2>/dev/null || true
 		wait "$$pid" 2>/dev/null || true
+		rm -f "$$denied_capture"
 	}
 	trap cleanup EXIT
 	for _ in {1..50}; do
@@ -409,6 +411,7 @@ smoke-trace-replay:
 	jq -e '.type == "trace_replay" and .trace_version == 1 and (.steps | length) == 5 and all(.steps[]; .ok == true) and any(.steps[]; .method == "safety_status")' "$$status_out" >/dev/null
 	target/debug/plasma-pilot-cli --socket "$$socket" trace replay --file examples/traces/policy-denials-smoke.json >"$$denial_out"
 	jq -e '.type == "trace_replay" and .trace_version == 1 and (.steps | length) == 3 and all(.steps[]; .response_type == "error" and .ok == false) and any(.steps[]; .method == "focus_window")' "$$denial_out" >/dev/null
+	test ! -e "$$denied_capture"
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 --method safety_status --ok true | jq -e '.type == "journal" and (.data | length) >= 1' >/dev/null
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 --ok false | jq -e '.type == "journal" and (.data | length) >= 3' >/dev/null
 

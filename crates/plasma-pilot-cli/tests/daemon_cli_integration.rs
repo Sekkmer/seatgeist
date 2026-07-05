@@ -404,6 +404,8 @@ fn cli_replays_trace_against_real_daemon() -> Result<()> {
 #[test]
 fn cli_replays_policy_denial_trace_against_real_daemon() -> Result<()> {
     let daemon = DaemonFixture::start()?;
+    let denied_screenshot = Path::new("/tmp/plasma-pilot-denied-full-resolution.png");
+    fs::remove_file(denied_screenshot).ok();
     let trace_path = workspace_root().join("examples/traces/policy-denials-smoke.json");
     let trace: ReplayTrace = serde_json::from_str(
         &fs::read_to_string(&trace_path).context("read checked-in policy denial trace fixture")?,
@@ -438,6 +440,12 @@ fn cli_replays_policy_denial_trace_against_real_daemon() -> Result<()> {
     };
     assert_methods(&entries, &["screenshot", "clipboard_get", "focus_window"]);
     assert!(entries.iter().all(|entry| !entry.ok));
+    assert!(
+        !denied_screenshot.exists(),
+        "denied full-resolution screenshot trace wrote {}",
+        denied_screenshot.display()
+    );
+    fs::remove_file(denied_screenshot).ok();
     Ok(())
 }
 
