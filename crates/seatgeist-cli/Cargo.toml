@@ -1,0 +1,23 @@
+[package]
+name = "seatgeist-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Command-line diagnostics and manual controls for Seatgeist."
+
+[[bin]]
+name = "seatgeist-cli"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+libseatgeist.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

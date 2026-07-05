@@ -1,18 +1,18 @@
 # Arch Linux KDE Install
 
-This is the operator runbook for a local Arch Linux + KDE Plasma 6 + Wayland workstation. It keeps PlasmaPilot user-scoped by default, separates diagnostics from control, and treats KWin script installation plus uinput access as explicit opt-in steps.
+This is the operator runbook for a local Arch Linux + KDE Plasma 6 + Wayland workstation. It keeps Seatgeist user-scoped by default, separates diagnostics from control, and treats KWin script installation plus uinput access as explicit opt-in steps.
 
 Package references were checked on 2026-07-04 against Arch's official package pages for `plasma-meta`, `plasma-workspace`, `kde-cli-tools`, `spectacle`, `xdg-desktop-portal`, `xdg-desktop-portal-kde`, and `wl-clipboard`.
 
 ## Packages
 
-Install or verify the host packages PlasmaPilot relies on:
+Install or verify the host packages Seatgeist relies on:
 
 ```bash
 sudo pacman -S --needed base-devel rust cargo jq plasma-meta plasma-workspace kde-cli-tools spectacle xdg-desktop-portal xdg-desktop-portal-kde wl-clipboard
 ```
 
-If you manage Rust with `rustup`, keep using that toolchain instead of Arch's `rust` and `cargo` packages. PlasmaPilot currently targets Rust 2024 crates in a Cargo resolver 3 workspace.
+If you manage Rust with `rustup`, keep using that toolchain instead of Arch's `rust` and `cargo` packages. Seatgeist currently targets Rust 2024 crates in a Cargo resolver 3 workspace.
 
 The package roles are:
 
@@ -41,20 +41,20 @@ From the repository root:
 cargo build --workspace
 ```
 
-For a user-service install matching `systemd/plasma-pilotd.service`, install the binaries into `~/.cargo/bin`:
+For a user-service install matching `systemd/seatgeistd.service`, install the binaries into `~/.cargo/bin`:
 
 ```bash
-cargo install --locked --path crates/plasma-pilotd
-cargo install --locked --path crates/plasma-pilot-cli
-cargo install --locked --path crates/plasma-pilot-mcp
+cargo install --locked --path crates/seatgeistd
+cargo install --locked --path crates/seatgeist-cli
+cargo install --locked --path crates/seatgeist-mcp
 ```
 
 Verify the user session can find them:
 
 ```bash
-command -v plasma-pilotd
-command -v plasma-pilot-cli
-command -v plasma-pilot-mcp
+command -v seatgeistd
+command -v seatgeist-cli
+command -v seatgeist-mcp
 ```
 
 ## Config
@@ -62,8 +62,8 @@ command -v plasma-pilot-mcp
 Create a conservative config first:
 
 ```bash
-mkdir -p ~/.config/plasma-pilot
-cat > ~/.config/plasma-pilot/config.toml <<'EOF'
+mkdir -p ~/.config/seatgeist
+cat > ~/.config/seatgeist/config.toml <<'EOF'
 [policy]
 default_observe = "allow"
 default_control = "prompt"
@@ -87,17 +87,17 @@ Install and start the socket-activated user service:
 
 ```bash
 mkdir -p ~/.config/systemd/user
-cp systemd/plasma-pilotd.service systemd/plasma-pilotd.socket ~/.config/systemd/user/
+cp systemd/seatgeistd.service systemd/seatgeistd.socket ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now plasma-pilotd.socket
+systemctl --user enable --now seatgeistd.socket
 ```
 
 Check the daemon through the CLI:
 
 ```bash
-plasma-pilot-cli doctor
-plasma-pilot-cli capabilities
-plasma-pilot-cli policy-status
+seatgeist-cli doctor
+seatgeist-cli capabilities
+seatgeist-cli policy-status
 ```
 
 The socket unit uses mode `0600` and directory mode `0700`. Keep the daemon running as the desktop user. Do not run it as root for ordinary operation.
@@ -107,17 +107,17 @@ The socket unit uses mode `0600` and directory mode `0700`. Keep the daemon runn
 Install the panic-stop helper somewhere KDE's global shortcut runner can execute:
 
 ```bash
-install -Dm755 scripts/plasma-pilot-panic-stop-hotkey ~/.local/bin/plasma-pilot-panic-stop-hotkey
+install -Dm755 scripts/seatgeist-panic-stop-hotkey ~/.local/bin/seatgeist-panic-stop-hotkey
 ```
 
-Bind `~/.local/bin/plasma-pilot-panic-stop-hotkey` to a KDE custom shortcut if you want a keyboard emergency stop. With no arguments it runs `plasma-pilot-cli panic-stop enable`, so the request still goes through the daemon and is journaled. If KDE's shortcut environment cannot find the CLI, set `PLASMA_PILOT_CLI=/home/$USER/.cargo/bin/plasma-pilot-cli` in the shortcut command or wrap it in a small shell command.
+Bind `~/.local/bin/seatgeist-panic-stop-hotkey` to a KDE custom shortcut if you want a keyboard emergency stop. With no arguments it runs `seatgeist-cli panic-stop enable`, so the request still goes through the daemon and is journaled. If KDE's shortcut environment cannot find the CLI, set `SEATGEIST_CLI=/home/$USER/.cargo/bin/seatgeist-cli` in the shortcut command or wrap it in a small shell command.
 
 Verify the binding target manually before assigning a shortcut:
 
 ```bash
-~/.local/bin/plasma-pilot-panic-stop-hotkey
-plasma-pilot-cli panic-stop status
-plasma-pilot-cli panic-stop disable
+~/.local/bin/seatgeist-panic-stop-hotkey
+seatgeist-cli panic-stop status
+seatgeist-cli panic-stop disable
 ```
 
 ## KDE Bridge
@@ -126,7 +126,7 @@ The KWin bridge is an explicit KDE configuration mutation. Install it only from 
 
 ```bash
 make install-kwin-script
-plasma-pilot-cli kwin-bridge-status
+seatgeist-cli kwin-bridge-status
 ```
 
 Before the script publishes its first active-window update, active-window reads can report the documented bridge-not-yet-reporting state. Open or focus a normal application window, then re-check status.
@@ -136,11 +136,11 @@ Before the script publishes its first active-window update, active-window reads 
 Run safe read-only diagnostics before enabling control:
 
 ```bash
-plasma-pilot-cli capture-backends
-plasma-pilot-cli input backends
-plasma-pilot-cli input status
-plasma-pilot-cli input pointer-calibration
-plasma-pilot-cli atspi tree --focused
+seatgeist-cli capture-backends
+seatgeist-cli input backends
+seatgeist-cli input status
+seatgeist-cli input pointer-calibration
+seatgeist-cli atspi tree --focused
 ```
 
 The matching safe smoke targets are:
@@ -156,17 +156,17 @@ make smoke-uinput-status
 make smoke-pointer-calibration
 ```
 
-When `--output` is omitted for direct CLI `screenshot`, `screenshot-tile`, or `wait-for-change` commands, PlasmaPilot writes a timestamped PNG under `$XDG_RUNTIME_DIR/plasma-pilot/screenshots/`, using the same `/run/user/<uid>` fallback as the daemon socket defaults if `XDG_RUNTIME_DIR` is missing.
+When `--output` is omitted for direct CLI `screenshot`, `screenshot-tile`, or `wait-for-change` commands, Seatgeist writes a timestamped PNG under `$XDG_RUNTIME_DIR/seatgeist/screenshots/`, using the same `/run/user/<uid>` fallback as the daemon socket defaults if `XDG_RUNTIME_DIR` is missing.
 
-`make smoke-monitors`, `make smoke-windows`, `make smoke-clipboard`, and `make smoke-atspi` require a real KDE user session and may observe session state. `make gui-eval-portal-screenshot` validates live portal Screenshot capture when the portal interface is visible and may show a desktop consent dialog; set `PLASMA_PILOT_PORTAL_SCREENSHOT_STRICT=1` to fail instead of skip when the portal cancels. `make gui-eval-remote-desktop-probe` validates the live RemoteDesktop consent path when the interface and active-window guard metadata are visible; set `PLASMA_PILOT_REMOTE_DESKTOP_STRICT=1` to require a started session instead of accepting a cancelled/ended probe. `make gui-eval-remote-desktop-eis-session` validates the retained RemoteDesktop EIS session lifecycle and minimal explicit-backend input attempts; it may show a portal dialog and can send one minimal scroll plus one minimal `Shift` key-combo only after method approval, an active-window guard, and EIS readiness checks pass. Set `PLASMA_PILOT_REMOTE_DESKTOP_EIS_STRICT=1` to require the stored session to start, and set `PLASMA_PILOT_REMOTE_DESKTOP_EIS_INPUT_STRICT=1` to require both minimal input attempts to succeed. `plasma-pilot-cli input remote-desktop-probe` is an explicit policy-gated RemoteDesktop consent-path probe that may show a portal dialog and closes the transient session without sending input. `plasma-pilot-cli input remote-desktop-eis-probe` uses the same consent path, calls `ConnectToEIS`, reports compact libei runtime state, immediately closes the returned FD, and still sends no input. `make smoke-gui-input` sends real keyboard and pointer input into a disposable KWrite/Kate document and should only be run intentionally. `make gui-eval-kcalc-visual` sends real keyboard input into KCalc through method-scoped approvals and writes a KCalc active-window screenshot artifact when Spectacle is available. `make gui-eval-firefox-localhost-button` launches Firefox with a disposable profile against a temporary localhost page, clicks a guarded window-local test button, verifies the local server received the click, and writes a Firefox active-window screenshot artifact when Spectacle is available.
+`make smoke-monitors`, `make smoke-windows`, `make smoke-clipboard`, and `make smoke-atspi` require a real KDE user session and may observe session state. `make gui-eval-portal-screenshot` validates live portal Screenshot capture when the portal interface is visible and may show a desktop consent dialog; set `SEATGEIST_PORTAL_SCREENSHOT_STRICT=1` to fail instead of skip when the portal cancels. `make gui-eval-remote-desktop-probe` validates the live RemoteDesktop consent path when the interface and active-window guard metadata are visible; set `SEATGEIST_REMOTE_DESKTOP_STRICT=1` to require a started session instead of accepting a cancelled/ended probe. `make gui-eval-remote-desktop-eis-session` validates the retained RemoteDesktop EIS session lifecycle and minimal explicit-backend input attempts; it may show a portal dialog and can send one minimal scroll plus one minimal `Shift` key-combo only after method approval, an active-window guard, and EIS readiness checks pass. Set `SEATGEIST_REMOTE_DESKTOP_EIS_STRICT=1` to require the stored session to start, and set `SEATGEIST_REMOTE_DESKTOP_EIS_INPUT_STRICT=1` to require both minimal input attempts to succeed. `seatgeist-cli input remote-desktop-probe` is an explicit policy-gated RemoteDesktop consent-path probe that may show a portal dialog and closes the transient session without sending input. `seatgeist-cli input remote-desktop-eis-probe` uses the same consent path, calls `ConnectToEIS`, reports compact libei runtime state, immediately closes the returned FD, and still sends no input. `make smoke-gui-input` sends real keyboard and pointer input into a disposable KWrite/Kate document and should only be run intentionally. `make gui-eval-kcalc-visual` sends real keyboard input into KCalc through method-scoped approvals and writes a KCalc active-window screenshot artifact when Spectacle is available. `make gui-eval-firefox-localhost-button` launches Firefox with a disposable profile against a temporary localhost page, clicks a guarded window-local test button, verifies the local server received the click, and writes a Firefox active-window screenshot artifact when Spectacle is available.
 
 ## Optional Uinput
 
 Use uinput only when the local operator accepts a privileged virtual-input fallback. Install the packaged udev rule and add the user to the narrow `uinput` group as documented in `docs/uinput-setup.md`, then log out and back in before retrying:
 
 ```bash
-plasma-pilot-cli input status
-plasma-pilot-cli input backends
+seatgeist-cli input status
+seatgeist-cli input backends
 ```
 
 All keyboard and pointer actions still flow through daemon policy, panic-stop, active-window guards when supplied, and the journal.
@@ -179,7 +179,7 @@ Validate the plugin bundle:
 make validate-plugin
 ```
 
-Install or load the repository `plugin/` directory through the Codex plugin workflow for the local Codex version. The plugin expects `plasma-pilot-mcp` on `PATH` and uses the daemon socket from `PLASMA_PILOT_SOCKET` or the built-in default.
+Install or load the repository `plugin/` directory through the Codex plugin workflow for the local Codex version. The plugin expects `seatgeist-mcp` on `PATH` and uses the daemon socket from `SEATGEIST_SOCKET` or the built-in default.
 
 After Codex sees the plugin, review plugin hooks through Codex's normal hook trust flow before expecting the bundled Stop audit hook to run.
 
@@ -188,7 +188,7 @@ After Codex sees the plugin, review plugin hooks through Codex's normal hook tru
 Prefer method-scoped, short-lived approval grants:
 
 ```bash
-plasma-pilot-cli approve --safety-class control-semantic --method focus_window --ttl-ms 60000
+seatgeist-cli approve --safety-class control-semantic --method focus_window --ttl-ms 60000
 ```
 
 Control actions should include active-window guards when possible. Full-resolution screenshots, clipboard reads, destructive actions, and secret-looking text fields remain separately gated.
@@ -198,8 +198,8 @@ Control actions should include active-window guards when possible. Full-resoluti
 Use journal filters to distinguish policy denials from backend failures:
 
 ```bash
-plasma-pilot-cli journal tail --limit 20
-plasma-pilot-cli journal tail --method focus_window --ok false
+seatgeist-cli journal tail --limit 20
+seatgeist-cli journal tail --method focus_window --ok false
 ```
 
-If capture fails, check `plasma-pilot-cli capture-backends` first. If input fails, check `plasma-pilot-cli input backends` and `plasma-pilot-cli input status` before changing udev, groups, or services.
+If capture fails, check `seatgeist-cli capture-backends` first. If input fails, check `seatgeist-cli input backends` and `seatgeist-cli input status` before changing udev, groups, or services.

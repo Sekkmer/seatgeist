@@ -1,0 +1,20 @@
+[package]
+name = "seatgeist-kwin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "KWin integration backend for Seatgeist."
+
+[dependencies]
+libseatgeist.workspace = true
+seatgeist-backend.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

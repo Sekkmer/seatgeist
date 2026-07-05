@@ -1,0 +1,10 @@
+[Unit]
+Description=Seatgeist daemon socket
+
+[Socket]
+ListenStream=%t/seatgeist/seatgeistd.sock
+SocketMode=0600
+DirectoryMode=0700
+
+[Install]
+WantedBy=sockets.target

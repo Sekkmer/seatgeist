@@ -7,7 +7,7 @@ Usage: scripts/gui-browser-smoke.sh [firefox-localhost-button]
 
 Runs an opt-in local GUI smoke that launches Firefox with a disposable profile,
 visits a temporary localhost page, and clicks a large test button through
-plasma-pilotd with short-lived approval-file grants.
+seatgeistd with short-lived approval-file grants.
 USAGE
 }
 
@@ -35,9 +35,9 @@ require_cmd python3
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-run_dir="target/plasma-pilot-gui-browser-smoke"
-socket_dir="/tmp/plasma-pilot-gui-browser-smoke"
-socket="$socket_dir/plasma-pilotd.sock"
+run_dir="target/seatgeist-gui-browser-smoke"
+socket_dir="/tmp/seatgeist-gui-browser-smoke"
+socket="$socket_dir/seatgeistd.sock"
 log="$run_dir/daemon.log"
 journal="$run_dir/journal.jsonl"
 approval_file="$run_dir/approvals.jsonl"
@@ -70,7 +70,7 @@ cat >"$web_root/index.html" <<'HTML'
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>PlasmaPilot Localhost Eval</title>
+  <title>Seatgeist Localhost Eval</title>
   <style>
     :root {
       color-scheme: light;
@@ -105,7 +105,7 @@ cat >"$web_root/index.html" <<'HTML'
   </style>
 </head>
 <body>
-  <button id="pilot-button" type="button">PlasmaPilot Localhost Button</button>
+  <button id="pilot-button" type="button">Seatgeist Localhost Button</button>
   <output id="result">waiting</output>
   <script>
     document.getElementById("pilot-button").addEventListener("click", async () => {
@@ -167,13 +167,13 @@ server.serve_forever()
 PY
 http_pid=$!
 
-cargo build -p plasma-pilotd -p plasma-pilot-cli
+cargo build -p seatgeistd -p seatgeist-cli
 
-target/debug/plasma-pilotd --socket "$socket" --journal "$journal" --approval-file "$approval_file" >"$log" 2>&1 &
+target/debug/seatgeistd --socket "$socket" --journal "$journal" --approval-file "$approval_file" >"$log" 2>&1 &
 daemon_pid=$!
 
 cli() {
-	target/debug/plasma-pilot-cli --socket "$socket" "$@"
+	target/debug/seatgeist-cli --socket "$socket" "$@"
 }
 
 guard_args=()
@@ -248,7 +248,7 @@ for _ in {1..150}; do
 	if jq -e '
 		[
 			.data[]
-			| select(((.title // "") | contains("PlasmaPilot Localhost Eval")) or ((.title // "") | contains("127.0.0.1")))
+			| select(((.title // "") | contains("Seatgeist Localhost Eval")) or ((.title // "") | contains("127.0.0.1")))
 			| select(.geometry != null)
 		][0]
 	' "$windows_json" >"$window_json"; then
@@ -273,7 +273,7 @@ for _ in {1..80}; do
 	if cli active-window >"$active_json" 2>/dev/null \
 		&& jq -e --arg id "$window_id" '
 			.type == "active_window"
-			and (.data.id == $id or ((.data.title // "") | contains("PlasmaPilot Localhost Eval")))
+			and (.data.id == $id or ((.data.title // "") | contains("Seatgeist Localhost Eval")))
 		' "$active_json" >/dev/null; then
 		break
 	fi
@@ -281,7 +281,7 @@ for _ in {1..80}; do
 done
 if ! jq -e --arg id "$window_id" '
 	.type == "active_window"
-	and (.data.id == $id or ((.data.title // "") | contains("PlasmaPilot Localhost Eval")))
+	and (.data.id == $id or ((.data.title // "") | contains("Seatgeist Localhost Eval")))
 ' "$active_json" >/dev/null 2>&1; then
 	echo "KWin active-window bridge did not report Firefox localhost eval as active; click or focus the Firefox eval window, run make install-kwin-script if needed, and retry" >&2
 	cat "$active_json" >&2 || true
@@ -330,19 +330,19 @@ if command -v spectacle >/dev/null 2>&1; then
 	if spectacle -b -n --activewindow -o "$screenshot_png" >/dev/null 2>"$screenshot_err"; then
 		if [[ -s "$screenshot_png" ]]; then
 			printf '{"type":"visual_artifact","data":{"source":"spectacle_active_window","output":"%s"}}\n' "$screenshot_png" >"$screenshot_json"
-		elif [[ "${PLASMA_PILOT_FIREFOX_SCREENSHOT_STRICT:-0}" == "1" ]]; then
+		elif [[ "${SEATGEIST_FIREFOX_SCREENSHOT_STRICT:-0}" == "1" ]]; then
 			echo "Firefox Spectacle active-window capture wrote no output" >&2
 			exit 1
 		else
 			echo "SKIP Firefox screenshot artifact: Spectacle wrote no output"
 		fi
-	elif [[ "${PLASMA_PILOT_FIREFOX_SCREENSHOT_STRICT:-0}" == "1" ]]; then
+	elif [[ "${SEATGEIST_FIREFOX_SCREENSHOT_STRICT:-0}" == "1" ]]; then
 		cat "$screenshot_err" >&2
 		exit 1
 	else
 		echo "SKIP Firefox screenshot artifact: Spectacle active-window capture failed"
 	fi
-elif [[ "${PLASMA_PILOT_FIREFOX_SCREENSHOT_STRICT:-0}" == "1" ]]; then
+elif [[ "${SEATGEIST_FIREFOX_SCREENSHOT_STRICT:-0}" == "1" ]]; then
 	echo "Spectacle is required for strict Firefox screenshot artifacts" >&2
 	exit 1
 else

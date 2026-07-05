@@ -1,5 +1,5 @@
 {
-  "name": "plasmapilot",
+  "name": "seatgeist",
   "version": "0.1.0",
   "description": "KDE Plasma desktop-control substrate for Codex CLI via MCP, skills, hooks, and a local daemon.",
   "author": {
@@ -11,9 +11,9 @@
   "skills": "./skills",
   "mcpServers": "./.mcp.json",
   "interface": {
-    "displayName": "PlasmaPilot",
+    "displayName": "Seatgeist",
     "shortDescription": "Use KDE Plasma desktop apps from Codex through local MCP tools.",
-    "longDescription": "PlasmaPilot exposes a local KDE Plasma desktop-control runtime to Codex. It provides screenshots, window state, input, clipboard, accessibility metadata, safety policy, and audit logging through MCP tools and reusable skills.",
+    "longDescription": "Seatgeist exposes a local KDE Plasma desktop-control runtime to Codex. It provides screenshots, window state, input, clipboard, accessibility metadata, safety policy, and audit logging through MCP tools and reusable skills.",
     "developerName": "Sekkmer",
     "category": "Developer Tools",
     "capabilities": ["MCP", "Skills", "Hooks", "Desktop Automation", "KDE", "Wayland"]

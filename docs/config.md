@@ -1,21 +1,21 @@
 # Configuration
 
-`plasma-pilotd` reads an optional TOML config from:
+`seatgeistd` reads an optional TOML config from:
 
 ```text
-~/.config/plasma-pilot/config.toml
+~/.config/seatgeist/config.toml
 ```
 
-Use `--config <path>` or `PLASMA_PILOT_CONFIG=<path>` to point at another file.
+Use `--config <path>` or `SEATGEIST_CONFIG=<path>` to point at another file.
 
 Implemented fields:
 
 ```toml
 [daemon]
-socket = "$XDG_RUNTIME_DIR/plasma-pilot/plasma-pilotd.sock"
-journal = "$XDG_STATE_HOME/plasma-pilot/journal.jsonl"
-panic_stop_file = "$XDG_RUNTIME_DIR/plasma-pilot/panic-stop"
-approval_file = "$XDG_RUNTIME_DIR/plasma-pilot/approvals.jsonl"
+socket = "$XDG_RUNTIME_DIR/seatgeist/seatgeistd.sock"
+journal = "$XDG_STATE_HOME/seatgeist/journal.jsonl"
+panic_stop_file = "$XDG_RUNTIME_DIR/seatgeist/panic-stop"
+approval_file = "$XDG_RUNTIME_DIR/seatgeist/approvals.jsonl"
 
 [journal]
 include_artifact_metadata = false
@@ -46,7 +46,7 @@ deny = ["org.keepassxc.KeePassXC"]
 [safety]
 require_focus_guard = true
 pause_on_human_input = false
-human_input_activity_file = "$XDG_RUNTIME_DIR/plasma-pilot/human-input-active"
+human_input_activity_file = "$XDG_RUNTIME_DIR/seatgeist/human-input-active"
 human_input_quiet_ms = 1500
 control_rate_limit_per_minute = 120
 preview_max_edge = 1600
@@ -69,19 +69,19 @@ Precedence is:
 2. Config file values.
 3. Built-in defaults.
 
-Prompt-level policy decisions fail closed unless the daemon is started with `--approval-file <path>` / `PLASMA_PILOT_APPROVAL_FILE=<path>` or `[daemon].approval_file`, and that file contains a matching unexpired grant. The approval file is JSONL, must be owned by the daemon uid, must be a regular file, and must not be readable, writable, or executable by group/other. Its parent directory must also be owned by the daemon uid and not group/other writable. Missing approval files mean no approval is present. Malformed or insecure approval files fail closed.
+Prompt-level policy decisions fail closed unless the daemon is started with `--approval-file <path>` / `SEATGEIST_APPROVAL_FILE=<path>` or `[daemon].approval_file`, and that file contains a matching unexpired grant. The approval file is JSONL, must be owned by the daemon uid, must be a regular file, and must not be readable, writable, or executable by group/other. Its parent directory must also be owned by the daemon uid and not group/other writable. Missing approval files mean no approval is present. Malformed or insecure approval files fail closed.
 
 Create a short-lived method-scoped grant with:
 
 ```bash
-plasma-pilot-cli approve --safety-class control-semantic --method focus_window --ttl-ms 60000
+seatgeist-cli approve --safety-class control-semantic --method focus_window --ttl-ms 60000
 ```
 
-The default CLI approval-file path is `$XDG_RUNTIME_DIR/plasma-pilot/approvals.jsonl`; the daemon only reads it when explicitly configured to do so. Grant records include `safety_class`, `method`, `expires_unix_ms`, and optional `reason`; `method = "*"` is supported for deliberate class-wide local grants. A matching grant only satisfies a prompt decision. Explicit `deny`, app policy, panic-stop, human-input pause, active-window guard checks, and backend validation still run.
+The default CLI approval-file path is `$XDG_RUNTIME_DIR/seatgeist/approvals.jsonl`; the daemon only reads it when explicitly configured to do so. Grant records include `safety_class`, `method`, `expires_unix_ms`, and optional `reason`; `method = "*"` is supported for deliberate class-wide local grants. A matching grant only satisfies a prompt decision. Explicit `deny`, app policy, panic-stop, human-input pause, active-window guard checks, and backend validation still run.
 
 Explicit local approval flags such as `--allow-control`, `--allow-clipboard-read`, and `--allow-full-resolution-screenshot` still override file policy defaults for that daemon run. Prefer short-lived approval-file grants for narrow local use.
 
-`[backends].input` controls the requested raw keyboard/pointer backend and can be `auto`, `uinput`, `portal_remote_desktop`, or `libei`. `--input-backend` / `PLASMA_PILOT_INPUT_BACKEND` override the config file. Raw input commands resolve a daemon input-executor trait before side effects, and successful action summaries include backend provenance. `auto` and `uinput` use the uinput adapter. Explicit `portal_remote_desktop` and `libei` selections build EIS plans for UTF-8 text, modeled XKB text keysyms, named evdev or single-symbol key combos, and pointer requests, then execute currently wired daemon requests through the stored daemon EIS session only after `plasma-pilot-cli input remote-desktop-eis-start` has retained a session and the per-plan readiness gate finds a connected session, bound capabilities, selected portal devices, and a matching resumed EIS device. Without a stored session or ready selected device, those explicit EIS backends fail closed before side effects. Explicit EIS `key_combo` planning first uses the named evdev parser and then resolves unsupported single-character symbol parts through xkbcommon keymap lookup. `[backends.keymap]` can pin explicit xkbcommon RMLVO names (`rules`, `model`, `layout`, `variant`, and `options`) for that lookup. Empty `options = ""` is preserved as xkbcommon's "no options" value. When `[backends.keymap]` is omitted, explicit EIS key combos try KDE's current keyboard-layout DBus metadata first, then KDE `kxkbrc` layout config via `kreadconfig6`, then xkbcommon defaults. `auto`/`uinput` still use the stricter named evdev/US mapping path. Use `plasma-pilot-cli input remote-desktop-eis-session-status` and `plasma-pilot-cli input remote-desktop-eis-stop` to inspect or drop the retained session. Use `plasma-pilot-cli input backends` or MCP `plasma.input_backend_status` to see `configured_backend`, `preferred_available_backend`, `implemented_available_backend`, `eis_keymap`, and setup hints. Use `plasma-pilot-cli input remote-desktop-probe` or MCP `plasma.remote_desktop_session_probe` only as an explicit, policy-gated RemoteDesktop consent-path test; it closes the transient session and does not send input. Use `plasma-pilot-cli input remote-desktop-eis-probe` or MCP `plasma.remote_desktop_eis_probe` only when you also need to prove the `ConnectToEIS` handoff path; it starts the transient session, calls `ConnectToEIS`, reports compact libei runtime connected/event/bound-capability/resumed-device state, immediately closes the returned FD, and sends no input.
+`[backends].input` controls the requested raw keyboard/pointer backend and can be `auto`, `uinput`, `portal_remote_desktop`, or `libei`. `--input-backend` / `SEATGEIST_INPUT_BACKEND` override the config file. Raw input commands resolve a daemon input-executor trait before side effects, and successful action summaries include backend provenance. `auto` and `uinput` use the uinput adapter. Explicit `portal_remote_desktop` and `libei` selections build EIS plans for UTF-8 text, modeled XKB text keysyms, named evdev or single-symbol key combos, and pointer requests, then execute currently wired daemon requests through the stored daemon EIS session only after `seatgeist-cli input remote-desktop-eis-start` has retained a session and the per-plan readiness gate finds a connected session, bound capabilities, selected portal devices, and a matching resumed EIS device. Without a stored session or ready selected device, those explicit EIS backends fail closed before side effects. Explicit EIS `key_combo` planning first uses the named evdev parser and then resolves unsupported single-character symbol parts through xkbcommon keymap lookup. `[backends.keymap]` can pin explicit xkbcommon RMLVO names (`rules`, `model`, `layout`, `variant`, and `options`) for that lookup. Empty `options = ""` is preserved as xkbcommon's "no options" value. When `[backends.keymap]` is omitted, explicit EIS key combos try KDE's current keyboard-layout DBus metadata first, then KDE `kxkbrc` layout config via `kreadconfig6`, then xkbcommon defaults. `auto`/`uinput` still use the stricter named evdev/US mapping path. Use `seatgeist-cli input remote-desktop-eis-session-status` and `seatgeist-cli input remote-desktop-eis-stop` to inspect or drop the retained session. Use `seatgeist-cli input backends` or MCP `seatgeist.input_backend_status` to see `configured_backend`, `preferred_available_backend`, `implemented_available_backend`, `eis_keymap`, and setup hints. Use `seatgeist-cli input remote-desktop-probe` or MCP `seatgeist.remote_desktop_session_probe` only as an explicit, policy-gated RemoteDesktop consent-path test; it closes the transient session and does not send input. Use `seatgeist-cli input remote-desktop-eis-probe` or MCP `seatgeist.remote_desktop_eis_probe` only when you also need to prove the `ConnectToEIS` handoff path; it starts the transient session, calls `ConnectToEIS`, reports compact libei runtime connected/event/bound-capability/resumed-device state, immediately closes the returned FD, and sends no input.
 
 `[policy].destructive_actions` applies after ordinary control policy for requests marked destructive and for obvious destructive labels in high-level semantic controls, such as delete, remove, discard, quit, shutdown, and restart. The default is `prompt`, which requires a matching approval-file grant or explicit local allow policy.
 
@@ -99,7 +99,7 @@ When `[safety].pause_on_human_input = true`, the daemon checks `human_input_acti
 
 `[safety].preview_max_edge` and `[safety].tile_max_edge` default to `1600` and must be greater than zero. These values bound default screenshot previews, observe-attached screenshots, wait-for-change captures, and screenshot tiles on high-resolution displays. Per-request `max_edge` values can still override the configured defaults, and full-resolution screenshot requests remain explicit and separately policy-gated.
 
-Use `plasma-pilot-cli readiness` or MCP `plasma.computer_use_readiness` for a compact computer-use preflight before attempting control. It aggregates safe status only, without screenshots, portal sessions, clipboard reads, or input. Use `plasma-pilot-cli safety-status` or MCP `plasma.safety_status` for detailed active safety gates; the response includes focus-guard enforcement, human-input pause state, whether the activity signal is currently fresh, the quiet interval, the optional signal-file path, the control rate limit, screenshot preview/tile max-edge defaults, the count of configured screenshot redaction regions without exposing redaction geometry, and whether opt-in journal artifact metadata is enabled. Use `plasma-pilot-cli desktop-session-status` or MCP `plasma.desktop_session_status` when diagnosing KDE, Wayland, DBus, portal, KWin, or AT-SPI setup; it reports sanitized session values and boolean DBus/runtime presence instead of raw paths.
+Use `seatgeist-cli readiness` or MCP `seatgeist.computer_use_readiness` for a compact computer-use preflight before attempting control. It aggregates safe status only, without screenshots, portal sessions, clipboard reads, or input. Use `seatgeist-cli safety-status` or MCP `seatgeist.safety_status` for detailed active safety gates; the response includes focus-guard enforcement, human-input pause state, whether the activity signal is currently fresh, the quiet interval, the optional signal-file path, the control rate limit, screenshot preview/tile max-edge defaults, the count of configured screenshot redaction regions without exposing redaction geometry, and whether opt-in journal artifact metadata is enabled. Use `seatgeist-cli desktop-session-status` or MCP `seatgeist.desktop_session_status` when diagnosing KDE, Wayland, DBus, portal, KWin, or AT-SPI setup; it reports sanitized session values and boolean DBus/runtime presence instead of raw paths.
 
 `[[safety.redact_regions]]` entries define physical-pixel source screenshot rectangles. The daemon maps each rectangle through the screenshot transform and black-fills the matching output pixels before returning screenshot, screenshot-tile, observe screenshot, or wait-for-change outputs. Zero-size regions are ignored.
 

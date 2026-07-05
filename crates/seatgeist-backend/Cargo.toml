@@ -1,0 +1,17 @@
+[package]
+name = "seatgeist-backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Backend traits for Seatgeist screen, input, window, clipboard, and accessibility providers."
+
+[dependencies]
+async-trait.workspace = true
+libseatgeist.workspace = true
+
+[lints]
+workspace = true

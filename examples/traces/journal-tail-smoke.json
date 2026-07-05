@@ -43,7 +43,7 @@
         },
         {
           "pointer": "/data/0/client/tool",
-          "equals": "plasma-pilot-cli"
+          "equals": "seatgeist-cli"
         },
         {
           "pointer": "/data/0/safety_class",

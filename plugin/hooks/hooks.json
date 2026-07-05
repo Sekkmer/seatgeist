@@ -5,9 +5,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/plugin/hooks/plasma_audit_summary.py\"",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/plugin/hooks/seatgeist_audit_summary.py\"",
             "timeout": 10,
-            "statusMessage": "Writing PlasmaPilot audit summary"
+            "statusMessage": "Writing Seatgeist audit summary"
           }
         ]
       }

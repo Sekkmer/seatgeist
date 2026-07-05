@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+	cat <<'USAGE'
+Usage: seatgeist-panic-stop-hotkey [enable|status|disable]
+
+KDE global-shortcut friendly wrapper around:
+
+  seatgeist-cli panic-stop enable
+
+With no arguments, the helper enables panic-stop. Set SEATGEIST_CLI to an
+explicit seatgeist-cli path when the KDE shortcut environment has a narrow
+PATH. Set SEATGEIST_SOCKET to target a non-default daemon socket.
+USAGE
+}
+
+action="${1:-enable}"
+case "$action" in
+	enable | status | disable) ;;
+	--help | -h)
+		usage
+		exit 0
+		;;
+	*)
+		usage >&2
+		exit 2
+		;;
+esac
+
+if [[ -n "${SEATGEIST_CLI:-}" ]]; then
+	cli="$SEATGEIST_CLI"
+elif command -v seatgeist-cli >/dev/null 2>&1; then
+	cli="$(command -v seatgeist-cli)"
+elif [[ -x "$HOME/.cargo/bin/seatgeist-cli" ]]; then
+	cli="$HOME/.cargo/bin/seatgeist-cli"
+else
+	echo "seatgeist-cli was not found; set SEATGEIST_CLI for the KDE shortcut" >&2
+	exit 127
+fi
+
+socket_args=()
+if [[ -n "${SEATGEIST_SOCKET:-}" ]]; then
+	socket_args=(--socket "$SEATGEIST_SOCKET")
+fi
+
+exec "$cli" "${socket_args[@]}" panic-stop "$action"

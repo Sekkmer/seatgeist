@@ -1,0 +1,17 @@
+[package]
+name = "seatgeist-atspi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "AT-SPI accessibility backend for Seatgeist."
+
+[dependencies]
+libseatgeist.workspace = true
+seatgeist-backend.workspace = true
+
+[lints]
+workspace = true

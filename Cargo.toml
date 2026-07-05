@@ -8,9 +8,9 @@ edition = "2024"
 rust-version = "1.96"
 authors = ["Sekkmer"]
 license = "MIT OR Apache-2.0"
-repository = "https://example.invalid/plasma-pilot"
-homepage = "https://example.invalid/plasma-pilot"
-description = "KDE Plasma desktop-control substrate for Codex."
+repository = "https://example.invalid/seatgeist"
+homepage = "https://example.invalid/seatgeist"
+description = "Seatgeist KDE Plasma desktop-control substrate for Codex."
 
 [workspace.dependencies]
 anyhow = "1.0.100"
@@ -18,14 +18,14 @@ async-trait = "0.1.88"
 clap = { version = "4.5.41", features = ["derive", "env"] }
 image = { version = "0.25.8", default-features = false, features = ["png"] }
 libc = "0.2.186"
-libplasma-pilot = { path = "crates/libplasma-pilot" }
-plasma-pilot-backend = { path = "crates/plasma-pilot-backend" }
-plasma-pilot-atspi = { path = "crates/plasma-pilot-atspi" }
-plasma-pilot-eis = { path = "crates/plasma-pilot-eis" }
-plasma-pilot-kwin = { path = "crates/plasma-pilot-kwin" }
-plasma-pilot-policy = { path = "crates/plasma-pilot-policy" }
-plasma-pilot-portal = { path = "crates/plasma-pilot-portal" }
-plasma-pilot-uinput = { path = "crates/plasma-pilot-uinput" }
+libseatgeist = { path = "crates/libseatgeist" }
+seatgeist-backend = { path = "crates/seatgeist-backend" }
+seatgeist-atspi = { path = "crates/seatgeist-atspi" }
+seatgeist-eis = { path = "crates/seatgeist-eis" }
+seatgeist-kwin = { path = "crates/seatgeist-kwin" }
+seatgeist-policy = { path = "crates/seatgeist-policy" }
+seatgeist-portal = { path = "crates/seatgeist-portal" }
+seatgeist-uinput = { path = "crates/seatgeist-uinput" }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 sha2 = "0.10.9"

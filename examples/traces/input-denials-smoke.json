@@ -6,7 +6,7 @@
       "label": "type-text-denied",
       "request": {
         "method": "type_text",
-        "text": "plasma-pilot-should-not-type"
+        "text": "seatgeist-should-not-type"
       },
       "expect_response_type": "error",
       "expect_ok": false,

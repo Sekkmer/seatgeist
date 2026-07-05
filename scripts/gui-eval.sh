@@ -5,7 +5,7 @@ usage() {
 	cat <<'USAGE'
 Usage: scripts/gui-eval.sh [all|status|session-preflight|observe|a11y-quality-status|a11y-focused-tree|a11y-find|a11y-text-attributes|a11y-control-denied|semantic-denied|input-denied|clipboard-status|clipboard-denied|kwin-bridge-status|keymap-status|screenshot-preview|screenshot-coordinate-map|screenshot-config-bounds|journal-artifacts|portal-screenshot|remote-desktop-probe|remote-desktop-eis-session|full-resolution-denied|control-safety]
 
-Runs opt-in local GUI evals against a private PlasmaPilot daemon socket.
+Runs opt-in local GUI evals against a private Seatgeist daemon socket.
 The default `all` set avoids control actions. `control-safety` starts a private
 daemon with a method-scoped approval grant, then verifies guard and panic-stop
 denials before any backend control action can execute.
@@ -34,12 +34,12 @@ fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-run_root="target/plasma-pilot-gui-eval"
+run_root="target/seatgeist-gui-eval"
 run_id="${case_name}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 run_dir="$run_root/$run_id"
 latest_link="$run_root/latest"
-socket_dir="$(mktemp -d -t "plasma-pilot-gui-eval-${case_name}.XXXXXX")"
-socket="$socket_dir/plasma-pilotd.sock"
+socket_dir="$(mktemp -d -t "seatgeist-gui-eval-${case_name}.XXXXXX")"
+socket="$socket_dir/seatgeistd.sock"
 log="$run_dir/daemon.log"
 journal="$run_dir/journal.jsonl"
 panic_stop_file="$run_dir/panic-stop.flag"
@@ -98,7 +98,7 @@ if [[ "$case_name" == "all" || "$case_name" == "kwin-bridge-status" || "$case_na
 	flock "$kwin_bridge_lock_fd"
 fi
 
-cargo build -p plasma-pilotd -p plasma-pilot-cli
+cargo build -p seatgeistd -p seatgeist-cli
 if [[ "$case_name" == "all" || "$case_name" == "screenshot-config-bounds" || "$case_name" == "journal-artifacts" ]]; then
 	cat >"$config_file" <<CONFIG
 [daemon]
@@ -123,7 +123,7 @@ fi
 if [[ "$case_name" == "remote-desktop-eis-session" ]]; then
 	daemon_args+=(--input-backend portal_remote_desktop)
 fi
-target/debug/plasma-pilotd "${daemon_args[@]}" >"$log" 2>&1 &
+target/debug/seatgeistd "${daemon_args[@]}" >"$log" 2>&1 &
 pid=$!
 
 for _ in {1..50}; do
@@ -138,7 +138,7 @@ if [[ ! -S "$socket" ]]; then
 fi
 
 cli() {
-	target/debug/plasma-pilot-cli --socket "$socket" "$@"
+	target/debug/seatgeist-cli --socket "$socket" "$@"
 }
 
 eval_status() {
@@ -518,12 +518,12 @@ seed_kwin_bridge_updates() {
 		return 1
 	fi
 
-	local active_payload='{"active":true,"id":"plasma-pilot-eval-window","title":"PlasmaPilot Eval Window","app_id":"org.plasmapilot.eval","geometry":{"x":0,"y":0,"width":100,"height":100}}'
-	local windows_payload='{"windows":[{"id":"plasma-pilot-eval-window","title":"PlasmaPilot Eval Window","app_id":"org.plasmapilot.eval","geometry":{"x":0,"y":0,"width":100,"height":100}},{"id":"plasma-pilot-eval-secondary","title":"PlasmaPilot Eval Secondary","app_id":"org.plasmapilot.eval","geometry":{"x":120,"y":0,"width":80,"height":80}}]}'
+	local active_payload='{"active":true,"id":"seatgeist-eval-window","title":"Seatgeist Eval Window","app_id":"org.seatgeist.eval","geometry":{"x":0,"y":0,"width":100,"height":100}}'
+	local windows_payload='{"windows":[{"id":"seatgeist-eval-window","title":"Seatgeist Eval Window","app_id":"org.seatgeist.eval","geometry":{"x":0,"y":0,"width":100,"height":100}},{"id":"seatgeist-eval-secondary","title":"Seatgeist Eval Secondary","app_id":"org.seatgeist.eval","geometry":{"x":120,"y":0,"width":80,"height":80}}]}'
 
 	for _ in {1..50}; do
-		if qdbus6 org.plasmapilot.KWinBridge /org/plasmapilot/KWinBridge1 org.plasmapilot.KWinBridge1.UpdateActiveWindow "$active_payload" >/dev/null 2>&1 \
-			&& qdbus6 org.plasmapilot.KWinBridge /org/plasmapilot/KWinBridge1 org.plasmapilot.KWinBridge1.UpdateWindows "$windows_payload" >/dev/null 2>&1; then
+		if qdbus6 org.seatgeist.KWinBridge /org/seatgeist/KWinBridge1 org.seatgeist.KWinBridge1.UpdateActiveWindow "$active_payload" >/dev/null 2>&1 \
+			&& qdbus6 org.seatgeist.KWinBridge /org/seatgeist/KWinBridge1 org.seatgeist.KWinBridge1.UpdateWindows "$windows_payload" >/dev/null 2>&1; then
 			return 0
 		fi
 		sleep 0.1
@@ -535,7 +535,7 @@ seed_kwin_bridge_updates() {
 skip_portal_screenshot_cancel() {
 	local eval_name="$1"
 	local err_file="$2"
-	if portal_screenshot_cancelled "$err_file" && [[ "${PLASMA_PILOT_PORTAL_SCREENSHOT_STRICT:-0}" != "1" ]]; then
+	if portal_screenshot_cancelled "$err_file" && [[ "${SEATGEIST_PORTAL_SCREENSHOT_STRICT:-0}" != "1" ]]; then
 		echo "SKIP $eval_name: portal cancelled or ended the request without a screenshot"
 		return 0
 	fi
@@ -567,8 +567,8 @@ eval_kwin_bridge_status() {
 			and .data.active_window_update_seen == true
 			and .data.window_list_update_seen == true
 			and .data.window_count == 2
-			and .data.active_window.id == "plasma-pilot-eval-window"
-			and .data.active_window.app_id == "org.plasmapilot.eval"
+			and .data.active_window.id == "seatgeist-eval-window"
+			and .data.active_window.app_id == "org.seatgeist.eval"
 		' "$run_dir/kwin-bridge-status.json" >/dev/null
 	fi
 	cli journal tail --limit 20 --method kwin_bridge_status --ok true >"$run_dir/kwin-bridge-status-journal.json"
@@ -808,7 +808,7 @@ eval_portal_screenshot() {
 	fi
 
 	if ! cli screenshot --output "$run_dir/portal-screenshot.png" >"$run_dir/portal-screenshot.json" 2>"$run_dir/portal-screenshot.err"; then
-		if portal_screenshot_cancelled "$run_dir/portal-screenshot.err" && [[ "${PLASMA_PILOT_PORTAL_SCREENSHOT_STRICT:-0}" != "1" ]]; then
+		if portal_screenshot_cancelled "$run_dir/portal-screenshot.err" && [[ "${SEATGEIST_PORTAL_SCREENSHOT_STRICT:-0}" != "1" ]]; then
 			echo "SKIP portal-screenshot: portal cancelled or ended the request without a screenshot"
 			return 0
 		fi
@@ -845,7 +845,7 @@ eval_portal_screenshot() {
 		--y 0 \
 		--width "$tile_width" \
 		--height "$tile_height" >"$run_dir/portal-screenshot-tile.json" 2>"$run_dir/portal-screenshot-tile.err"; then
-		if portal_screenshot_cancelled "$run_dir/portal-screenshot-tile.err" && [[ "${PLASMA_PILOT_PORTAL_SCREENSHOT_STRICT:-0}" != "1" ]]; then
+		if portal_screenshot_cancelled "$run_dir/portal-screenshot-tile.err" && [[ "${SEATGEIST_PORTAL_SCREENSHOT_STRICT:-0}" != "1" ]]; then
 			echo "SKIP portal-screenshot tile: portal cancelled or ended the tile source request without a screenshot"
 			return 0
 		fi
@@ -910,7 +910,7 @@ eval_remote_desktop_probe() {
 		and (.data.requested_devices | index("pointer"))
 		and .data.transient_session_closed == true
 	' "$run_dir/remote-desktop-probe.json" >/dev/null
-	if [[ "${PLASMA_PILOT_REMOTE_DESKTOP_STRICT:-0}" == "1" ]]; then
+	if [[ "${SEATGEIST_REMOTE_DESKTOP_STRICT:-0}" == "1" ]]; then
 		jq -e '.data.started == true and (.data.selected_devices | length) >= 1' "$run_dir/remote-desktop-probe.json" >/dev/null
 	fi
 	cli journal tail --limit 20 --method remote_desktop_session_probe --ok true >"$run_dir/remote-desktop-journal.json"
@@ -968,7 +968,7 @@ eval_remote_desktop_eis_session() {
 	fi
 	jq -e '.type == "remote_desktop_eis_session_status"' "$run_dir/remote-desktop-eis-start.json" >/dev/null
 	if ! jq -e '.data.active == true' "$run_dir/remote-desktop-eis-start.json" >/dev/null; then
-		if [[ "${PLASMA_PILOT_REMOTE_DESKTOP_EIS_STRICT:-0}" == "1" ]]; then
+		if [[ "${SEATGEIST_REMOTE_DESKTOP_EIS_STRICT:-0}" == "1" ]]; then
 			echo "remote-desktop-eis-session did not start in strict mode" >&2
 			cat "$run_dir/remote-desktop-eis-start.json" >&2
 			exit 1
@@ -997,7 +997,7 @@ eval_remote_desktop_eis_session() {
 		scroll_ok=1
 		jq -e '.type == "action" and (.data.message | contains("backend=portal_remote_desktop"))' "$run_dir/remote-desktop-eis-scroll.json" >/dev/null
 	else
-		if [[ "${PLASMA_PILOT_REMOTE_DESKTOP_EIS_INPUT_STRICT:-0}" == "1" ]]; then
+		if [[ "${SEATGEIST_REMOTE_DESKTOP_EIS_INPUT_STRICT:-0}" == "1" ]]; then
 			cat "$run_dir/remote-desktop-eis-scroll.err" >&2
 			cli input remote-desktop-eis-stop >"$run_dir/remote-desktop-eis-stop-after-scroll-failure.json" || true
 			exit 1
@@ -1013,7 +1013,7 @@ eval_remote_desktop_eis_session() {
 		key_combo_ok=1
 		jq -e '.type == "action" and (.data.message | contains("backend=portal_remote_desktop"))' "$run_dir/remote-desktop-eis-key-combo.json" >/dev/null
 	else
-		if [[ "${PLASMA_PILOT_REMOTE_DESKTOP_EIS_INPUT_STRICT:-0}" == "1" ]]; then
+		if [[ "${SEATGEIST_REMOTE_DESKTOP_EIS_INPUT_STRICT:-0}" == "1" ]]; then
 			cat "$run_dir/remote-desktop-eis-key-combo.err" >&2
 			cli input remote-desktop-eis-stop >"$run_dir/remote-desktop-eis-stop-after-key-combo-failure.json" || true
 			exit 1
@@ -1076,7 +1076,7 @@ eval_control_safety() {
 	seed_kwin_bridge_updates || true
 
 	if cli active-window >"$run_dir/control-safety-active-window.json" 2>/dev/null; then
-		if cli focus --window "__plasma_pilot_eval_never__" --expected-active-window "__plasma_pilot_wrong_window__" >"$run_dir/guard-denied.txt" 2>&1; then
+		if cli focus --window "__seatgeist_eval_never__" --expected-active-window "__seatgeist_wrong_window__" >"$run_dir/guard-denied.txt" 2>&1; then
 			echo "focus unexpectedly passed with an incorrect active-window guard" >&2
 			exit 1
 		fi
@@ -1087,7 +1087,7 @@ eval_control_safety() {
 
 	cli panic-stop enable >"$run_dir/panic-stop-enabled.json"
 	jq -e '.type == "panic_stop" and .data.enabled == true' "$run_dir/panic-stop-enabled.json" >/dev/null
-	if cli focus --window "__plasma_pilot_eval_never__" >"$run_dir/panic-stop-denied.txt" 2>&1; then
+	if cli focus --window "__seatgeist_eval_never__" >"$run_dir/panic-stop-denied.txt" 2>&1; then
 		echo "focus unexpectedly passed while panic-stop was active" >&2
 		exit 1
 	fi

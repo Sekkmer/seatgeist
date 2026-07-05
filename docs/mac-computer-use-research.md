@@ -2,7 +2,7 @@
 
 Last checked: 2026-07-05.
 
-This note captures Mac computer-use patterns that should influence PlasmaPilot live evals on KDE.
+This note captures Mac computer-use patterns that should influence Seatgeist live evals on KDE.
 
 ## Source Summary
 
@@ -43,27 +43,27 @@ This note captures Mac computer-use patterns that should influence PlasmaPilot l
   Source: https://www.reddit.com/r/AI_Agents/comments/1sw7akp/when_your_computer_use_agent_should_look_at/
 - Users worry about security and data leakage when screenshots can capture unrelated sensitive tabs, files, or banking sessions, especially when prompt-injected web content can influence a local agent with desktop control.
   Source: https://www.reddit.com/r/ArtificialInteligence/comments/1s24t3w/claudes_computer_use_is_great_but_security_risks/
-- Users report rough edges around regional/device availability, rate limits, occasional screen takeover, and non-Latin text input. Treat these as anecdotal but useful test prompts for PlasmaPilot: backend availability must be explicit, throttling must be visible, foreground takeover must be avoidable or documented, and non-US keyboard paths need dedicated coverage.
+- Users report rough edges around regional/device availability, rate limits, occasional screen takeover, and non-Latin text input. Treat these as anecdotal but useful test prompts for Seatgeist: backend availability must be explicit, throttling must be visible, foreground takeover must be avoidable or documented, and non-US keyboard paths need dedicated coverage.
   Source: https://findskill.ai/blog/openai-codex-mac-48-hours/
 
-## Implications For PlasmaPilot
+## Implications For Seatgeist
 
 - Keep KDE preflight explicit. `desktop-session-status`, `safety-status`, `kwin-bridge-status`, `input_backend_status`, `capture-backends`, and `pointer-calibration` should remain first-class eval steps before live control.
 - Prefer semantic/AT-SPI actions before pixels. Our KDE equivalent of the Mac AX pattern is AT-SPI: `a11y_find`, semantic actions, ambiguity refusal, and candidate summaries should be tested before raw pointer fallback.
 - Keep pixel tests focused on mapping, not blind clicking. Large 8K screenshots must be downscaled or tiled with transform metadata, and every visual eval should verify source/output dimensions and coordinate transforms.
 - Re-observe after state changes. Live evals should capture fresh active-window, journal, and where useful screenshot/AT-SPI state after every control action.
 - Scope observation. When possible, prefer active-window or tile captures over full desktop captures, and keep full-resolution requests policy-gated.
-- Treat local user input as a hard stop. Mac guidance repeatedly assumes user takeover is possible; PlasmaPilot's KDE equivalent is `pause_on_human_input`, panic-stop, and active-window guards. These should be verified in deterministic smokes as well as opt-in GUI evals.
+- Treat local user input as a hard stop. Mac guidance repeatedly assumes user takeover is possible; Seatgeist's KDE equivalent is `pause_on_human_input`, panic-stop, and active-window guards. These should be verified in deterministic smokes as well as opt-in GUI evals.
 - Make backend limitations observable. Portal visibility, libei readiness, KWin bridge state, AT-SPI availability, app policy, active-window guard state, and rate limits should be visible before a live action starts.
 - Separate OS/session/backend failures from policy failures. Diagnostic outputs should tell the operator whether a request was blocked by app policy, missing approval, portal/session availability, AT-SPI tree quality, code/runtime packaging, or a safety guard.
 - Avoid ID-only semantic targeting. Long-term semantic selectors should prefer role/name/path/ancestor context, with volatile ids treated as hints.
-- Prefer structured integration over GUI automation. If a plugin, MCP server, import file, or app API can perform a task deterministically, PlasmaPilot should make the desktop path an explicit fallback.
+- Prefer structured integration over GUI automation. If a plugin, MCP server, import file, or app API can perform a task deterministically, Seatgeist should make the desktop path an explicit fallback.
 
 ## Added KDE Test Coverage
 
 - `make smoke-human-input-pause` starts a private daemon with `[safety].pause_on_human_input = true`, writes a fresh activity signal, verifies `safety-status` reports the signal as fresh, then confirms an approved focus-control request is denied and journaled before backend execution. This is included in `make verify`.
 - `semantic_resolvers_do_not_depend_on_stable_node_ids` verifies that high-level button and visible menu-path resolution still works when AT-SPI node IDs change between sessions but role/name/path/action context stays stable. Ambiguity summaries now include stable semantic candidate IDs and 1-based choice indexes alongside raw node IDs, so replay/eval diagnostics can refer to candidates without depending on volatile AT-SPI identifiers.
-- `plasma-pilot-cli atspi quality-status`, daemon `accessibility_quality_status`, and MCP `plasma.a11y_quality_status` report whether a bounded focused AT-SPI tree looks useful for semantic targeting, including flat/generic/empty-tree signals and a fallback recommendation. The status replay trace and MCP smoke cover this diagnostic.
+- `seatgeist-cli atspi quality-status`, daemon `accessibility_quality_status`, and MCP `seatgeist.a11y_quality_status` report whether a bounded focused AT-SPI tree looks useful for semantic targeting, including flat/generic/empty-tree signals and a fallback recommendation. The status replay trace and MCP smoke cover this diagnostic.
 - Unit fixture coverage now exercises flat and mostly generic weak accessibility trees through the same quality-status response and compact operator summary emitted by the daemon.
 - Daemon error responses now carry structured `kind` metadata for missing approval, explicit policy denial, app denial, focus guard, human-input pause, panic-stop, rate limit, portal/backend availability, backend failure, accessibility availability/weak-tree, validation, and unknown failures. MCP compact text includes the kind; policy/input denial replay traces assert `/data/kind = policy_prompt_required`; trace replay reports `error_kind`; configured-daemon CLI replay coverage proves app-policy, focus-guard, human-input-pause, forced portal-unavailable, and accessibility-unavailable kinds without unsafe desktop control or portal consent UI. MCP stdio integration now covers the same configured-denial categories through private daemons and asserts structured `data.kind` plus compact error text.
 - `wait_for_change` now reports explicit watchdog metadata, including `timed_out`, requested timeout, and poll interval, so a stalled/no-change visual poll can be distinguished from command failure or screenshot backend failure.

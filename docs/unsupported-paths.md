@@ -1,6 +1,6 @@
 # Unsupported Paths
 
-This document names the current boundaries for a public PlasmaPilot release. The project is intentionally KDE Plasma 6 Wayland first. Backend traits and protocol shapes should stay general, but unsupported desktops or control paths must not be implied as working until they have implementation, policy coverage, journaling, and eval evidence.
+This document names the current boundaries for a public Seatgeist release. The project is intentionally KDE Plasma 6 Wayland first. Backend traits and protocol shapes should stay general, but unsupported desktops or control paths must not be implied as working until they have implementation, policy coverage, journaling, and eval evidence.
 
 ## Supported Baseline
 
@@ -8,7 +8,7 @@ The supported baseline is:
 
 - Arch Linux or a comparable rolling Linux desktop.
 - KDE Plasma 6 Wayland user session.
-- User-scoped `plasma-pilotd`.
+- User-scoped `seatgeistd`.
 - Codex CLI connection through the bundled MCP server and plugin assets.
 - Observation through daemon status, KWin metadata, bounded screenshots, clipboard status, AT-SPI diagnostics, and journal tools.
 - Control only after policy checks, active-window guards where required, panic-stop checks, backend readiness checks, and journaling.
@@ -29,7 +29,7 @@ Screenshot/OCR fallback for semantic actions is not implemented. High-level sema
 
 Native desktop approval UX is not implemented. Approval files and explicit local daemon flags exist for operator-controlled runs. A future KDE approval UI must still create auditable, scoped, expiring grants instead of directly executing input or semantic control.
 
-Public backend-neutral packaging is not finalized. `PlasmaPilot` remains the KDE-first working name until the project chooses a backend-neutral public name and preserves compatibility for existing crate, binary, MCP, and plugin identifiers.
+Public backend-neutral packaging is not finalized. `Seatgeist` remains the KDE-first working name until the project chooses a backend-neutral public name and preserves compatibility for existing crate, binary, MCP, and plugin identifiers.
 
 ## Release Rule
 

@@ -9,7 +9,7 @@ Primary assets:
 
 Primary mitigations:
 
-- Unix socket under `$XDG_RUNTIME_DIR/plasma-pilot/` with restrictive permissions.
+- Unix socket under `$XDG_RUNTIME_DIR/seatgeist/` with restrictive permissions.
 - Policy checks before every control, clipboard, full-resolution screenshot, or privileged backend action.
 - Focus/window guards for pointer and keyboard actions.
 - Panic-stop support.

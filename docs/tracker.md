@@ -1,4 +1,4 @@
-# PlasmaPilot Tracker
+# Seatgeist Tracker
 
 Legend:
 
@@ -6,7 +6,7 @@ Legend:
 - `[~]` partial or in progress.
 - `[ ]` not done yet.
 
-Current full-project estimate: `[~]` about one third complete. This estimate uses the full PlasmaPilot goal as the denominator: a reliable KDE-first computer-use substrate for Codex with policy, journaling, MCP/plugin integration, real evals, installation docs, and room for alternate backends.
+Current full-project estimate: `[~]` about one third complete. This estimate uses the full Seatgeist goal as the denominator: a reliable backend-neutral computer-use substrate for Codex, starting with the KDE/Plasma backend, with policy, journaling, MCP/plugin integration, real evals, installation docs, and room for alternate backends.
 
 ## Foundation
 
@@ -89,7 +89,7 @@ Current full-project estimate: `[~]` about one third complete. This estimate use
 - [x] MCP tool outputs are compact and include structured daemon responses.
 - [x] MCP stdio integration tests cover real daemon calls, configured denial kinds, raw-input denial journaling, and journal visibility.
 - [x] Plugin manifest and bundled MCP config validate.
-- [x] Four plugin skills describe current PlasmaPilot workflows and safety rules.
+- [x] Four plugin skills describe current Seatgeist workflows and safety rules.
 - [x] Stop audit hook writes compact repo/journal audit summaries.
 - [~] Installed-plugin end-to-end use in a real Codex session is documented and scaffolded, but broader field validation remains partial.
 
@@ -102,11 +102,11 @@ Current full-project estimate: `[~]` about one third complete. This estimate use
 - [x] Safe GUI evals cover status, session preflight, observe, AT-SPI diagnostics, denial paths, clipboard status/denial, KWin bridge status, keymap status, full-resolution denial, and control safety.
 - [~] Opt-in GUI evals exist for KWrite/Kate, KCalc, Firefox localhost button, portal Screenshot, RemoteDesktop probe, and retained RemoteDesktop EIS session.
 - [~] Manual KDE Plasma 6 Wayland eval suite is useful but not complete enough to call v0.1 done.
-- [~] Public release checklist, external CI, and dual license files exist; versioned release artifacts are not done.
+- [~] Public release checklist, external CI, dual license files, and local Seatgeist release packaging exist; published signed artifacts are not done.
 
 ## v0.1 Definition Of Done
 
-- [x] PlasmaPilot daemon runs under the user session.
+- [x] Seatgeist daemon runs under the user session.
 - [x] Codex can connect through MCP.
 - [x] Codex can observe the screen.
 - [x] Codex can list and focus windows.
@@ -131,8 +131,8 @@ Current full-project estimate: `[~]` about one third complete. This estimate use
 
 - [~] Backend traits already allow KDE, Wayland/X11, mock, uinput, portal/libei, and future implementations to coexist.
 - [~] KDE is the only first-class desktop target right now.
-- [~] Backend-neutral public naming is open; current leading candidates are `DeskPilot`, `DesktopPilot`, `PilotDesk`, and `SeatPilot`, while `PlasmaPilot` remains the KDE-first working name.
+- [x] Backend-neutral public name and package/binary prefixes are `Seatgeist` / `seatgeist-*`.
 - [x] Unsupported public paths are documented for GNOME, wlroots/Sway, X11, kernel modules, OCR fallback, custom KDE/KWin work, and native desktop approval UX.
 - [ ] GNOME backend is not implemented.
-- [ ] Public project naming/positioning is not finalized.
+- [x] Public project naming is finalized as `Seatgeist`.
 - [ ] Hardening for public distribution, packaging, signing, and support expectations is not done.

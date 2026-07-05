@@ -11,10 +11,10 @@ from pathlib import Path
 
 
 REQUIRED_SKILLS = {
-    "plasma-computer-use",
-    "plasma-gui-testing",
-    "plasma-browser-debugging",
-    "plasma-desktop-triage",
+    "seatgeist-computer-use",
+    "seatgeist-gui-testing",
+    "seatgeist-browser-debugging",
+    "seatgeist-desktop-triage",
 }
 
 
@@ -119,12 +119,12 @@ def validate_manifest(root: Path) -> None:
 def validate_mcp(path: Path) -> None:
     config = require_object(load_json(path), ".mcp.json")
     servers = require_object(config.get("mcp_servers"), ".mcp.json.mcp_servers")
-    server = require_object(servers.get("plasmapilot"), ".mcp.json.mcp_servers.plasmapilot")
-    if require_string(server, "command", "plasmapilot MCP server") != "plasma-pilot-mcp":
-        fail("plasmapilot MCP command must be plasma-pilot-mcp")
+    server = require_object(servers.get("seatgeist"), ".mcp.json.mcp_servers.seatgeist")
+    if require_string(server, "command", "seatgeist MCP server") != "seatgeist-mcp":
+        fail("seatgeist MCP command must be seatgeist-mcp")
     args = server.get("args")
     if args != ["--stdio"]:
-        fail("plasmapilot MCP args must be [\"--stdio\"]")
+        fail("seatgeist MCP args must be [\"--stdio\"]")
 
 
 def validate_hooks(path: Path) -> None:
@@ -140,44 +140,44 @@ def validate_hooks(path: Path) -> None:
         fail("hooks/hooks.json Stop group must define exactly one command hook")
     handler = require_object(handlers[0], "hooks/hooks.json.hooks.Stop[0].hooks[0]")
     if handler.get("type") != "command":
-        fail("PlasmaPilot hook must use type=command")
-    command = require_string(handler, "command", "PlasmaPilot hook")
-    expected = 'python3 "$(git rev-parse --show-toplevel)/plugin/hooks/plasma_audit_summary.py"'
+        fail("Seatgeist hook must use type=command")
+    command = require_string(handler, "command", "Seatgeist hook")
+    expected = 'python3 "$(git rev-parse --show-toplevel)/plugin/hooks/seatgeist_audit_summary.py"'
     if command != expected:
-        fail("PlasmaPilot hook command must run plugin/hooks/plasma_audit_summary.py from git root")
+        fail("Seatgeist hook command must run plugin/hooks/seatgeist_audit_summary.py from git root")
     if handler.get("timeout") != 10:
-        fail("PlasmaPilot hook timeout must be 10 seconds")
-    require_string(handler, "statusMessage", "PlasmaPilot hook")
-    hook_script = path.parent / "plasma_audit_summary.py"
+        fail("Seatgeist hook timeout must be 10 seconds")
+    require_string(handler, "statusMessage", "Seatgeist hook")
+    hook_script = path.parent / "seatgeist_audit_summary.py"
     if not hook_script.is_file():
-        fail("PlasmaPilot hook script is missing")
+        fail("Seatgeist hook script is missing")
     validate_hook_summary_script(hook_script)
 
 
 def validate_hook_summary_script(path: Path) -> None:
     old_dont_write_bytecode = sys.dont_write_bytecode
     sys.dont_write_bytecode = True
-    spec = importlib.util.spec_from_file_location("plasma_audit_summary", path)
+    spec = importlib.util.spec_from_file_location("seatgeist_audit_summary", path)
     try:
         if spec is None or spec.loader is None:
-            fail("PlasmaPilot hook script cannot be imported")
+            fail("Seatgeist hook script cannot be imported")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
     finally:
         sys.dont_write_bytecode = old_dont_write_bytecode
     summarize_journal = getattr(module, "summarize_journal", None)
     if not callable(summarize_journal):
-        fail("PlasmaPilot hook script must expose summarize_journal")
+        fail("Seatgeist hook script must expose summarize_journal")
 
     audit = summarize_journal(
         [
             {
-                "journal": "target/plasma-pilot-smoke-journal.jsonl",
+                "journal": "target/seatgeist-smoke-journal.jsonl",
                 "sequence": 1,
                 "client": {
-                    "tool": "plasma-pilot-cli",
+                    "tool": "seatgeist-cli",
                     "pid": 1001,
-                    "process_name": "plasma-pilot-cl",
+                    "process_name": "seatgeist-cl",
                 },
                 "method": "observe",
                 "ok": True,
@@ -186,12 +186,12 @@ def validate_hook_summary_script(path: Path) -> None:
                 "summary": "observe 1 monitors 1 windows",
             },
             {
-                "journal": "target/plasma-pilot-smoke-journal.jsonl",
+                "journal": "target/seatgeist-smoke-journal.jsonl",
                 "sequence": 2,
                 "client": {
-                    "tool": "plasma-pilot-mcp",
+                    "tool": "seatgeist-mcp",
                     "pid": 1002,
-                    "process_name": "plasma-pilot-mc",
+                    "process_name": "seatgeist-mc",
                 },
                 "method": "type_text",
                 "ok": False,
@@ -206,19 +206,19 @@ def validate_hook_summary_script(path: Path) -> None:
                 "artifacts": [
                     {
                         "kind": "screenshot",
-                        "path": "target/plasma-pilot/preview.png",
+                        "path": "target/seatgeist/preview.png",
                         "sha256": "a" * 64,
                         "bytes": 42,
                     }
                 ],
             },
             {
-                "journal": "target/plasma-pilot-smoke-journal.jsonl",
+                "journal": "target/seatgeist-smoke-journal.jsonl",
                 "sequence": 3,
                 "client": {
-                    "tool": "plasma-pilot-mcp",
+                    "tool": "seatgeist-mcp",
                     "pid": 1002,
-                    "process_name": "plasma-pilot-mc",
+                    "process_name": "seatgeist-mc",
                 },
                 "method": "click_button",
                 "ok": True,
@@ -243,27 +243,27 @@ def validate_hook_summary_script(path: Path) -> None:
     }
     for key, value in expected.items():
         if audit.get(key) != value:
-            fail(f"PlasmaPilot hook audit {key} expected {value}, got {audit.get(key)}")
+            fail(f"Seatgeist hook audit {key} expected {value}, got {audit.get(key)}")
     if audit.get("methods", {}).get("type_text") != 1:
-        fail("PlasmaPilot hook audit must count methods")
+        fail("Seatgeist hook audit must count methods")
     if audit.get("safety_classes", {}).get("control_keyboard") != 1:
-        fail("PlasmaPilot hook audit must count safety classes")
-    if audit.get("clients", {}).get("plasma-pilot-mcp") != 2:
-        fail("PlasmaPilot hook audit must count explicit client tool identities")
+        fail("Seatgeist hook audit must count safety classes")
+    if audit.get("clients", {}).get("seatgeist-mcp") != 2:
+        fail("Seatgeist hook audit must count explicit client tool identities")
     if not audit.get("recent_failures"):
-        fail("PlasmaPilot hook audit must include recent failures")
+        fail("Seatgeist hook audit must include recent failures")
     if not audit.get("unguarded_control_examples"):
-        fail("PlasmaPilot hook audit must include unguarded control examples")
+        fail("Seatgeist hook audit must include unguarded control examples")
     artifacts = audit["unguarded_control_examples"][0].get("artifacts")
     if not artifacts or artifacts[0].get("sha256") != "a" * 64:
-        fail("PlasmaPilot hook audit must preserve compact artifact metadata when present")
+        fail("Seatgeist hook audit must preserve compact artifact metadata when present")
     last_window = audit.get("last_active_window")
     if not isinstance(last_window, dict) or last_window.get("app_id") != "org.kde.kate":
-        fail("PlasmaPilot hook audit must include last active window context")
+        fail("Seatgeist hook audit must include last active window context")
 
     examples = audit.get("recent_failures", []) + audit.get("unguarded_control_examples", [])
     if any("raw prompt" in json.dumps(example) for example in examples):
-        fail("PlasmaPilot hook audit examples must remain compact")
+        fail("Seatgeist hook audit examples must remain compact")
 
 
 def validate_skills(skills_root: Path) -> None:

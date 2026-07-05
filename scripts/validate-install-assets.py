@@ -39,8 +39,8 @@ def require_unit_value(
 
 
 def validate_systemd(root: Path) -> None:
-    service_path = root / "systemd" / "plasma-pilotd.service"
-    socket_path = root / "systemd" / "plasma-pilotd.socket"
+    service_path = root / "systemd" / "seatgeistd.service"
+    socket_path = root / "systemd" / "seatgeistd.socket"
     service = read_systemd_unit(service_path)
     socket = read_systemd_unit(socket_path)
 
@@ -49,7 +49,7 @@ def validate_systemd(root: Path) -> None:
         service_path,
         "Service",
         "ExecStart",
-        "%h/.cargo/bin/plasma-pilotd --socket %t/plasma-pilot/plasma-pilotd.sock",
+        "%h/.cargo/bin/seatgeistd --socket %t/seatgeist/seatgeistd.sock",
     )
     require_unit_value(service, service_path, "Service", "Restart", "on-failure")
     require_unit_value(service, service_path, "Service", "NoNewPrivileges", "true")
@@ -62,7 +62,7 @@ def validate_systemd(root: Path) -> None:
         socket_path,
         "Socket",
         "ListenStream",
-        "%t/plasma-pilot/plasma-pilotd.sock",
+        "%t/seatgeist/seatgeistd.sock",
     )
     require_unit_value(socket, socket_path, "Socket", "SocketMode", "0600")
     require_unit_value(socket, socket_path, "Socket", "DirectoryMode", "0700")
@@ -70,7 +70,7 @@ def validate_systemd(root: Path) -> None:
 
 
 def validate_udev(root: Path) -> None:
-    path = root / "udev" / "99-plasma-pilot-uinput.rules"
+    path = root / "udev" / "99-seatgeist-uinput.rules"
     if not path.is_file():
         fail(f"{path} is missing")
     rules = [
@@ -91,7 +91,7 @@ def child_text(element: ET.Element, tag: str) -> str | None:
 
 
 def validate_polkit(root: Path) -> None:
-    path = root / "polkit" / "org.plasmapilot.policy"
+    path = root / "polkit" / "org.seatgeist.policy"
     if not path.is_file():
         fail(f"{path} is missing")
     try:
@@ -102,15 +102,15 @@ def validate_polkit(root: Path) -> None:
     root_element = tree.getroot()
     if root_element.tag != "policyconfig":
         fail(f"{path} root element must be policyconfig")
-    if child_text(root_element, "vendor") != "PlasmaPilot":
-        fail(f"{path} vendor must be PlasmaPilot")
+    if child_text(root_element, "vendor") != "Seatgeist":
+        fail(f"{path} vendor must be Seatgeist")
 
     actions = root_element.findall("action")
     if len(actions) != 1:
         fail(f"{path} must define exactly one placeholder action")
     action = actions[0]
-    if action.get("id") != "org.plasmapilot.control-input":
-        fail(f"{path} action id must be org.plasmapilot.control-input")
+    if action.get("id") != "org.seatgeist.control-input":
+        fail(f"{path} action id must be org.seatgeist.control-input")
     if not child_text(action, "description") or not child_text(action, "message"):
         fail(f"{path} action must include description and message")
     defaults = action.find("defaults")
@@ -127,7 +127,7 @@ def validate_polkit(root: Path) -> None:
 
 
 def validate_panic_stop_hotkey(root: Path) -> None:
-    path = root / "scripts" / "plasma-pilot-panic-stop-hotkey"
+    path = root / "scripts" / "seatgeist-panic-stop-hotkey"
     if not path.is_file():
         fail(f"{path} is missing")
     mode = path.stat().st_mode
@@ -140,11 +140,11 @@ def validate_panic_stop_hotkey(root: Path) -> None:
 
     text = path.read_text(encoding="utf-8")
     required_fragments = [
-        "plasma-pilot-cli",
+        "seatgeist-cli",
         "panic-stop",
         "enable",
-        "PLASMA_PILOT_CLI",
-        "PLASMA_PILOT_SOCKET",
+        "SEATGEIST_CLI",
+        "SEATGEIST_SOCKET",
     ]
     for fragment in required_fragments:
         if fragment not in text:

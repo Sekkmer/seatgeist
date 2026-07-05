@@ -6,7 +6,7 @@ usage() {
 Usage: scripts/gui-input-smoke.sh [text-editor]
 
 Runs an opt-in local GUI smoke that sends real pointer and keyboard input to a
-disposable KWrite/Kate document through plasma-pilotd with short-lived
+disposable KWrite/Kate document through seatgeistd with short-lived
 approval-file grants.
 USAGE
 }
@@ -45,9 +45,9 @@ fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-run_dir="target/plasma-pilot-gui-input-smoke"
-socket_dir="/tmp/plasma-pilot-gui-input-smoke"
-socket="$socket_dir/plasma-pilotd.sock"
+run_dir="target/seatgeist-gui-input-smoke"
+socket_dir="/tmp/seatgeist-gui-input-smoke"
+socket="$socket_dir/seatgeistd.sock"
 log="$run_dir/daemon.log"
 journal="$run_dir/journal.jsonl"
 windows_json="$run_dir/windows.json"
@@ -62,8 +62,8 @@ save_json="$run_dir/save.json"
 journal_tail_json="$run_dir/journal-tail.json"
 approval_file="$run_dir/approvals.jsonl"
 stamp="$(date +%s)"
-test_file="$run_dir/plasma-pilot-input-smoke-$stamp.txt"
-sentinel="plasma-pilot-input-smoke"
+test_file="$run_dir/seatgeist-input-smoke-$stamp.txt"
+sentinel="seatgeist-input-smoke"
 window_id=""
 editor_pid=""
 app_id=""
@@ -73,13 +73,13 @@ mkdir -p "$run_dir"
 chmod 700 "$run_dir"
 printf '' >"$test_file"
 
-cargo build -p plasma-pilotd -p plasma-pilot-cli
+cargo build -p seatgeistd -p seatgeist-cli
 
-target/debug/plasma-pilotd --socket "$socket" --journal "$journal" --approval-file "$approval_file" >"$log" 2>&1 &
+target/debug/seatgeistd --socket "$socket" --journal "$journal" --approval-file "$approval_file" >"$log" 2>&1 &
 daemon_pid=$!
 
 cli() {
-	target/debug/plasma-pilot-cli --socket "$socket" "$@"
+	target/debug/seatgeist-cli --socket "$socket" "$@"
 }
 
 guard_args=()
@@ -221,7 +221,7 @@ cli input click-pointer \
 jq -e '.type == "action"' "$click_json" >/dev/null
 sleep 0.3
 
-type_chunks=("plasma-" "pilot-" "input-" "smoke")
+type_chunks=("seat" "geist-" "input-" "smoke")
 chunk_index=0
 for chunk in "${type_chunks[@]}"; do
 	chunk_index=$((chunk_index + 1))

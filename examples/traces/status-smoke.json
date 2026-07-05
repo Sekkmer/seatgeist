@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Safe status-only replay trace for verifying a PlasmaPilot daemon without control side effects.",
+  "description": "Safe status-only replay trace for verifying a Seatgeist daemon without control side effects.",
   "steps": [
     {
       "label": "health",

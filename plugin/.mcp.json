@@ -1,7 +1,7 @@
 {
   "mcp_servers": {
-    "plasmapilot": {
-      "command": "plasma-pilot-mcp",
+    "seatgeist": {
+      "command": "seatgeist-mcp",
       "args": ["--stdio"]
     }
   }

@@ -6,7 +6,7 @@
       "label": "full-resolution-screenshot-denied",
       "request": {
         "method": "screenshot",
-        "output": "/tmp/plasma-pilot-denied-full-resolution.png",
+        "output": "/tmp/seatgeist-denied-full-resolution.png",
         "max_edge": null,
         "full_resolution": true
       },
@@ -40,7 +40,7 @@
       "label": "focus-window-denied",
       "request": {
         "method": "focus_window",
-        "window_id": "plasma-pilot-nonexistent-window"
+        "window_id": "seatgeist-nonexistent-window"
       },
       "expect_response_type": "error",
       "expect_ok": false,

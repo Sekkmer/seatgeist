@@ -1,6 +1,6 @@
-# PlasmaPilot Agent Instructions
+# Seatgeist Agent Instructions
 
-This repository builds PlasmaPilot, a KDE Plasma desktop-control substrate for Codex.
+This repository builds Seatgeist, a KDE Plasma desktop-control substrate for Codex.
 
 Rules for AI agents:
 

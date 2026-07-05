@@ -1,0 +1,20 @@
+{
+  "KPlugin": {
+    "Authors": [
+      {
+        "Email": "sekkmer@gmail.com",
+        "Name": "Sekkmer"
+      }
+    ],
+    "Description": "Publishes KWin active-window and window-list metadata to the local Seatgeist daemon.",
+    "Icon": "preferences-system-windows",
+    "Id": "seatgeist-bridge",
+    "License": "MIT OR Apache-2.0",
+    "Name": "Seatgeist Bridge",
+    "Version": "0.1.0",
+    "Website": "https://example.invalid/seatgeist"
+  },
+  "KPackageStructure": "KWin/Script",
+  "X-Plasma-API": "javascript",
+  "X-Plasma-MainScript": "code/main.js"
+}

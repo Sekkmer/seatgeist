@@ -28,6 +28,15 @@ def require_absent(path: str, text: str, needle: str) -> None:
         fail(f"{path} still contains placeholder text: {needle}")
 
 
+def require_executable(path: str) -> str:
+    file_path = ROOT / path
+    if not file_path.exists():
+        fail(f"{path} is missing")
+    if file_path.stat().st_mode & 0o111 == 0:
+        fail(f"{path} must be executable")
+    return file_path.read_text(encoding="utf-8")
+
+
 def main() -> None:
     cargo = read("Cargo.toml")
     require_contains("Cargo.toml", cargo, 'license = "MIT OR Apache-2.0"')
@@ -46,7 +55,37 @@ def main() -> None:
     require_contains("LICENSE-APACHE", apache, "Copyright 2026 Sekkmer")
     require_absent("LICENSE-APACHE", apache, "Copyright [yyyy] [name of copyright owner]")
 
+    makefile = read("Makefile")
+    require_contains("Makefile", makefile, "package-release:")
+    require_contains("Makefile", makefile, "scripts/package-release.sh")
+
+    package_release = require_executable("scripts/package-release.sh")
+    for needle in [
+        "cargo build --workspace --release",
+        "package_name=\"seatgeist-${version}-${git_short}-${target_triple}\"",
+        "target/seatgeist-release",
+        "seatgeistd",
+        "seatgeist-cli",
+        "seatgeist-mcp",
+        "cp -a scripts/. \"$stage/scripts/\"",
+        "seatgeist-panic-stop-hotkey",
+        "MANIFEST.json",
+        "sha256sum",
+        "tar --sort=name",
+    ]:
+        require_contains("scripts/package-release.sh", package_release, needle)
+
     checklist = read("docs/release-checklist.md")
+    require_contains(
+        "docs/release-checklist.md",
+        checklist,
+        "- [x] Public project name and package/binary prefixes are `Seatgeist` / `seatgeist-*`.",
+    )
+    require_contains(
+        "docs/release-checklist.md",
+        checklist,
+        "- [~] Versioned local release artifact packaging exists through `make package-release`; published signed artifacts are not produced yet.",
+    )
     require_contains(
         "docs/release-checklist.md",
         checklist,

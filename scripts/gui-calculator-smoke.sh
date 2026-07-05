@@ -6,7 +6,7 @@ usage() {
 Usage: scripts/gui-calculator-smoke.sh [kcalc]
 
 Runs an opt-in local GUI smoke that sends real keyboard input to KCalc through
-plasma-pilotd with short-lived approval-file grants, then captures a visual
+seatgeistd with short-lived approval-file grants, then captures a visual
 artifact for human inspection when screenshot capture is available.
 USAGE
 }
@@ -34,9 +34,9 @@ require_cmd kcalc
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-run_dir="target/plasma-pilot-gui-calculator-smoke"
-socket_dir="/tmp/plasma-pilot-gui-calculator-smoke"
-socket="$socket_dir/plasma-pilotd.sock"
+run_dir="target/seatgeist-gui-calculator-smoke"
+socket_dir="/tmp/seatgeist-gui-calculator-smoke"
+socket="$socket_dir/seatgeistd.sock"
 log="$run_dir/daemon.log"
 journal="$run_dir/journal.jsonl"
 approval_file="$run_dir/approvals.jsonl"
@@ -59,13 +59,13 @@ rm -rf "$run_dir" "$socket_dir"
 mkdir -p "$run_dir"
 chmod 700 "$run_dir"
 
-cargo build -p plasma-pilotd -p plasma-pilot-cli
+cargo build -p seatgeistd -p seatgeist-cli
 
-target/debug/plasma-pilotd --socket "$socket" --journal "$journal" --approval-file "$approval_file" >"$log" 2>&1 &
+target/debug/seatgeistd --socket "$socket" --journal "$journal" --approval-file "$approval_file" >"$log" 2>&1 &
 daemon_pid=$!
 
 cli() {
-	target/debug/plasma-pilot-cli --socket "$socket" "$@"
+	target/debug/seatgeist-cli --socket "$socket" "$@"
 }
 
 guard_args=()
@@ -194,19 +194,19 @@ if command -v spectacle >/dev/null 2>&1; then
 	if spectacle -b -n --activewindow -o "$screenshot_png" >/dev/null 2>"$screenshot_err"; then
 		if [[ -s "$screenshot_png" ]]; then
 			printf '{"type":"visual_artifact","data":{"source":"spectacle_active_window","output":"%s"}}\n' "$screenshot_png" >"$screenshot_json"
-		elif [[ "${PLASMA_PILOT_KCALC_SCREENSHOT_STRICT:-0}" == "1" ]]; then
+		elif [[ "${SEATGEIST_KCALC_SCREENSHOT_STRICT:-0}" == "1" ]]; then
 			echo "KCalc Spectacle active-window capture wrote no output" >&2
 			exit 1
 		else
 			echo "SKIP KCalc screenshot artifact: Spectacle wrote no output"
 		fi
-	elif [[ "${PLASMA_PILOT_KCALC_SCREENSHOT_STRICT:-0}" == "1" ]]; then
+	elif [[ "${SEATGEIST_KCALC_SCREENSHOT_STRICT:-0}" == "1" ]]; then
 		cat "$screenshot_err" >&2
 		exit 1
 	else
 		echo "SKIP KCalc screenshot artifact: Spectacle active-window capture failed"
 	fi
-elif [[ "${PLASMA_PILOT_KCALC_SCREENSHOT_STRICT:-0}" == "1" ]]; then
+elif [[ "${SEATGEIST_KCALC_SCREENSHOT_STRICT:-0}" == "1" ]]; then
 	echo "Spectacle is required for strict KCalc screenshot artifacts" >&2
 	exit 1
 else
