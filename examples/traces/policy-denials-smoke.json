@@ -11,7 +11,8 @@
         "full_resolution": true
       },
       "expect_response_type": "error",
-      "expect_ok": false
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for FullResolutionScreenshot"
     },
     {
       "label": "clipboard-read-denied",
@@ -20,7 +21,8 @@
         "max_bytes": 64
       },
       "expect_response_type": "error",
-      "expect_ok": false
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ClipboardRead"
     },
     {
       "label": "focus-window-denied",
@@ -29,7 +31,8 @@
         "window_id": "plasma-pilot-nonexistent-window"
       },
       "expect_response_type": "error",
-      "expect_ok": false
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlSemantic"
     }
   ]
 }

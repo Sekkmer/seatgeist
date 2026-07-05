@@ -1478,6 +1478,7 @@ fn validate_trace_file(file: PathBuf) -> Result<()> {
                 "method": step.request.method_name(),
                 "expect_response_type": step.expect_response_type,
                 "expect_ok": step.expect_ok,
+                "expect_error_contains": step.expect_error_contains,
             })
         })
         .collect::<Vec<_>>();
@@ -1521,6 +1522,23 @@ fn replay_trace(socket: &PathBuf, file: PathBuf) -> Result<()> {
                 "trace {} expected ok={expected_ok}, got ok={ok}",
                 trace_step_context(index, step)
             );
+        }
+        if let Some(expected_error) = &step.expect_error_contains {
+            match &response {
+                DaemonResponse::Error { message } if message.contains(expected_error) => {}
+                DaemonResponse::Error { message } => {
+                    bail!(
+                        "trace {} expected error containing {expected_error:?}, got {message:?}",
+                        trace_step_context(index, step)
+                    );
+                }
+                _ => {
+                    bail!(
+                        "trace {} expected error containing {expected_error:?}, got response type {response_type}",
+                        trace_step_context(index, step)
+                    );
+                }
+            }
         }
 
         results.push(serde_json::json!({

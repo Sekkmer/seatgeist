@@ -412,6 +412,12 @@ fn cli_replays_policy_denial_trace_against_real_daemon() -> Result<()> {
     )
     .context("parse checked-in policy denial trace fixture")?;
     assert_eq!(trace.version, 1);
+    assert!(
+        trace
+            .steps
+            .iter()
+            .all(|step| step.expect_error_contains.is_some())
+    );
     let trace_arg = trace_path.to_string_lossy().into_owned();
     let report = daemon.cli_value(&["trace", "replay", "--file", &trace_arg])?;
     assert_eq!(report["type"], "trace_replay");
@@ -472,6 +478,36 @@ fn cli_validates_trace_without_daemon() -> Result<()> {
 }
 
 #[test]
+fn cli_validates_policy_denial_trace_expectations() -> Result<()> {
+    let trace_path = workspace_root().join("examples/traces/policy-denials-smoke.json");
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+        .args(["trace", "validate", "--file", &trace_arg])
+        .output()
+        .context("run plasma-pilot-cli trace validate")?;
+    require_success(&["trace", "validate"], &output)?;
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("parse trace validation report")?;
+    assert_eq!(report["type"], "trace_validation");
+    assert_eq!(report["step_count"], 3);
+    assert_eq!(report["steps"][0]["method"], "screenshot");
+    assert_eq!(
+        report["steps"][0]["expect_error_contains"],
+        "policy prompt required for FullResolutionScreenshot"
+    );
+    assert_eq!(
+        report["steps"][1]["expect_error_contains"],
+        "policy prompt required for ClipboardRead"
+    );
+    assert_eq!(
+        report["steps"][2]["expect_error_contains"],
+        "policy prompt required for ControlSemantic"
+    );
+    Ok(())
+}
+
+#[test]
 fn cli_validate_rejects_unknown_expected_response_type() -> Result<()> {
     let root = unique_temp_dir();
     fs::create_dir_all(&root).context("create integration temp dir")?;
@@ -484,6 +520,7 @@ fn cli_validate_rejects_unknown_expected_response_type() -> Result<()> {
             request: DaemonRequest::Health,
             expect_response_type: Some("bogus".to_string()),
             expect_ok: Some(true),
+            expect_error_contains: None,
         }],
     };
     fs::write(
@@ -525,6 +562,7 @@ fn cli_replay_errors_include_step_label_and_method() -> Result<()> {
             request: DaemonRequest::Health,
             expect_response_type: Some("policy_status".to_string()),
             expect_ok: Some(true),
+            expect_error_contains: None,
         }],
     };
     fs::write(
@@ -545,6 +583,45 @@ fn cli_replay_errors_include_step_label_and_method() -> Result<()> {
     assert!(
         stderr.contains("expected response type policy_status, got health"),
         "stderr did not include mismatch detail: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_replay_errors_include_step_context_for_error_expectations() -> Result<()> {
+    let daemon = DaemonFixture::start()?;
+    let trace_path = daemon.root.join("bad-error-expectation-trace.json");
+    let trace = ReplayTrace {
+        version: 1,
+        description: Some("intentionally mismatched error expectation trace".to_string()),
+        steps: vec![TraceStep {
+            label: Some("bad-health-error".to_string()),
+            request: DaemonRequest::Health,
+            expect_response_type: Some("health".to_string()),
+            expect_ok: Some(true),
+            expect_error_contains: Some("policy prompt required".to_string()),
+        }],
+    };
+    fs::write(
+        &trace_path,
+        serde_json::to_string_pretty(&trace).context("serialize bad trace")?,
+    )
+    .context("write bad trace file")?;
+
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let output = daemon.cli_output(&["trace", "replay", "--file", &trace_arg])?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(r#"trace step 0 label="bad-health-error" method=health"#),
+        "stderr did not include trace step context: {stderr}"
+    );
+    assert!(
+        stderr.contains(
+            r#"expected error containing "policy prompt required", got response type health"#
+        ),
+        "stderr did not include error-expectation mismatch detail: {stderr}"
     );
     Ok(())
 }

@@ -241,6 +241,7 @@ pub struct TraceStep {
     pub request: DaemonRequest,
     pub expect_response_type: Option<String>,
     pub expect_ok: Option<bool>,
+    pub expect_error_contains: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1359,12 +1360,14 @@ mod tests {
                     request: DaemonRequest::Health,
                     expect_response_type: Some("health".to_string()),
                     expect_ok: Some(true),
+                    expect_error_contains: None,
                 },
                 TraceStep {
                     label: Some("policy".to_string()),
                     request: DaemonRequest::PolicyStatus,
                     expect_response_type: Some("policy_status".to_string()),
                     expect_ok: Some(true),
+                    expect_error_contains: None,
                 },
             ],
         };

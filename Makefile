@@ -388,7 +388,7 @@ smoke-trace-replay:
 	target/debug/plasma-pilot-cli trace validate --file examples/traces/status-smoke.json >"$$status_validate_out"
 	jq -e '.type == "trace_validation" and .trace_version == 1 and .step_count == 5 and any(.steps[]; .method == "safety_status")' "$$status_validate_out" >/dev/null
 	target/debug/plasma-pilot-cli trace validate --file examples/traces/policy-denials-smoke.json >"$$denial_validate_out"
-	jq -e '.type == "trace_validation" and .trace_version == 1 and .step_count == 3 and all(.steps[]; .expect_response_type == "error" and .expect_ok == false)' "$$denial_validate_out" >/dev/null
+	jq -e '.type == "trace_validation" and .trace_version == 1 and .step_count == 3 and all(.steps[]; .expect_response_type == "error" and .expect_ok == false and (.expect_error_contains | type == "string"))' "$$denial_validate_out" >/dev/null
 	target/debug/plasma-pilotd --socket "$$socket" --journal "$$journal" >"$$log" 2>&1 &
 	pid=$$!
 	cleanup() {
