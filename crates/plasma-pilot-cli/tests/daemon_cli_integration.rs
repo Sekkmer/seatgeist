@@ -798,6 +798,8 @@ fn cli_validates_trace_without_daemon() -> Result<()> {
     assert_eq!(report["steps"][0]["label"], "health");
     assert_eq!(report["steps"][0]["method"], "health");
     assert_eq!(report["steps"][0]["expect_response_type"], "health");
+    assert_eq!(report["steps"][3]["method"], "safety_status");
+    assert_eq!(report["steps"][3]["expect_json_count"], 1);
     assert_eq!(report["steps"][4]["method"], "desktop_session_status");
     assert_eq!(report["steps"][5]["method"], "kwin_bridge_status");
     assert_eq!(report["steps"][5]["expect_json_count"], 4);

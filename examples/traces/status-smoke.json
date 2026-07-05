@@ -32,7 +32,13 @@
         "method": "safety_status"
       },
       "expect_response_type": "safety_status",
-      "expect_ok": true
+      "expect_ok": true,
+      "expect_json": [
+        {
+          "pointer": "/data/journal_artifact_metadata_enabled",
+          "equals": false
+        }
+      ]
     },
     {
       "label": "desktop-session",
