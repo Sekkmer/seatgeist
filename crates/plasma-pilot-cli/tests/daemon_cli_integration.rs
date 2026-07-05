@@ -567,6 +567,73 @@ fn cli_validates_all_checked_in_traces_without_daemon() -> Result<()> {
 }
 
 #[test]
+fn cli_validates_trace_directory_without_daemon() -> Result<()> {
+    let trace_dir = workspace_root().join("examples/traces");
+    let trace_arg = trace_dir.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+        .args(["trace", "validate", "--dir", &trace_arg])
+        .output()
+        .context("run plasma-pilot-cli trace validate --dir")?;
+    require_success(&["trace", "validate", "--dir"], &output)?;
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("parse trace directory report")?;
+    assert_eq!(report["type"], "trace_validation_set");
+    assert_eq!(report["dir"], trace_arg);
+    let traces = report["traces"]
+        .as_array()
+        .context("trace directory report traces are an array")?;
+    assert!(
+        traces.len() >= 3,
+        "expected checked-in trace fixtures under {}, got {traces:?}",
+        trace_dir.display()
+    );
+    assert_eq!(
+        report["trace_count"],
+        serde_json::Value::from(u64::try_from(traces.len()).expect("trace count fits u64"))
+    );
+    assert!(
+        report["step_count"].as_u64().unwrap_or_default() >= 3,
+        "trace directory report did not include aggregate steps: {report}"
+    );
+    for trace in traces {
+        assert_eq!(trace["trace_version"], 1);
+        assert!(
+            trace["step_count"].as_u64().unwrap_or_default() > 0,
+            "trace did not report any steps: {trace}"
+        );
+        assert!(
+            trace["file"]
+                .as_str()
+                .is_some_and(|path| path.ends_with(".json")),
+            "trace did not report a json file: {trace}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn cli_validate_directory_rejects_empty_trace_set() -> Result<()> {
+    let root = unique_temp_dir();
+    fs::create_dir_all(&root).context("create integration temp dir")?;
+    let trace_arg = root.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+        .args(["trace", "validate", "--dir", &trace_arg])
+        .output()
+        .context("run plasma-pilot-cli trace validate --dir")?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("contains no .json traces"),
+        "stderr did not include empty trace dir detail: {stderr}"
+    );
+
+    fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+#[test]
 fn cli_validates_policy_denial_trace_expectations() -> Result<()> {
     let trace_path = workspace_root().join("examples/traces/policy-denials-smoke.json");
     let trace_arg = trace_path.to_string_lossy().into_owned();

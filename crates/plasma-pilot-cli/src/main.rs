@@ -561,7 +561,9 @@ enum PanicStopCommand {
 enum TraceCommand {
     Validate {
         #[arg(long)]
-        file: PathBuf,
+        file: Option<PathBuf>,
+        #[arg(long, conflicts_with = "file")]
+        dir: Option<PathBuf>,
     },
     Replay {
         #[arg(long)]
@@ -1333,7 +1335,7 @@ fn main() -> Result<()> {
             write_approval_grant(&approval_file, safety_class, &method, ttl_ms, reason)?;
         }
         Command::Trace { command } => match command {
-            TraceCommand::Validate { file } => validate_trace_file(file)?,
+            TraceCommand::Validate { file, dir } => validate_trace_command(file, dir)?,
             TraceCommand::Replay { file } => replay_trace(&socket, file)?,
         },
     }
@@ -1509,10 +1511,78 @@ fn validate_trace(trace: &ReplayTrace) -> Result<()> {
     Ok(())
 }
 
+fn validate_trace_command(file: Option<PathBuf>, dir: Option<PathBuf>) -> Result<()> {
+    match (file, dir) {
+        (Some(file), None) => validate_trace_file(file),
+        (None, Some(dir)) => validate_trace_dir(dir),
+        (None, None) => bail!("trace validate requires --file <path> or --dir <path>"),
+        (Some(_), Some(_)) => bail!("trace validate accepts either --file <path> or --dir <path>"),
+    }
+}
+
 fn validate_trace_file(file: PathBuf) -> Result<()> {
     let trace = load_trace(&file)?;
     validate_trace(&trace)?;
+    let (step_count, steps) = trace_validation_steps(&trace);
 
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "type": "trace_validation",
+            "trace_version": trace.version,
+            "description": trace.description,
+            "step_count": step_count,
+            "steps": steps,
+        }))?
+    );
+    Ok(())
+}
+
+fn validate_trace_dir(dir: PathBuf) -> Result<()> {
+    let mut files = fs::read_dir(&dir)
+        .with_context(|| format!("read trace dir {}", dir.display()))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| format!("read trace paths in {}", dir.display()))?;
+    files.retain(|path| {
+        path.extension()
+            .is_some_and(|extension| extension == "json")
+    });
+    files.sort();
+    if files.is_empty() {
+        bail!("trace dir {} contains no .json traces", dir.display());
+    }
+
+    let mut total_steps = 0usize;
+    let mut traces = Vec::with_capacity(files.len());
+    for file in files {
+        let trace = load_trace(&file)?;
+        validate_trace(&trace).with_context(|| format!("validate trace {}", file.display()))?;
+        let (step_count, steps) = trace_validation_steps(&trace);
+        total_steps += step_count;
+        traces.push(serde_json::json!({
+            "file": file.display().to_string(),
+            "trace_version": trace.version,
+            "description": trace.description,
+            "step_count": step_count,
+            "steps": steps,
+        }));
+    }
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "type": "trace_validation_set",
+            "dir": dir.display().to_string(),
+            "trace_count": traces.len(),
+            "step_count": total_steps,
+            "traces": traces,
+        }))?
+    );
+    Ok(())
+}
+
+fn trace_validation_steps(trace: &ReplayTrace) -> (usize, Vec<serde_json::Value>) {
     let steps = trace
         .steps
         .iter()
@@ -1529,18 +1599,7 @@ fn validate_trace_file(file: PathBuf) -> Result<()> {
             })
         })
         .collect::<Vec<_>>();
-
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "type": "trace_validation",
-            "trace_version": trace.version,
-            "description": trace.description,
-            "step_count": steps.len(),
-            "steps": steps,
-        }))?
-    );
-    Ok(())
+    (steps.len(), steps)
 }
 
 fn replay_trace(socket: &PathBuf, file: PathBuf) -> Result<()> {

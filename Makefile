@@ -19,17 +19,8 @@ validate-plugin:
 	scripts/validate-plugin.py plugin
 
 validate-traces:
-	set -euo pipefail
-	shopt -s nullglob
-	traces=(examples/traces/*.json)
-	if [[ "$${#traces[@]}" -eq 0 ]]; then
-		echo "no replay traces found under examples/traces" >&2
-		exit 1
-	fi
 	cargo build -p plasma-pilot-cli
-	for trace in "$${traces[@]}"; do
-		target/debug/plasma-pilot-cli trace validate --file "$$trace" >/dev/null
-	done
+	target/debug/plasma-pilot-cli trace validate --dir examples/traces >/dev/null
 
 verify: fmt check test clippy validate-plugin validate-traces
 	git diff --check -- . ':(exclude)target'
