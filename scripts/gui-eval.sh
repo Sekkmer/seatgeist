@@ -277,6 +277,8 @@ eval_clipboard_denied() {
 		exit 1
 	fi
 	grep -qi "policy" "$run_dir/clipboard-denied.txt"
+	cli journal tail --limit 20 --method clipboard_get --ok false >"$run_dir/clipboard-denied-journal.json"
+	jq -e '.type == "journal" and any(.data[]; .summary | contains("ClipboardRead"))' "$run_dir/clipboard-denied-journal.json" >/dev/null
 }
 
 portal_screenshot_cancelled() {
