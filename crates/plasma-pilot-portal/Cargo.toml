@@ -9,5 +9,9 @@ repository.workspace = true
 homepage.workspace = true
 description = "xdg-desktop-portal contract helpers for PlasmaPilot."
 
+[dependencies]
+tokio.workspace = true
+zbus.workspace = true
+
 [lints]
 workspace = true

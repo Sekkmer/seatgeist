@@ -1,5 +1,11 @@
+use std::collections::HashMap;
 use std::fmt;
+use std::future::poll_fn;
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::time::Duration;
+use zbus::export::futures_core::Stream;
+use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 pub const DESKTOP_BUS_NAME: &str = "org.freedesktop.portal.Desktop";
 pub const DESKTOP_OBJECT_PATH: &str = "/org/freedesktop/portal/desktop";
@@ -234,6 +240,137 @@ where
         uri,
         path,
     }))
+}
+
+pub async fn request_screenshot_zbus(
+    options: &PortalScreenshotOptions,
+    response_timeout: Duration,
+) -> Result<Option<PortalScreenshotCapture>> {
+    options.validate()?;
+    let connection = zbus::Connection::session()
+        .await
+        .map_err(|err| PortalContractError::Transport(format!("connect session bus: {err}")))?;
+    let sender = connection
+        .unique_name()
+        .ok_or_else(|| {
+            PortalContractError::Transport(
+                "session bus did not assign a unique sender name".to_string(),
+            )
+        })?
+        .as_str()
+        .to_string();
+    let expected_handle_path = expected_request_path(&sender, &options.handle_token)?;
+    let request_proxy = request_proxy_for_path(&connection, expected_handle_path.clone()).await?;
+    let mut response_stream = request_proxy
+        .receive_signal(RESPONSE_SIGNAL)
+        .await
+        .map_err(|err| {
+            PortalContractError::Transport(format!("subscribe expected Request response: {err}"))
+        })?;
+
+    let actual_handle_path = call_screenshot_zbus(&connection, options).await?;
+    validate_request_path(&actual_handle_path)?;
+    if actual_handle_path != expected_handle_path {
+        let request_proxy = request_proxy_for_path(&connection, actual_handle_path.clone()).await?;
+        response_stream = request_proxy
+            .receive_signal(RESPONSE_SIGNAL)
+            .await
+            .map_err(|err| {
+                PortalContractError::Transport(format!(
+                    "subscribe returned Request response: {err}"
+                ))
+            })?;
+    }
+
+    let response = wait_for_zbus_response(&mut response_stream, response_timeout).await?;
+    let Some(uri) = parse_screenshot_uri(response.response, response.uri.as_deref())? else {
+        return Ok(None);
+    };
+    let path = file_uri_to_path(&uri)?;
+    Ok(Some(PortalScreenshotCapture {
+        expected_handle_path,
+        actual_handle_path,
+        uri,
+        path,
+    }))
+}
+
+async fn request_proxy_for_path(
+    connection: &zbus::Connection,
+    handle_path: String,
+) -> Result<zbus::Proxy<'static>> {
+    zbus::Proxy::new_owned(
+        connection.clone(),
+        DESKTOP_BUS_NAME.to_string(),
+        handle_path,
+        REQUEST_INTERFACE.to_string(),
+    )
+    .await
+    .map_err(|err| PortalContractError::Transport(format!("create Request proxy: {err}")))
+}
+
+async fn call_screenshot_zbus(
+    connection: &zbus::Connection,
+    options: &PortalScreenshotOptions,
+) -> Result<String> {
+    let portal_proxy = zbus::Proxy::new(
+        connection,
+        DESKTOP_BUS_NAME,
+        DESKTOP_OBJECT_PATH,
+        SCREENSHOT_INTERFACE,
+    )
+    .await
+    .map_err(|err| PortalContractError::Transport(format!("create Screenshot proxy: {err}")))?;
+    let mut vardict = HashMap::<&str, Value<'_>>::new();
+    vardict.insert("handle_token", Value::new(options.handle_token.as_str()));
+    vardict.insert("modal", Value::new(options.modal));
+    vardict.insert("interactive", Value::new(options.interactive));
+    if let Some(target) = options.target {
+        vardict.insert("target", Value::new(target.value()));
+    }
+    let handle: OwnedObjectPath = portal_proxy
+        .call(
+            SCREENSHOT_METHOD,
+            &(options.parent_window.as_str(), vardict),
+        )
+        .await
+        .map_err(|err| PortalContractError::Transport(format!("call Screenshot: {err}")))?;
+    Ok(handle.to_string())
+}
+
+async fn wait_for_zbus_response(
+    response_stream: &mut zbus::proxy::SignalStream<'_>,
+    response_timeout: Duration,
+) -> Result<PortalRequestResponse> {
+    let message = tokio::time::timeout(
+        response_timeout,
+        poll_fn(|context| Pin::new(&mut *response_stream).poll_next(context)),
+    )
+    .await
+    .map_err(|_| {
+        PortalContractError::Transport(format!(
+            "timed out waiting {}ms for portal Request response",
+            response_timeout.as_millis()
+        ))
+    })?
+    .ok_or_else(|| {
+        PortalContractError::Transport("portal Request response stream ended".to_string())
+    })?;
+    let (response, results): (u32, HashMap<String, OwnedValue>) =
+        message.body().deserialize().map_err(|err| {
+            PortalContractError::Transport(format!("decode Request response signal: {err}"))
+        })?;
+    let uri = results
+        .get("uri")
+        .map(|value| String::try_from(&**value))
+        .transpose()
+        .map_err(|err| {
+            PortalContractError::Transport(format!("decode screenshot uri result: {err}"))
+        })?;
+    Ok(PortalRequestResponse {
+        response: PortalResponseCode::try_from(response)?,
+        uri,
+    })
 }
 
 pub fn expected_request_path(sender_unique_name: &str, handle_token: &str) -> Result<String> {

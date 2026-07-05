@@ -52,6 +52,7 @@ const DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE: u32 = 120;
 const DEFAULT_PREVIEW_MAX_EDGE: u32 = 1600;
 const DEFAULT_TILE_MAX_EDGE: u32 = 1600;
 const CONTROL_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+const PORTAL_SCREENSHOT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone)]
 struct ActionJournal {
@@ -714,7 +715,7 @@ async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()>
     let request = serde_json::from_str::<DaemonRequest>(&line).context("parse daemon request")?;
     let method = request.method_name();
     let mut journal_context = journal_context_for_request(&request, &runtime);
-    let response = handle_request(request, &runtime);
+    let response = handle_request(request, &runtime).await;
     journal_context.active_window_after = active_window_context_for_safety_class(
         &journal_context.safety_class,
         &runtime.active_window_state,
@@ -784,7 +785,7 @@ fn compact_journal_title(mut title: String) -> String {
     title
 }
 
-fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResponse {
+async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResponse {
     if let Err(err) =
         enforce_policy_with_approvals(&runtime.policy, &runtime.approval_store, &request)
     {
@@ -901,7 +902,9 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
                 request,
                 &runtime.active_window_state,
                 &runtime.safety_settings,
-            ) {
+            )
+            .await
+            {
                 Ok(observation) => DaemonResponse::Observation(Box::new(observation)),
                 Err(err) => DaemonResponse::Error {
                     message: format_error_chain(&err),
@@ -909,7 +912,7 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
             }
         }
         DaemonRequest::Screenshot(request) => {
-            match capture_screenshot(request, &runtime.safety_settings) {
+            match capture_screenshot(request, &runtime.safety_settings).await {
                 Ok(info) => DaemonResponse::Screenshot(info),
                 Err(err) => DaemonResponse::Error {
                     message: format_error_chain(&err),
@@ -925,7 +928,7 @@ fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResp
             }
         }
         DaemonRequest::WaitForChange(request) => {
-            match wait_for_change(request, &runtime.safety_settings) {
+            match wait_for_change(request, &runtime.safety_settings).await {
                 Ok(result) => DaemonResponse::WaitForChange(Box::new(result)),
                 Err(err) => DaemonResponse::Error {
                     message: format_error_chain(&err),
@@ -1602,7 +1605,8 @@ fn capture_backend_status() -> CaptureBackendStatus {
     let spectacle = spectacle_status();
     let preferred_available_backend =
         preferred_capture_backend(&screenshot_portal, spectacle.command_available);
-    let implemented_available_backend = implemented_capture_backend(spectacle.command_available);
+    let implemented_available_backend =
+        implemented_capture_backend(&screenshot_portal, spectacle.command_available);
     let setup_hint = capture_backend_setup_hint(
         preferred_available_backend.as_deref(),
         implemented_available_backend.as_deref(),
@@ -1725,7 +1729,13 @@ fn preferred_capture_backend(
     None
 }
 
-fn implemented_capture_backend(spectacle_available: bool) -> Option<String> {
+fn implemented_capture_backend(
+    screenshot_portal: &ScreenshotPortalStatus,
+    spectacle_available: bool,
+) -> Option<String> {
+    if screenshot_portal.screenshot_interface_available {
+        return Some("portal_screenshot".to_string());
+    }
     spectacle_available.then(|| "spectacle".to_string())
 }
 
@@ -1737,16 +1747,16 @@ fn capture_backend_setup_hint(
     spectacle: &SpectacleStatus,
 ) -> String {
     match (preferred, implemented) {
-        (Some("portal_screenshot"), Some("spectacle"))
+        (Some("portal_screenshot"), Some("portal_screenshot"))
             if kwin_metadata.support_information_available =>
         {
-            "portal Screenshot is visible, but implemented capture currently uses Spectacle with KWin metadata until portal request handling lands".to_string()
+            "using portal Screenshot for full-screen capture with KWin metadata for monitor scale and coordinate mapping; Spectacle remains the tile and compatibility fallback".to_string()
         }
-        (Some("portal_screenshot"), Some("spectacle")) => {
-            "portal Screenshot is visible, but implemented capture currently uses Spectacle; KWin supportInformation is unavailable, so monitor scale metadata may be incomplete".to_string()
+        (Some("portal_screenshot"), Some("portal_screenshot")) => {
+            "using portal Screenshot for full-screen capture; KWin supportInformation is unavailable, so monitor scale metadata may be incomplete and Spectacle remains the tile fallback".to_string()
         }
         (Some("portal_screenshot"), _) => {
-            "portal Screenshot is visible, but PlasmaPilot does not yet execute portal capture requests; install Spectacle for the current capture backend".to_string()
+            "portal Screenshot is visible, but no executable capture backend was selected; inspect portal diagnostics and Spectacle fallback state".to_string()
         }
         (Some("spectacle"), Some("spectacle")) if kwin_metadata.support_information_available => {
             "using Spectacle command fallback with KWin metadata for monitor scale and coordinate mapping".to_string()
@@ -2501,7 +2511,93 @@ fn command_stdout(command: &str, args: &[&str]) -> Result<String> {
     String::from_utf8(output.stdout).with_context(|| format!("{command} stdout is not UTF-8"))
 }
 
-fn capture_screenshot(
+async fn capture_screenshot(
+    request: ScreenshotRequest,
+    safety_settings: &SafetySettings,
+) -> Result<ScreenshotInfo> {
+    if !request.full_resolution && request.max_edge == Some(0) {
+        bail!("max_edge must be greater than zero");
+    }
+    prepare_screenshot_output(&request.output)?;
+
+    if screenshot_portal_status().screenshot_interface_available {
+        match capture_screenshot_portal(request.clone(), safety_settings).await {
+            Ok(Some(info)) => return Ok(info),
+            Ok(None) => {
+                bail!(
+                    "portal screenshot request was cancelled or ended without a screenshot; not falling back to Spectacle"
+                );
+            }
+            Err(err) => {
+                if !command_exists("spectacle") {
+                    return Err(err)
+                        .context("portal screenshot backend failed and Spectacle is unavailable");
+                }
+                warn!(
+                    error = %err,
+                    "portal screenshot backend failed; falling back to Spectacle"
+                );
+            }
+        }
+    }
+
+    capture_screenshot_spectacle(request, safety_settings)
+}
+
+async fn capture_screenshot_portal(
+    request: ScreenshotRequest,
+    safety_settings: &SafetySettings,
+) -> Result<Option<ScreenshotInfo>> {
+    let handle_token = format!("plasma_pilot_{}", Uuid::new_v4().simple());
+    let options = plasma_pilot_portal::PortalScreenshotOptions::new(handle_token);
+    let Some(capture) =
+        plasma_pilot_portal::request_screenshot_zbus(&options, PORTAL_SCREENSHOT_RESPONSE_TIMEOUT)
+            .await
+            .map_err(|err| anyhow::anyhow!(err))?
+    else {
+        return Ok(None);
+    };
+    let (source_width, source_height) = read_png_dimensions_with_retry(&capture.path)
+        .with_context(|| {
+            format!(
+                "read portal screenshot dimensions from {}",
+                capture.path.display()
+            )
+        })?;
+    let (output_width, output_height) = if request.full_resolution {
+        fs::copy(&capture.path, &request.output).with_context(|| {
+            format!(
+                "copy portal screenshot from {} to {}",
+                capture.path.display(),
+                request.output.display()
+            )
+        })?;
+        (source_width, source_height)
+    } else {
+        write_preview_or_copy(
+            &capture.path,
+            &request.output,
+            source_width,
+            source_height,
+            request.max_edge.unwrap_or(safety_settings.preview_max_edge),
+        )?
+    };
+    Ok(Some(screenshot_info_from_capture(
+        request.output,
+        "portal_screenshot",
+        source_width,
+        source_height,
+        output_width,
+        output_height,
+        0,
+        0,
+        source_width,
+        source_height,
+        safety_settings,
+    )?))
+}
+
+fn capture_screenshot_spectacle(
     request: ScreenshotRequest,
     safety_settings: &SafetySettings,
 ) -> Result<ScreenshotInfo> {
@@ -2509,10 +2605,6 @@ fn capture_screenshot(
         .get_or_init(|| Mutex::new(()))
         .lock()
         .map_err(|_| anyhow::anyhow!("screenshot capture lock is poisoned"))?;
-    if !request.full_resolution && request.max_edge == Some(0) {
-        bail!("max_edge must be greater than zero");
-    }
-    prepare_screenshot_output(&request.output)?;
     if !command_exists("spectacle") {
         bail!("spectacle command is not available for KDE screenshot capture");
     }
@@ -2553,11 +2645,45 @@ fn capture_screenshot(
         )?
     };
 
-    let monitors = list_monitors().unwrap_or_default();
+    let info = screenshot_info_from_capture(
+        request.output,
+        "spectacle",
+        source_width,
+        source_height,
+        output_width,
+        output_height,
+        0,
+        0,
+        source_width,
+        source_height,
+        safety_settings,
+    )?;
 
+    if capture_output != info.path {
+        fs::remove_file(&capture_output).ok();
+    }
+
+    Ok(info)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn screenshot_info_from_capture(
+    path: PathBuf,
+    backend: &str,
+    source_width: u32,
+    source_height: u32,
+    output_width: u32,
+    output_height: u32,
+    source_origin_x: u32,
+    source_origin_y: u32,
+    transform_source_width: u32,
+    transform_source_height: u32,
+    safety_settings: &SafetySettings,
+) -> Result<ScreenshotInfo> {
+    let monitors = list_monitors().unwrap_or_default();
     let info = ScreenshotInfo {
-        path: request.output,
-        backend: "spectacle".to_string(),
+        path,
+        backend: backend.to_string(),
         source_width,
         source_height,
         output_width,
@@ -2565,20 +2691,15 @@ fn capture_screenshot(
         transform: ScreenshotTransform {
             source_coordinate_space: CoordinateSpace::PhysicalPixel,
             output_coordinate_space: CoordinateSpace::PhysicalPixel,
-            source_origin_x: 0,
-            source_origin_y: 0,
-            scale_x: f64::from(output_width) / f64::from(source_width),
-            scale_y: f64::from(output_height) / f64::from(source_height),
+            source_origin_x,
+            source_origin_y,
+            scale_x: f64::from(output_width) / f64::from(transform_source_width),
+            scale_y: f64::from(output_height) / f64::from(transform_source_height),
         },
         coordinate_space: CoordinateSpace::PhysicalPixel,
         monitors,
     };
     apply_screenshot_redactions(&info, &safety_settings.screenshot_redactions)?;
-
-    if capture_output != info.path {
-        fs::remove_file(&capture_output).ok();
-    }
-
     Ok(info)
 }
 
@@ -2647,7 +2768,7 @@ fn capture_screenshot_tile(
     Ok(info)
 }
 
-fn wait_for_change(
+async fn wait_for_change(
     request: WaitForChangeRequest,
     safety_settings: &SafetySettings,
 ) -> Result<WaitForChangeResult> {
@@ -2661,7 +2782,7 @@ fn wait_for_change(
         full_resolution: false,
     };
 
-    let baseline_info = capture_screenshot(screenshot_request(), safety_settings)?;
+    let baseline_info = capture_screenshot(screenshot_request(), safety_settings).await?;
     let baseline = read_image_sample(&baseline_info.path)?;
     let mut final_info = baseline_info;
     let mut captures = 1;
@@ -2671,7 +2792,7 @@ fn wait_for_change(
     while started.elapsed() < timeout {
         let remaining = timeout.saturating_sub(started.elapsed());
         thread::sleep(interval.min(remaining));
-        final_info = capture_screenshot(screenshot_request(), safety_settings)?;
+        final_info = capture_screenshot(screenshot_request(), safety_settings).await?;
         captures += 1;
 
         let candidate = read_image_sample(&final_info.path)?;
@@ -2842,7 +2963,7 @@ fn logical_overlap_area(geometry: &WindowGeometry, monitor: &libplasma_pilot::Mo
     overlap_width * overlap_height
 }
 
-fn observe_desktop(
+async fn observe_desktop(
     request: ObserveRequest,
     active_window_state: &ActiveWindowState,
     safety_settings: &SafetySettings,
@@ -2852,7 +2973,7 @@ fn observe_desktop(
     let active_window =
         active_window_with_monitors(active_window_state, &monitors).unwrap_or_default();
     let screenshot = match request.screenshot {
-        Some(request) => Some(capture_screenshot(request, safety_settings)?),
+        Some(request) => Some(capture_screenshot(request, safety_settings).await?),
         None => None,
     };
 
@@ -6727,11 +6848,17 @@ height = 40
             Some("spectacle")
         );
         assert_eq!(preferred_capture_backend(&portal, false), None);
+        let portal = screenshot_portal_status_fixture(true, true);
         assert_eq!(
-            implemented_capture_backend(true).as_deref(),
+            implemented_capture_backend(&portal, true).as_deref(),
+            Some("portal_screenshot")
+        );
+        let portal = screenshot_portal_status_fixture(false, true);
+        assert_eq!(
+            implemented_capture_backend(&portal, true).as_deref(),
             Some("spectacle")
         );
-        assert_eq!(implemented_capture_backend(false), None);
+        assert_eq!(implemented_capture_backend(&portal, false), None);
     }
 
     #[test]
@@ -6752,12 +6879,12 @@ height = 40
         assert!(hint.contains("busctl") || hint.contains("capture backend"));
         let visible_portal_hint = capture_backend_setup_hint(
             Some("portal_screenshot"),
-            None,
+            Some("portal_screenshot"),
             &screenshot_portal_status_fixture(true, true),
             &kwin,
             &spectacle,
         );
-        assert!(visible_portal_hint.contains("does not yet execute portal capture"));
+        assert!(visible_portal_hint.contains("using portal Screenshot"));
         assert!(screenshot_portal_setup_hint(false, false, false, false, false).contains("busctl"));
         assert!(
             screenshot_portal_setup_hint(true, true, false, false, true)

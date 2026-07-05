@@ -624,6 +624,10 @@ dependencies = [
 [[package]]
 name = "plasma-pilot-portal"
 version = "0.1.0"
+dependencies = [
+ "tokio",
+ "zbus",
+]
 
 [[package]]
 name = "plasma-pilot-testkit"
@@ -654,6 +658,7 @@ dependencies = [
  "plasma-pilot-atspi",
  "plasma-pilot-kwin",
  "plasma-pilot-policy",
+ "plasma-pilot-portal",
  "plasma-pilot-uinput",
  "serde",
  "serde_json",
