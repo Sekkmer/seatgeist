@@ -19,15 +19,19 @@ target_triple="${SEATGEIST_RELEASE_TARGET:-linux-x86_64}"
 release_root="${SEATGEIST_RELEASE_DIR:-target/seatgeist-release}"
 package_name="seatgeist-${version}-${git_short}-${target_triple}"
 source_name="seatgeist-${version}-${git_short}-source"
+plugin_name="seatgeist-${version}-${git_short}-plugin"
 stage="${release_root}/${package_name}"
+plugin_stage="${release_root}/${plugin_name}"
 archive="${release_root}/${package_name}.tar.gz"
 checksum="${archive}.sha256"
+plugin_archive="${release_root}/${plugin_name}.tar.gz"
+plugin_checksum="${plugin_archive}.sha256"
 source_archive="${release_root}/${source_name}.tar.gz"
 source_checksum="${source_archive}.sha256"
 source_file_list="${release_root}/${source_name}.files"
 manifest="${release_root}/${package_name}.manifest.json"
 
-rm -rf "$stage" "$archive" "$checksum" "$source_archive" "$source_checksum" "$source_file_list" "$manifest"
+rm -rf "$stage" "$plugin_stage" "$archive" "$checksum" "$plugin_archive" "$plugin_checksum" "$source_archive" "$source_checksum" "$source_file_list" "$manifest"
 mkdir -p "$stage/bin" \
 	"$stage/docs" \
 	"$stage/examples/traces" \
@@ -56,6 +60,21 @@ cp -a systemd/. "$stage/systemd/"
 cp -a udev/. "$stage/udev/"
 cp Cargo.toml Cargo.lock Makefile LICENSE-MIT LICENSE-APACHE "$stage/"
 
+mkdir -p "$plugin_stage"
+cp -a plugin/. "$plugin_stage/"
+cat >"$plugin_stage/MANIFEST.json" <<EOF
+{
+  "name": "Seatgeist Codex Plugin",
+  "package": "$plugin_name",
+  "version": "$version",
+  "git": "$git_short",
+  "type": "codex-plugin",
+  "plugin_manifest": ".codex-plugin/plugin.json",
+  "mcp_config": ".mcp.json"
+}
+EOF
+find "$plugin_stage" -type f -printf '%P\n' | sort >"$plugin_stage/MANIFEST.files"
+
 find "$stage" -type f -printf '%P\n' | sort >"$stage/MANIFEST.files"
 
 cat >"$stage/MANIFEST.json" <<EOF
@@ -73,6 +92,8 @@ cat >"$stage/MANIFEST.json" <<EOF
   "artifacts": {
     "bundle": "$(basename "$archive")",
     "bundle_sha256": "$(basename "$checksum")",
+    "plugin": "$(basename "$plugin_archive")",
+    "plugin_sha256": "$(basename "$plugin_checksum")",
     "source": "$(basename "$source_archive")",
     "source_sha256": "$(basename "$source_checksum")"
   },
@@ -82,6 +103,8 @@ EOF
 
 tar --sort=name --owner=0 --group=0 --numeric-owner -C "$release_root" -czf "$archive" "$package_name"
 sha256sum "$archive" >"$checksum"
+tar --sort=name --owner=0 --group=0 --numeric-owner -C "$release_root" -czf "$plugin_archive" "$plugin_name"
+sha256sum "$plugin_archive" >"$plugin_checksum"
 
 git ls-files -z >"$source_file_list"
 tar --null \
@@ -99,6 +122,8 @@ cp "$stage/MANIFEST.json" "$manifest"
 
 echo "package-release: archive=$archive"
 echo "package-release: checksum=$checksum"
+echo "package-release: plugin_archive=$plugin_archive"
+echo "package-release: plugin_checksum=$plugin_checksum"
 echo "package-release: source_archive=$source_archive"
 echo "package-release: source_checksum=$source_checksum"
 echo "package-release: manifest=$manifest"

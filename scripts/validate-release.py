@@ -76,15 +76,19 @@ def main() -> None:
         "cargo build --workspace --release",
         "package_name=\"seatgeist-${version}-${git_short}-${target_triple}\"",
         "source_name=\"seatgeist-${version}-${git_short}-source\"",
+        "plugin_name=\"seatgeist-${version}-${git_short}-plugin\"",
         "target/seatgeist-release",
         "seatgeistd",
         "seatgeist-cli",
         "seatgeist-mcp",
+        "\"plugin\": \"$(basename \"$plugin_archive\")\"",
         "\"source\": \"$(basename \"$source_archive\")\"",
         "cp -a scripts/. \"$stage/scripts/\"",
         "seatgeist-panic-stop-hotkey",
         "MANIFEST.json",
         "git ls-files -z",
+        "plugin_archive=",
+        "plugin_checksum=",
         "source_archive=",
         "source_checksum=",
         "sha256sum",
@@ -95,8 +99,10 @@ def main() -> None:
     verify_release = require_executable("scripts/verify-release-artifacts.py")
     for needle in [
         "verify_checksum(bundle, bundle_checksum)",
+        "verify_checksum(plugin, plugin_checksum)",
         "verify_checksum(source, source_checksum)",
         "verify_bundle(bundle, manifest)",
+        "verify_plugin(plugin, manifest)",
         "verify_source(source, manifest)",
         "crates/seatgeistd/src/main.rs",
         "plugin/.mcp.json",
@@ -115,6 +121,7 @@ def main() -> None:
     for needle in [
         "validate-plugin.py",
         "validate-install-assets.py",
+        "plugin_root=",
         "seatgeist-cli",
         "seatgeist-mcp",
         "seatgeistd",
@@ -149,6 +156,7 @@ def main() -> None:
         "release_checklist",
         "release_artifacts",
         "release_signatures",
+        "plugin_sha256",
         "live_eval_evidence",
         "seatgeist_eval_evidence",
         "evidence.json",
@@ -189,7 +197,7 @@ def main() -> None:
     require_contains(
         "docs/release-checklist.md",
         checklist,
-        "- [~] Versioned local release artifact packaging, verification, clean-install validation, and optional GPG signing exist through `make verify-release-artifacts`, `make verify-release-install`, `make sign-release-artifacts`, and `make verify-release-signatures`; public uploads and signed release tags are not done yet.",
+        "- [~] Versioned local release artifact packaging, standalone plugin bundle packaging, verification, clean-install validation, and optional GPG signing exist through `make verify-release-artifacts`, `make verify-release-install`, `make sign-release-artifacts`, and `make verify-release-signatures`; public uploads and signed release tags are not done yet.",
     )
     require_contains(
         "docs/release-checklist.md",

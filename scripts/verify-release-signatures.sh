@@ -28,7 +28,7 @@ manifest = Path(sys.argv[1])
 release_dir = manifest.parent
 data = json.loads(manifest.read_text(encoding="utf-8"))
 artifacts = data.get("artifacts", {})
-for key in ("bundle", "bundle_sha256", "source", "source_sha256"):
+for key in ("bundle", "bundle_sha256", "plugin", "plugin_sha256", "source", "source_sha256"):
     name = artifacts.get(key)
     if not isinstance(name, str) or "/" in name:
         raise SystemExit(f"manifest.artifacts.{key} must be a plain filename")

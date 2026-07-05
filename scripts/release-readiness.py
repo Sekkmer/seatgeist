@@ -73,7 +73,7 @@ def artifact_paths(manifest_path: Path | None, manifest: dict[str, Any] | None) 
     if not isinstance(artifacts, dict):
         return []
     paths = []
-    for key in ("bundle", "bundle_sha256", "source", "source_sha256"):
+    for key in ("bundle", "bundle_sha256", "plugin", "plugin_sha256", "source", "source_sha256"):
         value = artifacts.get(key)
         if isinstance(value, str) and "/" not in value:
             paths.append(manifest_path.parent / value)

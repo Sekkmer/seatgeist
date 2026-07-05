@@ -24,25 +24,39 @@ release_dir = manifest.parent
 data = json.loads(manifest.read_text(encoding="utf-8"))
 artifacts = data.get("artifacts", {})
 bundle = artifacts.get("bundle")
+plugin = artifacts.get("plugin")
 package = data.get("package")
 version = data.get("version")
+git = data.get("git")
 if not isinstance(bundle, str) or "/" in bundle:
     raise SystemExit("manifest.artifacts.bundle must be a plain filename")
+if not isinstance(plugin, str) or "/" in plugin:
+    raise SystemExit("manifest.artifacts.plugin must be a plain filename")
 if not isinstance(package, str) or not package:
     raise SystemExit("manifest.package must be a non-empty string")
 if not isinstance(version, str) or not version:
     raise SystemExit("manifest.version must be a non-empty string")
+if not isinstance(git, str) or not git:
+    raise SystemExit("manifest.git must be a non-empty string")
 print(release_dir / bundle)
+print(release_dir / plugin)
 print(package)
 print(version)
+print(git)
 PY
 )
 
 bundle="${metadata[0]}"
-package="${metadata[1]}"
-version="${metadata[2]}"
+plugin="${metadata[1]}"
+package="${metadata[2]}"
+version="${metadata[3]}"
+git="${metadata[4]}"
 if [[ ! -f "$bundle" ]]; then
 	echo "verify-release-install: bundle is missing: $bundle" >&2
+	exit 1
+fi
+if [[ ! -f "$plugin" ]]; then
+	echo "verify-release-install: plugin bundle is missing: $plugin" >&2
 	exit 1
 fi
 
@@ -79,5 +93,16 @@ test -f "$install_root/docs/release-checklist.md"
 test -f "$install_root/plugin/.mcp.json"
 test -f "$install_root/systemd/seatgeistd.service"
 test -f "$install_root/udev/99-seatgeist-uinput.rules"
+
+tar -xzf "$plugin" -C "$tmp_dir"
+plugin_root="$tmp_dir/seatgeist-$version-$git-plugin"
+if [[ ! -d "$plugin_root" ]]; then
+	echo "verify-release-install: plugin archive did not extract expected package dir: seatgeist-$version-$git-plugin" >&2
+	exit 1
+fi
+"$install_root/scripts/validate-plugin.py" "$plugin_root"
+test -f "$plugin_root/MANIFEST.json"
+test -f "$plugin_root/MANIFEST.files"
+test -f "$plugin_root/.mcp.json"
 
 echo "verify-release-install: ok $manifest"

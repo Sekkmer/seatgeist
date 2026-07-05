@@ -133,6 +133,40 @@ def verify_bundle(bundle: Path, manifest: dict[str, Any]) -> None:
         fail(f"{bundle} embedded MANIFEST.json differs from external manifest")
 
 
+def verify_plugin(plugin: Path, manifest: dict[str, Any]) -> None:
+    version = require_string(manifest, "version", "manifest")
+    git = require_string(manifest, "git", "manifest")
+    plugin_name = f"seatgeist-{version}-{git}-plugin"
+    names = tar_names(plugin)
+    prefix = f"{plugin_name}/"
+    require_members(
+        plugin,
+        names,
+        [
+            f"{prefix}MANIFEST.files",
+            f"{prefix}MANIFEST.json",
+            f"{prefix}.codex-plugin/plugin.json",
+            f"{prefix}.mcp.json",
+            f"{prefix}hooks/hooks.json",
+            f"{prefix}hooks/seatgeist_audit_summary.py",
+            f"{prefix}skills/seatgeist-browser-debugging/SKILL.md",
+            f"{prefix}skills/seatgeist-computer-use/SKILL.md",
+            f"{prefix}skills/seatgeist-desktop-triage/SKILL.md",
+            f"{prefix}skills/seatgeist-gui-testing/SKILL.md",
+        ],
+    )
+    embedded_manifest = read_tar_json(plugin, f"{prefix}MANIFEST.json")
+    if embedded_manifest.get("type") != "codex-plugin":
+        fail(f"{plugin} embedded MANIFEST.json type must be codex-plugin")
+    if embedded_manifest.get("version") != version:
+        fail(f"{plugin} embedded MANIFEST.json version differs from release manifest")
+    if embedded_manifest.get("git") != git:
+        fail(f"{plugin} embedded MANIFEST.json git differs from release manifest")
+    forbidden = [name for name in names if "/target/" in name or "/.git/" in name or "/bin/" in name]
+    if forbidden:
+        fail(f"{plugin} contains generated, VCS, or binary paths: {forbidden[:3]}")
+
+
 def verify_source(source: Path, manifest: dict[str, Any]) -> None:
     version = require_string(manifest, "version", "manifest")
     git = require_string(manifest, "git", "manifest")
@@ -191,14 +225,20 @@ def main() -> None:
     bundle_checksum = require_artifact(
         release_dir, require_string(artifacts, "bundle_sha256", "manifest.artifacts")
     )
+    plugin = require_artifact(release_dir, require_string(artifacts, "plugin", "manifest.artifacts"))
+    plugin_checksum = require_artifact(
+        release_dir, require_string(artifacts, "plugin_sha256", "manifest.artifacts")
+    )
     source = require_artifact(release_dir, require_string(artifacts, "source", "manifest.artifacts"))
     source_checksum = require_artifact(
         release_dir, require_string(artifacts, "source_sha256", "manifest.artifacts")
     )
 
     verify_checksum(bundle, bundle_checksum)
+    verify_checksum(plugin, plugin_checksum)
     verify_checksum(source, source_checksum)
     verify_bundle(bundle, manifest)
+    verify_plugin(plugin, manifest)
     verify_source(source, manifest)
 
     print(f"verify-release-artifacts: ok {manifest_path}")
