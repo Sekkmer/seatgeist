@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use libseatgeist::{
     AccessibilityAction, AccessibilityFindRequest, AccessibilityNode, AccessibilityTextAttributes,
-    MonitorInfo, PilotError, Point, PointerButton, ScreenshotTarget, WindowId, WindowInfo,
+    MonitorInfo, Point, PointerButton, ScreenshotTarget, SeatgeistError, WindowId, WindowInfo,
 };
 
-pub type Result<T> = std::result::Result<T, PilotError>;
+pub type Result<T> = std::result::Result<T, SeatgeistError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Screenshot {

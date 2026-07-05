@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 use libseatgeist::{
     AccessibilityAction, AccessibilityFindRequest, AccessibilityNode, AccessibilityTextAttributes,
-    CoordinateSpace, MonitorInfo, PilotError, Point, PointerButton, ScreenshotTarget,
+    CoordinateSpace, MonitorInfo, Point, PointerButton, ScreenshotTarget, SeatgeistError,
     TextAttribute, WindowGeometry, WindowId, WindowInfo,
 };
 use seatgeist_backend::{
@@ -594,7 +594,7 @@ impl AccessibilityBackend for MockAccessibilityBackend {
 fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
     mutex
         .lock()
-        .map_err(|_| PilotError::Io("mock backend lock poisoned".to_string()))
+        .map_err(|_| SeatgeistError::Io("mock backend lock poisoned".to_string()))
 }
 
 #[cfg(test)]

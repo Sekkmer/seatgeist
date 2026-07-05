@@ -243,7 +243,7 @@ pub struct Observation {
 }
 
 #[derive(Debug, Error)]
-pub enum PilotError {
+pub enum SeatgeistError {
     #[error("backend unavailable: {0}")]
     BackendUnavailable(String),
     #[error("policy denied action: {0}")]

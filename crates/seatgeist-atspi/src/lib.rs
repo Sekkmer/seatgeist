@@ -2,7 +2,7 @@ use std::process::Command;
 
 use libseatgeist::{
     AccessibilityAction, AccessibilityBounds, AccessibilityFindRequest, AccessibilityNode,
-    AccessibilityTextAttributes, CoordinateSpace, PilotError, TextAttribute,
+    AccessibilityTextAttributes, CoordinateSpace, SeatgeistError, TextAttribute,
 };
 
 pub const BACKEND_NAME: &str = "atspi";
@@ -20,7 +20,7 @@ const DEFAULT_SEARCH_DEPTH: usize = 12;
 const DEFAULT_VALUE_MAX_CHARS: i32 = 512;
 const DEFAULT_SET_TEXT_MAX_CHARS: usize = 8192;
 
-pub type Result<T> = std::result::Result<T, PilotError>;
+pub type Result<T> = std::result::Result<T, SeatgeistError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AtspiRef {
@@ -60,7 +60,7 @@ pub fn available() -> bool {
 
 pub fn focused_tree(depth: usize, max_nodes: usize) -> Result<Option<AccessibilityNode>> {
     if max_nodes == 0 {
-        return Err(PilotError::InvalidRequest(
+        return Err(SeatgeistError::InvalidRequest(
             "max_nodes must be greater than zero".to_string(),
         ));
     }
@@ -121,7 +121,7 @@ pub fn text_attributes(
     include_defaults: bool,
 ) -> Result<AccessibilityTextAttributes> {
     if offset < 0 {
-        return Err(PilotError::InvalidRequest(
+        return Err(SeatgeistError::InvalidRequest(
             "offset must be greater than or equal to zero".to_string(),
         ));
     }
@@ -145,7 +145,7 @@ pub fn set_text(node_id: &str, text: &str) -> Result<()> {
 
 pub fn insert_text(node_id: &str, offset: i32, text: &str) -> Result<()> {
     if offset < 0 {
-        return Err(PilotError::InvalidRequest(
+        return Err(SeatgeistError::InvalidRequest(
             "offset must be greater than or equal to zero".to_string(),
         ));
     }
@@ -178,7 +178,7 @@ pub fn cut_text(node_id: &str, start_offset: i32, end_offset: i32) -> Result<()>
 
 pub fn paste_text(node_id: &str, offset: i32) -> Result<()> {
     if offset < 0 {
-        return Err(PilotError::InvalidRequest(
+        return Err(SeatgeistError::InvalidRequest(
             "offset must be greater than or equal to zero".to_string(),
         ));
     }
@@ -189,7 +189,7 @@ pub fn paste_text(node_id: &str, offset: i32) -> Result<()> {
 
 pub fn set_caret(node_id: &str, offset: i32) -> Result<()> {
     if offset < 0 {
-        return Err(PilotError::InvalidRequest(
+        return Err(SeatgeistError::InvalidRequest(
             "offset must be greater than or equal to zero".to_string(),
         ));
     }
@@ -205,7 +205,7 @@ pub fn set_selection(
     end_offset: i32,
 ) -> Result<()> {
     if selection_num < 0 {
-        return Err(PilotError::InvalidRequest(
+        return Err(SeatgeistError::InvalidRequest(
             "selection_num must be greater than or equal to zero".to_string(),
         ));
     }
@@ -217,7 +217,7 @@ pub fn set_selection(
 
 pub fn set_current_value(node_id: &str, value: f64) -> Result<()> {
     if !value.is_finite() {
-        return Err(PilotError::InvalidRequest(
+        return Err(SeatgeistError::InvalidRequest(
             "value must be finite".to_string(),
         ));
     }
@@ -263,7 +263,7 @@ impl AtspiBus {
         budget: &mut NodeBudget,
     ) -> Result<AccessibilityNode> {
         if !budget.take() {
-            return Err(PilotError::InvalidRequest(
+            return Err(SeatgeistError::InvalidRequest(
                 "accessibility tree max_nodes exhausted".to_string(),
             ));
         }
@@ -417,7 +417,7 @@ impl AtspiBus {
                 method,
             ])
             .output()
-            .map_err(|err| PilotError::BackendUnavailable(format!("run busctl: {err}")))?;
+            .map_err(|err| SeatgeistError::BackendUnavailable(format!("run busctl: {err}")))?;
         command_output(output, "busctl AT-SPI call")
     }
 
@@ -441,7 +441,7 @@ impl AtspiBus {
             ])
             .args(args)
             .output()
-            .map_err(|err| PilotError::BackendUnavailable(format!("run busctl: {err}")))?;
+            .map_err(|err| SeatgeistError::BackendUnavailable(format!("run busctl: {err}")))?;
         command_output(output, "busctl AT-SPI call")
     }
 
@@ -463,7 +463,7 @@ impl AtspiBus {
                 property,
             ])
             .output()
-            .map_err(|err| PilotError::BackendUnavailable(format!("run busctl: {err}")))?;
+            .map_err(|err| SeatgeistError::BackendUnavailable(format!("run busctl: {err}")))?;
         command_output(output, "busctl AT-SPI get-property")
     }
 
@@ -489,7 +489,7 @@ impl AtspiBus {
                 value,
             ])
             .output()
-            .map_err(|err| PilotError::BackendUnavailable(format!("run busctl: {err}")))?;
+            .map_err(|err| SeatgeistError::BackendUnavailable(format!("run busctl: {err}")))?;
         command_output(output, "busctl AT-SPI set-property")
     }
 
@@ -552,13 +552,13 @@ impl AtspiBus {
             .role_name(node)
             .unwrap_or_else(|_| "unknown".to_string());
         if is_sensitive_role(&role) {
-            return Err(PilotError::PolicyDenied(
+            return Err(SeatgeistError::PolicyDenied(
                 "refusing to read text attributes on sensitive accessibility node".to_string(),
             ));
         }
         let interfaces = self.interfaces(node)?;
         if !interfaces.iter().any(|interface| interface == ATSPI_TEXT) {
-            return Err(PilotError::InvalidRequest(
+            return Err(SeatgeistError::InvalidRequest(
                 "node does not expose org.a11y.atspi.Text".to_string(),
             ));
         }
@@ -587,7 +587,7 @@ impl AtspiBus {
             .iter()
             .position(|candidate| action_name_matches(candidate, &action))
         else {
-            return Err(PilotError::InvalidRequest(format!(
+            return Err(SeatgeistError::InvalidRequest(format!(
                 "node does not expose {} action",
                 action.as_str()
             )));
@@ -603,7 +603,7 @@ impl AtspiBus {
         if parse_bool_value(&output)? {
             Ok(())
         } else {
-            Err(PilotError::BackendUnavailable(format!(
+            Err(SeatgeistError::BackendUnavailable(format!(
                 "AT-SPI DoAction({index}) returned false"
             )))
         }
@@ -614,7 +614,7 @@ impl AtspiBus {
             .role_name(node)
             .unwrap_or_else(|_| "unknown".to_string());
         if is_sensitive_role(&role) {
-            return Err(PilotError::PolicyDenied(
+            return Err(SeatgeistError::PolicyDenied(
                 "refusing to set text on sensitive accessibility node".to_string(),
             ));
         }
@@ -623,7 +623,7 @@ impl AtspiBus {
             .iter()
             .any(|interface| interface == ATSPI_EDITABLE_TEXT)
         {
-            return Err(PilotError::InvalidRequest(
+            return Err(SeatgeistError::InvalidRequest(
                 "node does not expose org.a11y.atspi.EditableText".to_string(),
             ));
         }
@@ -637,7 +637,7 @@ impl AtspiBus {
         if parse_bool_value(&output)? {
             Ok(())
         } else {
-            Err(PilotError::BackendUnavailable(
+            Err(SeatgeistError::BackendUnavailable(
                 "AT-SPI SetTextContents returned false".to_string(),
             ))
         }
@@ -648,7 +648,7 @@ impl AtspiBus {
             .role_name(node)
             .unwrap_or_else(|_| "unknown".to_string());
         if is_sensitive_role(&role) {
-            return Err(PilotError::PolicyDenied(
+            return Err(SeatgeistError::PolicyDenied(
                 "refusing to insert text on sensitive accessibility node".to_string(),
             ));
         }
@@ -657,7 +657,7 @@ impl AtspiBus {
             .iter()
             .any(|interface| interface == ATSPI_EDITABLE_TEXT)
         {
-            return Err(PilotError::InvalidRequest(
+            return Err(SeatgeistError::InvalidRequest(
                 "node does not expose org.a11y.atspi.EditableText".to_string(),
             ));
         }
@@ -673,7 +673,7 @@ impl AtspiBus {
         if parse_bool_value(&output)? {
             Ok(())
         } else {
-            Err(PilotError::BackendUnavailable(
+            Err(SeatgeistError::BackendUnavailable(
                 "AT-SPI InsertText returned false".to_string(),
             ))
         }
@@ -703,7 +703,7 @@ impl AtspiBus {
             .role_name(node)
             .unwrap_or_else(|_| "unknown".to_string());
         if is_sensitive_role(&role) {
-            return Err(PilotError::PolicyDenied(format!(
+            return Err(SeatgeistError::PolicyDenied(format!(
                 "refusing to {action} text on sensitive accessibility node"
             )));
         }
@@ -712,7 +712,7 @@ impl AtspiBus {
             .iter()
             .any(|interface| interface == ATSPI_EDITABLE_TEXT)
         {
-            return Err(PilotError::InvalidRequest(
+            return Err(SeatgeistError::InvalidRequest(
                 "node does not expose org.a11y.atspi.EditableText".to_string(),
             ));
         }
@@ -728,7 +728,7 @@ impl AtspiBus {
         if parse_bool_value(&output)? {
             Ok(())
         } else {
-            Err(PilotError::BackendUnavailable(format!(
+            Err(SeatgeistError::BackendUnavailable(format!(
                 "AT-SPI {method} returned false"
             )))
         }
@@ -739,7 +739,7 @@ impl AtspiBus {
             .role_name(node)
             .unwrap_or_else(|_| "unknown".to_string());
         if is_sensitive_role(&role) {
-            return Err(PilotError::PolicyDenied(
+            return Err(SeatgeistError::PolicyDenied(
                 "refusing to paste text on sensitive accessibility node".to_string(),
             ));
         }
@@ -748,7 +748,7 @@ impl AtspiBus {
             .iter()
             .any(|interface| interface == ATSPI_EDITABLE_TEXT)
         {
-            return Err(PilotError::InvalidRequest(
+            return Err(SeatgeistError::InvalidRequest(
                 "node does not expose org.a11y.atspi.EditableText".to_string(),
             ));
         }
@@ -763,7 +763,7 @@ impl AtspiBus {
         if parse_bool_value(&output)? {
             Ok(())
         } else {
-            Err(PilotError::BackendUnavailable(
+            Err(SeatgeistError::BackendUnavailable(
                 "AT-SPI PasteText returned false".to_string(),
             ))
         }
@@ -782,7 +782,7 @@ impl AtspiBus {
         if parse_bool_value(&output)? {
             Ok(())
         } else {
-            Err(PilotError::BackendUnavailable(
+            Err(SeatgeistError::BackendUnavailable(
                 "AT-SPI SetCaretOffset returned false".to_string(),
             ))
         }
@@ -809,7 +809,7 @@ impl AtspiBus {
         if parse_bool_value(&output)? {
             Ok(())
         } else {
-            Err(PilotError::BackendUnavailable(
+            Err(SeatgeistError::BackendUnavailable(
                 "AT-SPI SetSelection returned false".to_string(),
             ))
         }
@@ -820,13 +820,13 @@ impl AtspiBus {
             .role_name(node)
             .unwrap_or_else(|_| "unknown".to_string());
         if is_sensitive_role(&role) {
-            return Err(PilotError::PolicyDenied(format!(
+            return Err(SeatgeistError::PolicyDenied(format!(
                 "refusing to {action} on sensitive accessibility node"
             )));
         }
         let interfaces = self.interfaces(node)?;
         if !interfaces.iter().any(|interface| interface == ATSPI_TEXT) {
-            return Err(PilotError::InvalidRequest(
+            return Err(SeatgeistError::InvalidRequest(
                 "node does not expose org.a11y.atspi.Text".to_string(),
             ));
         }
@@ -838,13 +838,13 @@ impl AtspiBus {
             .role_name(node)
             .unwrap_or_else(|_| "unknown".to_string());
         if is_sensitive_role(&role) {
-            return Err(PilotError::PolicyDenied(
+            return Err(SeatgeistError::PolicyDenied(
                 "refusing to set value on sensitive accessibility node".to_string(),
             ));
         }
         let interfaces = self.interfaces(node)?;
         if !interfaces.iter().any(|interface| interface == ATSPI_VALUE) {
-            return Err(PilotError::InvalidRequest(
+            return Err(SeatgeistError::InvalidRequest(
                 "node does not expose org.a11y.atspi.Value".to_string(),
             ));
         }
@@ -905,18 +905,18 @@ fn accessibility_bus_address() -> Result<String> {
             "GetAddress",
         ])
         .output()
-        .map_err(|err| PilotError::BackendUnavailable(format!("run busctl: {err}")))?;
+        .map_err(|err| SeatgeistError::BackendUnavailable(format!("run busctl: {err}")))?;
     parse_single_string(&command_output(output, "busctl org.a11y.Bus GetAddress")?)
 }
 
 fn validate_find_request(request: &AccessibilityFindRequest) -> Result<()> {
     if request.max_results == 0 {
-        return Err(PilotError::InvalidRequest(
+        return Err(SeatgeistError::InvalidRequest(
             "max_results must be greater than zero".to_string(),
         ));
     }
     if request.max_nodes == 0 {
-        return Err(PilotError::InvalidRequest(
+        return Err(SeatgeistError::InvalidRequest(
             "max_nodes must be greater than zero".to_string(),
         ));
     }
@@ -925,7 +925,7 @@ fn validate_find_request(request: &AccessibilityFindRequest) -> Result<()> {
         && request.app.is_none()
         && request.window_name_contains.is_none()
     {
-        return Err(PilotError::InvalidRequest(
+        return Err(SeatgeistError::InvalidRequest(
             "at least one accessibility find filter is required".to_string(),
         ));
     }
@@ -935,7 +935,7 @@ fn validate_find_request(request: &AccessibilityFindRequest) -> Result<()> {
 fn validate_set_text(text: &str) -> Result<()> {
     let char_count = text.chars().count();
     if char_count > DEFAULT_SET_TEXT_MAX_CHARS {
-        return Err(PilotError::InvalidRequest(format!(
+        return Err(SeatgeistError::InvalidRequest(format!(
             "text exceeds {DEFAULT_SET_TEXT_MAX_CHARS} character limit"
         )));
     }
@@ -944,12 +944,12 @@ fn validate_set_text(text: &str) -> Result<()> {
 
 fn validate_text_range(start_offset: i32, end_offset: i32) -> Result<()> {
     if start_offset < 0 {
-        return Err(PilotError::InvalidRequest(
+        return Err(SeatgeistError::InvalidRequest(
             "start_offset must be greater than or equal to zero".to_string(),
         ));
     }
     if end_offset <= start_offset {
-        return Err(PilotError::InvalidRequest(
+        return Err(SeatgeistError::InvalidRequest(
             "end_offset must be greater than start_offset".to_string(),
         ));
     }
@@ -957,16 +957,16 @@ fn validate_text_range(start_offset: i32, end_offset: i32) -> Result<()> {
 }
 
 fn parse_node_id(node_id: &str) -> Result<AtspiRef> {
-    let rest = node_id
-        .strip_prefix("atspi://")
-        .ok_or_else(|| PilotError::InvalidRequest(format!("invalid AT-SPI node id: {node_id}")))?;
+    let rest = node_id.strip_prefix("atspi://").ok_or_else(|| {
+        SeatgeistError::InvalidRequest(format!("invalid AT-SPI node id: {node_id}"))
+    })?;
     let Some((service, path)) = rest.split_once('/') else {
-        return Err(PilotError::InvalidRequest(format!(
+        return Err(SeatgeistError::InvalidRequest(format!(
             "invalid AT-SPI node id: {node_id}"
         )));
     };
     if service.is_empty() || path.is_empty() {
-        return Err(PilotError::InvalidRequest(format!(
+        return Err(SeatgeistError::InvalidRequest(format!(
             "invalid AT-SPI node id: {node_id}"
         )));
     }
@@ -979,13 +979,13 @@ fn parse_node_id(node_id: &str) -> Result<AtspiRef> {
 fn command_output(output: std::process::Output, context: &str) -> Result<String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(PilotError::BackendUnavailable(format!(
+        return Err(SeatgeistError::BackendUnavailable(format!(
             "{context} exited with status {}: {stderr}",
             output.status
         )));
     }
     String::from_utf8(output.stdout).map_err(|err| {
-        PilotError::BackendUnavailable(format!("{context} output was not UTF-8: {err}"))
+        SeatgeistError::BackendUnavailable(format!("{context} output was not UTF-8: {err}"))
     })
 }
 
@@ -1001,7 +1001,7 @@ fn parse_object_refs(output: &str) -> Vec<AtspiRef> {
 
 fn parse_single_string(output: &str) -> Result<String> {
     parse_strings(output).into_iter().next().ok_or_else(|| {
-        PilotError::InvalidRequest(format!("expected string in AT-SPI output: {output}"))
+        SeatgeistError::InvalidRequest(format!("expected string in AT-SPI output: {output}"))
     })
 }
 
@@ -1078,7 +1078,7 @@ fn parse_extents(output: &str) -> Result<(i32, i32, u32, u32)> {
         .filter_map(|value| value.parse::<i32>().ok())
         .collect::<Vec<_>>();
     if values.len() != 4 {
-        return Err(PilotError::InvalidRequest(format!(
+        return Err(SeatgeistError::InvalidRequest(format!(
             "expected AT-SPI extents tuple: {output}"
         )));
     }
@@ -1095,7 +1095,7 @@ fn parse_i32_value(output: &str) -> Result<i32> {
         .split_whitespace()
         .rev()
         .find_map(|value| value.parse::<i32>().ok())
-        .ok_or_else(|| PilotError::InvalidRequest(format!("expected i32 value: {output}")))
+        .ok_or_else(|| SeatgeistError::InvalidRequest(format!("expected i32 value: {output}")))
 }
 
 fn parse_scalar_value(output: &str) -> Result<String> {
@@ -1104,14 +1104,14 @@ fn parse_scalar_value(output: &str) -> Result<String> {
         .last()
         .filter(|value| !value.trim().is_empty())
         .map(ToOwned::to_owned)
-        .ok_or_else(|| PilotError::InvalidRequest(format!("expected scalar value: {output}")))
+        .ok_or_else(|| SeatgeistError::InvalidRequest(format!("expected scalar value: {output}")))
 }
 
 fn parse_bool_value(output: &str) -> Result<bool> {
     match output.split_whitespace().last() {
         Some("true") => Ok(true),
         Some("false") => Ok(false),
-        _ => Err(PilotError::InvalidRequest(format!(
+        _ => Err(SeatgeistError::InvalidRequest(format!(
             "expected bool value: {output}"
         ))),
     }
@@ -1132,7 +1132,7 @@ fn parse_text_attributes(output: &str) -> Result<(Vec<TextAttribute>, i32, i32)>
         .filter_map(|value| value.parse::<i32>().ok())
         .collect::<Vec<_>>();
     let [.., start_offset, end_offset] = values.as_slice() else {
-        return Err(PilotError::InvalidRequest(format!(
+        return Err(SeatgeistError::InvalidRequest(format!(
             "expected AT-SPI text attribute range: {output}"
         )));
     };

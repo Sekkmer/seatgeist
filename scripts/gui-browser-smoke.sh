@@ -105,10 +105,10 @@ cat >"$web_root/index.html" <<'HTML'
   </style>
 </head>
 <body>
-  <button id="pilot-button" type="button">Seatgeist Localhost Button</button>
+  <button id="seatgeist-button" type="button">Seatgeist Localhost Button</button>
   <output id="result">waiting</output>
   <script>
-    document.getElementById("pilot-button").addEventListener("click", async () => {
+    document.getElementById("seatgeist-button").addEventListener("click", async () => {
       document.getElementById("result").textContent = "clicked";
       await fetch("/clicked", {
         method: "POST",

@@ -36,6 +36,6 @@ pub use runtime::{
 };
 pub use types::{
     AccessibilityAction, AccessibilityBounds, AccessibilityNode, BackendCapability,
-    CoordinateSpace, MonitorInfo, Observation, PilotError, Point, PointerButton, PolicyDecision,
-    SafetyClass, ScreenshotTarget, ToolApprovalLevel, WindowGeometry, WindowId, WindowInfo,
+    CoordinateSpace, MonitorInfo, Observation, Point, PointerButton, PolicyDecision, SafetyClass,
+    ScreenshotTarget, SeatgeistError, ToolApprovalLevel, WindowGeometry, WindowId, WindowInfo,
 };

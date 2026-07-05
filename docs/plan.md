@@ -206,7 +206,7 @@ Must define:
 - `ToolApprovalLevel`
 - `SafetyClass`
 - `BackendCapability`
-- `PilotError`
+- `SeatgeistError`
 
 Keep this crate mostly dependency-light.
 
@@ -418,7 +418,7 @@ Every screenshot response must include:
 
 Never let MCP tools accept ambiguous coordinates without declaring their coordinate space.
 
-For an 8K monitor, default screenshots should not blindly return a full-resolution PNG to the model. The default `pilot.observe()` response should return a bounded preview plus metadata and make full-resolution capture explicit:
+For an 8K monitor, default screenshots should not blindly return a full-resolution PNG to the model. The default `seatgeist.observe()` response should return a bounded preview plus metadata and make full-resolution capture explicit:
 
 ```text
 preview_max_edge default: 1600
@@ -434,18 +434,18 @@ Start with a small, strong tool surface. Add semantic tools later.
 ### 11.1 Observation tools
 
 ```text
-pilot.health()
-pilot.capabilities()
-pilot.list_monitors()
-pilot.list_windows()
-pilot.active_window()
-pilot.screenshot(target?, include_cursor?, output_format?)
-pilot.screenshot_tile(target, row, col, tile_size?)
-pilot.observe(target?)
-pilot.wait_for_change(target?, timeout_ms?, threshold?)
+seatgeist.health()
+seatgeist.capabilities()
+seatgeist.list_monitors()
+seatgeist.list_windows()
+seatgeist.active_window()
+seatgeist.screenshot(target?, include_cursor?, output_format?)
+seatgeist.screenshot_tile(target, row, col, tile_size?)
+seatgeist.observe(target?)
+seatgeist.wait_for_change(target?, timeout_ms?, threshold?)
 ```
 
-`pilot.observe()` should be the preferred high-level tool. It returns:
+`seatgeist.observe()` should be the preferred high-level tool. It returns:
 
 - active window
 - window list summary
@@ -458,14 +458,14 @@ pilot.wait_for_change(target?, timeout_ms?, threshold?)
 ### 11.2 Control tools
 
 ```text
-pilot.focus_window(window_id)
-pilot.move_pointer(point, coordinate_space)
-pilot.click(point, button, coordinate_space, guard?)
-pilot.double_click(point, button, coordinate_space, guard?)
-pilot.drag(from, to, coordinate_space, duration_ms?, guard?)
-pilot.scroll(dx, dy, guard?)
-pilot.key(combo, guard?)
-pilot.type_text(text, guard?)
+seatgeist.focus_window(window_id)
+seatgeist.move_pointer(point, coordinate_space)
+seatgeist.click(point, button, coordinate_space, guard?)
+seatgeist.double_click(point, button, coordinate_space, guard?)
+seatgeist.drag(from, to, coordinate_space, duration_ms?, guard?)
+seatgeist.scroll(dx, dy, guard?)
+seatgeist.key(combo, guard?)
+seatgeist.type_text(text, guard?)
 ```
 
 `guard` should optionally include:
@@ -483,8 +483,8 @@ The daemon must reject the action if the guard does not match.
 ### 11.3 Clipboard tools
 
 ```text
-pilot.clipboard_get_text(max_bytes?)
-pilot.clipboard_set_text(text)
+seatgeist.clipboard_get_text(max_bytes?)
+seatgeist.clipboard_set_text(text)
 ```
 
 Clipboard reads should be policy-controlled because clipboard content often contains secrets. The current MCP names are `seatgeist.clipboard_status`, `seatgeist.clipboard_get_text`, and `seatgeist.clipboard_set_text`; `seatgeist.clipboard_status` reports backend availability without reading clipboard contents.
@@ -492,18 +492,18 @@ Clipboard reads should be policy-controlled because clipboard content often cont
 ### 11.4 Accessibility tools
 
 ```text
-pilot.a11y_focused_tree(depth?)
-pilot.a11y_find(role?, name_contains?, app?, window_id?)
-pilot.a11y_text_attributes(node_id, offset, include_defaults?)
-pilot.a11y_invoke(node_id, action, guard?)
-pilot.a11y_set_text(node_id, text, guard?)
-pilot.a11y_insert_text(node_id, offset, text, guard?)
-pilot.a11y_delete_text(node_id, start_offset, end_offset, guard?)
-pilot.a11y_copy_text(node_id, start_offset, end_offset, guard?)
-pilot.a11y_cut_text(node_id, start_offset, end_offset, guard?)
-pilot.a11y_paste_text(node_id, offset, guard?)
-pilot.a11y_set_caret(node_id, offset, guard?)
-pilot.a11y_set_selection(node_id, selection_num?, start_offset, end_offset, guard?)
+seatgeist.a11y_focused_tree(depth?)
+seatgeist.a11y_find(role?, name_contains?, app?, window_id?)
+seatgeist.a11y_text_attributes(node_id, offset, include_defaults?)
+seatgeist.a11y_invoke(node_id, action, guard?)
+seatgeist.a11y_set_text(node_id, text, guard?)
+seatgeist.a11y_insert_text(node_id, offset, text, guard?)
+seatgeist.a11y_delete_text(node_id, start_offset, end_offset, guard?)
+seatgeist.a11y_copy_text(node_id, start_offset, end_offset, guard?)
+seatgeist.a11y_cut_text(node_id, start_offset, end_offset, guard?)
+seatgeist.a11y_paste_text(node_id, offset, guard?)
+seatgeist.a11y_set_caret(node_id, offset, guard?)
+seatgeist.a11y_set_selection(node_id, selection_num?, start_offset, end_offset, guard?)
 ```
 
 These should be added after the pixel/control MVP is stable.
@@ -511,9 +511,9 @@ These should be added after the pixel/control MVP is stable.
 ### 11.5 Safety tools
 
 ```text
-pilot.policy_status()
-pilot.set_panic_stop(enabled)
-pilot.journal_recent(limit?)
+seatgeist.policy_status()
+seatgeist.set_panic_stop(enabled)
+seatgeist.journal_recent(limit?)
 ```
 
 ## 12. Codex plugin bundle
@@ -584,7 +584,7 @@ Rules:
 
 - Prefer terminal, files, APIs, and structured integrations when they solve the task directly.
 - Use Seatgeist when GUI state matters or no API exists.
-- Always call `pilot.observe()` before acting.
+- Always call `seatgeist.observe()` before acting.
 - After every click/type/key/drag/scroll, observe again unless performing a tightly bounded text entry.
 - Use focus/window guards for every action when possible.
 - Never interact with password fields, payment flows, account-security settings, or destructive dialogs without explicit user approval.
@@ -761,7 +761,7 @@ Each record:
 {
   "ts": "2026-07-04T15:00:00+02:00",
   "client": "seatgeist-mcp",
-  "tool": "pilot.click",
+  "tool": "seatgeist.click",
   "action_id": "uuid",
   "safety_class": "control.pointer.click",
   "requested_target": {"x": 100, "y": 200, "space": "LogicalPixel"},
@@ -991,15 +991,15 @@ Goal: robust high-level UI operations.
 Tasks:
 
 - Implement high-level tools:
-  - [x] `pilot.click_button(name, app/window guard)`
-  - [x] `pilot.set_text_field(name, text, app/window guard)`
-  - [x] `pilot.focus_text_field(name, app/window guard)` for focusing a non-sensitive text field before keyboard input.
-  - [x] `pilot.select_menu(path, app/window guard)` for visible AT-SPI menu paths.
-  - [x] `pilot.activate_tab(name, app/window guard)`
-  - [x] `pilot.activate_link(name, app/window guard)` for AT-SPI links.
-  - [x] `pilot.toggle_check(name, checked?, app/window guard)` for checkboxes, radio buttons, and checkable menu items.
-  - [x] `pilot.set_value(name, value, app/window guard)` for sliders, spin buttons, scrollbars, and dials exposing AT-SPI Value.
-  - [x] `pilot.select_item(name, app/window guard)` for list items, tree items, table rows, combo boxes, options, and menu-item-like choices exposing select or press.
+  - [x] `seatgeist.click_button(name, app/window guard)`
+  - [x] `seatgeist.set_text_field(name, text, app/window guard)`
+  - [x] `seatgeist.focus_text_field(name, app/window guard)` for focusing a non-sensitive text field before keyboard input.
+  - [x] `seatgeist.select_menu(path, app/window guard)` for visible AT-SPI menu paths.
+  - [x] `seatgeist.activate_tab(name, app/window guard)`
+  - [x] `seatgeist.activate_link(name, app/window guard)` for AT-SPI links.
+  - [x] `seatgeist.toggle_check(name, checked?, app/window guard)` for checkboxes, radio buttons, and checkable menu items.
+  - [x] `seatgeist.set_value(name, value, app/window guard)` for sliders, spin buttons, scrollbars, and dials exposing AT-SPI Value.
+  - [x] `seatgeist.select_item(name, app/window guard)` for list items, tree items, table rows, combo boxes, options, and menu-item-like choices exposing select or press.
 - [x] Use AT-SPI first for `click_button`, `set_text_field`, `focus_text_field`, `select_menu`, `activate_tab`, `activate_link`, `toggle_check`, `set_value`, and `select_item`; screenshot+coordinate fallback remains future work and must only happen when safe.
 - [x] Add ambiguity refusal for `click_button`, `set_text_field`, `focus_text_field`, `select_menu`, `activate_tab`, `activate_link`, `toggle_check`, `set_value`, and `select_item`. Current status: ambiguous semantic matches fail closed and return bounded candidate choices with a 1-based choice index, deterministic candidate id that is stable across raw AT-SPI node-id churn, raw node id, role, name, deterministic name-match score, and action metadata so the caller can disambiguate.
 

@@ -1,27 +1,27 @@
 use std::process::Command;
 
-use libseatgeist::{CoordinateSpace, MonitorInfo, PilotError, WindowGeometry, WindowInfo};
+use libseatgeist::{CoordinateSpace, MonitorInfo, SeatgeistError, WindowGeometry, WindowInfo};
 
 pub const BACKEND_NAME: &str = "kwin";
 
-pub type Result<T> = std::result::Result<T, PilotError>;
+pub type Result<T> = std::result::Result<T, SeatgeistError>;
 
 pub fn list_monitors() -> Result<Vec<MonitorInfo>> {
     let output = Command::new("qdbus6")
         .args(["org.kde.KWin", "/KWin", "org.kde.KWin.supportInformation"])
         .output()
-        .map_err(|err| PilotError::BackendUnavailable(format!("run qdbus6: {err}")))?;
+        .map_err(|err| SeatgeistError::BackendUnavailable(format!("run qdbus6: {err}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(PilotError::BackendUnavailable(format!(
+        return Err(SeatgeistError::BackendUnavailable(format!(
             "qdbus6 KWin supportInformation exited with status {}: {stderr}",
             output.status
         )));
     }
 
     let support_info = String::from_utf8(output.stdout).map_err(|err| {
-        PilotError::BackendUnavailable(format!("KWin supportInformation was not UTF-8: {err}"))
+        SeatgeistError::BackendUnavailable(format!("KWin supportInformation was not UTF-8: {err}"))
     })?;
     parse_support_info_monitors(&support_info)
 }
@@ -36,18 +36,18 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
             "",
         ])
         .output()
-        .map_err(|err| PilotError::BackendUnavailable(format!("run qdbus6: {err}")))?;
+        .map_err(|err| SeatgeistError::BackendUnavailable(format!("run qdbus6: {err}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(PilotError::BackendUnavailable(format!(
+        return Err(SeatgeistError::BackendUnavailable(format!(
             "qdbus6 KWin WindowsRunner Match exited with status {}: {stderr}",
             output.status
         )));
     }
 
     let literal = String::from_utf8(output.stdout).map_err(|err| {
-        PilotError::BackendUnavailable(format!("WindowsRunner output was not UTF-8: {err}"))
+        SeatgeistError::BackendUnavailable(format!("WindowsRunner output was not UTF-8: {err}"))
     })?;
     let mut windows = Vec::new();
     for match_entry in parse_windows_runner_matches(&literal) {
@@ -57,7 +57,7 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
 }
 
 pub fn active_window() -> Result<Option<WindowInfo>> {
-    Err(PilotError::BackendUnavailable(
+    Err(SeatgeistError::BackendUnavailable(
         "active window requires the Seatgeist KWin script bridge".to_string(),
     ))
 }
@@ -73,11 +73,11 @@ pub fn focus_window(window_id: &str) -> Result<()> {
             "",
         ])
         .output()
-        .map_err(|err| PilotError::BackendUnavailable(format!("run qdbus6: {err}")))?;
+        .map_err(|err| SeatgeistError::BackendUnavailable(format!("run qdbus6: {err}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(PilotError::BackendUnavailable(format!(
+        return Err(SeatgeistError::BackendUnavailable(format!(
             "qdbus6 KWin WindowsRunner Run exited with status {}: {stderr}",
             output.status
         )));
@@ -111,18 +111,18 @@ fn get_window_info(window_id: &str) -> Result<KwinWindowInfo> {
             window_id,
         ])
         .output()
-        .map_err(|err| PilotError::BackendUnavailable(format!("run qdbus6: {err}")))?;
+        .map_err(|err| SeatgeistError::BackendUnavailable(format!("run qdbus6: {err}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(PilotError::BackendUnavailable(format!(
+        return Err(SeatgeistError::BackendUnavailable(format!(
             "qdbus6 KWin getWindowInfo exited with status {}: {stderr}",
             output.status
         )));
     }
 
     let literal = String::from_utf8(output.stdout).map_err(|err| {
-        PilotError::BackendUnavailable(format!("getWindowInfo output was not UTF-8: {err}"))
+        SeatgeistError::BackendUnavailable(format!("getWindowInfo output was not UTF-8: {err}"))
     })?;
     Ok(parse_get_window_info(&literal))
 }
@@ -195,7 +195,7 @@ fn normalize_runner_window_id(runner_id: &str) -> String {
 fn runner_match_id(window_id: &str) -> Result<String> {
     let trimmed = window_id.trim();
     if trimmed.is_empty() {
-        return Err(PilotError::InvalidRequest(
+        return Err(SeatgeistError::InvalidRequest(
             "window id must not be empty".to_string(),
         ));
     }
@@ -313,7 +313,7 @@ pub fn parse_support_info_monitors(support_info: &str) -> Result<Vec<MonitorInfo
             current.logical_height = Some(geometry.3);
         } else if let Some(scale) = line.strip_prefix("Scale:") {
             let scale = scale.trim().parse::<f64>().map_err(|err| {
-                PilotError::InvalidRequest(format!("parse KWin monitor scale '{scale}': {err}"))
+                SeatgeistError::InvalidRequest(format!("parse KWin monitor scale '{scale}': {err}"))
             })?;
             current.scale_factor = Some(scale);
         }
@@ -328,32 +328,32 @@ pub fn parse_support_info_monitors(support_info: &str) -> Result<Vec<MonitorInfo
 
 fn parse_geometry(geometry: &str) -> Result<(i32, i32, u32, u32)> {
     let Some((origin, size)) = geometry.split_once(',') else {
-        return Err(PilotError::InvalidRequest(format!(
+        return Err(SeatgeistError::InvalidRequest(format!(
             "invalid KWin geometry '{geometry}'"
         )));
     };
     let Some((origin_y, size)) = size.split_once(',') else {
-        return Err(PilotError::InvalidRequest(format!(
+        return Err(SeatgeistError::InvalidRequest(format!(
             "invalid KWin geometry '{geometry}'"
         )));
     };
     let Some((width, height)) = size.split_once('x') else {
-        return Err(PilotError::InvalidRequest(format!(
+        return Err(SeatgeistError::InvalidRequest(format!(
             "invalid KWin geometry '{geometry}'"
         )));
     };
 
     let origin_x = origin.trim().parse::<i32>().map_err(|err| {
-        PilotError::InvalidRequest(format!("parse KWin geometry x '{origin}': {err}"))
+        SeatgeistError::InvalidRequest(format!("parse KWin geometry x '{origin}': {err}"))
     })?;
     let origin_y = origin_y.trim().parse::<i32>().map_err(|err| {
-        PilotError::InvalidRequest(format!("parse KWin geometry y '{origin_y}': {err}"))
+        SeatgeistError::InvalidRequest(format!("parse KWin geometry y '{origin_y}': {err}"))
     })?;
     let width = width.trim().parse::<u32>().map_err(|err| {
-        PilotError::InvalidRequest(format!("parse KWin geometry width '{width}': {err}"))
+        SeatgeistError::InvalidRequest(format!("parse KWin geometry width '{width}': {err}"))
     })?;
     let height = height.trim().parse::<u32>().map_err(|err| {
-        PilotError::InvalidRequest(format!("parse KWin geometry height '{height}': {err}"))
+        SeatgeistError::InvalidRequest(format!("parse KWin geometry height '{height}': {err}"))
     })?;
 
     Ok((origin_x, origin_y, width, height))
@@ -375,10 +375,10 @@ impl MonitorBuilder {
         let id = self.id.unwrap_or_else(|| "unknown".to_string());
         let scale_factor = self.scale_factor.unwrap_or(1.0);
         let logical_width = self.logical_width.ok_or_else(|| {
-            PilotError::InvalidRequest(format!("KWin monitor {id} missing logical width"))
+            SeatgeistError::InvalidRequest(format!("KWin monitor {id} missing logical width"))
         })?;
         let logical_height = self.logical_height.ok_or_else(|| {
-            PilotError::InvalidRequest(format!("KWin monitor {id} missing logical height"))
+            SeatgeistError::InvalidRequest(format!("KWin monitor {id} missing logical height"))
         })?;
 
         Ok(MonitorInfo {
