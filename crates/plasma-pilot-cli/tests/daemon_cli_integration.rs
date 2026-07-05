@@ -8,9 +8,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use libplasma_pilot::{
-    BackendCapability, CapabilitySet, DaemonResponse, DesktopSessionStatus, HealthStatus,
-    JournalEntry, PanicStopStatus, PolicyStatus, ReplayTrace, SafetyStatus, ToolApprovalLevel,
-    UinputStatus,
+    BackendCapability, CapabilitySet, DaemonRequest, DaemonResponse, DesktopSessionStatus,
+    HealthStatus, JournalEntry, PanicStopStatus, PolicyStatus, ReplayTrace, SafetyStatus,
+    ToolApprovalLevel, TraceStep, UinputStatus,
 };
 use std::os::unix::fs::PermissionsExt;
 
@@ -398,6 +398,42 @@ fn cli_replays_trace_against_real_daemon() -> Result<()> {
         ],
     );
     assert!(entries.iter().all(|entry| entry.ok));
+    Ok(())
+}
+
+#[test]
+fn cli_replay_errors_include_step_label_and_method() -> Result<()> {
+    let daemon = DaemonFixture::start()?;
+    let trace_path = daemon.root.join("bad-status-trace.json");
+    let trace = ReplayTrace {
+        version: 1,
+        description: Some("intentionally mismatched status trace".to_string()),
+        steps: vec![TraceStep {
+            label: Some("bad-health".to_string()),
+            request: DaemonRequest::Health,
+            expect_response_type: Some("policy_status".to_string()),
+            expect_ok: Some(true),
+        }],
+    };
+    fs::write(
+        &trace_path,
+        serde_json::to_string_pretty(&trace).context("serialize bad trace")?,
+    )
+    .context("write bad trace file")?;
+
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let output = daemon.cli_output(&["trace", "replay", "--file", &trace_arg])?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(r#"trace step 0 label="bad-health" method=health"#),
+        "stderr did not include trace step context: {stderr}"
+    );
+    assert!(
+        stderr.contains("expected response type policy_status, got health"),
+        "stderr did not include mismatch detail: {stderr}"
+    );
     Ok(())
 }
 

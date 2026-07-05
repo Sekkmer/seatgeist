@@ -1444,19 +1444,25 @@ fn replay_trace(socket: &PathBuf, file: PathBuf) -> Result<()> {
     let mut results = Vec::with_capacity(trace.steps.len());
     for (index, step) in trace.steps.iter().enumerate() {
         let response = send_request(socket, step.request.clone())
-            .with_context(|| format!("replay trace step {index}"))?;
+            .with_context(|| format!("replay {}", trace_step_context(index, step)))?;
         let response_type = response.response_type();
         let ok = response.ok();
 
         if let Some(expected) = &step.expect_response_type
             && expected != response_type
         {
-            bail!("trace step {index} expected response type {expected}, got {response_type}");
+            bail!(
+                "trace {} expected response type {expected}, got {response_type}",
+                trace_step_context(index, step)
+            );
         }
         if let Some(expected_ok) = step.expect_ok
             && expected_ok != ok
         {
-            bail!("trace step {index} expected ok={expected_ok}, got ok={ok}");
+            bail!(
+                "trace {} expected ok={expected_ok}, got ok={ok}",
+                trace_step_context(index, step)
+            );
         }
 
         results.push(serde_json::json!({
@@ -1478,6 +1484,16 @@ fn replay_trace(socket: &PathBuf, file: PathBuf) -> Result<()> {
         }))?
     );
     Ok(())
+}
+
+fn trace_step_context(index: usize, step: &libplasma_pilot::TraceStep) -> String {
+    match step.label.as_deref() {
+        Some(label) => format!(
+            "step {index} label={label:?} method={}",
+            step.request.method_name()
+        ),
+        None => format!("step {index} method={}", step.request.method_name()),
+    }
 }
 
 fn send_request(socket: &PathBuf, request: DaemonRequest) -> Result<DaemonResponse> {
