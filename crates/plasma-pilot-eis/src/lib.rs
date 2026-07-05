@@ -21,6 +21,52 @@ pub enum EisCapability {
     Text,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EisDeviceKind {
+    Virtual,
+    Physical,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EisRegion {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub scale: f64,
+}
+
+impl EisRegion {
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.x && y >= self.y && x < self.x + self.width && y < self.y + self.height
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EisDeviceInfo {
+    pub id: String,
+    pub name: Option<String>,
+    pub kind: EisDeviceKind,
+    pub resumed: bool,
+    pub capabilities: Vec<EisCapability>,
+    pub regions: Vec<EisRegion>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EisDeviceSelection {
+    pub device_id: String,
+    pub device_name: Option<String>,
+    pub matched_region: Option<EisRegion>,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum EisDeviceSelectionError {
+    #[error("no resumed EIS device provides the required capabilities")]
+    NoCapableResumedDevice,
+    #[error("no resumed EIS absolute-pointer device covers every target coordinate")]
+    NoRegionForAbsolutePointer,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum EisEvent {
     StartEmulating { sequence: u32 },
@@ -44,6 +90,81 @@ pub enum EisPlanError {
 }
 
 pub type Result<T> = std::result::Result<T, EisPlanError>;
+
+pub fn select_resumed_device_for_plan(
+    plan: &EisActionPlan,
+    devices: &[EisDeviceInfo],
+) -> std::result::Result<EisDeviceSelection, EisDeviceSelectionError> {
+    let capable = devices
+        .iter()
+        .filter(|device| device.resumed && device_supports_plan(device, plan));
+
+    if !plan
+        .required_capabilities
+        .contains(&EisCapability::PointerAbsolute)
+    {
+        let device = capable
+            .into_iter()
+            .next()
+            .ok_or(EisDeviceSelectionError::NoCapableResumedDevice)?;
+        return Ok(device_selection(device, None));
+    }
+
+    let absolute_points = absolute_pointer_points(plan);
+    let mut saw_capable = false;
+    for device in capable {
+        saw_capable = true;
+        if let Some(region) = region_covering_points(device, &absolute_points) {
+            return Ok(device_selection(device, Some(region.clone())));
+        }
+    }
+
+    if saw_capable {
+        Err(EisDeviceSelectionError::NoRegionForAbsolutePointer)
+    } else {
+        Err(EisDeviceSelectionError::NoCapableResumedDevice)
+    }
+}
+
+pub fn device_supports_plan(device: &EisDeviceInfo, plan: &EisActionPlan) -> bool {
+    plan.required_capabilities
+        .iter()
+        .all(|capability| device.capabilities.contains(capability))
+}
+
+fn device_selection(
+    device: &EisDeviceInfo,
+    matched_region: Option<EisRegion>,
+) -> EisDeviceSelection {
+    EisDeviceSelection {
+        device_id: device.id.clone(),
+        device_name: device.name.clone(),
+        matched_region,
+    }
+}
+
+fn absolute_pointer_points(plan: &EisActionPlan) -> Vec<(f64, f64)> {
+    plan.events
+        .iter()
+        .filter_map(|event| match event {
+            EisEvent::PointerMotionAbsolute { x, y } => Some((*x, *y)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn region_covering_points<'a>(
+    device: &'a EisDeviceInfo,
+    points: &[(f64, f64)],
+) -> Option<&'a EisRegion> {
+    match device.kind {
+        EisDeviceKind::Virtual => device
+            .regions
+            .iter()
+            .find(|region| points.iter().all(|(x, y)| region.contains(*x, *y))),
+        EisDeviceKind::Physical => None,
+    }
+}
 
 pub trait EisEventSink {
     type Error;
@@ -470,6 +591,32 @@ mod tests {
         }
     }
 
+    fn region(x: f64, y: f64, width: f64, height: f64) -> EisRegion {
+        EisRegion {
+            x,
+            y,
+            width,
+            height,
+            scale: 1.0,
+        }
+    }
+
+    fn device(
+        id: &str,
+        resumed: bool,
+        capabilities: Vec<EisCapability>,
+        regions: Vec<EisRegion>,
+    ) -> EisDeviceInfo {
+        EisDeviceInfo {
+            id: id.to_string(),
+            name: Some(format!("device {id}")),
+            kind: EisDeviceKind::Virtual,
+            resumed,
+            capabilities,
+            regions,
+        }
+    }
+
     #[test]
     fn plans_utf8_text_with_transaction_and_frame() {
         let plan = plan_text_utf8(7, "hello").expect("text plan");
@@ -643,6 +790,128 @@ mod tests {
         assert_eq!(
             sink.text_utf8("bad\0text"),
             Err(LibeiSinkError::InteriorNulText)
+        );
+    }
+
+    #[test]
+    fn selects_resumed_text_device_with_required_capability() {
+        let plan = plan_text_utf8(1, "hello").expect("text plan");
+        let devices = vec![
+            device("paused", false, vec![EisCapability::Text], vec![]),
+            device("text", true, vec![EisCapability::Text], vec![]),
+        ];
+
+        let selection = select_resumed_device_for_plan(&plan, &devices).expect("selection");
+
+        assert_eq!(
+            selection,
+            EisDeviceSelection {
+                device_id: "text".to_string(),
+                device_name: Some("device text".to_string()),
+                matched_region: None,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_devices_missing_required_capabilities() {
+        let plan = plan_pointer_click_absolute(1, point(10.0, 10.0), PointerButton::Left, 1)
+            .expect("click plan");
+        let devices = vec![device(
+            "pointer-only",
+            true,
+            vec![EisCapability::PointerAbsolute],
+            vec![region(0.0, 0.0, 100.0, 100.0)],
+        )];
+
+        assert_eq!(
+            select_resumed_device_for_plan(&plan, &devices),
+            Err(EisDeviceSelectionError::NoCapableResumedDevice)
+        );
+    }
+
+    #[test]
+    fn selects_absolute_pointer_device_with_covering_region() {
+        let plan = plan_pointer_click_absolute(1, point(75.0, 80.0), PointerButton::Left, 1)
+            .expect("click plan");
+        let devices = vec![
+            device(
+                "wrong-region",
+                true,
+                vec![EisCapability::PointerAbsolute, EisCapability::Button],
+                vec![region(200.0, 200.0, 100.0, 100.0)],
+            ),
+            device(
+                "right-region",
+                true,
+                vec![EisCapability::PointerAbsolute, EisCapability::Button],
+                vec![region(0.0, 0.0, 100.0, 100.0)],
+            ),
+        ];
+
+        let selection = select_resumed_device_for_plan(&plan, &devices).expect("selection");
+
+        assert_eq!(selection.device_id, "right-region");
+        assert_eq!(
+            selection.matched_region,
+            Some(region(0.0, 0.0, 100.0, 100.0))
+        );
+    }
+
+    #[test]
+    fn rejects_absolute_pointer_points_outside_regions() {
+        let plan = plan_pointer_move_absolute(1, point(150.0, 10.0));
+        let devices = vec![device(
+            "too-small",
+            true,
+            vec![EisCapability::PointerAbsolute],
+            vec![region(0.0, 0.0, 100.0, 100.0)],
+        )];
+
+        assert_eq!(
+            select_resumed_device_for_plan(&plan, &devices),
+            Err(EisDeviceSelectionError::NoRegionForAbsolutePointer)
+        );
+    }
+
+    #[test]
+    fn rejects_drag_crossing_eis_regions_until_split_routing_exists() {
+        let plan = plan_pointer_drag_absolute(
+            1,
+            point(10.0, 10.0),
+            point(250.0, 10.0),
+            PointerButton::Left,
+        );
+        let devices = vec![device(
+            "two-regions",
+            true,
+            vec![EisCapability::PointerAbsolute, EisCapability::Button],
+            vec![
+                region(0.0, 0.0, 100.0, 100.0),
+                region(200.0, 0.0, 100.0, 100.0),
+            ],
+        )];
+
+        assert_eq!(
+            select_resumed_device_for_plan(&plan, &devices),
+            Err(EisDeviceSelectionError::NoRegionForAbsolutePointer)
+        );
+    }
+
+    #[test]
+    fn rejects_physical_absolute_pointer_device_without_explicit_mapping() {
+        let plan = plan_pointer_move_absolute(1, point(10.0, 10.0));
+        let mut physical = device(
+            "physical",
+            true,
+            vec![EisCapability::PointerAbsolute],
+            vec![region(0.0, 0.0, 100.0, 100.0)],
+        );
+        physical.kind = EisDeviceKind::Physical;
+
+        assert_eq!(
+            select_resumed_device_for_plan(&plan, &[physical]),
+            Err(EisDeviceSelectionError::NoRegionForAbsolutePointer)
         );
     }
 }
