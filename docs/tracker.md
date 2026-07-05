@@ -92,6 +92,8 @@ Current full-project estimate: `[~]` about one third complete. This estimate use
 - [x] MCP tool outputs are compact and include structured daemon responses.
 - [x] MCP stdio integration tests cover real daemon calls, configured denial kinds, raw-input denial journaling, and journal visibility.
 - [x] Plugin manifest and bundled MCP config validate.
+- [x] Repo-local Codex marketplace entry exposes the `seatgeist` plugin from `./plugin`.
+- [x] `make smoke-codex-plugin-install` validates Codex marketplace discovery, local plugin install, installed skill/hook/MCP files, and `seatgeist-mcp --help` in an isolated `CODEX_HOME`.
 - [x] Four plugin skills describe current Seatgeist workflows and safety rules.
 - [x] Stop audit hook writes compact repo/journal audit summaries.
 - [~] Installed-plugin end-to-end use in a real Codex session is documented and scaffolded, but broader field validation remains partial.
@@ -105,7 +107,7 @@ Current full-project estimate: `[~]` about one third complete. This estimate use
 - [x] Safe GUI evals cover status, session preflight, observe, AT-SPI diagnostics, denial paths, clipboard status/denial, KWin bridge status, keymap status, full-resolution denial, and control safety.
 - [~] Opt-in GUI evals exist for KWrite/Kate, KCalc, Firefox localhost button, portal Screenshot, RemoteDesktop probe, and retained RemoteDesktop EIS session.
 - [~] Manual KDE Plasma 6 Wayland eval suite is useful and now writes explicit pass evidence records, but broader repeated passes are still required before v0.1 is complete.
-- [~] Public release checklist, external CI, dual license files, local Seatgeist binary, standalone plugin, and source release packaging, artifact verification, clean-install validation, optional GPG signing targets, repeatable public-name collision evidence, retained JSON release-evidence snapshots, and a release-readiness blocker audit exist; public uploads and signed release tags are not done.
+- [~] Public release checklist, external CI, dual license files, local Seatgeist binary, standalone plugin, and source release packaging, artifact verification, clean-install validation, optional GPG signing targets, repeatable public-name collision evidence, retained JSON release-evidence snapshots with snapshot-shape verification, and a release-readiness blocker audit exist; public uploads and signed release tags are not done.
 
 ## v0.1 Definition Of Done
 

@@ -10,9 +10,10 @@ Run `make release-readiness` to summarize current blockers from local repo metad
 - [x] External CI runs the safe verification gate on push and pull requests.
 - [x] Policy-denied raw input, semantic control, clipboard read, full-resolution screenshot, and panic-stop paths are covered by tests, replay traces, or safe GUI evals.
 - [x] Arch Linux/KDE Plasma 6 operator installation docs exist.
-- [x] Plugin manifest, MCP config, skills, and hook assets validate locally.
+- [x] Plugin manifest, MCP config, skills, hook assets, and repo-local Codex marketplace entry validate locally.
 - [~] Manual KDE Plasma 6 Wayland evals exist, but broader repeated passes are still required before a public v0.1 release.
-- [~] Versioned local release artifact packaging, standalone plugin bundle packaging, verification, clean-install validation, optional GPG signing, and retained JSON release-evidence snapshots exist through `make verify-release-artifacts`, `make verify-release-install`, `make sign-release-artifacts`, `make verify-release-signatures`, and `make write-release-evidence`; public uploads and signed release tags are not done yet.
+- [~] Versioned local release artifact packaging, standalone plugin bundle packaging, verification, clean-install validation, optional GPG signing, retained JSON release-evidence snapshots, and evidence-snapshot verification exist through `make verify-release-artifacts`, `make verify-release-install`, `make sign-release-artifacts`, `make verify-release-signatures`, `make write-release-evidence`, and `make verify-release-evidence`; public uploads and signed release tags are not done yet.
+- [x] Retained release-evidence snapshots are shape-checked by `make verify-release-evidence`.
 - [ ] Add real public repository metadata before publishing, replacing placeholder `example.invalid` Cargo package URLs.
 - [x] Final license files match the workspace `MIT OR Apache-2.0` declaration.
 - [x] Public project name and package/binary prefixes are `Seatgeist` / `seatgeist-*`.
@@ -38,7 +39,8 @@ The CI workflow runs only safe, non-opt-in gates. It does not send real desktop 
 9. Verify a clean extraction/install smoke from the binary archive and standalone plugin archive with `make verify-release-install`.
 10. Sign the generated artifacts with `SEATGEIST_RELEASE_SIGNING_KEY=<key> make sign-release-artifacts`, then run `make verify-release-signatures`.
 11. Run `make write-release-evidence` to retain the JSON release-readiness report and portal Screenshot v3 diagnostic next to the release manifest.
-12. Run `scripts/release-readiness.py --strict`; it must report no blockers before upload.
-13. Upload the generated Seatgeist binary/plugin tarball, source tarball, manifest, checksums, detached signatures, signature checksum manifest, and release-evidence JSON snapshots from `target/seatgeist-release/`.
-14. Publish checksums and signatures for every uploaded artifact.
-15. Verify a clean install from the released artifacts on a separate release-test checkout or machine, not from the working tree.
+12. Run `make verify-release-evidence` to confirm the retained JSON snapshots are linked to the selected manifest and have the expected release-readiness and portal-diagnostic shape.
+13. Run `scripts/release-readiness.py --strict`; it must report no blockers before upload.
+14. Upload the generated Seatgeist binary/plugin tarball, source tarball, manifest, checksums, detached signatures, signature checksum manifest, and release-evidence JSON snapshots from `target/seatgeist-release/`.
+15. Publish checksums and signatures for every uploaded artifact.
+16. Verify a clean install from the released artifacts on a separate release-test checkout or machine, not from the working tree.

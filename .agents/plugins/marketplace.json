@@ -1,0 +1,22 @@
+{
+  "name": "seatgeist-local",
+  "plugins": [
+    {
+      "name": "seatgeist",
+      "description": "KDE Plasma desktop-control substrate for Codex through Seatgeist MCP tools, skills, and hooks.",
+      "source": {
+        "source": "local",
+        "path": "./plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools",
+      "interface": {
+        "displayName": "Seatgeist",
+        "shortDescription": "Use KDE Plasma desktop apps from Codex through local MCP tools."
+      }
+    }
+  ]
+}

@@ -24,6 +24,45 @@ For development, a direct plugin source install should point at the repository's
 
 For the full Arch Linux + KDE Plasma setup path, including packages, user service, KWin bridge, safe diagnostics, optional uinput, and plugin validation, see `docs/arch-kde-install.md`.
 
+## Local Marketplace Install
+
+The repository includes `.agents/plugins/marketplace.json`, which exposes the local `plugin/` bundle as the `seatgeist` plugin for Codex.
+
+Make sure the MCP binary resolves for the Codex process before using the plugin:
+
+```bash
+cargo build --release -p seatgeist-mcp -p seatgeist-cli -p seatgeistd
+ln -sfn "$PWD/target/release/seatgeist-mcp" "$HOME/.local/bin/seatgeist-mcp"
+ln -sfn "$PWD/target/release/seatgeist-cli" "$HOME/.local/bin/seatgeist-cli"
+ln -sfn "$PWD/target/release/seatgeistd" "$HOME/.local/bin/seatgeistd"
+seatgeist-mcp --version
+```
+
+Register the checkout as a local marketplace and install the plugin:
+
+```bash
+codex plugin marketplace add .
+codex plugin list --marketplace seatgeist-local --available
+codex plugin add seatgeist@seatgeist-local
+codex plugin list --marketplace seatgeist-local
+```
+
+Restart Codex or start a new thread after installing. The plugin should make the four Seatgeist skills available and load `seatgeist-mcp --stdio` as the bundled MCP server when the binary is on `PATH`.
+
+For a repeatable noninteractive install smoke that does not mutate your real Codex config, run:
+
+```bash
+make smoke-codex-plugin-install
+```
+
+For a real installed-plugin skill-discovery smoke, start a fresh Codex exec session in read-only mode and explicitly invoke one bundled skill:
+
+```bash
+codex exec --sandbox read-only -C "$PWD" 'Use $seatgeist-desktop-triage. Do not run shell commands and do not control the desktop. If the skill is available, answer exactly one line beginning SKILL_OK followed by the skill name and one safety rule from the skill. If it is unavailable, answer exactly SKILL_MISSING.'
+```
+
+This confirms Codex can discover the installed skill without exercising desktop control. Live MCP tool tests still require a running `seatgeistd` socket and should start with read-only tools such as readiness, safety status, observation, and journal tail before any input action.
+
 ## Validation
 
 Run the repo-local plugin validator:

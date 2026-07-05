@@ -116,6 +116,37 @@ def validate_manifest(root: Path) -> None:
     validate_hooks(root / "hooks" / "hooks.json")
 
 
+def validate_marketplace(repo_root: Path, plugin_root: Path) -> None:
+    marketplace_path = repo_root / ".agents" / "plugins" / "marketplace.json"
+    if not marketplace_path.exists():
+        if (repo_root / ".git").exists():
+            fail("repo-local marketplace file is missing: .agents/plugins/marketplace.json")
+        return
+    marketplace = require_object(load_json(marketplace_path), "marketplace.json")
+    if require_string(marketplace, "name", "marketplace.json") != "seatgeist-local":
+        fail("marketplace.json name must be seatgeist-local")
+    plugins = marketplace.get("plugins")
+    if not isinstance(plugins, list) or len(plugins) != 1:
+        fail("marketplace.json must contain exactly one plugin entry")
+    entry = require_object(plugins[0], "marketplace.json.plugins[0]")
+    if require_string(entry, "name", "marketplace.json.plugins[0]") != "seatgeist":
+        fail("marketplace plugin name must be seatgeist")
+    source = require_object(entry.get("source"), "marketplace.json.plugins[0].source")
+    if source.get("source") != "local":
+        fail("marketplace plugin source must be local")
+    if source.get("path") != "./plugin":
+        fail("marketplace plugin source.path must be ./plugin")
+    resolved = (repo_root / "plugin").resolve()
+    if resolved != plugin_root:
+        fail("marketplace plugin path must resolve to the validated plugin root")
+    policy = require_object(entry.get("policy"), "marketplace.json.plugins[0].policy")
+    if policy.get("installation") != "AVAILABLE":
+        fail("marketplace plugin installation policy must be AVAILABLE")
+    interface = require_object(entry.get("interface"), "marketplace.json.plugins[0].interface")
+    if require_string(interface, "displayName", "marketplace.json.plugins[0].interface") != "Seatgeist":
+        fail("marketplace plugin displayName must be Seatgeist")
+
+
 def validate_mcp(path: Path) -> None:
     config = require_object(load_json(path), ".mcp.json")
     servers = require_object(config.get("mcp_servers"), ".mcp.json.mcp_servers")
@@ -285,8 +316,11 @@ def main() -> None:
     root = Path(sys.argv[1] if len(sys.argv) > 1 else "plugin").resolve()
     if not root.is_dir():
         fail(f"{root} is not a plugin directory")
+    repo_root = Path(__file__).resolve().parents[1]
     reject_todos(root)
     validate_manifest(root)
+    if root == (repo_root / "plugin").resolve():
+        validate_marketplace(repo_root, root)
     print(f"plugin validation passed: {root}")
 
 

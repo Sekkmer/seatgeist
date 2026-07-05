@@ -20,6 +20,7 @@ portal_v3="${prefix}.portal-screenshot-v3-status.json"
 
 scripts/release-readiness.py --json >"$readiness"
 scripts/portal-screenshot-v3-status.py >"$portal_v3"
+scripts/verify-release-evidence.py "$manifest"
 
 echo "write-release-evidence: readiness=$readiness"
 echo "write-release-evidence: portal_screenshot_v3=$portal_v3"

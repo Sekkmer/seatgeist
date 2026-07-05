@@ -68,6 +68,10 @@ def main() -> None:
     require_contains("Makefile", makefile, "scripts/verify-release-signatures.sh")
     require_contains("Makefile", makefile, "write-release-evidence:")
     require_contains("Makefile", makefile, "scripts/write-release-evidence.sh")
+    require_contains("Makefile", makefile, "verify-release-evidence:")
+    require_contains("Makefile", makefile, "scripts/verify-release-evidence.py")
+    require_contains("Makefile", makefile, "smoke-codex-plugin-install:")
+    require_contains("Makefile", makefile, "scripts/smoke-codex-plugin-install.sh")
     require_contains("Makefile", makefile, "check-public-name:")
     require_contains("Makefile", makefile, "scripts/check-public-name.py")
     require_contains("Makefile", makefile, "release-readiness:")
@@ -110,6 +114,7 @@ def main() -> None:
         "verify_source(source, manifest)",
         "crates/seatgeistd/src/main.rs",
         "plugin/.mcp.json",
+        ".agents/plugins/marketplace.json",
         "scripts/package-release.sh",
         "scripts/verify-release-artifacts.py",
         "scripts/verify-release-install.sh",
@@ -118,6 +123,8 @@ def main() -> None:
         "scripts/portal-screenshot-v3-status.py",
         "scripts/check-public-name.py",
         "scripts/release-readiness.py",
+        "scripts/verify-release-evidence.py",
+        "scripts/smoke-codex-plugin-install.sh",
         "target/",
     ]:
         require_contains("scripts/verify-release-artifacts.py", verify_release, needle)
@@ -157,10 +164,36 @@ def main() -> None:
     for needle in [
         "scripts/release-readiness.py --json",
         "scripts/portal-screenshot-v3-status.py",
+        "scripts/verify-release-evidence.py \"$manifest\"",
         ".readiness.json",
         ".portal-screenshot-v3-status.json",
     ]:
         require_contains("scripts/write-release-evidence.sh", write_release_evidence, needle)
+
+    verify_release_evidence = require_executable("scripts/verify-release-evidence.py")
+    for needle in [
+        "release_readiness",
+        "portal_screenshot_v3_status",
+        "REQUIRED_READINESS_CHECKS",
+        "REQUIRED_PORTAL_PACKAGES",
+        "read-only diagnostic",
+        "blocker_count",
+        "latest_manifest",
+        "verify-release-evidence: ok",
+    ]:
+        require_contains("scripts/verify-release-evidence.py", verify_release_evidence, needle)
+
+    codex_plugin_smoke = require_executable("scripts/smoke-codex-plugin-install.sh")
+    for needle in [
+        "CODEX_HOME",
+        "codex plugin marketplace add . --json",
+        "codex plugin list --marketplace seatgeist-local --available --json",
+        "codex plugin add seatgeist@seatgeist-local --json",
+        "scripts/validate-plugin.py \"$installed_path\"",
+        "seatgeist-mcp --help",
+        "smoke-codex-plugin-install: ok",
+    ]:
+        require_contains("scripts/smoke-codex-plugin-install.sh", codex_plugin_smoke, needle)
 
     readiness = require_executable("scripts/release-readiness.py")
     for needle in [
@@ -224,13 +257,35 @@ def main() -> None:
     require_contains(
         "docs/release-checklist.md",
         checklist,
-        "- [~] Versioned local release artifact packaging, standalone plugin bundle packaging, verification, clean-install validation, optional GPG signing, and retained JSON release-evidence snapshots exist through `make verify-release-artifacts`, `make verify-release-install`, `make sign-release-artifacts`, `make verify-release-signatures`, and `make write-release-evidence`; public uploads and signed release tags are not done yet.",
+        "repo-local Codex marketplace entry validate locally",
+    )
+    require_contains(
+        "docs/release-checklist.md",
+        checklist,
+        "- [~] Versioned local release artifact packaging, standalone plugin bundle packaging, verification, clean-install validation, optional GPG signing, retained JSON release-evidence snapshots, and evidence-snapshot verification exist through `make verify-release-artifacts`, `make verify-release-install`, `make sign-release-artifacts`, `make verify-release-signatures`, `make write-release-evidence`, and `make verify-release-evidence`; public uploads and signed release tags are not done yet.",
+    )
+    require_contains(
+        "docs/release-checklist.md",
+        checklist,
+        "- [x] Retained release-evidence snapshots are shape-checked by `make verify-release-evidence`.",
     )
     require_contains(
         "docs/release-checklist.md",
         checklist,
         "make write-release-evidence",
     )
+
+    plugin_doc = read("docs/plugin.md")
+    for needle in [
+        "seatgeist@seatgeist-local",
+        "make smoke-codex-plugin-install",
+        "codex exec --sandbox read-only",
+        "$seatgeist-desktop-triage",
+        "SKILL_OK",
+        "seatgeist-mcp --version",
+    ]:
+        require_contains("docs/plugin.md", plugin_doc, needle)
+
     require_contains(
         "docs/release-checklist.md",
         checklist,
