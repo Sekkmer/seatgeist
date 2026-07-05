@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Safe deny-by-default replay trace for verifying raw keyboard and pointer input fail closed before backend side effects.",
+  "description": "Safe deny-by-default replay trace for verifying raw keyboard, pointer, and RemoteDesktop input probes fail closed before backend side effects.",
   "steps": [
     {
       "label": "type-text-denied",
@@ -79,6 +79,19 @@
         "method": "scroll_pointer",
         "vertical": -1,
         "horizontal": 0
+      },
+      "expect_response_type": "error",
+      "expect_ok": false,
+      "expect_error_contains": "policy prompt required for ControlPointer"
+    },
+    {
+      "label": "remote-desktop-session-probe-denied",
+      "request": {
+        "method": "remote_desktop_session_probe",
+        "keyboard": true,
+        "pointer": true,
+        "touchscreen": false,
+        "timeout_ms": 1000
       },
       "expect_response_type": "error",
       "expect_ok": false,
