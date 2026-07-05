@@ -76,6 +76,8 @@ def main() -> None:
     require_contains("Makefile", makefile, "scripts/check-public-name.py")
     require_contains("Makefile", makefile, "release-readiness:")
     require_contains("Makefile", makefile, "scripts/release-readiness.py")
+    require_contains("Makefile", makefile, "release-live-evals:")
+    require_contains("Makefile", makefile, "scripts/run-release-live-evals.sh")
     require_contains("Makefile", makefile, "portal-screenshot-v3-status:")
     require_contains("Makefile", makefile, "scripts/portal-screenshot-v3-status.py")
 
@@ -125,6 +127,7 @@ def main() -> None:
         "scripts/release-readiness.py",
         "scripts/verify-release-evidence.py",
         "scripts/smoke-codex-plugin-install.sh",
+        "scripts/run-release-live-evals.sh",
         "target/",
     ]:
         require_contains("scripts/verify-release-artifacts.py", verify_release, needle)
@@ -194,6 +197,23 @@ def main() -> None:
         "smoke-codex-plugin-install: ok",
     ]:
         require_contains("scripts/smoke-codex-plugin-install.sh", codex_plugin_smoke, needle)
+
+    release_live_evals = require_executable("scripts/run-release-live-evals.sh")
+    for needle in [
+        "SEATGEIST_RELEASE_LIVE_EVALS_APPROVED",
+        "SEATGEIST_PORTAL_SCREENSHOT_STRICT=1",
+        "SEATGEIST_REMOTE_DESKTOP_STRICT=1",
+        "SEATGEIST_REMOTE_DESKTOP_EIS_STRICT=1",
+        "SEATGEIST_REMOTE_DESKTOP_EIS_INPUT_STRICT=1",
+        "make gui-eval-text-editor-input",
+        "make gui-eval-kcalc-visual",
+        "make gui-eval-firefox-localhost-button",
+        "make gui-eval-portal-screenshot",
+        "make gui-eval-remote-desktop-probe",
+        "make gui-eval-remote-desktop-eis-session",
+        "live_eval_evidence ok",
+    ]:
+        require_contains("scripts/run-release-live-evals.sh", release_live_evals, needle)
 
     readiness = require_executable("scripts/release-readiness.py")
     for needle in [
@@ -273,6 +293,11 @@ def main() -> None:
         "docs/release-checklist.md",
         checklist,
         "make write-release-evidence",
+    )
+    require_contains(
+        "docs/release-checklist.md",
+        checklist,
+        "SEATGEIST_RELEASE_LIVE_EVALS_APPROVED=1 make release-live-evals",
     )
 
     plugin_doc = read("docs/plugin.md")

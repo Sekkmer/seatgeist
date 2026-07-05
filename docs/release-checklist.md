@@ -33,7 +33,7 @@ The CI workflow runs only safe, non-opt-in gates. It does not send real desktop 
 3. Run `make check-public-name` and review the generated exact-name collision report.
 4. Run `make release-readiness` to capture the current blocker list before release work.
 5. Run `make verify` locally.
-6. Run each opt-in live eval intentionally on the supported KDE Plasma 6 Wayland workstation and keep the generated `evidence.json` records.
+6. Run `SEATGEIST_RELEASE_LIVE_EVALS_APPROVED=1 make release-live-evals` intentionally on the supported KDE Plasma 6 Wayland workstation and keep the generated `evidence.json` records. This target may open desktop apps, show portal consent dialogs, and send scoped input through Seatgeist policy gates.
 7. Create a signed release tag.
 8. Build and verify local release artifacts with `make verify-release-artifacts`.
 9. Verify a clean extraction/install smoke from the binary archive and standalone plugin archive with `make verify-release-install`.
