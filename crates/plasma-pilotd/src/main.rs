@@ -5394,29 +5394,48 @@ fn accessibility_quality_status() -> AccessibilityQualityStatus {
     let sample_depth = ACCESSIBILITY_QUALITY_SAMPLE_DEPTH;
     let sample_max_nodes = ACCESSIBILITY_QUALITY_SAMPLE_MAX_NODES;
     if !plasma_pilot_atspi::available() {
-        return AccessibilityQualityStatus {
-            atspi_available: false,
-            focused_node_present: false,
-            sample_depth,
-            sample_max_nodes,
-            sampled_node_count: 0,
-            named_node_count: 0,
-            actionable_node_count: 0,
-            text_node_count: 0,
-            sensitive_node_count: 0,
-            generic_role_count: 0,
-            max_depth_seen: 0,
-            tree_flat: false,
-            semantic_targeting_reliable: false,
-            recommended_fallback: "desktop_session_status".to_string(),
-            setup_hint: "AT-SPI bus is not available; check DBus/session accessibility setup before semantic UI control".to_string(),
-        };
+        return accessibility_quality_unavailable_status(sample_depth, sample_max_nodes);
     }
 
-    let focused = match focused_accessibility_tree(FocusedAccessibilityTreeRequest {
-        depth: sample_depth,
-        max_nodes: sample_max_nodes,
-    }) {
+    accessibility_quality_status_from_sample(
+        sample_depth,
+        sample_max_nodes,
+        focused_accessibility_tree(FocusedAccessibilityTreeRequest {
+            depth: sample_depth,
+            max_nodes: sample_max_nodes,
+        }),
+    )
+}
+
+fn accessibility_quality_unavailable_status(
+    sample_depth: usize,
+    sample_max_nodes: usize,
+) -> AccessibilityQualityStatus {
+    AccessibilityQualityStatus {
+        atspi_available: false,
+        focused_node_present: false,
+        sample_depth,
+        sample_max_nodes,
+        sampled_node_count: 0,
+        named_node_count: 0,
+        actionable_node_count: 0,
+        text_node_count: 0,
+        sensitive_node_count: 0,
+        generic_role_count: 0,
+        max_depth_seen: 0,
+        tree_flat: false,
+        semantic_targeting_reliable: false,
+        recommended_fallback: "desktop_session_status".to_string(),
+        setup_hint: "AT-SPI bus is not available; check DBus/session accessibility setup before semantic UI control".to_string(),
+    }
+}
+
+fn accessibility_quality_status_from_sample(
+    sample_depth: usize,
+    sample_max_nodes: usize,
+    focused: Result<Option<libplasma_pilot::AccessibilityNode>>,
+) -> AccessibilityQualityStatus {
+    let focused = match focused {
         Ok(focused) => focused,
         Err(err) => {
             return AccessibilityQualityStatus {
@@ -11744,6 +11763,69 @@ height = 40
     }
 
     #[test]
+    fn accessibility_quality_reports_flat_weak_tree_fixture() {
+        let status = accessibility_quality_status_from_sample(
+            4,
+            512,
+            Ok(Some(generic_node("canvas", "canvas", vec![]))),
+        );
+        assert!(status.atspi_available);
+        assert!(status.focused_node_present);
+        assert_eq!(status.sampled_node_count, 1);
+        assert_eq!(status.generic_role_count, 1);
+        assert_eq!(status.max_depth_seen, 0);
+        assert!(status.tree_flat);
+        assert!(!status.semantic_targeting_reliable);
+        assert_eq!(
+            status.recommended_fallback,
+            "screenshot_tile_or_structured_integration"
+        );
+        assert!(status.setup_hint.contains("flat"));
+
+        let summary = summarize_response(&DaemonResponse::AccessibilityQualityStatus(status));
+        assert!(summary.contains("accessibility quality"));
+        assert!(summary.contains("reliable=false"));
+        assert!(summary.contains("nodes=1"));
+        assert!(summary.contains("generic=1"));
+        assert!(summary.contains("flat=true"));
+    }
+
+    #[test]
+    fn accessibility_quality_reports_mostly_generic_weak_tree_fixture() {
+        let status = accessibility_quality_status_from_sample(
+            4,
+            512,
+            Ok(Some(generic_node(
+                "root-panel",
+                "panel",
+                vec![generic_node(
+                    "section",
+                    "section",
+                    vec![generic_node("layer", "layer", vec![])],
+                )],
+            ))),
+        );
+        assert!(status.atspi_available);
+        assert!(status.focused_node_present);
+        assert_eq!(status.sampled_node_count, 3);
+        assert_eq!(status.generic_role_count, 3);
+        assert_eq!(status.max_depth_seen, 2);
+        assert!(!status.tree_flat);
+        assert!(!status.semantic_targeting_reliable);
+        assert_eq!(
+            status.recommended_fallback,
+            "screenshot_tile_or_structured_integration"
+        );
+        assert!(status.setup_hint.contains("mostly generic"));
+
+        let summary = summarize_response(&DaemonResponse::AccessibilityQualityStatus(status));
+        assert!(summary.contains("reliable=false"));
+        assert!(summary.contains("nodes=3"));
+        assert!(summary.contains("generic=3"));
+        assert!(summary.contains("flat=false"));
+    }
+
+    #[test]
     fn click_button_resolver_refuses_ambiguous_matches() {
         let err = resolve_click_button_match(
             "Open",
@@ -12346,6 +12428,26 @@ height = 40
             available_actions: Vec::new(),
             actions: vec![libplasma_pilot::AccessibilityAction::SetText],
             children: Vec::new(),
+        }
+    }
+
+    fn generic_node(
+        id: &str,
+        role: &str,
+        children: Vec<libplasma_pilot::AccessibilityNode>,
+    ) -> libplasma_pilot::AccessibilityNode {
+        libplasma_pilot::AccessibilityNode {
+            id: id.to_string(),
+            role: role.to_string(),
+            name: None,
+            value: None,
+            value_truncated: false,
+            sensitive: false,
+            states: Vec::new(),
+            bounds: None,
+            available_actions: Vec::new(),
+            actions: Vec::new(),
+            children,
         }
     }
 
