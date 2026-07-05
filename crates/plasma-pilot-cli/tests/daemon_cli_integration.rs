@@ -528,6 +528,45 @@ fn cli_validates_trace_without_daemon() -> Result<()> {
 }
 
 #[test]
+fn cli_validates_all_checked_in_traces_without_daemon() -> Result<()> {
+    let trace_dir = workspace_root().join("examples/traces");
+    let mut traces = fs::read_dir(&trace_dir)
+        .with_context(|| format!("read trace dir {}", trace_dir.display()))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()
+        .context("read checked-in trace paths")?;
+    traces.retain(|path| {
+        path.extension()
+            .is_some_and(|extension| extension == "json")
+    });
+    traces.sort();
+    assert!(
+        traces.len() >= 3,
+        "expected checked-in trace fixtures under {}, got {traces:?}",
+        trace_dir.display()
+    );
+
+    for trace_path in traces {
+        let trace_arg = trace_path.to_string_lossy().into_owned();
+        let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+            .args(["trace", "validate", "--file", &trace_arg])
+            .output()
+            .with_context(|| format!("run plasma-pilot-cli trace validate for {trace_arg}"))?;
+        require_success(&["trace", "validate"], &output)?;
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).context("parse trace validation report")?;
+        assert_eq!(report["type"], "trace_validation");
+        assert_eq!(report["trace_version"], 1);
+        assert!(
+            report["step_count"].as_u64().unwrap_or_default() > 0,
+            "trace {} did not report any steps",
+            trace_path.display()
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn cli_validates_policy_denial_trace_expectations() -> Result<()> {
     let trace_path = workspace_root().join("examples/traces/policy-denials-smoke.json");
     let trace_arg = trace_path.to_string_lossy().into_owned();

@@ -129,7 +129,7 @@ The matching safe smoke targets are:
 
 ```bash
 make smoke
-plasma-pilot-cli trace validate --file examples/traces/status-smoke.json
+make validate-traces
 make smoke-trace-replay
 make smoke-mcp
 make smoke-capture-backends
