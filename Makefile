@@ -379,8 +379,11 @@ smoke-trace-replay:
 	log="target/plasma-pilot-trace-smoke-daemon.log"
 	journal="target/plasma-pilot-trace-smoke-journal.jsonl"
 	out="target/plasma-pilot-trace-smoke.json"
-	rm -rf /tmp/plasma-pilot-trace-smoke "$$log" "$$journal" "$$out"
+	validate_out="target/plasma-pilot-trace-validate-smoke.json"
+	rm -rf /tmp/plasma-pilot-trace-smoke "$$log" "$$journal" "$$out" "$$validate_out"
 	cargo build -p plasma-pilotd -p plasma-pilot-cli
+	target/debug/plasma-pilot-cli trace validate --file examples/traces/status-smoke.json >"$$validate_out"
+	jq -e '.type == "trace_validation" and .trace_version == 1 and .step_count == 5 and any(.steps[]; .method == "safety_status")' "$$validate_out" >/dev/null
 	target/debug/plasma-pilotd --socket "$$socket" --journal "$$journal" >"$$log" 2>&1 &
 	pid=$$!
 	cleanup() {

@@ -402,6 +402,70 @@ fn cli_replays_trace_against_real_daemon() -> Result<()> {
 }
 
 #[test]
+fn cli_validates_trace_without_daemon() -> Result<()> {
+    let trace_path = workspace_root().join("examples/traces/status-smoke.json");
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+        .args(["trace", "validate", "--file", &trace_arg])
+        .output()
+        .context("run plasma-pilot-cli trace validate")?;
+    require_success(&["trace", "validate"], &output)?;
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("parse trace validation report")?;
+    assert_eq!(report["type"], "trace_validation");
+    assert_eq!(report["trace_version"], 1);
+    assert_eq!(report["step_count"], 5);
+    assert_eq!(report["steps"][0]["label"], "health");
+    assert_eq!(report["steps"][0]["method"], "health");
+    assert_eq!(report["steps"][0]["expect_response_type"], "health");
+    assert_eq!(report["steps"][4]["method"], "desktop_session_status");
+    Ok(())
+}
+
+#[test]
+fn cli_validate_rejects_unknown_expected_response_type() -> Result<()> {
+    let root = unique_temp_dir();
+    fs::create_dir_all(&root).context("create integration temp dir")?;
+    let trace_path = root.join("bad-status-trace.json");
+    let trace = ReplayTrace {
+        version: 1,
+        description: Some("intentionally invalid status trace".to_string()),
+        steps: vec![TraceStep {
+            label: Some("bad-health".to_string()),
+            request: DaemonRequest::Health,
+            expect_response_type: Some("bogus".to_string()),
+            expect_ok: Some(true),
+        }],
+    };
+    fs::write(
+        &trace_path,
+        serde_json::to_string_pretty(&trace).context("serialize bad trace")?,
+    )
+    .context("write bad trace file")?;
+
+    let trace_arg = trace_path.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+        .args(["trace", "validate", "--file", &trace_arg])
+        .output()
+        .context("run plasma-pilot-cli trace validate")?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(r#"trace step 0 label="bad-health" method=health"#),
+        "stderr did not include trace step context: {stderr}"
+    );
+    assert!(
+        stderr.contains("expects unknown response type bogus"),
+        "stderr did not include validation detail: {stderr}"
+    );
+
+    fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+#[test]
 fn cli_replay_errors_include_step_label_and_method() -> Result<()> {
     let daemon = DaemonFixture::start()?;
     let trace_path = daemon.root.join("bad-status-trace.json");

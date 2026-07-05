@@ -558,6 +558,10 @@ enum PanicStopCommand {
 
 #[derive(Debug, Subcommand)]
 enum TraceCommand {
+    Validate {
+        #[arg(long)]
+        file: PathBuf,
+    },
     Replay {
         #[arg(long)]
         file: PathBuf,
@@ -1327,9 +1331,10 @@ fn main() -> Result<()> {
             };
             write_approval_grant(&approval_file, safety_class, &method, ttl_ms, reason)?;
         }
-        Command::Trace {
-            command: TraceCommand::Replay { file },
-        } => replay_trace(&socket, file)?,
+        Command::Trace { command } => match command {
+            TraceCommand::Validate { file } => validate_trace_file(file)?,
+            TraceCommand::Replay { file } => replay_trace(&socket, file)?,
+        },
     }
 
     Ok(())
@@ -1432,14 +1437,67 @@ fn print_daemon_response(socket: &PathBuf, request: DaemonRequest) -> Result<()>
     Ok(())
 }
 
-fn replay_trace(socket: &PathBuf, file: PathBuf) -> Result<()> {
+fn load_trace(file: &Path) -> Result<ReplayTrace> {
     let contents =
-        fs::read_to_string(&file).with_context(|| format!("read trace {}", file.display()))?;
-    let trace: ReplayTrace = serde_json::from_str(&contents)
-        .with_context(|| format!("parse trace {}", file.display()))?;
+        fs::read_to_string(file).with_context(|| format!("read trace {}", file.display()))?;
+    serde_json::from_str(&contents).with_context(|| format!("parse trace {}", file.display()))
+}
+
+fn validate_trace(trace: &ReplayTrace) -> Result<()> {
     if trace.version != 1 {
         bail!("unsupported trace version {}", trace.version);
     }
+    if trace.steps.is_empty() {
+        bail!("trace must contain at least one step");
+    }
+    for (index, step) in trace.steps.iter().enumerate() {
+        if let Some(expected) = &step.expect_response_type
+            && !known_response_types().contains(&expected.as_str())
+        {
+            bail!(
+                "trace {} expects unknown response type {expected}",
+                trace_step_context(index, step)
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_trace_file(file: PathBuf) -> Result<()> {
+    let trace = load_trace(&file)?;
+    validate_trace(&trace)?;
+
+    let steps = trace
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            serde_json::json!({
+                "index": index,
+                "label": step.label,
+                "method": step.request.method_name(),
+                "expect_response_type": step.expect_response_type,
+                "expect_ok": step.expect_ok,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "type": "trace_validation",
+            "trace_version": trace.version,
+            "description": trace.description,
+            "step_count": steps.len(),
+            "steps": steps,
+        }))?
+    );
+    Ok(())
+}
+
+fn replay_trace(socket: &PathBuf, file: PathBuf) -> Result<()> {
+    let trace = load_trace(&file)?;
+    validate_trace(&trace)?;
 
     let mut results = Vec::with_capacity(trace.steps.len());
     for (index, step) in trace.steps.iter().enumerate() {
@@ -1484,6 +1542,35 @@ fn replay_trace(socket: &PathBuf, file: PathBuf) -> Result<()> {
         }))?
     );
     Ok(())
+}
+
+fn known_response_types() -> &'static [&'static str] {
+    &[
+        "health",
+        "capabilities",
+        "policy_status",
+        "safety_status",
+        "desktop_session_status",
+        "panic_stop",
+        "kwin_bridge_status",
+        "uinput_status",
+        "input_backend_status",
+        "capture_backend_status",
+        "pointer_calibration",
+        "monitors",
+        "windows",
+        "active_window",
+        "observation",
+        "screenshot",
+        "wait_for_change",
+        "clipboard_text",
+        "accessibility_tree",
+        "accessibility_matches",
+        "accessibility_text_attributes",
+        "journal",
+        "action",
+        "error",
+    ]
 }
 
 fn trace_step_context(index: usize, step: &libplasma_pilot::TraceStep) -> String {
