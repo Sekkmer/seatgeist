@@ -276,6 +276,13 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
         ],
     );
     assert!(entries.iter().all(|entry| entry.ok));
+    assert!(entries.iter().all(|entry| {
+        entry
+            .client
+            .as_ref()
+            .and_then(|client| client.tool.as_deref())
+            == Some("plasma-pilot-cli")
+    }));
     Ok(())
 }
 

@@ -181,6 +181,7 @@ fn mcp_stdio_talks_to_real_daemon_and_reports_tool_errors() -> Result<()> {
     };
     assert_eq!(entry["ok"], false);
     assert_eq!(entry["safety_class"], "observe");
+    assert_eq!(entry["client"]["tool"], "plasma-pilot-mcp");
     Ok(())
 }
 

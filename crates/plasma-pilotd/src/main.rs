@@ -23,21 +23,22 @@ use libplasma_pilot::{
     AccessibilitySetTextRequest, AccessibilityTextAttributesRequest, ActionResult,
     ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard, BackendCapability, CapabilitySet,
     CaptureBackendStatus, ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest,
-    ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse, DesktopObservation,
-    DesktopSessionStatus, DragPointerRequest, FocusTextFieldRequest, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus, JournalClientContext,
-    JournalControlContext, JournalEntry, JournalRequestedTarget, JournalWindowContext,
-    KeyComboRequest, KwinBridgeStatus, KwinMetadataStatus, LibeiStatus, MovePointerRequest,
-    ObserveRequest, PanicStopStatus, Point, PointerButton, PointerCalibrationPoint,
-    PointerCalibrationStatus, PointerMonitorCalibration, PointerPhysicalBounds, PolicyStatus,
-    RemoteDesktopEisProbe, RemoteDesktopEisSessionStatus, RemoteDesktopPersistMode,
-    RemoteDesktopPortalStatus, RemoteDesktopSessionProbe, RemoteDesktopSessionProbeRequest,
-    SafetyClass, SafetyStatus, ScreenshotInfo, ScreenshotPortalStatus, ScreenshotRequest,
-    ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest, SelectItemRequest,
-    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, SpectacleStatus,
-    ToggleCheckRequest, ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest,
-    WaitForChangeResult, WindowGeometry, WindowInfo, XkbKeymapStatus, current_egid, current_euid,
-    default_journal_path, default_panic_stop_path, default_socket_path,
+    ClipboardText, CoordinateSpace, DaemonClientIdentity, DaemonRequest, DaemonRequestEnvelope,
+    DaemonResponse, DesktopObservation, DesktopSessionStatus, DragPointerRequest,
+    FocusTextFieldRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus,
+    InputBackendStatus, JournalClientContext, JournalControlContext, JournalEntry,
+    JournalRequestedTarget, JournalWindowContext, KeyComboRequest, KwinBridgeStatus,
+    KwinMetadataStatus, LibeiStatus, MovePointerRequest, ObserveRequest, PanicStopStatus, Point,
+    PointerButton, PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
+    PointerPhysicalBounds, PolicyStatus, RemoteDesktopEisProbe, RemoteDesktopEisSessionStatus,
+    RemoteDesktopPersistMode, RemoteDesktopPortalStatus, RemoteDesktopSessionProbe,
+    RemoteDesktopSessionProbeRequest, SafetyClass, SafetyStatus, ScreenshotInfo,
+    ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
+    ScrollPointerRequest, SelectItemRequest, SelectMenuRequest, SetPanicStopRequest,
+    SetTextFieldRequest, SetValueRequest, SpectacleStatus, ToggleCheckRequest, ToolApprovalLevel,
+    TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult, WindowGeometry,
+    WindowInfo, XkbKeymapStatus, current_egid, current_euid, default_journal_path,
+    default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -831,7 +832,7 @@ struct DaemonRuntime {
 }
 
 async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()> {
-    let client = validate_peer_client(&stream)?;
+    let peer_client = validate_peer_client(&stream)?;
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     let bytes = reader
@@ -842,7 +843,8 @@ async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()>
         bail!("empty request");
     }
 
-    let request = serde_json::from_str::<DaemonRequest>(&line).context("parse daemon request")?;
+    let (request, request_client) = parse_daemon_request_line(&line)?;
+    let client = merge_client_context(peer_client, request_client);
     let method = request.method_name();
     let mut journal_context = journal_context_for_request(&request, &runtime, client);
     let response = handle_request(request, &runtime).await;
@@ -862,6 +864,47 @@ async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()>
         .context("write response")?;
     stream.write_all(b"\n").await.context("write newline")?;
     Ok(())
+}
+
+fn parse_daemon_request_line(line: &str) -> Result<(DaemonRequest, Option<JournalClientContext>)> {
+    match serde_json::from_str::<DaemonRequestEnvelope>(line) {
+        Ok(envelope) => {
+            let client = envelope.client.and_then(client_context_from_identity);
+            Ok((envelope.request, client))
+        }
+        Err(_) => {
+            let request =
+                serde_json::from_str::<DaemonRequest>(line).context("parse daemon request")?;
+            Ok((request, None))
+        }
+    }
+}
+
+fn client_context_from_identity(identity: DaemonClientIdentity) -> Option<JournalClientContext> {
+    let tool = identity.tool.as_deref().and_then(compact_client_tool_name);
+    tool.as_ref()?;
+    Some(JournalClientContext {
+        tool,
+        pid: None,
+        process_name: None,
+    })
+}
+
+fn merge_client_context(
+    peer_client: Option<JournalClientContext>,
+    request_client: Option<JournalClientContext>,
+) -> Option<JournalClientContext> {
+    let tool = request_client.and_then(|client| client.tool);
+    let pid = peer_client.as_ref().and_then(|client| client.pid);
+    let process_name = peer_client.and_then(|client| client.process_name);
+    if tool.is_none() && pid.is_none() && process_name.is_none() {
+        return None;
+    }
+    Some(JournalClientContext {
+        tool,
+        pid,
+        process_name,
+    })
 }
 
 fn journal_context_for_request(
@@ -7375,7 +7418,11 @@ fn validate_peer_client(stream: &UnixStream) -> Result<Option<JournalClientConte
     if pid.is_none() && process_name.is_none() {
         return Ok(None);
     }
-    Ok(Some(JournalClientContext { pid, process_name }))
+    Ok(Some(JournalClientContext {
+        tool: None,
+        pid,
+        process_name,
+    }))
 }
 
 fn client_process_name(pid: u32) -> Option<String> {
@@ -7392,6 +7439,21 @@ fn compact_client_process_name(name: &str) -> Option<String> {
         .chars()
         .filter(|character| !character.is_control())
         .take(MAX_CLIENT_NAME_CHARS)
+        .collect::<String>();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+fn compact_client_tool_name(name: &str) -> Option<String> {
+    const MAX_CLIENT_TOOL_CHARS: usize = 64;
+    let cleaned = name
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(MAX_CLIENT_TOOL_CHARS)
         .collect::<String>();
     if cleaned.is_empty() {
         None
@@ -7623,6 +7685,7 @@ mod tests {
                 "health",
                 JournalContext {
                     client: Some(JournalClientContext {
+                        tool: Some("plasma-pilot-cli".to_string()),
                         pid: Some(1111),
                         process_name: Some("plasma-pilot-cl".to_string()),
                     }),
@@ -7644,6 +7707,7 @@ mod tests {
                 "focus_window",
                 JournalContext {
                     client: Some(JournalClientContext {
+                        tool: Some("plasma-pilot-mcp".to_string()),
                         pid: Some(2222),
                         process_name: Some("plasma-pilot-mc".to_string()),
                     }),
@@ -7687,6 +7751,13 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].sequence, 2);
         assert_eq!(entries[0].method, "focus_window");
+        assert_eq!(
+            entries[0]
+                .client
+                .as_ref()
+                .and_then(|client| client.tool.as_deref()),
+            Some("plasma-pilot-mcp")
+        );
         assert_eq!(
             entries[0]
                 .client
@@ -7751,6 +7822,57 @@ mod tests {
         let name = compact_client_process_name(&long).expect("long client name is retained");
         assert_eq!(name.len(), 64);
         assert!(compact_client_process_name("\n\t").is_none());
+    }
+
+    #[test]
+    fn compact_client_tool_name_removes_controls_and_bounds_length() {
+        let name =
+            compact_client_tool_name("plasma-pilot-mcp\n").expect("valid tool name is retained");
+        assert_eq!(name, "plasma-pilot-mcp");
+
+        let long = format!("{}{}", "m".repeat(80), "\n");
+        let name = compact_client_tool_name(&long).expect("long tool name is retained");
+        assert_eq!(name.len(), 64);
+        assert!(compact_client_tool_name("\n\t").is_none());
+    }
+
+    #[test]
+    fn parse_daemon_request_line_accepts_legacy_and_enveloped_requests() {
+        let (legacy, legacy_client) =
+            parse_daemon_request_line(r#"{"method":"health"}"#).expect("legacy request parses");
+        assert_eq!(legacy, DaemonRequest::Health);
+        assert_eq!(legacy_client, None);
+
+        let (enveloped, client) = parse_daemon_request_line(
+            r#"{"request":{"method":"health"},"client":{"tool":"plasma-pilot-mcp"}}"#,
+        )
+        .expect("enveloped request parses");
+        assert_eq!(enveloped, DaemonRequest::Health);
+        assert_eq!(
+            client.and_then(|client| client.tool),
+            Some("plasma-pilot-mcp".to_string())
+        );
+    }
+
+    #[test]
+    fn merge_client_context_keeps_trusted_peer_metadata_and_request_tool() {
+        let merged = merge_client_context(
+            Some(JournalClientContext {
+                tool: None,
+                pid: Some(1234),
+                process_name: Some("plasma-pilot-mc".to_string()),
+            }),
+            Some(JournalClientContext {
+                tool: Some("plasma-pilot-mcp".to_string()),
+                pid: Some(9999),
+                process_name: Some("spoofed".to_string()),
+            }),
+        )
+        .expect("merged client context is present");
+
+        assert_eq!(merged.tool.as_deref(), Some("plasma-pilot-mcp"));
+        assert_eq!(merged.pid, Some(1234));
+        assert_eq!(merged.process_name.as_deref(), Some("plasma-pilot-mc"));
     }
 
     #[test]

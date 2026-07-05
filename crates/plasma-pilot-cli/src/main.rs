@@ -17,18 +17,21 @@ use libplasma_pilot::{
     ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest,
     CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS,
     DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
-    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest, DaemonResponse, DragPointerRequest,
-    FocusTextFieldRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
-    KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton,
-    RemoteDesktopPersistMode, RemoteDesktopSessionProbeRequest, ReplayTrace, SafetyClass,
-    ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest,
-    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest,
-    ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest, default_approval_file_path,
-    default_screenshot_output_path, default_socket_path,
+    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonClientIdentity, DaemonRequest, DaemonRequestEnvelope,
+    DaemonResponse, DragPointerRequest, FocusTextFieldRequest, FocusWindowRequest,
+    FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, MovePointerRequest,
+    ObserveRequest, Point, PointerButton, RemoteDesktopPersistMode,
+    RemoteDesktopSessionProbeRequest, ReplayTrace, SafetyClass, ScreenshotRequest,
+    ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
+    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
+    WaitForChangeRequest, default_approval_file_path, default_screenshot_output_path,
+    default_socket_path,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
+
+const CLIENT_TOOL_NAME: &str = "plasma-pilot-cli";
 
 #[derive(Debug, Parser)]
 #[command(version, about = "PlasmaPilot diagnostics and manual control CLI")]
@@ -2130,7 +2133,8 @@ fn trace_step_context(index: usize, step: &libplasma_pilot::TraceStep) -> String
 fn send_request(socket: &PathBuf, request: DaemonRequest) -> Result<DaemonResponse> {
     let mut stream =
         UnixStream::connect(socket).with_context(|| format!("connect to {}", socket.display()))?;
-    let request_line = serde_json::to_string(&request).context("serialize daemon request")?;
+    let request_line =
+        serde_json::to_string(&request_envelope(request)).context("serialize daemon request")?;
     stream
         .write_all(request_line.as_bytes())
         .context("write request")?;
@@ -2142,6 +2146,15 @@ fn send_request(socket: &PathBuf, request: DaemonRequest) -> Result<DaemonRespon
         .read_line(&mut response_line)
         .context("read daemon response")?;
     serde_json::from_str(&response_line).context("parse daemon response")
+}
+
+fn request_envelope(request: DaemonRequest) -> DaemonRequestEnvelope {
+    DaemonRequestEnvelope {
+        request,
+        client: Some(DaemonClientIdentity {
+            tool: Some(CLIENT_TOOL_NAME.to_string()),
+        }),
+    }
 }
 
 fn screenshot_output_or_default(output: Option<PathBuf>, kind: &str) -> Result<PathBuf> {

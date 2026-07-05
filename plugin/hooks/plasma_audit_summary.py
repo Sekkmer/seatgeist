@@ -94,6 +94,7 @@ def compact_client(client: Any) -> dict[str, Any] | None:
     if not isinstance(client, dict):
         return None
     compact = {
+        "tool": client.get("tool"),
         "pid": client.get("pid"),
         "process_name": client.get("process_name"),
     }
@@ -141,10 +142,18 @@ def summarize_journal(entries: list[dict[str, Any]]) -> dict[str, Any]:
         if isinstance(entry.get("safety_class"), str) and entry.get("safety_class")
     )
     clients = Counter(
-        str(entry["client"].get("process_name") or entry["client"].get("pid"))
+        str(
+            entry["client"].get("tool")
+            or entry["client"].get("process_name")
+            or entry["client"].get("pid")
+        )
         for entry in entries
         if isinstance(entry.get("client"), dict)
-        and (entry["client"].get("process_name") or entry["client"].get("pid"))
+        and (
+            entry["client"].get("tool")
+            or entry["client"].get("process_name")
+            or entry["client"].get("pid")
+        )
     )
     failures = [entry for entry in entries if entry.get("ok") is False]
     controls = [entry for entry in entries if is_control_entry(entry)]

@@ -15,12 +15,13 @@ use libplasma_pilot::{
     ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest,
     CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS,
     DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
-    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonRequest, DaemonResponse, DragPointerRequest,
-    FocusTextFieldRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
-    KeyComboRequest, MovePointerRequest, ObserveRequest, Point, PointerButton,
-    RemoteDesktopPersistMode, RemoteDesktopSessionProbeRequest, ScreenshotRequest,
-    ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
-    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
+    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonClientIdentity, DaemonRequest, DaemonRequestEnvelope,
+    DaemonResponse, DragPointerRequest, FocusTextFieldRequest, FocusWindowRequest,
+    FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, MovePointerRequest,
+    ObserveRequest, Point, PointerButton, RemoteDesktopPersistMode,
+    RemoteDesktopSessionProbeRequest, ScreenshotRequest, ScreenshotTileRequest,
+    ScrollPointerRequest, SelectItemRequest, SelectMenuRequest, SetPanicStopRequest,
+    SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
     WaitForChangeRequest, default_screenshot_output_path, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,7 @@ use serde_json::{Value, json};
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "plasmapilot";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+const CLIENT_TOOL_NAME: &str = "plasma-pilot-mcp";
 const SERVER_INSTRUCTIONS: &str = "PlasmaPilot exposes local KDE Plasma observation and carefully policy-gated control tools. Prefer observe/list/screenshot tools first, keep outputs compact, and expect control tools such as focus_window to fail unless the daemon is started with an explicit approval/control policy.";
 
 #[derive(Debug, Parser)]
@@ -173,7 +175,8 @@ impl McpServer {
     fn send_daemon_request(&self, request: DaemonRequest) -> Result<DaemonResponse> {
         let mut stream = UnixStream::connect(&self.socket)
             .with_context(|| format!("connect to daemon socket {}", self.socket.display()))?;
-        let request_line = serde_json::to_string(&request).context("serialize daemon request")?;
+        let request_line = serde_json::to_string(&request_envelope(request))
+            .context("serialize daemon request")?;
         stream
             .write_all(request_line.as_bytes())
             .context("write daemon request")?;
@@ -187,6 +190,15 @@ impl McpServer {
             .read_line(&mut response_line)
             .context("read daemon response")?;
         serde_json::from_str(&response_line).context("parse daemon response")
+    }
+}
+
+fn request_envelope(request: DaemonRequest) -> DaemonRequestEnvelope {
+    DaemonRequestEnvelope {
+        request,
+        client: Some(DaemonClientIdentity {
+            tool: Some(CLIENT_TOOL_NAME.to_string()),
+        }),
     }
 }
 

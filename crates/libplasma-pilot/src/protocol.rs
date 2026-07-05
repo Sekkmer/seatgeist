@@ -349,9 +349,24 @@ pub struct JournalEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalClientContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonClientIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DaemonRequestEnvelope {
+    pub request: DaemonRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<DaemonClientIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1240,6 +1255,7 @@ mod tests {
             unix_time_ms: 1001,
             method: "focus_window".to_string(),
             client: Some(JournalClientContext {
+                tool: Some("plasma-pilot-mcp".to_string()),
                 pid: Some(4242),
                 process_name: Some("plasma-pilot-cl".to_string()),
             }),
@@ -1272,6 +1288,7 @@ mod tests {
         let encoded = serde_json::to_string(&entry).expect("journal context serializes");
         assert!(encoded.contains(r#""safety_class":"control_semantic""#));
         assert!(encoded.contains(r#""client""#));
+        assert!(encoded.contains(r#""tool":"plasma-pilot-mcp""#));
         assert!(encoded.contains(r#""pid":4242"#));
         assert!(encoded.contains(r#""process_name":"plasma-pilot-cl""#));
         assert!(encoded.contains(r#""guard_present":true"#));
@@ -1283,6 +1300,27 @@ mod tests {
         assert!(encoded.contains(r#""policy":"allow""#));
         assert!(encoded.contains(r#""backend":"kwin""#));
         assert!(encoded.contains(r#""requested_target""#));
+    }
+
+    #[test]
+    fn serializes_daemon_request_envelope_with_client_identity() {
+        let envelope = DaemonRequestEnvelope {
+            request: DaemonRequest::Health,
+            client: Some(DaemonClientIdentity {
+                tool: Some("plasma-pilot-mcp".to_string()),
+            }),
+        };
+        let encoded = serde_json::to_string(&envelope).expect("envelope serializes");
+        assert!(encoded.contains(r#""request":{"method":"health"}"#));
+        assert!(encoded.contains(r#""client":{"tool":"plasma-pilot-mcp"}"#));
+
+        let decoded: DaemonRequestEnvelope =
+            serde_json::from_str(&encoded).expect("envelope deserializes");
+        assert_eq!(decoded.request, DaemonRequest::Health);
+        assert_eq!(
+            decoded.client.and_then(|client| client.tool),
+            Some("plasma-pilot-mcp".to_string())
+        );
     }
 
     #[test]
