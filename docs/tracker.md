@@ -45,6 +45,7 @@ Current full-project estimate: `[~]` about one third complete. This estimate use
 - [x] Screenshot tile capture with 8K/scaled coordinate metadata.
 - [x] Wait-for-change polling with timed-out versus failed-command distinction.
 - [x] Capture backend status for portal, KWin metadata, and Spectacle fallback.
+- [x] Read-only portal Screenshot v3 target diagnostic for interface version, `AvailableTargets`, pacman package state, and `aur-step` presence.
 - [~] Portal Screenshot live eval exists but remains opt-in because it may request user consent.
 - [~] Robust multi-monitor visual eval coverage is partial.
 

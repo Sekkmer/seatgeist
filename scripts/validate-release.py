@@ -70,6 +70,8 @@ def main() -> None:
     require_contains("Makefile", makefile, "scripts/check-public-name.py")
     require_contains("Makefile", makefile, "release-readiness:")
     require_contains("Makefile", makefile, "scripts/release-readiness.py")
+    require_contains("Makefile", makefile, "portal-screenshot-v3-status:")
+    require_contains("Makefile", makefile, "scripts/portal-screenshot-v3-status.py")
 
     package_release = require_executable("scripts/package-release.sh")
     for needle in [
@@ -111,6 +113,7 @@ def main() -> None:
         "scripts/verify-release-install.sh",
         "scripts/sign-release-artifacts.sh",
         "scripts/verify-release-signatures.sh",
+        "scripts/portal-screenshot-v3-status.py",
         "scripts/check-public-name.py",
         "scripts/release-readiness.py",
         "target/",
@@ -188,6 +191,18 @@ def main() -> None:
     ]:
         require_contains("scripts/check-public-name.py", name_check, needle)
 
+    portal_v3_status = require_executable("scripts/portal-screenshot-v3-status.py")
+    for needle in [
+        "portal_screenshot_v3_status",
+        "AvailableTargets",
+        "screenshot_interface_version",
+        "target_option_supported",
+        "pacman",
+        "aur-step",
+        "read-only diagnostic",
+    ]:
+        require_contains("scripts/portal-screenshot-v3-status.py", portal_v3_status, needle)
+
     checklist = read("docs/release-checklist.md")
     require_contains(
         "docs/release-checklist.md",
@@ -235,6 +250,11 @@ def main() -> None:
     require_contains(".github/workflows/ci.yml", ci, "make verify")
     require_contains(".github/workflows/ci.yml", ci, "libei-dev")
     require_contains(".github/workflows/ci.yml", ci, "libxkbcommon-dev")
+
+    arch_install = read("docs/arch-kde-install.md")
+    require_contains("docs/arch-kde-install.md", arch_install, "make portal-screenshot-v3-status")
+    require_contains("docs/arch-kde-install.md", arch_install, "Screenshot v3")
+    require_contains("docs/arch-kde-install.md", arch_install, "AvailableTargets")
 
     print("validate-release: ok")
 

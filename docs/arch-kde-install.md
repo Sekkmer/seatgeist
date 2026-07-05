@@ -160,6 +160,19 @@ When `--output` is omitted for direct CLI `screenshot`, `screenshot-tile`, or `w
 
 `make smoke-monitors`, `make smoke-windows`, `make smoke-clipboard`, and `make smoke-atspi` require a real KDE user session and may observe session state. `make gui-eval-portal-screenshot` validates live portal Screenshot capture when the portal interface is visible, first through the default noninteractive request and then through `--portal-interactive` if the portal cancels; it may show a desktop consent dialog, and `SEATGEIST_PORTAL_SCREENSHOT_STRICT=1` makes cancellation fail instead of skip. `make gui-eval-remote-desktop-probe` validates the live RemoteDesktop consent path when the interface and active-window guard metadata are visible; set `SEATGEIST_REMOTE_DESKTOP_STRICT=1` to require a started session instead of accepting a cancelled/ended probe. `make gui-eval-remote-desktop-eis-session` validates the retained RemoteDesktop EIS session lifecycle and minimal explicit-backend input attempts; it may show a portal dialog and can send one minimal scroll plus one minimal `Shift` key-combo only after method approval, an active-window guard, and EIS readiness checks pass. Set `SEATGEIST_REMOTE_DESKTOP_EIS_STRICT=1` to require the stored session to start, and set `SEATGEIST_REMOTE_DESKTOP_EIS_INPUT_STRICT=1` to require both minimal input attempts to succeed. `seatgeist-cli input remote-desktop-probe` is an explicit policy-gated RemoteDesktop consent-path probe that may show a portal dialog and closes the transient session without sending input. `seatgeist-cli input remote-desktop-eis-probe` uses the same consent path, calls `ConnectToEIS`, reports compact libei runtime state, immediately closes the returned FD, and still sends no input. `make smoke-gui-input` sends real keyboard and pointer input into a disposable KWrite/Kate document and should only be run intentionally. `make gui-eval-kcalc-visual` sends real keyboard input into KCalc through method-scoped approvals and writes a KCalc active-window screenshot artifact when Spectacle is available. `make gui-eval-firefox-localhost-button` launches Firefox with a disposable profile against a temporary localhost page, clicks a guarded window-local test button, verifies the local server received the click, and writes a Firefox active-window screenshot artifact when Spectacle is available.
 
+## Portal Screenshot v3 Targets
+
+Use the read-only v3 diagnostic before assuming an Arch/KDE package upgrade will make `--portal-target` work:
+
+```bash
+make portal-screenshot-v3-status
+seatgeist-cli capture-backends
+```
+
+The diagnostic does not install packages, run `pacman -Syu`, call `aur-step`, restart services, request portal consent, or capture pixels. It reports the user-session `org.freedesktop.portal.Screenshot` `version`, the optional `AvailableTargets` bitmask, installed Arch package versions for the KDE/portal screenshot path, visible pending upgrades from the local pacman sync database, and whether `aur-step` is present.
+
+The upstream xdg-desktop-portal frontend and backend documentation describes the Screenshot interface version 3 and states that `AvailableTargets` plus the `target` option were added in version 3. Seatgeist therefore treats missing `AvailableTargets` or a reported Screenshot version below 3 as a hard reason to reject `--portal-target` requests instead of silently falling back to a different capture shape. If the diagnostic still reports Screenshot v2 after normal system updates and a user-session restart, prefer Seatgeist's bounded full-screen/tile capture path or a future documented KWin-native fallback rather than weakening the policy check.
+
 ## Optional Uinput
 
 Use uinput only when the local operator accepts a privileged virtual-input fallback. Install the packaged udev rule and add the user to the narrow `uinput` group as documented in `docs/uinput-setup.md`, then log out and back in before retrying:
