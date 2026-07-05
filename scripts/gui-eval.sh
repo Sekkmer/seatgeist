@@ -148,6 +148,12 @@ eval_status() {
 	jq -e '.type == "capabilities"' "$run_dir/capabilities.json" >/dev/null
 	cli policy-status >"$run_dir/policy-status.json"
 	jq -e '.type == "policy_status" and .data.default_control == "prompt"' "$run_dir/policy-status.json" >/dev/null
+	cli journal tail --limit 20 --method health --ok true >"$run_dir/status-health-journal.json"
+	jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/status-health-journal.json" >/dev/null
+	cli journal tail --limit 20 --method capabilities --ok true >"$run_dir/status-capabilities-journal.json"
+	jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/status-capabilities-journal.json" >/dev/null
+	cli journal tail --limit 20 --method policy_status --ok true >"$run_dir/status-policy-journal.json"
+	jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/status-policy-journal.json" >/dev/null
 }
 
 eval_session_preflight() {
