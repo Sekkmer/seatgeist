@@ -71,7 +71,7 @@ pub struct EisDeviceSelection {
     pub matched_region: Option<EisRegion>,
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum EisDeviceSelectionError {
     #[error("no resumed EIS device provides the required capabilities")]
     NoCapableResumedDevice,
@@ -128,6 +128,76 @@ pub enum LibeiEventSnapshot {
     Other {
         event_type: u32,
     },
+}
+
+pub trait EisEventSource {
+    fn event_fd(&self) -> RawFd;
+    fn dispatch_pending(&mut self) -> Vec<LibeiEventSnapshot>;
+    fn dispatch_pending_for_plan(&mut self, plan: &EisActionPlan) -> Vec<LibeiEventSnapshot>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EisPlanReadiness {
+    pub snapshots: Vec<LibeiEventSnapshot>,
+    pub selection: std::result::Result<EisDeviceSelection, EisDeviceSelectionError>,
+}
+
+pub struct EisSessionRuntime<S = LibeiSenderContext> {
+    source: S,
+    state: EisRuntimeState,
+}
+
+impl EisSessionRuntime<LibeiSenderContext> {
+    pub fn from_owned_fd(
+        fd: OwnedFd,
+        client_name: &str,
+    ) -> std::result::Result<Self, LibeiConnectionError> {
+        Ok(Self::new(LibeiSenderContext::from_owned_fd(
+            fd,
+            client_name,
+        )?))
+    }
+}
+
+impl<S: EisEventSource> EisSessionRuntime<S> {
+    pub fn new(source: S) -> Self {
+        Self {
+            source,
+            state: EisRuntimeState::new(),
+        }
+    }
+
+    pub fn event_fd(&self) -> RawFd {
+        self.source.event_fd()
+    }
+
+    pub fn state(&self) -> &EisRuntimeState {
+        &self.state
+    }
+
+    pub fn source(&self) -> &S {
+        &self.source
+    }
+
+    pub fn source_mut(&mut self) -> &mut S {
+        &mut self.source
+    }
+
+    pub fn dispatch_pending(&mut self) -> Vec<LibeiEventSnapshot> {
+        let snapshots = self.source.dispatch_pending();
+        self.state.apply_snapshots(snapshots.iter());
+        snapshots
+    }
+
+    pub fn refresh_for_plan(&mut self, plan: &EisActionPlan) -> EisPlanReadiness {
+        let snapshots = self.source.dispatch_pending_for_plan(plan);
+        self.state.apply_snapshots(snapshots.iter());
+        let selection = self.state.select_device_for_plan(plan);
+        EisPlanReadiness {
+            snapshots,
+            selection,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -529,6 +599,20 @@ impl LibeiSenderContext {
             unsafe { ei_event_unref(event.as_ptr()) };
         }
         snapshots
+    }
+}
+
+impl EisEventSource for LibeiSenderContext {
+    fn event_fd(&self) -> RawFd {
+        LibeiSenderContext::event_fd(self)
+    }
+
+    fn dispatch_pending(&mut self) -> Vec<LibeiEventSnapshot> {
+        LibeiSenderContext::dispatch_pending(self)
+    }
+
+    fn dispatch_pending_for_plan(&mut self, plan: &EisActionPlan) -> Vec<LibeiEventSnapshot> {
+        LibeiSenderContext::dispatch_pending_for_plan(self, plan)
     }
 }
 
@@ -991,8 +1075,47 @@ pub fn pointer_button_code(button: PointerButton) -> u32 {
 #[cfg(test)]
 mod tests {
     use libplasma_pilot::CoordinateSpace;
+    use std::collections::VecDeque;
 
     use super::*;
+
+    #[derive(Default)]
+    struct MockEventSource {
+        event_fd: RawFd,
+        pending_batches: VecDeque<Vec<LibeiEventSnapshot>>,
+        plan_batches: VecDeque<Vec<LibeiEventSnapshot>>,
+    }
+
+    impl MockEventSource {
+        fn with_event_fd(event_fd: RawFd) -> Self {
+            Self {
+                event_fd,
+                ..Self::default()
+            }
+        }
+
+        fn push_pending(&mut self, snapshots: Vec<LibeiEventSnapshot>) {
+            self.pending_batches.push_back(snapshots);
+        }
+
+        fn push_plan(&mut self, snapshots: Vec<LibeiEventSnapshot>) {
+            self.plan_batches.push_back(snapshots);
+        }
+    }
+
+    impl EisEventSource for MockEventSource {
+        fn event_fd(&self) -> RawFd {
+            self.event_fd
+        }
+
+        fn dispatch_pending(&mut self) -> Vec<LibeiEventSnapshot> {
+            self.pending_batches.pop_front().unwrap_or_default()
+        }
+
+        fn dispatch_pending_for_plan(&mut self, _plan: &EisActionPlan) -> Vec<LibeiEventSnapshot> {
+            self.plan_batches.pop_front().unwrap_or_default()
+        }
+    }
 
     #[derive(Debug, Default)]
     struct RecordingSink {
@@ -1328,6 +1451,82 @@ mod tests {
                 matched_region: Some(region(50.0, 50.0, 100.0, 100.0)),
             }
         );
+    }
+
+    #[test]
+    fn session_runtime_dispatches_pending_events_into_state() {
+        let mut source = MockEventSource::with_event_fd(42);
+        source.push_pending(vec![
+            LibeiEventSnapshot::Connect,
+            LibeiEventSnapshot::SeatAdded {
+                capabilities: vec![EisCapability::Text],
+                bound_capabilities: Vec::new(),
+            },
+        ]);
+        let mut runtime = EisSessionRuntime::new(source);
+
+        let snapshots = runtime.dispatch_pending();
+
+        assert_eq!(runtime.event_fd(), 42);
+        assert_eq!(snapshots.len(), 2);
+        assert!(runtime.state().connected());
+        assert_eq!(runtime.state().seat_capabilities(), &[EisCapability::Text]);
+        assert!(runtime.state().devices().is_empty());
+    }
+
+    #[test]
+    fn session_runtime_refreshes_for_plan_and_reports_selection() {
+        let plan = plan_pointer_click_absolute(1, point(20.0, 20.0), PointerButton::Left, 1)
+            .expect("click plan");
+        let mut source = MockEventSource::default();
+        source.push_plan(vec![
+            LibeiEventSnapshot::SeatAdded {
+                capabilities: vec![EisCapability::PointerAbsolute, EisCapability::Button],
+                bound_capabilities: vec![EisCapability::PointerAbsolute, EisCapability::Button],
+            },
+            LibeiEventSnapshot::DeviceResumed(device(
+                "pointer",
+                true,
+                vec![EisCapability::PointerAbsolute, EisCapability::Button],
+                vec![region(0.0, 0.0, 100.0, 100.0)],
+            )),
+        ]);
+        let mut runtime = EisSessionRuntime::new(source);
+
+        let readiness = runtime.refresh_for_plan(&plan);
+
+        assert_eq!(readiness.snapshots.len(), 2);
+        assert_eq!(
+            readiness.selection.expect("selection"),
+            EisDeviceSelection {
+                device_id: "pointer".to_string(),
+                device_name: Some("device pointer".to_string()),
+                matched_region: Some(region(0.0, 0.0, 100.0, 100.0)),
+            }
+        );
+        assert_eq!(
+            runtime.state().bound_capabilities(),
+            &[EisCapability::PointerAbsolute, EisCapability::Button]
+        );
+    }
+
+    #[test]
+    fn session_runtime_reports_not_ready_without_resumed_device() {
+        let plan = plan_text_utf8(1, "hello").expect("text plan");
+        let mut source = MockEventSource::default();
+        source.push_plan(vec![LibeiEventSnapshot::SeatAdded {
+            capabilities: vec![EisCapability::Text],
+            bound_capabilities: vec![EisCapability::Text],
+        }]);
+        let mut runtime = EisSessionRuntime::new(source);
+
+        let readiness = runtime.refresh_for_plan(&plan);
+
+        assert_eq!(
+            readiness.selection,
+            Err(EisDeviceSelectionError::NoCapableResumedDevice)
+        );
+        assert!(runtime.state().devices().is_empty());
     }
 
     #[test]
