@@ -10,7 +10,7 @@ This checklist defines the minimum evidence required before calling a public rel
 - [x] Arch Linux/KDE Plasma 6 operator installation docs exist.
 - [x] Plugin manifest, MCP config, skills, and hook assets validate locally.
 - [~] Manual KDE Plasma 6 Wayland evals exist, but broader repeated passes are still required before a public v0.1 release.
-- [~] Versioned local release artifact packaging exists through `make package-release`; published signed artifacts are not produced yet.
+- [~] Versioned local release artifact packaging exists through `make package-release` for binary/plugin and source archives; published signed artifacts are not produced yet.
 - [ ] Add real public repository metadata before publishing, replacing placeholder `example.invalid` Cargo package URLs.
 - [x] Final license files match the workspace `MIT OR Apache-2.0` declaration.
 - [x] Public project name and package/binary prefixes are `Seatgeist` / `seatgeist-*`.
@@ -31,6 +31,6 @@ The CI workflow runs only safe, non-opt-in gates. It does not send real desktop 
 4. Run each opt-in live eval intentionally on the supported KDE Plasma 6 Wayland workstation and save the artifact paths or summaries.
 5. Create a signed release tag.
 6. Build local release artifacts with `make package-release`.
-7. Upload the generated Seatgeist tarball, manifest, and checksum from `target/seatgeist-release/`.
+7. Upload the generated Seatgeist binary/plugin tarball, source tarball, manifest, and checksums from `target/seatgeist-release/`.
 8. Publish checksums for every uploaded artifact and add signatures when the signing key is finalized.
 9. Verify a clean install from the released artifacts, not from the working tree.

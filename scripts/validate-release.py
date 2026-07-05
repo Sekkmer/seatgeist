@@ -63,13 +63,18 @@ def main() -> None:
     for needle in [
         "cargo build --workspace --release",
         "package_name=\"seatgeist-${version}-${git_short}-${target_triple}\"",
+        "source_name=\"seatgeist-${version}-${git_short}-source\"",
         "target/seatgeist-release",
         "seatgeistd",
         "seatgeist-cli",
         "seatgeist-mcp",
+        "\"source\": \"$(basename \"$source_archive\")\"",
         "cp -a scripts/. \"$stage/scripts/\"",
         "seatgeist-panic-stop-hotkey",
         "MANIFEST.json",
+        "git ls-files -z",
+        "source_archive=",
+        "source_checksum=",
         "sha256sum",
         "tar --sort=name",
     ]:
@@ -84,7 +89,7 @@ def main() -> None:
     require_contains(
         "docs/release-checklist.md",
         checklist,
-        "- [~] Versioned local release artifact packaging exists through `make package-release`; published signed artifacts are not produced yet.",
+        "- [~] Versioned local release artifact packaging exists through `make package-release` for binary/plugin and source archives; published signed artifacts are not produced yet.",
     )
     require_contains(
         "docs/release-checklist.md",

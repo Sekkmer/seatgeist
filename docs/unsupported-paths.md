@@ -29,7 +29,7 @@ Screenshot/OCR fallback for semantic actions is not implemented. High-level sema
 
 Native desktop approval UX is not implemented. Approval files and explicit local daemon flags exist for operator-controlled runs. A future KDE approval UI must still create auditable, scoped, expiring grants instead of directly executing input or semantic control.
 
-Public backend-neutral packaging is not finalized. `Seatgeist` remains the KDE-first working name until the project chooses a backend-neutral public name and preserves compatibility for existing crate, binary, MCP, and plugin identifiers.
+Backend-neutral packaging beyond the KDE Plasma 6 Wayland baseline is not finalized. `Seatgeist` is the public project name, but GNOME, wlroots/Sway, X11, and any future native desktop-specific packages still need their own implementation, install docs, policy evidence, and compatibility notes before they are presented as supported.
 
 ## Release Rule
 
