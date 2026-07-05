@@ -819,9 +819,13 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             info.path.display()
         ),
         DaemonResponse::WaitForChange(result) => format!(
-            "wait_for_change changed={} captures={} score={:.6} threshold={:.6} backend={} path={}",
+            "wait_for_change changed={} timed_out={} captures={} elapsed_ms={} timeout_ms={} interval_ms={} score={:.6} threshold={:.6} backend={} path={}",
             result.changed,
+            result.timed_out,
             result.captures,
+            result.elapsed_ms,
+            result.timeout_ms,
+            result.interval_ms,
             result.score,
             result.threshold,
             result.screenshot.backend,
@@ -2261,14 +2265,37 @@ mod tests {
             "plasma.wait_for_change",
             &DaemonResponse::WaitForChange(Box::new(WaitForChangeResult {
                 changed: true,
+                timed_out: false,
+                timeout_ms: 5_000,
+                interval_ms: 250,
                 captures: 2,
                 elapsed_ms: 250,
                 score: 0.25,
                 threshold: 0.01,
-                screenshot,
+                screenshot: screenshot.clone(),
             })),
         );
         assert!(text.contains("backend=spectacle"));
+        assert!(text.contains("timed_out=false"));
+        assert!(text.contains("elapsed_ms=250"));
+
+        let text = compact_tool_text(
+            "plasma.wait_for_change",
+            &DaemonResponse::WaitForChange(Box::new(WaitForChangeResult {
+                changed: false,
+                timed_out: true,
+                timeout_ms: 5_000,
+                interval_ms: 250,
+                captures: 20,
+                elapsed_ms: 5_000,
+                score: 0.0,
+                threshold: 0.01,
+                screenshot,
+            })),
+        );
+        assert!(text.contains("changed=false"));
+        assert!(text.contains("timed_out=true"));
+        assert!(text.contains("timeout_ms=5000"));
     }
 
     #[test]

@@ -524,6 +524,12 @@ pub struct WaitForChangeRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WaitForChangeResult {
     pub changed: bool,
+    #[serde(default)]
+    pub timed_out: bool,
+    #[serde(default)]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub interval_ms: u64,
     pub captures: u32,
     pub elapsed_ms: u64,
     pub score: f64,
@@ -1202,6 +1208,9 @@ mod tests {
     fn serializes_wait_for_change_response_with_type_tag() {
         let response = DaemonResponse::WaitForChange(Box::new(WaitForChangeResult {
             changed: true,
+            timed_out: false,
+            timeout_ms: DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS,
+            interval_ms: DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
             captures: 3,
             elapsed_ms: 500,
             score: 0.05,
@@ -1228,6 +1237,9 @@ mod tests {
         let encoded = serde_json::to_string(&response).expect("wait response serializes");
         assert!(encoded.contains(r#""type":"wait_for_change""#));
         assert!(encoded.contains(r#""changed":true"#));
+        assert!(encoded.contains(r#""timed_out":false"#));
+        assert!(encoded.contains(r#""timeout_ms":5000"#));
+        assert!(encoded.contains(r#""interval_ms":250"#));
         assert_eq!(response.response_type(), "wait_for_change");
     }
 

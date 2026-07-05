@@ -4860,6 +4860,9 @@ async fn wait_for_change(
 
     Ok(WaitForChangeResult {
         changed,
+        timed_out: !changed,
+        timeout_ms: request.timeout_ms,
+        interval_ms: request.interval_ms,
         captures,
         elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
         score,
@@ -7786,9 +7789,13 @@ fn summarize_response(response: &DaemonResponse) -> String {
             info.path.display()
         ),
         DaemonResponse::WaitForChange(result) => format!(
-            "wait_for_change changed={} captures={} score={:.6} threshold={:.6} backend={} path={}",
+            "wait_for_change changed={} timed_out={} captures={} elapsed_ms={} timeout_ms={} interval_ms={} score={:.6} threshold={:.6} backend={} path={}",
             result.changed,
+            result.timed_out,
             result.captures,
+            result.elapsed_ms,
+            result.timeout_ms,
+            result.interval_ms,
             result.score,
             result.threshold,
             result.screenshot.backend,
@@ -8680,14 +8687,36 @@ mod tests {
         let summary = summarize_response(&DaemonResponse::WaitForChange(Box::new(
             WaitForChangeResult {
                 changed: true,
+                timed_out: false,
+                timeout_ms: 5_000,
+                interval_ms: 250,
                 captures: 2,
                 elapsed_ms: 250,
                 score: 0.25,
                 threshold: 0.01,
-                screenshot,
+                screenshot: screenshot.clone(),
             },
         )));
         assert!(summary.contains("backend=spectacle"));
+        assert!(summary.contains("timed_out=false"));
+        assert!(summary.contains("elapsed_ms=250"));
+
+        let summary = summarize_response(&DaemonResponse::WaitForChange(Box::new(
+            WaitForChangeResult {
+                changed: false,
+                timed_out: true,
+                timeout_ms: 5_000,
+                interval_ms: 250,
+                captures: 20,
+                elapsed_ms: 5_000,
+                score: 0.0,
+                threshold: 0.01,
+                screenshot,
+            },
+        )));
+        assert!(summary.contains("changed=false"));
+        assert!(summary.contains("timed_out=true"));
+        assert!(summary.contains("timeout_ms=5000"));
     }
 
     #[test]

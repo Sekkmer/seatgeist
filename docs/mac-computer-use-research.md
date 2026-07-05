@@ -66,6 +66,7 @@ This note captures Mac computer-use patterns that should influence PlasmaPilot l
 - `plasma-pilot-cli atspi quality-status`, daemon `accessibility_quality_status`, and MCP `plasma.a11y_quality_status` report whether a bounded focused AT-SPI tree looks useful for semantic targeting, including flat/generic/empty-tree signals and a fallback recommendation. The status replay trace and MCP smoke cover this diagnostic.
 - Unit fixture coverage now exercises flat and mostly generic weak accessibility trees through the same quality-status response and compact operator summary emitted by the daemon.
 - Daemon error responses now carry structured `kind` metadata for missing approval, explicit policy denial, app denial, focus guard, human-input pause, panic-stop, rate limit, portal/backend availability, backend failure, accessibility availability/weak-tree, validation, and unknown failures. MCP compact text includes the kind; policy/input denial replay traces assert `/data/kind = policy_prompt_required`; trace replay reports `error_kind`; configured-daemon CLI replay coverage proves app-policy, focus-guard, human-input-pause, forced portal-unavailable, and accessibility-unavailable kinds without unsafe desktop control or portal consent UI. MCP stdio integration now covers the same configured-denial categories through private daemons and asserts structured `data.kind` plus compact error text.
+- `wait_for_change` now reports explicit watchdog metadata, including `timed_out`, requested timeout, and poll interval, so a stalled/no-change visual poll can be distinguished from command failure or screenshot backend failure.
 
 ## Future Eval Candidates
 
@@ -73,4 +74,3 @@ This note captures Mac computer-use patterns that should influence PlasmaPilot l
 - Add a post-action observation contract for opt-in GUI smokes: every live control eval should require a follow-up active-window or AT-SPI read plus journal evidence before considering the action complete.
 - Add a long-scroll semantic eval that proves the agent can inspect more than one viewport through AT-SPI before falling back to screenshots.
 - Add non-US keyboard and IME coverage for explicit EIS/keymap paths before claiming broad text-entry reliability.
-- Add a background-throttling/watchdog diagnostic for long-running GUI evals so stalled output polling is distinguished from failed desktop action.
