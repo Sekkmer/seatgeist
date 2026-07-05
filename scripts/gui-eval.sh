@@ -45,6 +45,8 @@ journal="$run_dir/journal.jsonl"
 panic_stop_file="$run_dir/panic-stop.flag"
 approval_file="$run_dir/approvals.jsonl"
 config_file="$run_dir/config.toml"
+kwin_bridge_lock_file="$run_root/kwin-bridge-dbus.lock"
+kwin_bridge_lock_fd=""
 pid=""
 
 emit_failure_diagnostics() {
@@ -86,6 +88,15 @@ trap on_exit EXIT
 mkdir -p "$run_root" "$run_dir"
 chmod 700 "$run_root" "$run_dir"
 ln -sfnT "$run_id" "$latest_link"
+
+if [[ "$case_name" == "all" || "$case_name" == "kwin-bridge-status" || "$case_name" == "control-safety" ]]; then
+	if ! command -v flock >/dev/null 2>&1; then
+		echo "flock is required for KWin bridge DBus eval serialization" >&2
+		exit 1
+	fi
+	exec {kwin_bridge_lock_fd}>"$kwin_bridge_lock_file"
+	flock "$kwin_bridge_lock_fd"
+fi
 
 cargo build -p plasma-pilotd -p plasma-pilot-cli
 if [[ "$case_name" == "all" || "$case_name" == "screenshot-config-bounds" || "$case_name" == "journal-artifacts" ]]; then
@@ -223,6 +234,25 @@ portal_screenshot_cancelled() {
 	grep -qi "portal screenshot request was cancelled or ended without a screenshot" "$1"
 }
 
+seed_kwin_bridge_updates() {
+	if ! command -v qdbus6 >/dev/null 2>&1; then
+		return 1
+	fi
+
+	local active_payload='{"active":true,"id":"plasma-pilot-eval-window","title":"PlasmaPilot Eval Window","app_id":"org.plasmapilot.eval","geometry":{"x":0,"y":0,"width":100,"height":100}}'
+	local windows_payload='{"windows":[{"id":"plasma-pilot-eval-window","title":"PlasmaPilot Eval Window","app_id":"org.plasmapilot.eval","geometry":{"x":0,"y":0,"width":100,"height":100}},{"id":"plasma-pilot-eval-secondary","title":"PlasmaPilot Eval Secondary","app_id":"org.plasmapilot.eval","geometry":{"x":120,"y":0,"width":80,"height":80}}]}'
+
+	for _ in {1..50}; do
+		if qdbus6 org.plasmapilot.KWinBridge /org/plasmapilot/KWinBridge1 org.plasmapilot.KWinBridge1.UpdateActiveWindow "$active_payload" >/dev/null 2>&1 \
+			&& qdbus6 org.plasmapilot.KWinBridge /org/plasmapilot/KWinBridge1 org.plasmapilot.KWinBridge1.UpdateWindows "$windows_payload" >/dev/null 2>&1; then
+			return 0
+		fi
+		sleep 0.1
+	done
+
+	return 1
+}
+
 skip_portal_screenshot_cancel() {
 	local eval_name="$1"
 	local err_file="$2"
@@ -234,6 +264,11 @@ skip_portal_screenshot_cancel() {
 }
 
 eval_kwin_bridge_status() {
+	local seeded="false"
+	if seed_kwin_bridge_updates; then
+		seeded="true"
+	fi
+
 	cli kwin-bridge-status >"$run_dir/kwin-bridge-status.json"
 	jq -e '
 		.type == "kwin_bridge_status"
@@ -247,6 +282,16 @@ eval_kwin_bridge_status() {
 			or (.data.script_enabled == null)
 		)
 	' "$run_dir/kwin-bridge-status.json" >/dev/null
+	if [[ "$seeded" == "true" ]]; then
+		jq -e '
+			.data.dbus_service_registered == true
+			and .data.active_window_update_seen == true
+			and .data.window_list_update_seen == true
+			and .data.window_count == 2
+			and .data.active_window.id == "plasma-pilot-eval-window"
+			and .data.active_window.app_id == "org.plasmapilot.eval"
+		' "$run_dir/kwin-bridge-status.json" >/dev/null
+	fi
 	cli journal tail --limit 20 --method kwin_bridge_status --ok true >"$run_dir/kwin-bridge-status-journal.json"
 	jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/kwin-bridge-status-journal.json" >/dev/null
 }
@@ -747,14 +792,7 @@ eval_control_safety() {
 	jq -e '.method == "focus_window" and .safety_class == "control_semantic"' "$run_dir/control-safety-approval.json" >/dev/null
 	test "$(stat -c '%a' "$approval_file")" = "600"
 
-	if command -v qdbus6 >/dev/null 2>&1; then
-		for _ in {1..50}; do
-			if qdbus6 org.plasmapilot.KWinBridge /org/plasmapilot/KWinBridge1 org.plasmapilot.KWinBridge1.UpdateActiveWindow '{"active":true,"id":"plasma-pilot-eval-window","title":"PlasmaPilot Eval Window","app_id":"org.plasmapilot.eval","geometry":{"x":0,"y":0,"width":100,"height":100}}' >/dev/null 2>&1; then
-				break
-			fi
-			sleep 0.1
-		done
-	fi
+	seed_kwin_bridge_updates || true
 
 	if cli active-window >"$run_dir/control-safety-active-window.json" 2>/dev/null; then
 		if cli focus --window "__plasma_pilot_eval_never__" --expected-active-window "__plasma_pilot_wrong_window__" >"$run_dir/guard-denied.txt" 2>&1; then
