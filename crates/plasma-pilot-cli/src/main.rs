@@ -327,6 +327,7 @@ enum InputCommand {
 
 #[derive(Debug, Subcommand)]
 enum AtspiCommand {
+    QualityStatus,
     Tree {
         #[arg(long)]
         focused: bool,
@@ -1074,6 +1075,9 @@ fn main() -> Result<()> {
                 ),
             }),
         )?,
+        Command::Atspi {
+            command: AtspiCommand::QualityStatus,
+        } => print_daemon_response(&socket, DaemonRequest::AccessibilityQualityStatus)?,
         Command::Atspi {
             command:
                 AtspiCommand::Tree {
@@ -2149,6 +2153,7 @@ fn known_response_types() -> &'static [&'static str] {
         "wait_for_change",
         "clipboard_backend_status",
         "clipboard_text",
+        "accessibility_quality_status",
         "accessibility_tree",
         "accessibility_matches",
         "accessibility_text_attributes",

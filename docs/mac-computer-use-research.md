@@ -63,6 +63,7 @@ This note captures Mac computer-use patterns that should influence PlasmaPilot l
 
 - `make smoke-human-input-pause` starts a private daemon with `[safety].pause_on_human_input = true`, writes a fresh activity signal, verifies `safety-status` reports the signal as fresh, then confirms an approved focus-control request is denied and journaled before backend execution. This is included in `make verify`.
 - `semantic_resolvers_do_not_depend_on_stable_node_ids` verifies that high-level button and visible menu-path resolution still works when AT-SPI node IDs change between sessions but role/name/path/action context stays stable.
+- `plasma-pilot-cli atspi quality-status`, daemon `accessibility_quality_status`, and MCP `plasma.a11y_quality_status` report whether a bounded focused AT-SPI tree looks useful for semantic targeting, including flat/generic/empty-tree signals and a fallback recommendation. The status replay trace and MCP smoke cover this diagnostic.
 
 ## Future Eval Candidates
 
@@ -70,7 +71,6 @@ This note captures Mac computer-use patterns that should influence PlasmaPilot l
 - Add an opt-in app-scoped screenshot eval that compares active-window capture/tile behavior against full-screen preview metadata.
 - Add a post-action observation contract for opt-in GUI smokes: every live control eval should require a follow-up active-window or AT-SPI read plus journal evidence before considering the action complete.
 - Add a long-scroll semantic eval that proves the agent can inspect more than one viewport through AT-SPI before falling back to screenshots.
-- Add an AT-SPI quality diagnostic that identifies flat/generic/empty trees, flags when semantic targeting is likely unreliable, and records which fallback path would be used.
 - Add a policy-vs-backend denial fixture that proves MCP/CLI errors distinguish missing approval, app deny, focus guard, human-input pause, portal unavailable, and weak accessibility-tree cases.
 - Add non-US keyboard and IME coverage for explicit EIS/keymap paths before claiming broad text-entry reliability.
 - Add a background-throttling/watchdog diagnostic for long-running GUI evals so stalled output polling is distinguished from failed desktop action.

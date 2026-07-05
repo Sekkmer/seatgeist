@@ -49,6 +49,32 @@
       "expect_ok": true
     },
     {
+      "label": "accessibility-quality-status",
+      "request": {
+        "method": "accessibility_quality_status"
+      },
+      "expect_response_type": "accessibility_quality_status",
+      "expect_ok": true,
+      "expect_json": [
+        {
+          "pointer": "/data/atspi_available",
+          "value_type": "boolean"
+        },
+        {
+          "pointer": "/data/semantic_targeting_reliable",
+          "value_type": "boolean"
+        },
+        {
+          "pointer": "/data/recommended_fallback",
+          "value_type": "string"
+        },
+        {
+          "pointer": "/data/setup_hint",
+          "value_type": "string"
+        }
+      ]
+    },
+    {
       "label": "kwin-bridge-status",
       "request": {
         "method": "kwin_bridge_status"

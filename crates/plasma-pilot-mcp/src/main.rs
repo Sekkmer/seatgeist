@@ -342,6 +342,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         "plasma.clipboard_set_text" => Ok(DaemonRequest::ClipboardSet(ClipboardSetRequest {
             text: required_string(arguments, "text")?,
         })),
+        "plasma.a11y_quality_status" => Ok(DaemonRequest::AccessibilityQualityStatus),
         "plasma.a11y_focused_tree" => Ok(DaemonRequest::FocusedAccessibilityTree(
             FocusedAccessibilityTreeRequest {
                 depth: optional_u64(arguments, "depth")?
@@ -840,6 +841,19 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             text.truncated,
             text.original_bytes,
             text.backend
+        ),
+        DaemonResponse::AccessibilityQualityStatus(status) => format!(
+            "accessibility quality atspi={} focused={} reliable={} nodes={} named={} actionable={} text={} generic={} flat={} fallback={}",
+            status.atspi_available,
+            status.focused_node_present,
+            status.semantic_targeting_reliable,
+            status.sampled_node_count,
+            status.named_node_count,
+            status.actionable_node_count,
+            status.text_node_count,
+            status.generic_role_count,
+            status.tree_flat,
+            status.recommended_fallback
         ),
         DaemonResponse::AccessibilityTree(Some(node)) => format!(
             "accessibility focused role={} name={} children={}",
@@ -1658,6 +1672,12 @@ fn tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "plasma.a11y_quality_status",
+            "Accessibility Quality Status",
+            "Report bounded AT-SPI availability and semantic-tree quality before choosing semantic actions or screenshot/pointer fallback.",
+            object_schema(vec![], vec![]),
+        ),
+        tool(
             "plasma.a11y_focused_tree",
             "Focused Accessibility Tree",
             "Return a compact AT-SPI subtree rooted at the currently focused accessibility node.",
@@ -2208,9 +2228,9 @@ fn i64_to_i32(value: i64) -> Result<i32> {
 mod tests {
     use super::*;
     use libplasma_pilot::{
-        CaptureBackendStatus, ClipboardBackendStatus, InputBackendStatus, KwinMetadataStatus,
-        LibeiStatus, RemoteDesktopPortalStatus, SafetyStatus, ScreenshotPortalStatus,
-        SpectacleStatus, XkbKeymapStatus,
+        AccessibilityQualityStatus, CaptureBackendStatus, ClipboardBackendStatus,
+        InputBackendStatus, KwinMetadataStatus, LibeiStatus, RemoteDesktopPortalStatus,
+        SafetyStatus, ScreenshotPortalStatus, SpectacleStatus, XkbKeymapStatus,
     };
     use libplasma_pilot::{ScreenshotInfo, ScreenshotTransform, WaitForChangeResult};
     use std::path::Path;
@@ -2272,6 +2292,34 @@ mod tests {
             "text attributes range=2..8 count=1 node=atspi://:1.42/org/a11y/atspi/accessible/7"
         );
         assert!(!text.contains("bold"));
+    }
+
+    #[test]
+    fn accessibility_quality_compact_text_reports_fallback() {
+        let text = compact_tool_text(
+            "plasma.a11y_quality_status",
+            &DaemonResponse::AccessibilityQualityStatus(AccessibilityQualityStatus {
+                atspi_available: true,
+                focused_node_present: true,
+                sample_depth: 4,
+                sample_max_nodes: 512,
+                sampled_node_count: 12,
+                named_node_count: 5,
+                actionable_node_count: 3,
+                text_node_count: 2,
+                sensitive_node_count: 1,
+                generic_role_count: 2,
+                max_depth_seen: 3,
+                tree_flat: false,
+                semantic_targeting_reliable: true,
+                recommended_fallback: "atspi_semantic".to_string(),
+                setup_hint: "prefer semantic actions".to_string(),
+            }),
+        );
+        assert!(text.contains("atspi=true"));
+        assert!(text.contains("reliable=true"));
+        assert!(text.contains("nodes=12"));
+        assert!(text.contains("fallback=atspi_semantic"));
     }
 
     #[test]
@@ -2634,6 +2682,11 @@ mod tests {
             tools
                 .iter()
                 .any(|tool| tool["name"] == "plasma.clipboard_status")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "plasma.a11y_quality_status")
         );
         assert!(
             tools
@@ -3514,6 +3567,13 @@ mod tests {
         let request = daemon_request_for_tool("plasma.clipboard_status", &json!({}))
             .expect("clipboard status maps");
         assert_eq!(request, DaemonRequest::ClipboardBackendStatus);
+    }
+
+    #[test]
+    fn maps_accessibility_quality_status_tool() {
+        let request = daemon_request_for_tool("plasma.a11y_quality_status", &json!({}))
+            .expect("accessibility quality status maps");
+        assert_eq!(request, DaemonRequest::AccessibilityQualityStatus);
     }
 
     #[test]

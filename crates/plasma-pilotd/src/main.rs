@@ -19,26 +19,27 @@ use image::{GenericImageView, Rgba, imageops::FilterType};
 use libplasma_pilot::{
     AccessibilityCopyTextRequest, AccessibilityCutTextRequest, AccessibilityDeleteTextRequest,
     AccessibilityFindRequest, AccessibilityInsertTextRequest, AccessibilityInvokeRequest,
-    AccessibilityPasteTextRequest, AccessibilitySetCaretRequest, AccessibilitySetSelectionRequest,
-    AccessibilitySetTextRequest, AccessibilityTextAttributesRequest, ActionResult,
-    ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard, BackendCapability, CapabilitySet,
-    CaptureBackendStatus, ClickButtonRequest, ClickPointerRequest, ClipboardBackendStatus,
-    ClipboardGetRequest, ClipboardText, CoordinateSpace, DaemonClientIdentity, DaemonRequest,
-    DaemonRequestEnvelope, DaemonResponse, DesktopObservation, DesktopSessionStatus,
-    DragPointerRequest, FocusTextFieldRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest,
-    HealthStatus, InputBackendStatus, JournalArtifactContext, JournalClientContext,
-    JournalControlContext, JournalEntry, JournalRequestedTarget, JournalWindowContext,
-    KeyComboRequest, KwinBridgeStatus, KwinMetadataStatus, LibeiStatus, MovePointerRequest,
-    ObserveRequest, PanicStopStatus, Point, PointerButton, PointerCalibrationPoint,
-    PointerCalibrationStatus, PointerMonitorCalibration, PointerPhysicalBounds, PolicyStatus,
-    RemoteDesktopEisProbe, RemoteDesktopEisSessionStatus, RemoteDesktopPersistMode,
-    RemoteDesktopPortalStatus, RemoteDesktopSessionProbe, RemoteDesktopSessionProbeRequest,
-    SafetyClass, SafetyStatus, ScreenshotInfo, ScreenshotPortalStatus, ScreenshotRequest,
-    ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest, SelectItemRequest,
-    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, SpectacleStatus,
-    ToggleCheckRequest, ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest,
-    WaitForChangeResult, WindowGeometry, WindowInfo, XkbKeymapStatus, current_egid, current_euid,
-    default_journal_path, default_panic_stop_path, default_socket_path,
+    AccessibilityPasteTextRequest, AccessibilityQualityStatus, AccessibilitySetCaretRequest,
+    AccessibilitySetSelectionRequest, AccessibilitySetTextRequest,
+    AccessibilityTextAttributesRequest, ActionResult, ActivateLinkRequest, ActivateTabRequest,
+    ActiveWindowGuard, BackendCapability, CapabilitySet, CaptureBackendStatus, ClickButtonRequest,
+    ClickPointerRequest, ClipboardBackendStatus, ClipboardGetRequest, ClipboardText,
+    CoordinateSpace, DaemonClientIdentity, DaemonRequest, DaemonRequestEnvelope, DaemonResponse,
+    DesktopObservation, DesktopSessionStatus, DragPointerRequest, FocusTextFieldRequest,
+    FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus,
+    JournalArtifactContext, JournalClientContext, JournalControlContext, JournalEntry,
+    JournalRequestedTarget, JournalWindowContext, KeyComboRequest, KwinBridgeStatus,
+    KwinMetadataStatus, LibeiStatus, MovePointerRequest, ObserveRequest, PanicStopStatus, Point,
+    PointerButton, PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
+    PointerPhysicalBounds, PolicyStatus, RemoteDesktopEisProbe, RemoteDesktopEisSessionStatus,
+    RemoteDesktopPersistMode, RemoteDesktopPortalStatus, RemoteDesktopSessionProbe,
+    RemoteDesktopSessionProbeRequest, SafetyClass, SafetyStatus, ScreenshotInfo,
+    ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
+    ScrollPointerRequest, SelectItemRequest, SelectMenuRequest, SetPanicStopRequest,
+    SetTextFieldRequest, SetValueRequest, SpectacleStatus, ToggleCheckRequest, ToolApprovalLevel,
+    TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult, WindowGeometry,
+    WindowInfo, XkbKeymapStatus, current_egid, current_euid, default_journal_path,
+    default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -60,6 +61,8 @@ const DEFAULT_TILE_MAX_EDGE: u32 = 1600;
 const CONTROL_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 const PORTAL_SCREENSHOT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_REMOTE_DESKTOP_PROBE_TIMEOUT: Duration = Duration::from_secs(300);
+const ACCESSIBILITY_QUALITY_SAMPLE_DEPTH: usize = 4;
+const ACCESSIBILITY_QUALITY_SAMPLE_MAX_NODES: usize = 512;
 
 #[derive(Debug, Clone)]
 struct ActionJournal {
@@ -1750,6 +1753,9 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 message: format_error_chain(&err),
             },
         },
+        DaemonRequest::AccessibilityQualityStatus => {
+            DaemonResponse::AccessibilityQualityStatus(accessibility_quality_status())
+        }
         DaemonRequest::FocusedAccessibilityTree(request) => {
             match focused_accessibility_tree(request) {
                 Ok(tree) => DaemonResponse::AccessibilityTree(tree),
@@ -4366,6 +4372,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::CaptureBackendStatus
         | DaemonRequest::PointerCalibration
         | DaemonRequest::ClipboardBackendStatus
+        | DaemonRequest::AccessibilityQualityStatus
         | DaemonRequest::JournalTail(_) => SafetyClass::Policy,
         DaemonRequest::ListMonitors
         | DaemonRequest::ListWindows
@@ -5479,6 +5486,179 @@ fn accessibility_find(
     request: AccessibilityFindRequest,
 ) -> Result<Vec<libplasma_pilot::AccessibilityNode>> {
     plasma_pilot_atspi::find(request).map_err(|err| anyhow::anyhow!(err))
+}
+
+#[derive(Default)]
+struct AccessibilityQualityCounts {
+    sampled_node_count: usize,
+    named_node_count: usize,
+    actionable_node_count: usize,
+    text_node_count: usize,
+    sensitive_node_count: usize,
+    generic_role_count: usize,
+    max_depth_seen: usize,
+}
+
+fn accessibility_quality_status() -> AccessibilityQualityStatus {
+    let sample_depth = ACCESSIBILITY_QUALITY_SAMPLE_DEPTH;
+    let sample_max_nodes = ACCESSIBILITY_QUALITY_SAMPLE_MAX_NODES;
+    if !plasma_pilot_atspi::available() {
+        return AccessibilityQualityStatus {
+            atspi_available: false,
+            focused_node_present: false,
+            sample_depth,
+            sample_max_nodes,
+            sampled_node_count: 0,
+            named_node_count: 0,
+            actionable_node_count: 0,
+            text_node_count: 0,
+            sensitive_node_count: 0,
+            generic_role_count: 0,
+            max_depth_seen: 0,
+            tree_flat: false,
+            semantic_targeting_reliable: false,
+            recommended_fallback: "desktop_session_status".to_string(),
+            setup_hint: "AT-SPI bus is not available; check DBus/session accessibility setup before semantic UI control".to_string(),
+        };
+    }
+
+    let focused = match focused_accessibility_tree(FocusedAccessibilityTreeRequest {
+        depth: sample_depth,
+        max_nodes: sample_max_nodes,
+    }) {
+        Ok(focused) => focused,
+        Err(err) => {
+            return AccessibilityQualityStatus {
+                atspi_available: true,
+                focused_node_present: false,
+                sample_depth,
+                sample_max_nodes,
+                sampled_node_count: 0,
+                named_node_count: 0,
+                actionable_node_count: 0,
+                text_node_count: 0,
+                sensitive_node_count: 0,
+                generic_role_count: 0,
+                max_depth_seen: 0,
+                tree_flat: false,
+                semantic_targeting_reliable: false,
+                recommended_fallback: "screenshot_tile_or_structured_integration".to_string(),
+                setup_hint: format!(
+                    "AT-SPI is reachable but focused-tree sampling failed: {}",
+                    format_error_chain(&err)
+                ),
+            };
+        }
+    };
+
+    let Some(root) = focused else {
+        return AccessibilityQualityStatus {
+            atspi_available: true,
+            focused_node_present: false,
+            sample_depth,
+            sample_max_nodes,
+            sampled_node_count: 0,
+            named_node_count: 0,
+            actionable_node_count: 0,
+            text_node_count: 0,
+            sensitive_node_count: 0,
+            generic_role_count: 0,
+            max_depth_seen: 0,
+            tree_flat: false,
+            semantic_targeting_reliable: false,
+            recommended_fallback: "focus_target_window_or_screenshot".to_string(),
+            setup_hint: "AT-SPI is reachable but no focused accessibility node was found; focus the target app or use screenshot/window diagnostics first".to_string(),
+        };
+    };
+
+    let mut counts = AccessibilityQualityCounts::default();
+    collect_accessibility_quality_counts(&root, 0, &mut counts);
+    let semantic_signal_count =
+        counts.named_node_count + counts.actionable_node_count + counts.text_node_count;
+    let tree_flat = counts.sampled_node_count <= 1 || counts.max_depth_seen == 0;
+    let mostly_generic =
+        counts.sampled_node_count > 0 && counts.generic_role_count == counts.sampled_node_count;
+    let semantic_targeting_reliable = !tree_flat && semantic_signal_count > 0 && !mostly_generic;
+    let recommended_fallback = if semantic_targeting_reliable {
+        "atspi_semantic"
+    } else if semantic_signal_count > 0 {
+        "atspi_find_with_screenshot_confirmation"
+    } else {
+        "screenshot_tile_or_structured_integration"
+    };
+    let setup_hint = if semantic_targeting_reliable {
+        "AT-SPI tree has names/actions/text in a non-flat subtree; prefer semantic actions before pixel fallback".to_string()
+    } else if tree_flat {
+        "AT-SPI tree is flat or only exposes the focused node; use semantic actions cautiously and confirm with screenshot or structured app integration".to_string()
+    } else if mostly_generic {
+        "AT-SPI tree is mostly generic roles; prefer screenshot, app API, or explicit pointer fallback for this surface".to_string()
+    } else {
+        "AT-SPI tree has limited semantic signals; confirm targets with screenshot or structured app integration before control".to_string()
+    };
+
+    AccessibilityQualityStatus {
+        atspi_available: true,
+        focused_node_present: true,
+        sample_depth,
+        sample_max_nodes,
+        sampled_node_count: counts.sampled_node_count,
+        named_node_count: counts.named_node_count,
+        actionable_node_count: counts.actionable_node_count,
+        text_node_count: counts.text_node_count,
+        sensitive_node_count: counts.sensitive_node_count,
+        generic_role_count: counts.generic_role_count,
+        max_depth_seen: counts.max_depth_seen,
+        tree_flat,
+        semantic_targeting_reliable,
+        recommended_fallback: recommended_fallback.to_string(),
+        setup_hint,
+    }
+}
+
+fn collect_accessibility_quality_counts(
+    node: &libplasma_pilot::AccessibilityNode,
+    depth: usize,
+    counts: &mut AccessibilityQualityCounts,
+) {
+    counts.sampled_node_count += 1;
+    counts.max_depth_seen = counts.max_depth_seen.max(depth);
+    if node
+        .name
+        .as_deref()
+        .is_some_and(|name| !name.trim().is_empty())
+    {
+        counts.named_node_count += 1;
+    }
+    if !node.actions.is_empty() || !node.available_actions.is_empty() {
+        counts.actionable_node_count += 1;
+    }
+    if is_accessibility_text_role(&node.role) {
+        counts.text_node_count += 1;
+    }
+    if node.sensitive {
+        counts.sensitive_node_count += 1;
+    }
+    if is_generic_accessibility_role(&node.role) {
+        counts.generic_role_count += 1;
+    }
+    for child in &node.children {
+        collect_accessibility_quality_counts(child, depth + 1, counts);
+    }
+}
+
+fn is_accessibility_text_role(role: &str) -> bool {
+    let role = role.to_ascii_lowercase();
+    role.contains("text")
+        || role.contains("entry")
+        || role.contains("paragraph")
+        || role.contains("document")
+}
+
+fn is_generic_accessibility_role(role: &str) -> bool {
+    matches!(
+        role.to_ascii_lowercase().as_str(),
+        "unknown" | "filler" | "panel" | "section" | "layer" | "canvas"
+    )
 }
 
 fn accessibility_text_attributes(
@@ -7606,6 +7786,19 @@ fn summarize_response(response: &DaemonResponse) -> String {
             text.truncated,
             text.original_bytes,
             text.backend
+        ),
+        DaemonResponse::AccessibilityQualityStatus(status) => format!(
+            "accessibility quality atspi={} focused={} reliable={} nodes={} named={} actionable={} text={} generic={} flat={} fallback={}",
+            status.atspi_available,
+            status.focused_node_present,
+            status.semantic_targeting_reliable,
+            status.sampled_node_count,
+            status.named_node_count,
+            status.actionable_node_count,
+            status.text_node_count,
+            status.generic_role_count,
+            status.tree_flat,
+            status.recommended_fallback
         ),
         DaemonResponse::AccessibilityTree(Some(node)) => format!(
             "accessibility focused role={} name={} children={}",
@@ -9749,6 +9942,8 @@ height = 40
             .expect("pointer calibration is allowed as policy diagnostics");
         enforce_policy(&policy, &DaemonRequest::DesktopSessionStatus)
             .expect("desktop session status is allowed as policy diagnostics");
+        enforce_policy(&policy, &DaemonRequest::AccessibilityQualityStatus)
+            .expect("accessibility quality status is allowed as policy diagnostics");
     }
 
     #[test]
@@ -11487,6 +11682,49 @@ height = 40
         assert_eq!(first_menu.0.role, second_menu.0.role);
         assert_eq!(first_menu.0.name, second_menu.0.name);
         assert_eq!(first_menu.1, second_menu.1);
+    }
+
+    #[test]
+    fn accessibility_quality_counts_semantic_signals() {
+        let mut root = libplasma_pilot::AccessibilityNode {
+            id: "root".to_string(),
+            role: "frame".to_string(),
+            name: Some("Editor".to_string()),
+            value: None,
+            value_truncated: false,
+            sensitive: false,
+            states: vec!["focused".to_string()],
+            bounds: None,
+            available_actions: Vec::new(),
+            actions: Vec::new(),
+            children: vec![
+                button_node("save", "Save"),
+                text_node("body", "Document Body"),
+                libplasma_pilot::AccessibilityNode {
+                    id: "canvas".to_string(),
+                    role: "canvas".to_string(),
+                    name: None,
+                    value: None,
+                    value_truncated: false,
+                    sensitive: false,
+                    states: Vec::new(),
+                    bounds: None,
+                    available_actions: Vec::new(),
+                    actions: Vec::new(),
+                    children: Vec::new(),
+                },
+            ],
+        };
+        root.children[1].sensitive = true;
+        let mut counts = AccessibilityQualityCounts::default();
+        collect_accessibility_quality_counts(&root, 0, &mut counts);
+        assert_eq!(counts.sampled_node_count, 4);
+        assert_eq!(counts.named_node_count, 3);
+        assert_eq!(counts.actionable_node_count, 2);
+        assert_eq!(counts.text_node_count, 1);
+        assert_eq!(counts.sensitive_node_count, 1);
+        assert_eq!(counts.generic_role_count, 1);
+        assert_eq!(counts.max_depth_seen, 1);
     }
 
     #[test]

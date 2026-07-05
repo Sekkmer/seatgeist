@@ -560,6 +560,25 @@ pub struct ClipboardSetRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessibilityQualityStatus {
+    pub atspi_available: bool,
+    pub focused_node_present: bool,
+    pub sample_depth: usize,
+    pub sample_max_nodes: usize,
+    pub sampled_node_count: usize,
+    pub named_node_count: usize,
+    pub actionable_node_count: usize,
+    pub text_node_count: usize,
+    pub sensitive_node_count: usize,
+    pub generic_role_count: usize,
+    pub max_depth_seen: usize,
+    pub tree_flat: bool,
+    pub semantic_targeting_reliable: bool,
+    pub recommended_fallback: String,
+    pub setup_hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FocusedAccessibilityTreeRequest {
     pub depth: usize,
     pub max_nodes: usize,
@@ -891,6 +910,7 @@ pub enum DaemonRequest {
     ClipboardBackendStatus,
     ClipboardGet(ClipboardGetRequest),
     ClipboardSet(ClipboardSetRequest),
+    AccessibilityQualityStatus,
     FocusedAccessibilityTree(FocusedAccessibilityTreeRequest),
     AccessibilityFind(AccessibilityFindRequest),
     AccessibilityTextAttributes(AccessibilityTextAttributesRequest),
@@ -952,6 +972,7 @@ impl DaemonRequest {
             Self::ClipboardBackendStatus => "clipboard_backend_status",
             Self::ClipboardGet(_) => "clipboard_get",
             Self::ClipboardSet(_) => "clipboard_set",
+            Self::AccessibilityQualityStatus => "accessibility_quality_status",
             Self::FocusedAccessibilityTree(_) => "focused_accessibility_tree",
             Self::AccessibilityFind(_) => "accessibility_find",
             Self::AccessibilityTextAttributes(_) => "accessibility_text_attributes",
@@ -1010,6 +1031,7 @@ pub enum DaemonResponse {
     WaitForChange(Box<WaitForChangeResult>),
     ClipboardBackendStatus(ClipboardBackendStatus),
     ClipboardText(ClipboardText),
+    AccessibilityQualityStatus(AccessibilityQualityStatus),
     AccessibilityTree(Option<AccessibilityNode>),
     AccessibilityMatches(Vec<AccessibilityNode>),
     AccessibilityTextAttributes(AccessibilityTextAttributes),
@@ -1043,6 +1065,7 @@ impl DaemonResponse {
             Self::WaitForChange(_) => "wait_for_change",
             Self::ClipboardBackendStatus(_) => "clipboard_backend_status",
             Self::ClipboardText(_) => "clipboard_text",
+            Self::AccessibilityQualityStatus(_) => "accessibility_quality_status",
             Self::AccessibilityTree(_) => "accessibility_tree",
             Self::AccessibilityMatches(_) => "accessibility_matches",
             Self::AccessibilityTextAttributes(_) => "accessibility_text_attributes",
@@ -1977,6 +2000,36 @@ mod tests {
             encoded,
             r#"{"method":"focused_accessibility_tree","depth":2,"max_nodes":100}"#
         );
+    }
+
+    #[test]
+    fn serializes_accessibility_quality_status() {
+        let request = DaemonRequest::AccessibilityQualityStatus;
+        let encoded =
+            serde_json::to_string(&request).expect("a11y quality status request serializes");
+        assert_eq!(encoded, r#"{"method":"accessibility_quality_status"}"#);
+
+        let response = DaemonResponse::AccessibilityQualityStatus(AccessibilityQualityStatus {
+            atspi_available: true,
+            focused_node_present: true,
+            sample_depth: 4,
+            sample_max_nodes: 512,
+            sampled_node_count: 9,
+            named_node_count: 4,
+            actionable_node_count: 2,
+            text_node_count: 1,
+            sensitive_node_count: 0,
+            generic_role_count: 1,
+            max_depth_seen: 3,
+            tree_flat: false,
+            semantic_targeting_reliable: true,
+            recommended_fallback: "atspi_semantic".to_string(),
+            setup_hint: "prefer semantic actions".to_string(),
+        });
+        let encoded = serde_json::to_string(&response).expect("a11y quality response serializes");
+        assert!(encoded.contains(r#""type":"accessibility_quality_status""#));
+        assert!(encoded.contains(r#""semantic_targeting_reliable":true"#));
+        assert_eq!(response.response_type(), "accessibility_quality_status");
     }
 
     #[test]
