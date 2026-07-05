@@ -2123,6 +2123,80 @@ mod tests {
     }
 
     #[test]
+    fn omitted_screenshot_max_edges_use_daemon_defaults() {
+        assert_eq!(
+            daemon_request_for_tool(
+                "plasma.screenshot",
+                &json!({
+                    "output": "/tmp/screen.png"
+                }),
+            )
+            .expect("screenshot args map"),
+            DaemonRequest::Screenshot(ScreenshotRequest {
+                output: "/tmp/screen.png".into(),
+                max_edge: None,
+                full_resolution: false,
+            })
+        );
+
+        assert_eq!(
+            daemon_request_for_tool(
+                "plasma.screenshot_tile",
+                &json!({
+                    "output": "/tmp/tile.png",
+                    "x": 10,
+                    "y": 20,
+                    "width": 640,
+                    "height": 480
+                }),
+            )
+            .expect("tile args map"),
+            DaemonRequest::ScreenshotTile(ScreenshotTileRequest {
+                output: "/tmp/tile.png".into(),
+                x: 10,
+                y: 20,
+                width: 640,
+                height: 480,
+                max_edge: None,
+            })
+        );
+
+        assert_eq!(
+            daemon_request_for_tool(
+                "plasma.observe",
+                &json!({
+                    "screenshot_output": "/tmp/observe.png"
+                }),
+            )
+            .expect("observe screenshot args map"),
+            DaemonRequest::Observe(ObserveRequest {
+                screenshot: Some(ScreenshotRequest {
+                    output: "/tmp/observe.png".into(),
+                    max_edge: None,
+                    full_resolution: false,
+                }),
+            })
+        );
+
+        assert_eq!(
+            daemon_request_for_tool(
+                "plasma.wait_for_change",
+                &json!({
+                    "output": "/tmp/wait.png"
+                }),
+            )
+            .expect("wait args map"),
+            DaemonRequest::WaitForChange(WaitForChangeRequest {
+                output: "/tmp/wait.png".into(),
+                max_edge: None,
+                timeout_ms: DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS,
+                interval_ms: DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
+                threshold: DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
+            })
+        );
+    }
+
+    #[test]
     fn maps_wait_for_change_arguments() {
         let request = daemon_request_for_tool(
             "plasma.wait_for_change",
