@@ -17,6 +17,9 @@ journal = "$XDG_STATE_HOME/plasma-pilot/journal.jsonl"
 panic_stop_file = "$XDG_RUNTIME_DIR/plasma-pilot/panic-stop"
 approval_file = "$XDG_RUNTIME_DIR/plasma-pilot/approvals.jsonl"
 
+[journal]
+include_artifact_metadata = false
+
 [backends]
 input = "auto"
 
@@ -57,6 +60,8 @@ height = 120
 ```
 
 Path values can use `$XDG_RUNTIME_DIR`, `$XDG_STATE_HOME`, `$XDG_CONFIG_HOME`, and `$HOME`.
+
+`[journal].include_artifact_metadata` defaults to `false`. When enabled, screenshot-bearing journal entries can include compact artifact records with the output path, byte count, and SHA-256 of the written file. This is useful for local audit correlation, but it is opt-in because paths can reveal local project/session details.
 
 Precedence is:
 

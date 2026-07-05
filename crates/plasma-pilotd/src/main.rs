@@ -4,7 +4,7 @@ use std::{
     fmt::{self, Display},
     fs,
     fs::OpenOptions,
-    io::Write,
+    io::{Read, Write},
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -26,8 +26,8 @@ use libplasma_pilot::{
     ClipboardText, CoordinateSpace, DaemonClientIdentity, DaemonRequest, DaemonRequestEnvelope,
     DaemonResponse, DesktopObservation, DesktopSessionStatus, DragPointerRequest,
     FocusTextFieldRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus,
-    InputBackendStatus, JournalClientContext, JournalControlContext, JournalEntry,
-    JournalRequestedTarget, JournalWindowContext, KeyComboRequest, KwinBridgeStatus,
+    InputBackendStatus, JournalArtifactContext, JournalClientContext, JournalControlContext,
+    JournalEntry, JournalRequestedTarget, JournalWindowContext, KeyComboRequest, KwinBridgeStatus,
     KwinMetadataStatus, LibeiStatus, MovePointerRequest, ObserveRequest, PanicStopStatus, Point,
     PointerButton, PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
     PointerPhysicalBounds, PolicyStatus, RemoteDesktopEisProbe, RemoteDesktopEisSessionStatus,
@@ -42,6 +42,7 @@ use libplasma_pilot::{
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
@@ -63,13 +64,15 @@ const MAX_REMOTE_DESKTOP_PROBE_TIMEOUT: Duration = Duration::from_secs(300);
 #[derive(Debug, Clone)]
 struct ActionJournal {
     path: PathBuf,
+    settings: JournalSettings,
     sequence: Arc<Mutex<u64>>,
 }
 
 impl ActionJournal {
-    fn new(path: PathBuf) -> Self {
+    fn new(path: PathBuf, settings: JournalSettings) -> Self {
         Self {
             path,
+            settings,
             sequence: Arc::new(Mutex::new(0)),
         }
     }
@@ -81,6 +84,7 @@ impl ActionJournal {
         response: &DaemonResponse,
     ) -> Result<()> {
         let control = finalize_journal_control_context(context.control, response);
+        let artifacts = journal_artifacts_for_response(response, &self.settings);
         let entry = JournalEntry {
             sequence: self.next_sequence()?,
             unix_time_ms: unix_time_ms()?,
@@ -91,6 +95,7 @@ impl ActionJournal {
             active_window_before: context.active_window_before,
             active_window_after: context.active_window_after,
             control,
+            artifacts,
             ok: !matches!(response, DaemonResponse::Error { .. }),
             summary: summarize_response(response),
         };
@@ -114,6 +119,11 @@ impl ActionJournal {
         *sequence += 1;
         Ok(*sequence)
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct JournalSettings {
+    include_artifact_metadata: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -451,6 +461,7 @@ impl From<KwinActiveWindowGeometry> for WindowGeometry {
 #[derive(Debug, Default, Deserialize)]
 struct DaemonConfigFile {
     daemon: Option<DaemonFileConfig>,
+    journal: Option<JournalFileConfig>,
     backends: Option<BackendFileConfig>,
     policy: Option<PolicyFileConfig>,
     apps: Option<AppsFileConfig>,
@@ -463,6 +474,11 @@ struct DaemonFileConfig {
     journal: Option<String>,
     panic_stop_file: Option<String>,
     approval_file: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct JournalFileConfig {
+    include_artifact_metadata: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -701,10 +717,12 @@ async fn main() -> Result<()> {
     let app_policy = app_policy(file_config.apps.as_ref());
     let safety_settings =
         safety_settings(file_config.safety.as_ref()).context("resolve safety settings")?;
+    let journal_settings = journal_settings(file_config.journal.as_ref());
 
     run(RunSettings {
         socket,
         journal_path: journal,
+        journal_settings,
         panic_stop_path: panic_stop_file,
         approval_file_path: approval_file,
         policy_config,
@@ -719,6 +737,7 @@ async fn main() -> Result<()> {
 struct RunSettings {
     socket: PathBuf,
     journal_path: PathBuf,
+    journal_settings: JournalSettings,
     panic_stop_path: PathBuf,
     approval_file_path: Option<PathBuf>,
     policy_config: PolicyConfig,
@@ -732,6 +751,7 @@ async fn run(settings: RunSettings) -> Result<()> {
     let RunSettings {
         socket,
         journal_path,
+        journal_settings,
         panic_stop_path,
         approval_file_path,
         policy_config,
@@ -740,7 +760,7 @@ async fn run(settings: RunSettings) -> Result<()> {
         input_backend_preference,
         xkb_keymap_config,
     } = settings;
-    let journal = ActionJournal::new(journal_path);
+    let journal = ActionJournal::new(journal_path, journal_settings);
     let panic_stop = PanicStopState::new(panic_stop_path);
     let approval_store = ApprovalStore::new(approval_file_path);
     let policy = PolicyEngine::new(policy_config);
@@ -1360,6 +1380,64 @@ fn compact_journal_title(mut title: String) -> String {
     title.truncate(end);
     title.push_str("...");
     title
+}
+
+fn journal_artifacts_for_response(
+    response: &DaemonResponse,
+    settings: &JournalSettings,
+) -> Vec<JournalArtifactContext> {
+    if !settings.include_artifact_metadata {
+        return Vec::new();
+    }
+
+    match response {
+        DaemonResponse::Screenshot(info) => {
+            vec![journal_artifact_for_screenshot("screenshot", info)]
+        }
+        DaemonResponse::Observation(observation) => observation
+            .screenshot
+            .as_ref()
+            .map(|info| journal_artifact_for_screenshot("observe_screenshot", info))
+            .into_iter()
+            .collect(),
+        DaemonResponse::WaitForChange(result) => vec![journal_artifact_for_screenshot(
+            "wait_for_change_screenshot",
+            &result.screenshot,
+        )],
+        _ => Vec::new(),
+    }
+}
+
+fn journal_artifact_for_screenshot(kind: &str, info: &ScreenshotInfo) -> JournalArtifactContext {
+    let (bytes, sha256) = journal_artifact_file_metadata(&info.path);
+    JournalArtifactContext {
+        kind: kind.to_string(),
+        path: info.path.clone(),
+        sha256,
+        bytes,
+    }
+}
+
+fn journal_artifact_file_metadata(path: &Path) -> (Option<u64>, Option<String>) {
+    let bytes = fs::metadata(path).ok().map(|metadata| metadata.len());
+    let sha256 = sha256_file(path).ok();
+    (bytes, sha256)
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("read {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResponse {
@@ -2247,6 +2325,14 @@ fn app_policy(file_apps: Option<&AppsFileConfig>) -> AppPolicy {
     AppPolicy {
         allow: normalize_app_policy_list(file_apps.allow.as_deref().unwrap_or(&[])),
         deny: normalize_app_policy_list(file_apps.deny.as_deref().unwrap_or(&[])),
+    }
+}
+
+fn journal_settings(file_journal: Option<&JournalFileConfig>) -> JournalSettings {
+    JournalSettings {
+        include_artifact_metadata: file_journal
+            .and_then(|journal| journal.include_artifact_metadata)
+            .unwrap_or(false),
     }
 }
 
@@ -7678,7 +7764,7 @@ mod tests {
             std::process::id(),
             unix_time_ms().expect("time is available")
         ));
-        let journal = ActionJournal::new(path.clone());
+        let journal = ActionJournal::new(path.clone(), JournalSettings::default());
 
         journal
             .record(
@@ -7751,6 +7837,7 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].sequence, 2);
         assert_eq!(entries[0].method, "focus_window");
+        assert!(entries[0].artifacts.is_empty());
         assert_eq!(
             entries[0]
                 .client
@@ -7810,6 +7897,75 @@ mod tests {
         assert!(entries[0].ok);
 
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn journal_artifact_metadata_is_opt_in_and_hashes_written_files() {
+        let path = std::env::temp_dir().join(format!(
+            "plasma-pilot-journal-artifact-test-{}-{}.jsonl",
+            std::process::id(),
+            unix_time_ms().expect("time is available")
+        ));
+        let artifact_path = temp_test_path("journal-artifact").with_extension("png");
+        fs::write(&artifact_path, b"abc").expect("artifact fixture is written");
+        let mut screenshot = sample_screenshot_info("test");
+        screenshot.path = artifact_path.clone();
+
+        let disabled = ActionJournal::new(path.clone(), JournalSettings::default());
+        disabled
+            .record(
+                "screenshot",
+                JournalContext {
+                    client: None,
+                    safety_class: SafetyClass::Observe,
+                    guard_present: false,
+                    active_window_before: None,
+                    active_window_after: None,
+                    control: None,
+                },
+                &DaemonResponse::Screenshot(screenshot.clone()),
+            )
+            .expect("disabled artifact record appends");
+        let entries = disabled
+            .tail_filtered(1, None, None)
+            .expect("disabled journal tail succeeds");
+        assert!(entries[0].artifacts.is_empty());
+
+        let enabled = ActionJournal::new(
+            path.clone(),
+            JournalSettings {
+                include_artifact_metadata: true,
+            },
+        );
+        enabled
+            .record(
+                "screenshot",
+                JournalContext {
+                    client: None,
+                    safety_class: SafetyClass::Observe,
+                    guard_present: false,
+                    active_window_before: None,
+                    active_window_after: None,
+                    control: None,
+                },
+                &DaemonResponse::Screenshot(screenshot),
+            )
+            .expect("enabled artifact record appends");
+        let entries = enabled
+            .tail_filtered(1, None, None)
+            .expect("enabled journal tail succeeds");
+        assert_eq!(entries[0].artifacts.len(), 1);
+        let artifact = &entries[0].artifacts[0];
+        assert_eq!(artifact.kind, "screenshot");
+        assert_eq!(artifact.path, artifact_path);
+        assert_eq!(artifact.bytes, Some(3));
+        assert_eq!(
+            artifact.sha256.as_deref(),
+            Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        );
+
+        fs::remove_file(&path).ok();
+        fs::remove_file(&artifact_path).ok();
     }
 
     #[test]
@@ -8762,6 +8918,9 @@ journal = "$XDG_STATE_HOME/plasma-pilot/configured.jsonl"
 panic_stop_file = "$XDG_RUNTIME_DIR/plasma-pilot/configured-panic-stop"
 approval_file = "$XDG_RUNTIME_DIR/plasma-pilot/approvals.jsonl"
 
+[journal]
+include_artifact_metadata = true
+
 [backends]
 input = "portal_remote_desktop"
 
@@ -8813,6 +8972,9 @@ height = 40
             daemon.approval_file.as_deref(),
             Some("$XDG_RUNTIME_DIR/plasma-pilot/approvals.jsonl")
         );
+        let journal = config.journal.expect("journal section is present");
+        assert_eq!(journal.include_artifact_metadata, Some(true));
+        assert!(journal_settings(Some(&journal)).include_artifact_metadata);
         let backends = config.backends.expect("backends section is present");
         assert_eq!(
             backends.input,

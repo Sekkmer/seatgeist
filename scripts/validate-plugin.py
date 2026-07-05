@@ -203,6 +203,14 @@ def validate_hook_summary_script(path: Path) -> None:
                     "title": "scratch.txt",
                 },
                 "summary": "focus guard is required",
+                "artifacts": [
+                    {
+                        "kind": "screenshot",
+                        "path": "target/plasma-pilot/preview.png",
+                        "sha256": "a" * 64,
+                        "bytes": 42,
+                    }
+                ],
             },
             {
                 "journal": "target/plasma-pilot-smoke-journal.jsonl",
@@ -246,9 +254,16 @@ def validate_hook_summary_script(path: Path) -> None:
         fail("PlasmaPilot hook audit must include recent failures")
     if not audit.get("unguarded_control_examples"):
         fail("PlasmaPilot hook audit must include unguarded control examples")
+    artifacts = audit["unguarded_control_examples"][0].get("artifacts")
+    if not artifacts or artifacts[0].get("sha256") != "a" * 64:
+        fail("PlasmaPilot hook audit must preserve compact artifact metadata when present")
     last_window = audit.get("last_active_window")
     if not isinstance(last_window, dict) or last_window.get("app_id") != "org.kde.kate":
         fail("PlasmaPilot hook audit must include last active window context")
+
+    examples = audit.get("recent_failures", []) + audit.get("unguarded_control_examples", [])
+    if any("raw prompt" in json.dumps(example) for example in examples):
+        fail("PlasmaPilot hook audit examples must remain compact")
 
 
 def validate_skills(skills_root: Path) -> None:

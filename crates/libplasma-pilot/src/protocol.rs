@@ -342,6 +342,8 @@ pub struct JournalEntry {
     pub active_window_after: Option<JournalWindowContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<JournalControlContext>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<JournalArtifactContext>,
     pub ok: bool,
     pub summary: String,
 }
@@ -354,6 +356,16 @@ pub struct JournalClientContext {
     pub pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalArtifactContext {
+    pub kind: String,
+    pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1246,6 +1258,7 @@ mod tests {
         assert_eq!(entry.active_window_before, None);
         assert_eq!(entry.active_window_after, None);
         assert_eq!(entry.control, None);
+        assert!(entry.artifacts.is_empty());
     }
 
     #[test]
@@ -1282,6 +1295,12 @@ mod tests {
                     fields: BTreeMap::from([("window_id".to_string(), "window-1".to_string())]),
                 }),
             }),
+            artifacts: vec![JournalArtifactContext {
+                kind: "screenshot".to_string(),
+                path: PathBuf::from("/tmp/plasma-pilot-preview.png"),
+                sha256: Some("a".repeat(64)),
+                bytes: Some(1024),
+            }],
             ok: false,
             summary: "policy denied".to_string(),
         };
@@ -1300,6 +1319,10 @@ mod tests {
         assert!(encoded.contains(r#""policy":"allow""#));
         assert!(encoded.contains(r#""backend":"kwin""#));
         assert!(encoded.contains(r#""requested_target""#));
+        assert!(encoded.contains(r#""artifacts""#));
+        assert!(encoded.contains(r#""kind":"screenshot""#));
+        assert!(encoded.contains(r#""sha256""#));
+        assert!(encoded.contains(r#""bytes":1024"#));
     }
 
     #[test]

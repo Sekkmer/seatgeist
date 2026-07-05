@@ -69,6 +69,7 @@ def recent_journal_entries(root: Path, limit: int = 20) -> list[dict[str, Any]]:
                     "active_window_before": entry.get("active_window_before"),
                     "active_window_after": entry.get("active_window_after"),
                     "summary": entry.get("summary"),
+                    "artifacts": compact_artifacts(entry.get("artifacts")),
                 }
             )
     return entries[-limit:]
@@ -101,6 +102,25 @@ def compact_client(client: Any) -> dict[str, Any] | None:
     return {key: value for key, value in compact.items() if value not in (None, "")}
 
 
+def compact_artifacts(artifacts: Any) -> list[dict[str, Any]]:
+    if not isinstance(artifacts, list):
+        return []
+    compacted: list[dict[str, Any]] = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        compact = {
+            "kind": artifact.get("kind"),
+            "path": artifact.get("path"),
+            "sha256": artifact.get("sha256"),
+            "bytes": artifact.get("bytes"),
+        }
+        compacted.append(
+            {key: value for key, value in compact.items() if value not in (None, "")}
+        )
+    return compacted
+
+
 def compact_example(entry: dict[str, Any]) -> dict[str, Any]:
     example = {
         "journal": entry.get("journal"),
@@ -112,6 +132,9 @@ def compact_example(entry: dict[str, Any]) -> dict[str, Any]:
         "guard_present": entry.get("guard_present", False),
         "summary": entry.get("summary"),
     }
+    artifacts = compact_artifacts(entry.get("artifacts"))
+    if artifacts:
+        example["artifacts"] = artifacts
     before = compact_window(entry.get("active_window_before"))
     after = compact_window(entry.get("active_window_after"))
     if before:
