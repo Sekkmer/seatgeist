@@ -1,11 +1,22 @@
 use libplasma_pilot::{Point, PointerButton};
-use std::{marker::PhantomData, ptr::NonNull};
+use std::{
+    ffi::{CStr, CString},
+    marker::PhantomData,
+    os::fd::{IntoRawFd, OwnedFd, RawFd},
+    ptr::{self, NonNull},
+};
 use thiserror::Error;
 
 pub const LIBEI_SCROLL_UNIT: i32 = 120;
 pub const BTN_LEFT: u32 = 0x110;
 pub const BTN_RIGHT: u32 = 0x111;
 pub const BTN_MIDDLE: u32 = 0x112;
+pub const EI_CAP_POINTER_ABSOLUTE: u32 = 1 << 1;
+pub const EI_CAP_BUTTON: u32 = 1 << 5;
+pub const EI_CAP_SCROLL: u32 = 1 << 4;
+pub const EI_CAP_TEXT: u32 = 1 << 6;
+pub const EI_DEVICE_TYPE_VIRTUAL: u32 = 1;
+pub const EI_DEVICE_TYPE_PHYSICAL: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EisActionPlan {
@@ -25,6 +36,7 @@ pub enum EisCapability {
 pub enum EisDeviceKind {
     Virtual,
     Physical,
+    Unknown(u32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,6 +77,58 @@ pub enum EisDeviceSelectionError {
     NoCapableResumedDevice,
     #[error("no resumed EIS absolute-pointer device covers every target coordinate")]
     NoRegionForAbsolutePointer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibeiEventType {
+    Connect,
+    Disconnect,
+    SeatAdded,
+    SeatRemoved,
+    DeviceAdded,
+    DeviceRemoved,
+    DevicePaused,
+    DeviceResumed,
+    Other(u32),
+}
+
+impl LibeiEventType {
+    pub fn from_raw(value: u32) -> Self {
+        match value {
+            1 => Self::Connect,
+            2 => Self::Disconnect,
+            3 => Self::SeatAdded,
+            4 => Self::SeatRemoved,
+            5 => Self::DeviceAdded,
+            6 => Self::DeviceRemoved,
+            7 => Self::DevicePaused,
+            8 => Self::DeviceResumed,
+            other => Self::Other(other),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LibeiEventSnapshot {
+    Connect,
+    Disconnect,
+    SeatAdded { capabilities: Vec<EisCapability> },
+    SeatRemoved,
+    DeviceAdded(EisDeviceInfo),
+    DeviceRemoved { device_id: String },
+    DevicePaused { device_id: String },
+    DeviceResumed(EisDeviceInfo),
+    Other { event_type: u32 },
+}
+
+#[derive(Debug, Error)]
+pub enum LibeiConnectionError {
+    #[error("libei client name contains an interior NUL byte")]
+    InteriorNulClientName,
+    #[error("libei failed to create a sender context")]
+    CreateSenderContext,
+    #[error("libei failed to set up fd backend: errno {errno}")]
+    SetupBackendFd { errno: i32 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -162,8 +226,29 @@ fn region_covering_points<'a>(
             .regions
             .iter()
             .find(|region| points.iter().all(|(x, y)| region.contains(*x, *y))),
-        EisDeviceKind::Physical => None,
+        EisDeviceKind::Physical | EisDeviceKind::Unknown(_) => None,
     }
+}
+
+pub fn capability_to_libei(capability: EisCapability) -> u32 {
+    match capability {
+        EisCapability::PointerAbsolute => EI_CAP_POINTER_ABSOLUTE,
+        EisCapability::Button => EI_CAP_BUTTON,
+        EisCapability::Scroll => EI_CAP_SCROLL,
+        EisCapability::Text => EI_CAP_TEXT,
+    }
+}
+
+pub fn capabilities_from_libei_bits(bits: u32) -> Vec<EisCapability> {
+    [
+        EisCapability::PointerAbsolute,
+        EisCapability::Button,
+        EisCapability::Scroll,
+        EisCapability::Text,
+    ]
+    .into_iter()
+    .filter(|capability| bits & capability_to_libei(*capability) != 0)
+    .collect()
 }
 
 pub trait EisEventSink {
@@ -217,9 +302,45 @@ pub struct EiDevice {
     _private: [u8; 0],
 }
 
+#[repr(C)]
+pub struct EiSeat {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct EiEvent {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct EiRegion {
+    _private: [u8; 0],
+}
+
 #[link(name = "ei")]
 unsafe extern "C" {
+    fn ei_new_sender(user_data: *mut libc::c_void) -> *mut Ei;
+    fn ei_unref(ei: *mut Ei) -> *mut Ei;
+    fn ei_configure_name(ei: *mut Ei, name: *const libc::c_char);
+    fn ei_setup_backend_fd(ei: *mut Ei, fd: libc::c_int) -> libc::c_int;
+    fn ei_get_fd(ei: *mut Ei) -> libc::c_int;
+    fn ei_dispatch(ei: *mut Ei);
+    fn ei_get_event(ei: *mut Ei) -> *mut EiEvent;
     fn ei_now(ei: *mut Ei) -> u64;
+    fn ei_event_unref(event: *mut EiEvent) -> *mut EiEvent;
+    fn ei_event_get_type(event: *mut EiEvent) -> libc::c_uint;
+    fn ei_event_get_device(event: *mut EiEvent) -> *mut EiDevice;
+    fn ei_event_get_seat(event: *mut EiEvent) -> *mut EiSeat;
+    fn ei_seat_has_capability(seat: *mut EiSeat, capability: libc::c_uint) -> bool;
+    fn ei_device_get_name(device: *mut EiDevice) -> *const libc::c_char;
+    fn ei_device_get_type(device: *mut EiDevice) -> libc::c_uint;
+    fn ei_device_has_capability(device: *mut EiDevice, capability: libc::c_uint) -> bool;
+    fn ei_device_get_region(device: *mut EiDevice, index: usize) -> *mut EiRegion;
+    fn ei_region_get_x(region: *mut EiRegion) -> u32;
+    fn ei_region_get_y(region: *mut EiRegion) -> u32;
+    fn ei_region_get_width(region: *mut EiRegion) -> u32;
+    fn ei_region_get_height(region: *mut EiRegion) -> u32;
+    fn ei_region_get_physical_scale(region: *mut EiRegion) -> f64;
     fn ei_device_start_emulating(device: *mut EiDevice, sequence: u32);
     fn ei_device_stop_emulating(device: *mut EiDevice);
     fn ei_device_frame(device: *mut EiDevice, time: u64);
@@ -232,6 +353,69 @@ unsafe extern "C" {
         text: *const libc::c_char,
         length: usize,
     );
+}
+
+pub struct LibeiSenderContext {
+    context: NonNull<Ei>,
+}
+
+impl LibeiSenderContext {
+    pub fn from_owned_fd(
+        fd: OwnedFd,
+        client_name: &str,
+    ) -> std::result::Result<Self, LibeiConnectionError> {
+        let client_name =
+            CString::new(client_name).map_err(|_| LibeiConnectionError::InteriorNulClientName)?;
+        // SAFETY: passing a null user-data pointer is permitted by libei.
+        let context = unsafe { ei_new_sender(ptr::null_mut()) };
+        let context = NonNull::new(context).ok_or(LibeiConnectionError::CreateSenderContext)?;
+
+        // SAFETY: `context` is a new sender context, and `client_name` is NUL-terminated.
+        unsafe { ei_configure_name(context.as_ptr(), client_name.as_ptr()) };
+        let raw_fd = fd.into_raw_fd();
+        // SAFETY: `context` is valid; libei takes ownership of `raw_fd`.
+        let setup_result = unsafe { ei_setup_backend_fd(context.as_ptr(), raw_fd) };
+        if setup_result < 0 {
+            // SAFETY: `context` was created by libei and must be released on setup failure.
+            unsafe { ei_unref(context.as_ptr()) };
+            return Err(LibeiConnectionError::SetupBackendFd {
+                errno: -setup_result,
+            });
+        }
+
+        Ok(Self { context })
+    }
+
+    pub fn event_fd(&self) -> RawFd {
+        // SAFETY: `context` is valid for this wrapper's lifetime.
+        unsafe { ei_get_fd(self.context.as_ptr()) }
+    }
+
+    pub fn dispatch_pending(&mut self) -> Vec<LibeiEventSnapshot> {
+        // SAFETY: `context` is valid for this wrapper's lifetime.
+        unsafe { ei_dispatch(self.context.as_ptr()) };
+
+        let mut snapshots = Vec::new();
+        loop {
+            // SAFETY: `context` is valid; NULL means no pending events.
+            let event = unsafe { ei_get_event(self.context.as_ptr()) };
+            let Some(event) = NonNull::new(event) else {
+                break;
+            };
+
+            snapshots.push(libei_event_snapshot(event.as_ptr()));
+            // SAFETY: each event returned by ei_get_event must be unref'd once.
+            unsafe { ei_event_unref(event.as_ptr()) };
+        }
+        snapshots
+    }
+}
+
+impl Drop for LibeiSenderContext {
+    fn drop(&mut self) {
+        // SAFETY: `context` is owned by this wrapper and released exactly once.
+        unsafe { ei_unref(self.context.as_ptr()) };
+    }
 }
 
 pub struct LibeiDeviceSink<'a> {
@@ -261,6 +445,157 @@ impl<'a> LibeiDeviceSink<'a> {
         // SAFETY: `context` is guaranteed valid by `from_raw` for this sink's lifetime.
         unsafe { ei_now(self.context.as_ptr()) }
     }
+}
+
+fn libei_event_snapshot(event: *mut EiEvent) -> LibeiEventSnapshot {
+    let event_type = LibeiEventType::from_raw(unsafe { ei_event_get_type(event) });
+    match event_type {
+        LibeiEventType::Connect => LibeiEventSnapshot::Connect,
+        LibeiEventType::Disconnect => LibeiEventSnapshot::Disconnect,
+        LibeiEventType::SeatAdded => {
+            // SAFETY: libei permits retrieving the seat for seat events; NULL is handled.
+            let seat = unsafe { ei_event_get_seat(event) };
+            LibeiEventSnapshot::SeatAdded {
+                capabilities: libei_seat_capabilities(seat),
+            }
+        }
+        LibeiEventType::SeatRemoved => LibeiEventSnapshot::SeatRemoved,
+        LibeiEventType::DeviceAdded => {
+            // SAFETY: libei permits retrieving the device for device events; NULL is handled.
+            let device = unsafe { ei_event_get_device(event) };
+            libei_device_info(device, false).map_or(
+                LibeiEventSnapshot::Other { event_type: 5 },
+                LibeiEventSnapshot::DeviceAdded,
+            )
+        }
+        LibeiEventType::DeviceRemoved => {
+            // SAFETY: libei permits retrieving the device for device events; NULL is handled.
+            let device = unsafe { ei_event_get_device(event) };
+            LibeiEventSnapshot::DeviceRemoved {
+                device_id: libei_device_id(device),
+            }
+        }
+        LibeiEventType::DevicePaused => {
+            // SAFETY: libei permits retrieving the device for device events; NULL is handled.
+            let device = unsafe { ei_event_get_device(event) };
+            LibeiEventSnapshot::DevicePaused {
+                device_id: libei_device_id(device),
+            }
+        }
+        LibeiEventType::DeviceResumed => {
+            // SAFETY: libei permits retrieving the device for device events; NULL is handled.
+            let device = unsafe { ei_event_get_device(event) };
+            libei_device_info(device, true).map_or(
+                LibeiEventSnapshot::Other { event_type: 8 },
+                LibeiEventSnapshot::DeviceResumed,
+            )
+        }
+        LibeiEventType::Other(event_type) => LibeiEventSnapshot::Other { event_type },
+    }
+}
+
+fn libei_seat_capabilities(seat: *mut EiSeat) -> Vec<EisCapability> {
+    let Some(seat) = NonNull::new(seat) else {
+        return Vec::new();
+    };
+
+    known_capabilities()
+        .into_iter()
+        .filter(|capability| unsafe {
+            ei_seat_has_capability(seat.as_ptr(), capability_to_libei(*capability))
+        })
+        .collect()
+}
+
+fn libei_device_info(device: *mut EiDevice, resumed: bool) -> Option<EisDeviceInfo> {
+    let device = NonNull::new(device)?;
+    let device_ptr = device.as_ptr();
+    let id = libei_device_id(device_ptr);
+    let name = libei_device_name(device_ptr);
+    let kind = libei_device_kind(device_ptr);
+    let capabilities = libei_device_capabilities(device_ptr);
+    let regions = if kind == EisDeviceKind::Virtual {
+        libei_device_regions(device_ptr)
+    } else {
+        Vec::new()
+    };
+
+    Some(EisDeviceInfo {
+        id,
+        name,
+        kind,
+        resumed,
+        capabilities,
+        regions,
+    })
+}
+
+fn libei_device_id(device: *mut EiDevice) -> String {
+    format!("{device:p}")
+}
+
+fn libei_device_name(device: *mut EiDevice) -> Option<String> {
+    // SAFETY: libei returns NULL or a NUL-terminated borrowed string for the device lifetime.
+    let name = unsafe { ei_device_get_name(device) };
+    NonNull::new(name.cast_mut()).map(|name| {
+        // SAFETY: non-null libei device names are valid C strings.
+        unsafe { CStr::from_ptr(name.as_ptr()) }
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
+fn libei_device_kind(device: *mut EiDevice) -> EisDeviceKind {
+    // SAFETY: `device` is a non-null libei device pointer from an event.
+    match unsafe { ei_device_get_type(device) } {
+        EI_DEVICE_TYPE_VIRTUAL => EisDeviceKind::Virtual,
+        EI_DEVICE_TYPE_PHYSICAL => EisDeviceKind::Physical,
+        other => EisDeviceKind::Unknown(other),
+    }
+}
+
+fn libei_device_capabilities(device: *mut EiDevice) -> Vec<EisCapability> {
+    known_capabilities()
+        .into_iter()
+        .filter(|capability| unsafe {
+            ei_device_has_capability(device, capability_to_libei(*capability))
+        })
+        .collect()
+}
+
+fn libei_device_regions(device: *mut EiDevice) -> Vec<EisRegion> {
+    let mut regions = Vec::new();
+    for index in 0.. {
+        // SAFETY: indexes are queried until libei reports NULL.
+        let region = unsafe { ei_device_get_region(device, index) };
+        let Some(region) = NonNull::new(region) else {
+            break;
+        };
+        regions.push(libei_region(region.as_ptr()));
+    }
+    regions
+}
+
+fn libei_region(region: *mut EiRegion) -> EisRegion {
+    // SAFETY: `region` is a non-null libei region pointer borrowed from a device.
+    unsafe {
+        EisRegion {
+            x: f64::from(ei_region_get_x(region)),
+            y: f64::from(ei_region_get_y(region)),
+            width: f64::from(ei_region_get_width(region)),
+            height: f64::from(ei_region_get_height(region)),
+            scale: ei_region_get_physical_scale(region),
+        }
+    }
+}
+
+fn known_capabilities() -> [EisCapability; 4] {
+    [
+        EisCapability::PointerAbsolute,
+        EisCapability::Button,
+        EisCapability::Scroll,
+        EisCapability::Text,
+    ]
 }
 
 impl EisEventSink for LibeiDeviceSink<'_> {
@@ -615,6 +950,38 @@ mod tests {
             capabilities,
             regions,
         }
+    }
+
+    #[test]
+    fn maps_libei_event_types() {
+        assert_eq!(LibeiEventType::from_raw(1), LibeiEventType::Connect);
+        assert_eq!(LibeiEventType::from_raw(2), LibeiEventType::Disconnect);
+        assert_eq!(LibeiEventType::from_raw(3), LibeiEventType::SeatAdded);
+        assert_eq!(LibeiEventType::from_raw(4), LibeiEventType::SeatRemoved);
+        assert_eq!(LibeiEventType::from_raw(5), LibeiEventType::DeviceAdded);
+        assert_eq!(LibeiEventType::from_raw(6), LibeiEventType::DeviceRemoved);
+        assert_eq!(LibeiEventType::from_raw(7), LibeiEventType::DevicePaused);
+        assert_eq!(LibeiEventType::from_raw(8), LibeiEventType::DeviceResumed);
+        assert_eq!(LibeiEventType::from_raw(999), LibeiEventType::Other(999));
+    }
+
+    #[test]
+    fn maps_libei_capability_bits_to_plan_capabilities() {
+        assert_eq!(
+            capability_to_libei(EisCapability::PointerAbsolute),
+            EI_CAP_POINTER_ABSOLUTE
+        );
+        assert_eq!(capability_to_libei(EisCapability::Button), EI_CAP_BUTTON);
+        assert_eq!(capability_to_libei(EisCapability::Scroll), EI_CAP_SCROLL);
+        assert_eq!(capability_to_libei(EisCapability::Text), EI_CAP_TEXT);
+        assert_eq!(
+            capabilities_from_libei_bits(EI_CAP_POINTER_ABSOLUTE | EI_CAP_BUTTON | EI_CAP_TEXT),
+            vec![
+                EisCapability::PointerAbsolute,
+                EisCapability::Button,
+                EisCapability::Text,
+            ]
+        );
     }
 
     #[test]
