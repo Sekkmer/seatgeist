@@ -620,7 +620,7 @@ Initial hook goals:
 - After PlasmaPilot actions, append a local audit record.
 - On `Stop`, summarize actions taken and any denied actions.
 
-Current hook implementation: `plugin/hooks/hooks.json` enables one conservative Codex `Stop` command hook. After Codex's normal `/hooks` trust review, it runs `plugin/hooks/plasma_audit_summary.py` from the git root and writes `target/plasma-pilot-hook-audit/latest.json`. The hook is fail-open, ignores prompt/hook stdin, and records only repo status, HEAD/branch, recent compact PlasmaPilot journal metadata, failure/control/unguarded-control counts, method and safety-class counts, and compact active-window context. `make validate-plugin` verifies the hook command, timeout, script import, and audit aggregation behavior.
+Current hook implementation: `plugin/hooks/hooks.json` enables one conservative Codex `Stop` command hook. After Codex's normal `/hooks` trust review, it runs `plugin/hooks/plasma_audit_summary.py` from the git root and writes `target/plasma-pilot-hook-audit/latest.json`. The hook is fail-open, ignores prompt/hook stdin, and records only repo status, HEAD/branch, recent compact PlasmaPilot journal metadata, failure/control/unguarded-control counts, method, safety-class, and client counts, and compact active-window context. `make validate-plugin` verifies the hook command, timeout, script import, and audit aggregation behavior.
 
 ## 13. Safety and threat model
 
@@ -739,9 +739,9 @@ Write JSONL records to:
 ~/.local/state/plasma-pilot/journal.jsonl
 ```
 
-Current implementation: `plasma-pilotd` appends compact request records containing `sequence`, `unix_time_ms`, `method`, `safety_class`, `guard_present`, best-effort `active_window_before` and `active_window_after` for control-class requests, optional structured `control` metadata, `ok`, and `summary`. Control metadata includes the action id when an action result exists, policy outcome, backend provenance, and a compact `requested_target` object with non-content fields such as coordinates, node ids, offsets, text length, key count, semantic-name length, app filters, and requested backend/device hints. It does not store typed text, replacement text, clipboard contents, screenshots, or semantic target names. Screenshot and wait-for-change summaries include capture backend provenance while still storing only metadata and output paths, not image payloads. `plasma-pilot-cli journal tail --limit N` returns recent records through the daemon and supports `--method <name>` and `--ok <true|false>` filters. Existing journal lines without the context fields remain parseable. Smoke tests pass target-local journal paths and verify `0600` file permissions.
+Current implementation: `plasma-pilotd` appends compact request records containing `sequence`, `unix_time_ms`, `method`, optional best-effort `client` metadata, `safety_class`, `guard_present`, best-effort `active_window_before` and `active_window_after` for control-class requests, optional structured `control` metadata, `ok`, and `summary`. Client metadata comes from Unix peer credentials and may include peer pid plus a sanitized `/proc/<pid>/comm` process name, which Linux may truncate. Control metadata includes the action id when an action result exists, policy outcome, backend provenance, and a compact `requested_target` object with non-content fields such as coordinates, node ids, offsets, text length, key count, semantic-name length, app filters, and requested backend/device hints. It does not store typed text, replacement text, clipboard contents, screenshots, or semantic target names. Screenshot and wait-for-change summaries include capture backend provenance while still storing only metadata and output paths, not image payloads. `plasma-pilot-cli journal tail --limit N` returns recent records through the daemon and supports `--method <name>` and `--ok <true|false>` filters. Existing journal lines without the context fields remain parseable. Smoke tests pass target-local journal paths and verify `0600` file permissions.
 
-The remaining future journal work should preserve the compact tail format while adding explicit client/tool identity and optional path/hash fields only when the operator enables them:
+The remaining future journal work should preserve the compact tail format while adding explicit protocol-level tool identity and optional path/hash fields only when the operator enables them:
 
 Each record:
 
@@ -910,7 +910,7 @@ Tasks:
 - [x] Finalize `plugin/.codex-plugin/plugin.json`. Current status: manifest has real author, license, keyword, interface, skills, and MCP metadata with relative paths.
 - [x] Finalize `plugin/.mcp.json`. Current status: bundled MCP config points at `plasma-pilot-mcp --stdio`, with daemon socket resolution handled by the MCP/daemon defaults or `PLASMA_PILOT_SOCKET`.
 - [x] Write the four skills. Current status: the skills describe current `plasma.*` MCP tools, safety guards, observation flow, browser debugging, GUI testing, and desktop triage.
-- [x] Create hook skeleton. Current status: `plugin/hooks/hooks.json` now enables one Codex `Stop` command hook that writes a fail-open local audit summary under `target/plasma-pilot-hook-audit/latest.json`; the summary includes repo status, recent compact journal entries, method/safety-class counts, failure examples, unguarded-control examples, and last active-window context. Codex still requires the normal `/hooks` trust review before non-managed plugin hooks run.
+- [x] Create hook skeleton. Current status: `plugin/hooks/hooks.json` now enables one Codex `Stop` command hook that writes a fail-open local audit summary under `target/plasma-pilot-hook-audit/latest.json`; the summary includes repo status, recent compact journal entries, method/safety-class/client counts, failure examples, unguarded-control examples, and last active-window context. Codex still requires the normal `/hooks` trust review before non-managed plugin hooks run.
 - [x] Add plugin install instructions. Current status: `docs/plugin.md` documents bundle contents, preconditions, validation, and local-use examples.
 - [x] Add examples:
   - “Open Kate and type hello.”
@@ -1125,7 +1125,7 @@ v0.2 is complete when:
 - Semantic button/text/menu actions work for common KDE apps.
 - Coordinate mapping is reliable with scaling and multiple monitors.
 - Window guards are used by default. Current status: `[safety].require_focus_guard` defaults to true, so every control-class request must include an active-window guard before backend execution unless a scoped local development config explicitly opts out.
-- Plugin hooks provide useful audit summaries. Current status: the Stop hook writes compact repo/journal metadata plus aggregate counts for failures, control actions, unguarded control actions, methods, safety classes, and last active-window context; `make validate-plugin` verifies the aggregation behavior.
+- Plugin hooks provide useful audit summaries. Current status: the Stop hook writes compact repo/journal metadata plus aggregate counts for failures, control actions, unguarded control actions, methods, safety classes, clients, and last active-window context; `make validate-plugin` verifies the aggregation behavior.
 - Docs explain installation on Arch Linux/KDE Plasma 6. Current status: `docs/arch-kde-install.md` covers package prerequisites, binary install, config, user service, KWin bridge, safe diagnostics, optional uinput, Codex plugin validation, approval flow, and troubleshooting.
 
 ## 22. Development priority

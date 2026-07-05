@@ -25,19 +25,19 @@ use libplasma_pilot::{
     CaptureBackendStatus, ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest,
     ClipboardText, CoordinateSpace, DaemonRequest, DaemonResponse, DesktopObservation,
     DesktopSessionStatus, DragPointerRequest, FocusTextFieldRequest, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus, JournalControlContext,
-    JournalEntry, JournalRequestedTarget, JournalWindowContext, KeyComboRequest, KwinBridgeStatus,
-    KwinMetadataStatus, LibeiStatus, MovePointerRequest, ObserveRequest, PanicStopStatus, Point,
-    PointerButton, PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
-    PointerPhysicalBounds, PolicyStatus, RemoteDesktopEisProbe, RemoteDesktopEisSessionStatus,
-    RemoteDesktopPersistMode, RemoteDesktopPortalStatus, RemoteDesktopSessionProbe,
-    RemoteDesktopSessionProbeRequest, SafetyClass, SafetyStatus, ScreenshotInfo,
-    ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest, ScreenshotTransform,
-    ScrollPointerRequest, SelectItemRequest, SelectMenuRequest, SetPanicStopRequest,
-    SetTextFieldRequest, SetValueRequest, SpectacleStatus, ToggleCheckRequest, ToolApprovalLevel,
-    TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult, WindowGeometry,
-    WindowInfo, XkbKeymapStatus, current_egid, current_euid, default_journal_path,
-    default_panic_stop_path, default_socket_path,
+    FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus, JournalClientContext,
+    JournalControlContext, JournalEntry, JournalRequestedTarget, JournalWindowContext,
+    KeyComboRequest, KwinBridgeStatus, KwinMetadataStatus, LibeiStatus, MovePointerRequest,
+    ObserveRequest, PanicStopStatus, Point, PointerButton, PointerCalibrationPoint,
+    PointerCalibrationStatus, PointerMonitorCalibration, PointerPhysicalBounds, PolicyStatus,
+    RemoteDesktopEisProbe, RemoteDesktopEisSessionStatus, RemoteDesktopPersistMode,
+    RemoteDesktopPortalStatus, RemoteDesktopSessionProbe, RemoteDesktopSessionProbeRequest,
+    SafetyClass, SafetyStatus, ScreenshotInfo, ScreenshotPortalStatus, ScreenshotRequest,
+    ScreenshotTileRequest, ScreenshotTransform, ScrollPointerRequest, SelectItemRequest,
+    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, SpectacleStatus,
+    ToggleCheckRequest, ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest,
+    WaitForChangeResult, WindowGeometry, WindowInfo, XkbKeymapStatus, current_egid, current_euid,
+    default_journal_path, default_panic_stop_path, default_socket_path,
 };
 use plasma_pilot_policy::{PolicyConfig, PolicyEngine};
 use serde::Deserialize;
@@ -84,6 +84,7 @@ impl ActionJournal {
             sequence: self.next_sequence()?,
             unix_time_ms: unix_time_ms()?,
             method: method.to_string(),
+            client: context.client,
             safety_class: Some(context.safety_class),
             guard_present: context.guard_present,
             active_window_before: context.active_window_before,
@@ -116,6 +117,7 @@ impl ActionJournal {
 
 #[derive(Debug, Clone)]
 struct JournalContext {
+    client: Option<JournalClientContext>,
     safety_class: SafetyClass,
     guard_present: bool,
     active_window_before: Option<JournalWindowContext>,
@@ -829,7 +831,7 @@ struct DaemonRuntime {
 }
 
 async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()> {
-    validate_peer_uid(&stream)?;
+    let client = validate_peer_client(&stream)?;
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     let bytes = reader
@@ -842,7 +844,7 @@ async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()>
 
     let request = serde_json::from_str::<DaemonRequest>(&line).context("parse daemon request")?;
     let method = request.method_name();
-    let mut journal_context = journal_context_for_request(&request, &runtime);
+    let mut journal_context = journal_context_for_request(&request, &runtime, client);
     let response = handle_request(request, &runtime).await;
     journal_context.active_window_after = active_window_context_for_safety_class(
         &journal_context.safety_class,
@@ -862,7 +864,11 @@ async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()>
     Ok(())
 }
 
-fn journal_context_for_request(request: &DaemonRequest, runtime: &DaemonRuntime) -> JournalContext {
+fn journal_context_for_request(
+    request: &DaemonRequest,
+    runtime: &DaemonRuntime,
+    client: Option<JournalClientContext>,
+) -> JournalContext {
     let safety_class = safety_class_for_request(request);
     let active_window_before =
         active_window_context_for_safety_class(&safety_class, &runtime.active_window_state);
@@ -872,6 +878,7 @@ fn journal_context_for_request(request: &DaemonRequest, runtime: &DaemonRuntime)
         runtime.input_backend_preference,
     );
     JournalContext {
+        client,
         safety_class,
         guard_present: active_window_guard_for_request(request).is_some(),
         active_window_before,
@@ -7352,14 +7359,45 @@ fn validate_socket_permissions(socket: &Path) -> Result<()> {
     Ok(())
 }
 
-fn validate_peer_uid(stream: &UnixStream) -> Result<()> {
-    let peer_uid = stream.peer_cred().context("read peer credentials")?.uid();
+fn validate_peer_client(stream: &UnixStream) -> Result<Option<JournalClientContext>> {
+    let credentials = stream.peer_cred().context("read peer credentials")?;
+    let peer_uid = credentials.uid();
     let daemon_uid = current_euid().context("read daemon uid")?;
     if peer_uid != daemon_uid {
         error!(peer_uid, daemon_uid, "rejecting client from different uid");
         bail!("peer uid {peer_uid} does not match daemon uid {daemon_uid}");
     }
-    Ok(())
+    let pid = credentials
+        .pid()
+        .filter(|pid| *pid > 0)
+        .and_then(|pid| u32::try_from(pid).ok());
+    let process_name = pid.and_then(client_process_name);
+    if pid.is_none() && process_name.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(JournalClientContext { pid, process_name }))
+}
+
+fn client_process_name(pid: u32) -> Option<String> {
+    let path = PathBuf::from(format!("/proc/{pid}/comm"));
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|name| compact_client_process_name(&name))
+}
+
+fn compact_client_process_name(name: &str) -> Option<String> {
+    const MAX_CLIENT_NAME_CHARS: usize = 64;
+    let cleaned = name
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(MAX_CLIENT_NAME_CHARS)
+        .collect::<String>();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
 }
 
 #[cfg(test)]
@@ -7584,6 +7622,10 @@ mod tests {
             .record(
                 "health",
                 JournalContext {
+                    client: Some(JournalClientContext {
+                        pid: Some(1111),
+                        process_name: Some("plasma-pilot-cl".to_string()),
+                    }),
                     safety_class: SafetyClass::Policy,
                     guard_present: false,
                     active_window_before: None,
@@ -7601,6 +7643,10 @@ mod tests {
             .record(
                 "focus_window",
                 JournalContext {
+                    client: Some(JournalClientContext {
+                        pid: Some(2222),
+                        process_name: Some("plasma-pilot-mc".to_string()),
+                    }),
                     safety_class: SafetyClass::ControlSemantic,
                     guard_present: true,
                     active_window_before: Some(JournalWindowContext {
@@ -7641,6 +7687,13 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].sequence, 2);
         assert_eq!(entries[0].method, "focus_window");
+        assert_eq!(
+            entries[0]
+                .client
+                .as_ref()
+                .and_then(|client| client.process_name.as_deref()),
+            Some("plasma-pilot-mc")
+        );
         assert_eq!(entries[0].safety_class, Some(SafetyClass::ControlSemantic));
         assert!(entries[0].guard_present);
         assert_eq!(
@@ -7679,9 +7732,25 @@ mod tests {
             .expect("filtered journal tail succeeds");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].method, "health");
+        assert_eq!(
+            entries[0].client.as_ref().and_then(|client| client.pid),
+            Some(1111)
+        );
         assert!(entries[0].ok);
 
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn compact_client_process_name_removes_controls_and_bounds_length() {
+        let name = compact_client_process_name("plasma-pilot-cli\n")
+            .expect("valid client name is retained");
+        assert_eq!(name, "plasma-pilot-cli");
+
+        let long = format!("{}{}", "a".repeat(80), "\n");
+        let name = compact_client_process_name(&long).expect("long client name is retained");
+        assert_eq!(name.len(), 64);
+        assert!(compact_client_process_name("\n\t").is_none());
     }
 
     #[test]

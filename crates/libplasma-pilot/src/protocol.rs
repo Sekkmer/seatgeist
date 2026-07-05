@@ -331,6 +331,8 @@ pub struct JournalEntry {
     pub unix_time_ms: u64,
     pub method: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<JournalClientContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safety_class: Option<SafetyClass>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub guard_present: bool,
@@ -342,6 +344,14 @@ pub struct JournalEntry {
     pub control: Option<JournalControlContext>,
     pub ok: bool,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalClientContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1216,6 +1226,7 @@ mod tests {
         )
         .expect("legacy journal entry parses");
         assert_eq!(entry.safety_class, None);
+        assert_eq!(entry.client, None);
         assert!(!entry.guard_present);
         assert_eq!(entry.active_window_before, None);
         assert_eq!(entry.active_window_after, None);
@@ -1228,6 +1239,10 @@ mod tests {
             sequence: 2,
             unix_time_ms: 1001,
             method: "focus_window".to_string(),
+            client: Some(JournalClientContext {
+                pid: Some(4242),
+                process_name: Some("plasma-pilot-cl".to_string()),
+            }),
             safety_class: Some(SafetyClass::ControlSemantic),
             guard_present: true,
             active_window_before: Some(JournalWindowContext {
@@ -1256,6 +1271,9 @@ mod tests {
         };
         let encoded = serde_json::to_string(&entry).expect("journal context serializes");
         assert!(encoded.contains(r#""safety_class":"control_semantic""#));
+        assert!(encoded.contains(r#""client""#));
+        assert!(encoded.contains(r#""pid":4242"#));
+        assert!(encoded.contains(r#""process_name":"plasma-pilot-cl""#));
         assert!(encoded.contains(r#""guard_present":true"#));
         assert!(encoded.contains(r#""active_window_before""#));
         assert!(encoded.contains(r#""active_window_after""#));

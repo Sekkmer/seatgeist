@@ -61,6 +61,7 @@ def recent_journal_entries(root: Path, limit: int = 20) -> list[dict[str, Any]]:
                     "journal": str(path.relative_to(root)),
                     "sequence": entry.get("sequence"),
                     "unix_time_ms": entry.get("unix_time_ms"),
+                    "client": compact_client(entry.get("client")),
                     "method": entry.get("method"),
                     "ok": entry.get("ok"),
                     "safety_class": entry.get("safety_class"),
@@ -89,10 +90,21 @@ def compact_window(window: Any) -> dict[str, Any] | None:
     return {key: value for key, value in compact.items() if value not in (None, "")}
 
 
+def compact_client(client: Any) -> dict[str, Any] | None:
+    if not isinstance(client, dict):
+        return None
+    compact = {
+        "pid": client.get("pid"),
+        "process_name": client.get("process_name"),
+    }
+    return {key: value for key, value in compact.items() if value not in (None, "")}
+
+
 def compact_example(entry: dict[str, Any]) -> dict[str, Any]:
     example = {
         "journal": entry.get("journal"),
         "sequence": entry.get("sequence"),
+        "client": entry.get("client"),
         "method": entry.get("method"),
         "ok": entry.get("ok"),
         "safety_class": entry.get("safety_class"),
@@ -128,6 +140,12 @@ def summarize_journal(entries: list[dict[str, Any]]) -> dict[str, Any]:
         for entry in entries
         if isinstance(entry.get("safety_class"), str) and entry.get("safety_class")
     )
+    clients = Counter(
+        str(entry["client"].get("process_name") or entry["client"].get("pid"))
+        for entry in entries
+        if isinstance(entry.get("client"), dict)
+        and (entry["client"].get("process_name") or entry["client"].get("pid"))
+    )
     failures = [entry for entry in entries if entry.get("ok") is False]
     controls = [entry for entry in entries if is_control_entry(entry)]
     unguarded_controls = [
@@ -142,6 +160,7 @@ def summarize_journal(entries: list[dict[str, Any]]) -> dict[str, Any]:
         "unguarded_control_count": len(unguarded_controls),
         "methods": dict(sorted(methods.items())),
         "safety_classes": dict(sorted(safety_classes.items())),
+        "clients": dict(sorted(clients.items())),
         "recent_failures": [
             compact_example(entry) for entry in failures[-MAX_AUDIT_EXAMPLES:]
         ],

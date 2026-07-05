@@ -174,6 +174,7 @@ def validate_hook_summary_script(path: Path) -> None:
             {
                 "journal": "target/plasma-pilot-smoke-journal.jsonl",
                 "sequence": 1,
+                "client": {"pid": 1001, "process_name": "plasma-pilot-cl"},
                 "method": "observe",
                 "ok": True,
                 "safety_class": "observe",
@@ -183,6 +184,7 @@ def validate_hook_summary_script(path: Path) -> None:
             {
                 "journal": "target/plasma-pilot-smoke-journal.jsonl",
                 "sequence": 2,
+                "client": {"pid": 1002, "process_name": "plasma-pilot-mc"},
                 "method": "type_text",
                 "ok": False,
                 "safety_class": "control_keyboard",
@@ -197,6 +199,7 @@ def validate_hook_summary_script(path: Path) -> None:
             {
                 "journal": "target/plasma-pilot-smoke-journal.jsonl",
                 "sequence": 3,
+                "client": {"pid": 1002, "process_name": "plasma-pilot-mc"},
                 "method": "click_button",
                 "ok": True,
                 "safety_class": "control_semantic",
@@ -225,6 +228,8 @@ def validate_hook_summary_script(path: Path) -> None:
         fail("PlasmaPilot hook audit must count methods")
     if audit.get("safety_classes", {}).get("control_keyboard") != 1:
         fail("PlasmaPilot hook audit must count safety classes")
+    if audit.get("clients", {}).get("plasma-pilot-mc") != 2:
+        fail("PlasmaPilot hook audit must count client process names")
     if not audit.get("recent_failures"):
         fail("PlasmaPilot hook audit must include recent failures")
     if not audit.get("unguarded_control_examples"):

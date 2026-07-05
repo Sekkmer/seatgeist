@@ -8,7 +8,7 @@ The repository ships a local Codex plugin bundle under `plugin/`.
 - `plugin/.mcp.json`: stdio MCP server entry for `plasma-pilot-mcp --stdio`.
 - `plugin/skills/`: PlasmaPilot operating workflows for computer use, GUI testing, browser debugging, and desktop triage.
 - `plugin/hooks/hooks.json`: Codex `Stop` hook config for writing a compact local audit summary.
-- `plugin/hooks/plasma_audit_summary.py`: fail-open audit hook that writes `target/plasma-pilot-hook-audit/latest.json` with git status, recent PlasmaPilot journal metadata, failure counts, unguarded-control counts, method/safety-class counts, and compact active-window context.
+- `plugin/hooks/plasma_audit_summary.py`: fail-open audit hook that writes `target/plasma-pilot-hook-audit/latest.json` with git status, recent PlasmaPilot journal metadata, failure counts, unguarded-control counts, method/safety-class/client counts, and compact active-window context.
 
 ## Preconditions
 
