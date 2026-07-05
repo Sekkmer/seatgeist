@@ -1,7 +1,7 @@
 SHELL := /usr/bin/bash
 .ONESHELL:
 
-.PHONY: fmt check test clippy validate-plugin validate-install-assets validate-traces verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-trace-replay smoke-gui-input smoke-mcp gui-eval gui-eval-status gui-eval-session-preflight gui-eval-observe gui-eval-clipboard-status gui-eval-clipboard-denied gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-screenshot-preview gui-eval-screenshot-coordinate-map gui-eval-screenshot-config-bounds gui-eval-journal-artifacts gui-eval-full-resolution-denied gui-eval-control-safety gui-eval-text-editor-input gui-eval-kcalc-visual gui-eval-firefox-localhost-button gui-eval-portal-screenshot gui-eval-remote-desktop-probe gui-eval-remote-desktop-eis-session install-kwin-script
+.PHONY: fmt check test clippy validate-plugin validate-install-assets validate-traces verify smoke smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-human-input-pause smoke-trace-replay smoke-gui-input smoke-mcp gui-eval gui-eval-status gui-eval-session-preflight gui-eval-observe gui-eval-clipboard-status gui-eval-clipboard-denied gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-screenshot-preview gui-eval-screenshot-coordinate-map gui-eval-screenshot-config-bounds gui-eval-journal-artifacts gui-eval-full-resolution-denied gui-eval-control-safety gui-eval-text-editor-input gui-eval-kcalc-visual gui-eval-firefox-localhost-button gui-eval-portal-screenshot gui-eval-remote-desktop-probe gui-eval-remote-desktop-eis-session install-kwin-script
 
 fmt:
 	cargo fmt --all
@@ -25,7 +25,7 @@ validate-traces:
 	cargo build -p plasma-pilot-cli
 	target/debug/plasma-pilot-cli trace validate --dir examples/traces >/dev/null
 
-verify: fmt check test clippy validate-plugin validate-install-assets validate-traces smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-trace-replay smoke-mcp gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-control-safety
+verify: fmt check test clippy validate-plugin validate-install-assets validate-traces smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-human-input-pause smoke-trace-replay smoke-mcp gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-control-safety
 	git diff --check -- . ':(exclude)target'
 
 smoke:
@@ -388,6 +388,51 @@ smoke-pointer-calibration:
 	target/debug/plasma-pilot-cli --socket "$$socket" input pointer-calibration >"$$out"
 	jq -e '.type == "pointer_calibration" and .data.coordinate_space == "physical_pixel" and (.data.monitors | length) >= 1 and (.data.sample_points | length) >= 3' "$$out" >/dev/null
 	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 | grep -q "pointer_calibration"
+
+smoke-human-input-pause:
+	set -euo pipefail
+	socket="/tmp/plasma-pilot-human-input-pause-smoke/plasma-pilotd.sock"
+	run_dir="target/plasma-pilot-human-input-pause-smoke"
+	log="target/plasma-pilot-human-input-pause-smoke-daemon.log"
+	journal="target/plasma-pilot-human-input-pause-smoke-journal.jsonl"
+	config="$$run_dir/config.toml"
+	approval_file="$$run_dir/approvals.jsonl"
+	activity_file="$$run_dir/human-input-active"
+	status_json="$$run_dir/safety-status.json"
+	approval_json="$$run_dir/approval.json"
+	denied_out="$$run_dir/focus-denied.txt"
+	rm -rf /tmp/plasma-pilot-human-input-pause-smoke "$$run_dir" "$$log" "$$journal"
+	mkdir -p "$$run_dir"
+	cargo build -p plasma-pilotd -p plasma-pilot-cli
+	printf '[daemon]\napproval_file = "%s"\n\n[safety]\nrequire_focus_guard = false\npause_on_human_input = true\nhuman_input_activity_file = "%s"\nhuman_input_quiet_ms = 60000\n' "$$(pwd)/$$approval_file" "$$(pwd)/$$activity_file" >"$$config"
+	target/debug/plasma-pilotd --socket "$$socket" --journal "$$journal" --config "$$config" >"$$log" 2>&1 &
+	pid=$$!
+	cleanup() {
+		kill "$$pid" 2>/dev/null || true
+		wait "$$pid" 2>/dev/null || true
+	}
+	trap cleanup EXIT
+	for _ in {1..50}; do
+		if [[ -S "$$socket" ]]; then
+			break
+		fi
+		sleep 0.1
+	done
+	if [[ ! -S "$$socket" ]]; then
+		cat "$$log"
+		exit 1
+	fi
+	target/debug/plasma-pilot-cli --socket "$$socket" approve --approval-file "$$approval_file" --safety-class control-semantic --method focus_window --ttl-ms 60000 --reason "human-input-pause smoke" >"$$approval_json"
+	test "$$(stat -c '%a' "$$approval_file")" = "600"
+	: >"$$activity_file"
+	target/debug/plasma-pilot-cli --socket "$$socket" safety-status >"$$status_json"
+	jq -e '.type == "safety_status" and .data.pause_on_human_input == true and .data.human_input_signal_fresh == true and .data.human_input_quiet_ms == 60000' "$$status_json" >/dev/null
+	if target/debug/plasma-pilot-cli --socket "$$socket" focus --window "__plasma_pilot_human_pause_never__" >"$$denied_out" 2>&1; then
+		cat "$$denied_out"
+		exit 1
+	fi
+	grep -q "human input activity signal is fresh" "$$denied_out"
+	target/debug/plasma-pilot-cli --socket "$$socket" journal tail --limit 10 --method focus_window --ok false | jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .summary | contains("human input activity signal is fresh"))' >/dev/null
 
 smoke-trace-replay:
 	set -euo pipefail

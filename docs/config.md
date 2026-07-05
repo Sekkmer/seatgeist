@@ -93,6 +93,8 @@ When `[safety].require_focus_guard = true`, every control-class request must inc
 
 When `[safety].pause_on_human_input = true`, the daemon checks `human_input_activity_file` before control-class requests. If the file exists and its mtime is newer than `human_input_quiet_ms`, control is refused before backend execution. This is a file-backed signal for a future KDE/libinput watcher; observe, status, policy, and journal requests are unaffected.
 
+`make smoke-human-input-pause` verifies this path through a private configured daemon: it writes a fresh activity signal, checks `safety-status` freshness metadata, then confirms an approved focus-control request is denied and journaled before backend focus execution.
+
 `[safety].control_rate_limit_per_minute` defaults to `120` and caps accepted control-class daemon requests over a rolling 60-second window. Set it to `0` only for a tightly scoped local development daemon. Observe, status, policy, and journal requests are unaffected, and denied preflight requests do not consume the control budget.
 
 `[safety].preview_max_edge` and `[safety].tile_max_edge` default to `1600` and must be greater than zero. These values bound default screenshot previews, observe-attached screenshots, wait-for-change captures, and screenshot tiles on high-resolution displays. Per-request `max_edge` values can still override the configured defaults, and full-resolution screenshot requests remain explicit and separately policy-gated.

@@ -11456,6 +11456,40 @@ height = 40
     }
 
     #[test]
+    fn semantic_resolvers_do_not_depend_on_stable_node_ids() {
+        let first = resolve_click_button_match("Save", vec![button_node("__rg-1::42", "Save")])
+            .expect("first dynamic id resolves");
+        let second = resolve_click_button_match("Save", vec![button_node("__rg-9::7", "Save")])
+            .expect("second dynamic id resolves");
+        assert_ne!(first.id, second.id);
+        assert_eq!(first.role, second.role);
+        assert_eq!(first.name, second.name);
+
+        let first_menu = resolve_menu_path_match(
+            &["File".to_string(), "Open".to_string()],
+            vec![menu_node(
+                "__menu-session-a",
+                "File",
+                vec![menu_item_node("__item-session-a", "Open")],
+            )],
+        )
+        .expect("first dynamic menu path resolves");
+        let second_menu = resolve_menu_path_match(
+            &["File".to_string(), "Open".to_string()],
+            vec![menu_node(
+                "__menu-session-b",
+                "File",
+                vec![menu_item_node("__item-session-b", "Open")],
+            )],
+        )
+        .expect("second dynamic menu path resolves");
+        assert_ne!(first_menu.0.id, second_menu.0.id);
+        assert_eq!(first_menu.0.role, second_menu.0.role);
+        assert_eq!(first_menu.0.name, second_menu.0.name);
+        assert_eq!(first_menu.1, second_menu.1);
+    }
+
+    #[test]
     fn click_button_resolver_refuses_ambiguous_matches() {
         let err = resolve_click_button_match(
             "Open",
