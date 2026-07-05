@@ -25,7 +25,7 @@ validate-traces:
 	cargo build -p plasma-pilot-cli
 	target/debug/plasma-pilot-cli trace validate --dir examples/traces >/dev/null
 
-verify: fmt check test clippy validate-plugin validate-install-assets validate-traces smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-human-input-pause smoke-trace-replay smoke-mcp gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-control-safety
+verify: fmt check test clippy validate-plugin validate-install-assets validate-traces smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-human-input-pause smoke-trace-replay smoke-mcp gui-eval-session-preflight gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-control-safety
 	git diff --check -- . ':(exclude)target'
 
 smoke:

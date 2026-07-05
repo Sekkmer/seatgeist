@@ -189,10 +189,51 @@ eval_session_preflight() {
 		)
 	' "$run_dir/session-preflight-desktop.json" >/dev/null
 
+	cli readiness >"$run_dir/session-preflight-readiness.json"
+	jq -e '
+		.type == "computer_use_readiness"
+		and (.data.ready_for_observe | type == "boolean")
+		and (.data.ready_for_screenshot | type == "boolean")
+		and (.data.ready_for_window_control | type == "boolean")
+		and (.data.ready_for_keyboard_input | type == "boolean")
+		and (.data.ready_for_pointer_input | type == "boolean")
+		and (.data.ready_for_semantic_actions | type == "boolean")
+		and (.data.ready_for_clipboard_read | type == "boolean")
+		and (.data.ready_for_clipboard_write | type == "boolean")
+		and (.data.focus_guard_required | type == "boolean")
+		and (.data.panic_stop_enabled | type == "boolean")
+		and (.data.human_input_pause_enabled | type == "boolean")
+		and (.data.human_input_signal_fresh | type == "boolean")
+		and (.data.desktop_session_ready | type == "boolean")
+		and (.data.dbus_session_bus_present | type == "boolean")
+		and (.data.runtime_dir_present | type == "boolean")
+		and (.data.issues | type == "array")
+		and (.data.next_steps | type == "array")
+		and (.data.accessibility_backend | type == "string")
+		and (
+			(.data.capture_backend | type == "string")
+			or (.data.capture_backend == null)
+		)
+		and (
+			(.data.input_backend | type == "string")
+			or (.data.input_backend == null)
+		)
+		and (
+			(.data.clipboard_read_backend | type == "string")
+			or (.data.clipboard_read_backend == null)
+		)
+		and (
+			(.data.clipboard_write_backend | type == "string")
+			or (.data.clipboard_write_backend == null)
+		)
+	' "$run_dir/session-preflight-readiness.json" >/dev/null
+
 	cli journal tail --limit 20 --method safety_status --ok true >"$run_dir/session-preflight-safety-journal.json"
 	jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/session-preflight-safety-journal.json" >/dev/null
 	cli journal tail --limit 20 --method desktop_session_status --ok true >"$run_dir/session-preflight-desktop-journal.json"
 	jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/session-preflight-desktop-journal.json" >/dev/null
+	cli journal tail --limit 20 --method computer_use_readiness --ok true >"$run_dir/session-preflight-readiness-journal.json"
+	jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/session-preflight-readiness-journal.json" >/dev/null
 }
 
 eval_observe() {
