@@ -64,6 +64,8 @@ def main() -> None:
     require_contains("Makefile", makefile, "scripts/sign-release-artifacts.sh")
     require_contains("Makefile", makefile, "verify-release-signatures:")
     require_contains("Makefile", makefile, "scripts/verify-release-signatures.sh")
+    require_contains("Makefile", makefile, "release-readiness:")
+    require_contains("Makefile", makefile, "scripts/release-readiness.py")
 
     package_release = require_executable("scripts/package-release.sh")
     for needle in [
@@ -98,6 +100,7 @@ def main() -> None:
         "scripts/verify-release-artifacts.py",
         "scripts/sign-release-artifacts.sh",
         "scripts/verify-release-signatures.sh",
+        "scripts/release-readiness.py",
         "target/",
     ]:
         require_contains("scripts/verify-release-artifacts.py", verify_release, needle)
@@ -120,6 +123,19 @@ def main() -> None:
     ]:
         require_contains("scripts/verify-release-signatures.sh", verify_signatures, needle)
 
+    readiness = require_executable("scripts/release-readiness.py")
+    for needle in [
+        "release_readiness",
+        "public_metadata",
+        "release_checklist",
+        "release_artifacts",
+        "release_signatures",
+        "live_eval_evidence",
+        "latest release manifest is stale for the current commit",
+        "--strict",
+    ]:
+        require_contains("scripts/release-readiness.py", readiness, needle)
+
     checklist = read("docs/release-checklist.md")
     require_contains(
         "docs/release-checklist.md",
@@ -130,6 +146,11 @@ def main() -> None:
         "docs/release-checklist.md",
         checklist,
         "- [~] Versioned local release artifact packaging, verification, and optional GPG signing exist through `make verify-release-artifacts`, `make sign-release-artifacts`, and `make verify-release-signatures`; public uploads and signed release tags are not done yet.",
+    )
+    require_contains(
+        "docs/release-checklist.md",
+        checklist,
+        "Run `make release-readiness` to summarize current blockers",
     )
     require_contains(
         "docs/release-checklist.md",
