@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::future::poll_fn;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::Duration;
@@ -417,6 +417,12 @@ pub struct PortalRemoteDesktopEisConnection {
     pub fd: RawFd,
 }
 
+#[derive(Debug)]
+pub struct PortalRemoteDesktopOwnedEisConnection {
+    pub session_handle: String,
+    pub fd: OwnedFd,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortalRequestResponse {
     pub response: PortalResponseCode,
@@ -709,6 +715,24 @@ where
     })
 }
 
+pub async fn connect_remote_desktop_eis_zbus(
+    session_handle: &str,
+    options: &PortalConnectToEisOptions,
+) -> Result<PortalRemoteDesktopOwnedEisConnection> {
+    validate_session_path(session_handle)?;
+    let connection = zbus::Connection::session()
+        .await
+        .map_err(|err| PortalContractError::Transport(format!("connect session bus: {err}")))?;
+    let fd = call_remote_desktop_connect_to_eis_zbus(&connection, session_handle, options).await?;
+    if fd.as_raw_fd() < 0 {
+        return Err(PortalContractError::InvalidFileDescriptor(fd.as_raw_fd()));
+    }
+    Ok(PortalRemoteDesktopOwnedEisConnection {
+        session_handle: session_handle.to_string(),
+        fd,
+    })
+}
+
 pub async fn request_screenshot_zbus(
     options: &PortalScreenshotOptions,
     response_timeout: Duration,
@@ -994,6 +1018,23 @@ async fn call_remote_desktop_start_zbus(
         .await
         .map_err(|err| PortalContractError::Transport(format!("call Start: {err}")))?;
     Ok(handle.to_string())
+}
+
+async fn call_remote_desktop_connect_to_eis_zbus(
+    connection: &zbus::Connection,
+    session_handle: &str,
+    options: &PortalConnectToEisOptions,
+) -> Result<OwnedFd> {
+    validate_session_path(session_handle)?;
+    let portal_proxy = remote_desktop_proxy(connection).await?;
+    let session_handle = OwnedObjectPath::try_from(session_handle.to_string())
+        .map_err(|err| PortalContractError::Transport(format!("invalid session handle: {err}")))?;
+    let vardict = HashMap::<&str, Value<'_>>::with_capacity(options.vardict_entry_count());
+    let fd: zbus::zvariant::OwnedFd = portal_proxy
+        .call(CONNECT_TO_EIS_METHOD, &(session_handle, vardict))
+        .await
+        .map_err(|err| PortalContractError::Transport(format!("call ConnectToEIS: {err}")))?;
+    Ok(fd.into())
 }
 
 async fn wait_for_zbus_response(
