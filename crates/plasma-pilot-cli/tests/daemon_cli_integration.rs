@@ -506,6 +506,102 @@ fn cli_replays_panic_stop_trace_against_real_daemon() -> Result<()> {
 }
 
 #[test]
+fn cli_replays_trace_directory_against_real_daemon() -> Result<()> {
+    let daemon = DaemonFixture::start()?;
+    let denied_screenshot = Path::new("/tmp/plasma-pilot-denied-full-resolution.png");
+    fs::remove_file(denied_screenshot).ok();
+
+    let trace_dir = workspace_root().join("examples/traces");
+    let trace_arg = trace_dir.to_string_lossy().into_owned();
+    let report = daemon.cli_value(&["trace", "replay", "--dir", &trace_arg])?;
+    assert_eq!(report["type"], "trace_replay_set");
+    assert_eq!(report["dir"], trace_arg);
+    let traces = report["traces"]
+        .as_array()
+        .context("trace replay directory report traces are an array")?;
+    assert!(
+        traces.len() >= 3,
+        "expected checked-in trace fixtures under {}, got {traces:?}",
+        trace_dir.display()
+    );
+    assert_eq!(
+        report["trace_count"],
+        serde_json::Value::from(u64::try_from(traces.len()).expect("trace count fits u64"))
+    );
+    assert!(
+        report["step_count"].as_u64().unwrap_or_default() >= 13,
+        "trace replay directory report did not include aggregate steps: {report}"
+    );
+    assert!(
+        traces.iter().any(|trace| {
+            trace["file"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("status-smoke.json"))
+                && trace["steps"]
+                    .as_array()
+                    .is_some_and(|steps| steps.iter().all(|step| step["ok"] == true))
+        }),
+        "status replay trace did not report all-ok steps: {traces:?}"
+    );
+    assert!(
+        traces.iter().any(|trace| {
+            trace["file"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("policy-denials-smoke.json"))
+                && trace["steps"].as_array().is_some_and(|steps| {
+                    steps
+                        .iter()
+                        .all(|step| step["response_type"] == "error" && step["ok"] == false)
+                })
+        }),
+        "policy denial replay trace did not report fail-closed steps: {traces:?}"
+    );
+    assert!(
+        traces.iter().any(|trace| {
+            trace["file"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("panic-stop-smoke.json"))
+                && trace["steps"].as_array().is_some_and(|steps| {
+                    steps.iter().any(|step| step["method"] == "set_panic_stop")
+                        && steps
+                            .iter()
+                            .all(|step| step["response_type"] == "panic_stop" && step["ok"] == true)
+                })
+        }),
+        "panic-stop replay trace did not report panic-stop steps: {traces:?}"
+    );
+    assert!(
+        !denied_screenshot.exists(),
+        "denied full-resolution screenshot trace wrote {}",
+        denied_screenshot.display()
+    );
+    fs::remove_file(denied_screenshot).ok();
+    Ok(())
+}
+
+#[test]
+fn cli_replay_directory_rejects_empty_trace_set() -> Result<()> {
+    let root = unique_temp_dir();
+    fs::create_dir_all(&root).context("create integration temp dir")?;
+    let socket = root.join("missing.sock").to_string_lossy().into_owned();
+    let trace_arg = root.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_plasma-pilot-cli"))
+        .args(["--socket", &socket, "trace", "replay", "--dir", &trace_arg])
+        .output()
+        .context("run plasma-pilot-cli trace replay --dir")?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("contains no .json traces"),
+        "stderr did not include empty trace dir detail: {stderr}"
+    );
+
+    fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+#[test]
 fn cli_validates_trace_without_daemon() -> Result<()> {
     let trace_path = workspace_root().join("examples/traces/status-smoke.json");
     let trace_arg = trace_path.to_string_lossy().into_owned();

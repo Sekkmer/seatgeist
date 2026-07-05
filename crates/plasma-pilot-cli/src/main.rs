@@ -567,7 +567,9 @@ enum TraceCommand {
     },
     Replay {
         #[arg(long)]
-        file: PathBuf,
+        file: Option<PathBuf>,
+        #[arg(long, conflicts_with = "file")]
+        dir: Option<PathBuf>,
     },
 }
 
@@ -1336,7 +1338,7 @@ fn main() -> Result<()> {
         }
         Command::Trace { command } => match command {
             TraceCommand::Validate { file, dir } => validate_trace_command(file, dir)?,
-            TraceCommand::Replay { file } => replay_trace(&socket, file)?,
+            TraceCommand::Replay { file, dir } => replay_trace_command(&socket, file, dir)?,
         },
     }
 
@@ -1539,19 +1541,7 @@ fn validate_trace_file(file: PathBuf) -> Result<()> {
 }
 
 fn validate_trace_dir(dir: PathBuf) -> Result<()> {
-    let mut files = fs::read_dir(&dir)
-        .with_context(|| format!("read trace dir {}", dir.display()))?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<std::io::Result<Vec<_>>>()
-        .with_context(|| format!("read trace paths in {}", dir.display()))?;
-    files.retain(|path| {
-        path.extension()
-            .is_some_and(|extension| extension == "json")
-    });
-    files.sort();
-    if files.is_empty() {
-        bail!("trace dir {} contains no .json traces", dir.display());
-    }
+    let files = trace_files_in_dir(&dir)?;
 
     let mut total_steps = 0usize;
     let mut traces = Vec::with_capacity(files.len());
@@ -1582,6 +1572,23 @@ fn validate_trace_dir(dir: PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn trace_files_in_dir(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = fs::read_dir(dir)
+        .with_context(|| format!("read trace dir {}", dir.display()))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| format!("read trace paths in {}", dir.display()))?;
+    files.retain(|path| {
+        path.extension()
+            .is_some_and(|extension| extension == "json")
+    });
+    files.sort();
+    if files.is_empty() {
+        bail!("trace dir {} contains no .json traces", dir.display());
+    }
+    Ok(files)
+}
+
 fn trace_validation_steps(trace: &ReplayTrace) -> (usize, Vec<serde_json::Value>) {
     let steps = trace
         .steps
@@ -1602,10 +1609,69 @@ fn trace_validation_steps(trace: &ReplayTrace) -> (usize, Vec<serde_json::Value>
     (steps.len(), steps)
 }
 
-fn replay_trace(socket: &PathBuf, file: PathBuf) -> Result<()> {
+fn replay_trace_command(
+    socket: &PathBuf,
+    file: Option<PathBuf>,
+    dir: Option<PathBuf>,
+) -> Result<()> {
+    match (file, dir) {
+        (Some(file), None) => replay_trace_file(socket, file),
+        (None, Some(dir)) => replay_trace_dir(socket, dir),
+        (None, None) => bail!("trace replay requires --file <path> or --dir <path>"),
+        (Some(_), Some(_)) => bail!("trace replay accepts either --file <path> or --dir <path>"),
+    }
+}
+
+fn replay_trace_file(socket: &PathBuf, file: PathBuf) -> Result<()> {
     let trace = load_trace(&file)?;
     validate_trace(&trace)?;
+    let results = replay_trace_steps(socket, &trace)?;
 
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "type": "trace_replay",
+            "trace_version": trace.version,
+            "description": trace.description,
+            "steps": results,
+        }))?
+    );
+    Ok(())
+}
+
+fn replay_trace_dir(socket: &PathBuf, dir: PathBuf) -> Result<()> {
+    let files = trace_files_in_dir(&dir)?;
+    let mut total_steps = 0usize;
+    let mut traces = Vec::with_capacity(files.len());
+    for file in files {
+        let trace = load_trace(&file)?;
+        validate_trace(&trace).with_context(|| format!("validate trace {}", file.display()))?;
+        let results = replay_trace_steps(socket, &trace)
+            .with_context(|| format!("replay trace {}", file.display()))?;
+        total_steps += results.len();
+        traces.push(serde_json::json!({
+            "file": file.display().to_string(),
+            "trace_version": trace.version,
+            "description": trace.description,
+            "step_count": results.len(),
+            "steps": results,
+        }));
+    }
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "type": "trace_replay_set",
+            "dir": dir.display().to_string(),
+            "trace_count": traces.len(),
+            "step_count": total_steps,
+            "traces": traces,
+        }))?
+    );
+    Ok(())
+}
+
+fn replay_trace_steps(socket: &PathBuf, trace: &ReplayTrace) -> Result<Vec<serde_json::Value>> {
     let mut results = Vec::with_capacity(trace.steps.len());
     for (index, step) in trace.steps.iter().enumerate() {
         let response = send_request(socket, step.request.clone())
@@ -1674,17 +1740,7 @@ fn replay_trace(socket: &PathBuf, file: PathBuf) -> Result<()> {
             "ok": ok,
         }));
     }
-
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "type": "trace_replay",
-            "trace_version": trace.version,
-            "description": trace.description,
-            "steps": results,
-        }))?
-    );
-    Ok(())
+    Ok(results)
 }
 
 fn known_response_types() -> &'static [&'static str] {
