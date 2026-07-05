@@ -157,6 +157,7 @@ def verify_source(source: Path, manifest: dict[str, Any]) -> None:
             f"{prefix}scripts/verify-release-install.sh",
             f"{prefix}scripts/sign-release-artifacts.sh",
             f"{prefix}scripts/verify-release-signatures.sh",
+            f"{prefix}scripts/check-public-name.py",
             f"{prefix}scripts/release-readiness.py",
             f"{prefix}scripts/write-eval-evidence.py",
         ],

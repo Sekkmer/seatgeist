@@ -66,6 +66,8 @@ def main() -> None:
     require_contains("Makefile", makefile, "scripts/sign-release-artifacts.sh")
     require_contains("Makefile", makefile, "verify-release-signatures:")
     require_contains("Makefile", makefile, "scripts/verify-release-signatures.sh")
+    require_contains("Makefile", makefile, "check-public-name:")
+    require_contains("Makefile", makefile, "scripts/check-public-name.py")
     require_contains("Makefile", makefile, "release-readiness:")
     require_contains("Makefile", makefile, "scripts/release-readiness.py")
 
@@ -103,6 +105,7 @@ def main() -> None:
         "scripts/verify-release-install.sh",
         "scripts/sign-release-artifacts.sh",
         "scripts/verify-release-signatures.sh",
+        "scripts/check-public-name.py",
         "scripts/release-readiness.py",
         "target/",
     ]:
@@ -142,6 +145,7 @@ def main() -> None:
     for needle in [
         "release_readiness",
         "public_metadata",
+        "name_collision_report",
         "release_checklist",
         "release_artifacts",
         "release_signatures",
@@ -163,6 +167,18 @@ def main() -> None:
         "--kind",
     ]:
         require_contains("scripts/write-eval-evidence.py", eval_evidence, needle)
+
+    name_check = require_executable("scripts/check-public-name.py")
+    for needle in [
+        "seatgeist_name_collision_check",
+        "name-collision-check.json",
+        "crates.io",
+        "registry.npmjs.org",
+        "pypi.org",
+        "api.github.com/search/repositories",
+        "--strict",
+    ]:
+        require_contains("scripts/check-public-name.py", name_check, needle)
 
     checklist = read("docs/release-checklist.md")
     require_contains(

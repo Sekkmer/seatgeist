@@ -13,6 +13,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_DIR = ROOT / "target" / "seatgeist-release"
 GUI_EVAL_DIR = ROOT / "target" / "seatgeist-gui-eval"
+NAME_CHECK = RELEASE_DIR / "name-collision-check.json"
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,51 @@ def check_release_checklist() -> Check:
     ok = not open_items
     summary = "release checklist has no open blocking evidence" if ok else f"release checklist has {len(open_items)} open or partial items"
     return Check("release_checklist", ok, summary, open_items)
+
+
+def check_name_collision_report(current_git: str) -> Check:
+    if not NAME_CHECK.is_file():
+        return Check(
+            "name_collision_report",
+            False,
+            "public package/repository name collision report is missing",
+            ["run make check-public-name"],
+        )
+    try:
+        report = json.loads(NAME_CHECK.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as err:
+        return Check("name_collision_report", False, "name collision report is invalid JSON", [str(err)])
+    if not isinstance(report, dict):
+        return Check("name_collision_report", False, "name collision report is not an object", [rel(NAME_CHECK)])
+    if report.get("type") != "seatgeist_name_collision_check":
+        return Check("name_collision_report", False, "name collision report has the wrong type", [rel(NAME_CHECK)])
+    report_git = report.get("git")
+    if report_git != current_git:
+        return Check(
+            "name_collision_report",
+            False,
+            "name collision report is stale for the current commit",
+            [f"report git: {report_git}", f"current git: {current_git}", rel(NAME_CHECK)],
+        )
+    collisions = report.get("collision_count")
+    errors = report.get("error_count")
+    if not isinstance(collisions, int) or not isinstance(errors, int):
+        return Check("name_collision_report", False, "name collision report is missing counts", [rel(NAME_CHECK)])
+
+    evidence = [rel(NAME_CHECK), f"collisions={collisions}", f"errors={errors}"]
+    if collisions or errors:
+        checks = report.get("checks")
+        if isinstance(checks, list):
+            for item in checks:
+                if isinstance(item, dict) and item.get("state") in ("taken", "error"):
+                    evidence.append(f"{item.get('registry')} {item.get('name')}: {item.get('state')}")
+        return Check(
+            "name_collision_report",
+            False,
+            "public package/repository name collision report has collisions or errors",
+            evidence,
+        )
+    return Check("name_collision_report", True, "public package/repository name collision report is clean", evidence)
 
 
 def check_release_artifacts(
@@ -235,6 +281,7 @@ def build_report() -> dict[str, Any]:
     checks = [
         check_git_state(),
         check_public_metadata(),
+        check_name_collision_report(current_git),
         check_release_checklist(),
         check_release_artifacts(manifest_path, manifest, current_git),
         check_release_signatures(manifest_path, manifest),
