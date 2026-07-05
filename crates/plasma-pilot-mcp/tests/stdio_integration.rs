@@ -384,6 +384,80 @@ require_focus_guard = false
     Ok(())
 }
 
+#[test]
+fn mcp_stdio_raw_input_fails_closed_and_is_journaled() -> Result<()> {
+    let daemon = DaemonFixture::start()?;
+    let denied_text = "blocked-through-mcp";
+    let responses = daemon.run_mcp(&[
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "plasma.type_text",
+                "arguments": {
+                    "text": denied_text
+                }
+            }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "plasma.journal_tail",
+                "arguments": {
+                    "limit": 10,
+                    "method": "type_text",
+                    "ok": false
+                }
+            }
+        }),
+    ])?;
+
+    assert_eq!(responses.len(), 3);
+
+    let denied = &responses[1]["result"];
+    assert_eq!(denied["isError"], true);
+    assert_eq!(denied["structuredContent"]["type"], "error");
+    assert_eq!(
+        denied["structuredContent"]["data"]["kind"],
+        "policy_prompt_required"
+    );
+
+    let journal = &responses[2]["result"];
+    assert_eq!(journal["isError"], false);
+    assert_eq!(journal["structuredContent"]["type"], "journal");
+    let entries = journal["structuredContent"]["data"]
+        .as_array()
+        .context("journal data is an array")?;
+    let Some(entry) = entries.iter().find(|entry| entry["method"] == "type_text") else {
+        bail!("missing type_text journal entry: {entries:?}");
+    };
+    assert_eq!(entry["ok"], false);
+    assert_eq!(entry["safety_class"], "control_keyboard");
+    assert_eq!(entry["client"]["tool"], "plasma-pilot-mcp");
+    assert!(
+        entry["summary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("PolicyPromptRequired")
+    );
+
+    let journal_json = serde_json::to_string(journal).context("serialize journal response")?;
+    assert!(
+        !journal_json.contains(denied_text),
+        "MCP journal response must not echo denied typed text: {journal_json}"
+    );
+    Ok(())
+}
+
 fn assert_tool_present(tools: &[Value], expected_name: &str) {
     assert!(
         tools.iter().any(|tool| tool["name"] == expected_name),
