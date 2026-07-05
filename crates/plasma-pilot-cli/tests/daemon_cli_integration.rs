@@ -8,9 +8,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use libplasma_pilot::{
-    BackendCapability, CapabilitySet, DaemonRequest, DaemonResponse, DesktopSessionStatus,
-    HealthStatus, JournalEntry, PanicStopStatus, PolicyStatus, ReplayTrace, SafetyStatus,
-    ToolApprovalLevel, TraceStep, UinputStatus,
+    BackendCapability, CapabilitySet, DaemonResponse, DesktopSessionStatus, HealthStatus,
+    JournalEntry, PanicStopStatus, PolicyStatus, ReplayTrace, SafetyStatus, ToolApprovalLevel,
+    UinputStatus,
 };
 use std::os::unix::fs::PermissionsExt;
 
@@ -358,37 +358,12 @@ fn cli_toggles_private_panic_stop_file() -> Result<()> {
 #[test]
 fn cli_replays_trace_against_real_daemon() -> Result<()> {
     let daemon = DaemonFixture::start()?;
-    let trace_path = daemon.root.join("status-trace.json");
-    let trace = ReplayTrace {
-        version: 1,
-        description: Some("status trace".to_string()),
-        steps: vec![
-            TraceStep {
-                label: Some("health".to_string()),
-                request: DaemonRequest::Health,
-                expect_response_type: Some("health".to_string()),
-                expect_ok: Some(true),
-            },
-            TraceStep {
-                label: Some("capabilities".to_string()),
-                request: DaemonRequest::Capabilities,
-                expect_response_type: Some("capabilities".to_string()),
-                expect_ok: Some(true),
-            },
-            TraceStep {
-                label: Some("policy".to_string()),
-                request: DaemonRequest::PolicyStatus,
-                expect_response_type: Some("policy_status".to_string()),
-                expect_ok: Some(true),
-            },
-        ],
-    };
-    fs::write(
-        &trace_path,
-        serde_json::to_string_pretty(&trace).context("serialize trace")?,
+    let trace_path = workspace_root().join("examples/traces/status-smoke.json");
+    let trace: ReplayTrace = serde_json::from_str(
+        &fs::read_to_string(&trace_path).context("read checked-in status trace fixture")?,
     )
-    .context("write trace file")?;
-
+    .context("parse checked-in status trace fixture")?;
+    assert_eq!(trace.version, 1);
     let trace_arg = trace_path.to_string_lossy().into_owned();
     let report = daemon.cli_value(&["trace", "replay", "--file", &trace_arg])?;
     assert_eq!(report["type"], "trace_replay");
@@ -398,17 +373,30 @@ fn cli_replays_trace_against_real_daemon() -> Result<()> {
             .as_array()
             .context("trace report steps are an array")?
             .len(),
-        3
+        trace.steps.len()
     );
     assert_eq!(report["steps"][0]["method"], "health");
     assert_eq!(report["steps"][2]["response_type"], "policy_status");
-    assert_eq!(report["steps"][2]["ok"], true);
+    assert_eq!(
+        report["steps"][4]["response_type"],
+        "desktop_session_status"
+    );
+    assert_eq!(report["steps"][4]["ok"], true);
 
     let journal = daemon.cli_json(&["journal", "tail", "--limit", "10"])?;
     let DaemonResponse::Journal(entries) = journal else {
         bail!("expected journal response, got {journal:?}");
     };
-    assert_methods(&entries, &["health", "capabilities", "policy_status"]);
+    assert_methods(
+        &entries,
+        &[
+            "health",
+            "capabilities",
+            "policy_status",
+            "safety_status",
+            "desktop_session_status",
+        ],
+    );
     assert!(entries.iter().all(|entry| entry.ok));
     Ok(())
 }
@@ -528,6 +516,14 @@ fn unique_temp_dir() -> PathBuf {
         "plasma-pilot-cli-integration-{}-{now}",
         std::process::id()
     ))
+}
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("CLI crate is under workspace crates directory")
+        .to_path_buf()
 }
 
 fn unix_time_ms() -> Result<u64> {

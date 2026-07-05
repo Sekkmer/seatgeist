@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "description": "Safe status-only replay trace for verifying a PlasmaPilot daemon without control side effects.",
+  "steps": [
+    {
+      "label": "health",
+      "request": {
+        "method": "health"
+      },
+      "expect_response_type": "health",
+      "expect_ok": true
+    },
+    {
+      "label": "capabilities",
+      "request": {
+        "method": "capabilities"
+      },
+      "expect_response_type": "capabilities",
+      "expect_ok": true
+    },
+    {
+      "label": "policy",
+      "request": {
+        "method": "policy_status"
+      },
+      "expect_response_type": "policy_status",
+      "expect_ok": true
+    },
+    {
+      "label": "safety",
+      "request": {
+        "method": "safety_status"
+      },
+      "expect_response_type": "safety_status",
+      "expect_ok": true
+    },
+    {
+      "label": "desktop-session",
+      "request": {
+        "method": "desktop_session_status"
+      },
+      "expect_response_type": "desktop_session_status",
+      "expect_ok": true
+    }
+  ]
+}
