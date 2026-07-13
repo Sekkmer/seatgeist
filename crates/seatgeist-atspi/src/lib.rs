@@ -19,6 +19,7 @@ const STATE_FOCUSED: usize = 12;
 const DEFAULT_SEARCH_DEPTH: usize = 12;
 const DEFAULT_VALUE_MAX_CHARS: i32 = 512;
 const DEFAULT_SET_TEXT_MAX_CHARS: usize = 8192;
+const BUSCTL_ACTION_TIMEOUT_ARG: &str = "--timeout=2s";
 
 pub type Result<T> = std::result::Result<T, SeatgeistError>;
 
@@ -500,7 +501,15 @@ impl AtspiBus {
 
     fn role_name(&self, node: &AtspiRef) -> Result<String> {
         let output = self.call(&node.service, &node.path, ATSPI_ACCESSIBLE, "GetRoleName")?;
-        parse_single_string(&output)
+        resolve_role_name(&output, || {
+            let localized = self.call(
+                &node.service,
+                &node.path,
+                ATSPI_ACCESSIBLE,
+                "GetLocalizedRoleName",
+            )?;
+            parse_single_string(&localized)
+        })
     }
 
     fn name(&self, node: &AtspiRef) -> Result<String> {
@@ -537,7 +546,10 @@ impl AtspiBus {
     }
 
     fn actions(&self, node: &AtspiRef) -> Result<Vec<String>> {
-        let output = self.call(&node.service, &node.path, ATSPI_ACTION, "GetActions")?;
+        let output = action_query_command(&self.address, node)
+            .output()
+            .map_err(|err| SeatgeistError::BackendUnavailable(format!("run busctl: {err}")))?;
+        let output = command_output(output, "busctl AT-SPI action query")?;
         Ok(parse_action_names(&output))
     }
 
@@ -1005,6 +1017,33 @@ fn parse_single_string(output: &str) -> Result<String> {
     })
 }
 
+fn resolve_role_name<F>(standard_output: &str, localized: F) -> Result<String>
+where
+    F: FnOnce() -> Result<String>,
+{
+    let standard = parse_single_string(standard_output)?;
+    if standard.trim().is_empty() {
+        localized()
+    } else {
+        Ok(standard)
+    }
+}
+
+fn action_query_command(address: &str, node: &AtspiRef) -> Command {
+    let mut command = Command::new("busctl");
+    command.args([
+        BUSCTL_ACTION_TIMEOUT_ARG,
+        "--address",
+        address,
+        "call",
+        &node.service,
+        &node.path,
+        ATSPI_ACTION,
+        "GetActions",
+    ]);
+    command
+}
+
 fn parse_strings(input: &str) -> Vec<String> {
     let mut strings = Vec::new();
     let mut rest = input;
@@ -1346,6 +1385,37 @@ mod tests {
         let states = state_names(&[1_u32 << STATE_FOCUSED]);
         assert_eq!(states, vec!["focused"]);
         assert!(state_has_focused(&[1_u32 << STATE_FOCUSED]));
+    }
+
+    #[test]
+    fn uses_localized_role_when_webkit_returns_an_empty_standard_role() {
+        let role = resolve_role_name("s \"\"\n", || Ok("push button".to_string()))
+            .expect("localized fallback resolves");
+        assert_eq!(role, "push button");
+
+        let role = resolve_role_name("s \"entry\"\n", || {
+            panic!("localized fallback must not run for a standard role")
+        })
+        .expect("standard role resolves");
+        assert_eq!(role, "entry");
+    }
+
+    #[test]
+    fn bounds_atspi_action_queries() {
+        let node = AtspiRef {
+            service: ":1.42".to_string(),
+            path: "/org/a11y/atspi/accessible/7".to_string(),
+        };
+        let command = action_query_command("unix:path=/run/user/1000/at-spi/bus_1", &node);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args.first().map(String::as_str),
+            Some(BUSCTL_ACTION_TIMEOUT_ARG)
+        );
+        assert!(args.iter().any(|arg| arg == "GetActions"));
     }
 
     #[test]
