@@ -33,6 +33,7 @@ manifest="${release_root}/${package_name}.manifest.json"
 
 rm -rf "$stage" "$plugin_stage" "$archive" "$checksum" "$plugin_archive" "$plugin_checksum" "$source_archive" "$source_checksum" "$source_file_list" "$manifest"
 mkdir -p "$stage/bin" \
+	"$stage/desktop" \
 	"$stage/docs" \
 	"$stage/examples/traces" \
 	"$stage/kwin" \
@@ -51,6 +52,7 @@ done
 test -f scripts/seatgeist-panic-stop-hotkey
 
 cp -a docs/. "$stage/docs/"
+cp -a desktop/. "$stage/desktop/"
 cp -a examples/traces/. "$stage/examples/traces/"
 cp -a kwin/. "$stage/kwin/"
 cp -a plugin/. "$stage/plugin/"
@@ -58,7 +60,7 @@ cp -a polkit/. "$stage/polkit/"
 cp -a scripts/. "$stage/scripts/"
 cp -a systemd/. "$stage/systemd/"
 cp -a udev/. "$stage/udev/"
-cp Cargo.toml Cargo.lock Makefile LICENSE-MIT LICENSE-APACHE "$stage/"
+cp README.md SECURITY.md Cargo.toml Cargo.lock Makefile LICENSE-MIT LICENSE-APACHE "$stage/"
 
 mkdir -p "$plugin_stage"
 cp -a plugin/. "$plugin_stage/"

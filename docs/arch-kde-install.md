@@ -41,13 +41,21 @@ From the repository root:
 cargo build --workspace
 ```
 
-For a user-service install matching `systemd/seatgeistd.service`, install the binaries into `~/.cargo/bin`:
+For a user-service install matching `systemd/seatgeistd.service`, expose the
+release binaries under `~/.local/bin`. Development checkouts can use symlinks
+so rebuilding `target/release` updates the CLI, MCP server, and next daemon
+restart together:
 
 ```bash
-cargo install --locked --path crates/seatgeistd
-cargo install --locked --path crates/seatgeist-cli
-cargo install --locked --path crates/seatgeist-mcp
+cargo build --workspace --release
+mkdir -p ~/.local/bin
+ln -sfn "$PWD/target/release/seatgeistd" ~/.local/bin/seatgeistd
+ln -sfn "$PWD/target/release/seatgeist-cli" ~/.local/bin/seatgeist-cli
+ln -sfn "$PWD/target/release/seatgeist-mcp" ~/.local/bin/seatgeist-mcp
 ```
+
+For a fixed release installation, copy the three release binaries into the
+same directory instead of linking them to a development checkout.
 
 Verify the user session can find them:
 
@@ -102,6 +110,26 @@ seatgeist-cli policy-status
 
 The socket unit uses mode `0600` and directory mode `0700`. Keep the daemon running as the desktop user. Do not run it as root for ordinary operation.
 
+### Safe daemon update
+
+From a development checkout, use the explicit deployment target instead of
+copying and restarting the daemon by hand:
+
+```bash
+make deploy-user-daemon
+```
+
+The deployment helper builds the current CLI and release daemon, refuses to
+restart while a retained capture or RemoteDesktop EIS session is active,
+installs a user-local KDE desktop authorization for the daemon's restricted
+`org.kde.KWin.ScreenShot2` exact-window capture interface, atomically installs
+the daemon at `~/.local/bin/seatgeistd`, and restarts only
+`seatgeistd.service`. It waits for a successful daemon request rather than
+socket existence, separately waits for the KWin bridge heartbeat, verifies
+that release, installed, and running executable hashes match, and rechecks
+retained-session idleness. It does not capture pixels, open a portal session,
+focus a window, or send input.
+
 ## Panic-Stop Shortcut
 
 Install the panic-stop helper somewhere KDE's global shortcut runner can execute:
@@ -129,7 +157,12 @@ make install-kwin-script
 seatgeist-cli kwin-bridge-status
 ```
 
-Before the script publishes its first active-window update, active-window reads can report the documented bridge-not-yet-reporting state. Open or focus a normal application window, then re-check status.
+The install target updates the user-local package and enabled flag, then
+reloads only the Seatgeist script when the KWin scripting service is live. If
+it reports that loading was deferred, log into the target KDE session and run
+the target again, or let the enabled script load at the next session start.
+
+Before the script publishes its first active-window update, active-window reads can report the documented bridge-not-yet-reporting state. The script republishes its current snapshot every two seconds, so a daemon-only restart should recover without focusing a window. If it remains empty, update/reload the installed script with `make install-kwin-script`, then re-check status.
 
 ## Backend Diagnostics
 
@@ -207,6 +240,10 @@ Prefer method-scoped, short-lived approval grants:
 
 ```bash
 seatgeist-cli approve --safety-class control-semantic --method focus_window --ttl-ms 60000
+seatgeist-cli approve --safety-class control-semantic --method move_window --ttl-ms 60000
+seatgeist-cli approve --safety-class control-semantic --method launch_window --ttl-ms 60000
+seatgeist-cli approve --safety-class control-semantic --method resize_window --ttl-ms 60000
+seatgeist-cli approve --safety-class control-keyboard --method page_zoom --ttl-ms 60000
 ```
 
 Control actions should include active-window guards when possible. Full-resolution screenshots, clipboard reads, destructive actions, and secret-looking text fields remain separately gated.

@@ -209,6 +209,7 @@ def write_summary(root: Path) -> None:
     recent_entries = recent_journal_entries(root)
     output_dir = root / "target" / "seatgeist-hook-audit"
     output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.chmod(0o700)
     summary = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "git_root": str(root),
@@ -219,10 +220,12 @@ def write_summary(root: Path) -> None:
         "seatgeist_audit": summarize_journal(recent_entries),
         "recent_seatgeist_journal": recent_entries,
     }
-    (output_dir / "latest.json").write_text(
+    latest_path = output_dir / "latest.json"
+    latest_path.write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    latest_path.chmod(0o600)
 
 
 def main() -> int:

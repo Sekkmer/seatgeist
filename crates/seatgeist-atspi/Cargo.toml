@@ -10,8 +10,11 @@ homepage.workspace = true
 description = "AT-SPI accessibility backend for Seatgeist."
 
 [dependencies]
+async-trait.workspace = true
 libseatgeist.workspace = true
 seatgeist-backend.workspace = true
+tokio.workspace = true
+zbus.workspace = true
 
 [lints]
 workspace = true

@@ -101,6 +101,13 @@ def validate_manifest(root: Path) -> None:
     capabilities = interface.get("capabilities")
     if not isinstance(capabilities, list) or not all(isinstance(item, str) for item in capabilities):
         fail("plugin.json.interface.capabilities must be a string array")
+    default_prompt = interface.get("defaultPrompt")
+    if (
+        not isinstance(default_prompt, list)
+        or not default_prompt
+        or not all(isinstance(item, str) and item.strip() for item in default_prompt)
+    ):
+        fail("plugin.json.interface.defaultPrompt must be a non-empty string array")
 
     skills_path = require_relative_path(root, manifest.get("skills"), "skills")
     mcp_path = require_relative_path(root, manifest.get("mcpServers"), "mcpServers")
@@ -149,13 +156,16 @@ def validate_marketplace(repo_root: Path, plugin_root: Path) -> None:
 
 def validate_mcp(path: Path) -> None:
     config = require_object(load_json(path), ".mcp.json")
-    servers = require_object(config.get("mcp_servers"), ".mcp.json.mcp_servers")
-    server = require_object(servers.get("seatgeist"), ".mcp.json.mcp_servers.seatgeist")
+    servers = require_object(config.get("mcpServers"), ".mcp.json.mcpServers")
+    server = require_object(servers.get("seatgeist"), ".mcp.json.mcpServers.seatgeist")
     if require_string(server, "command", "seatgeist MCP server") != "seatgeist-mcp":
         fail("seatgeist MCP command must be seatgeist-mcp")
     args = server.get("args")
-    if args != ["--stdio"]:
-        fail("seatgeist MCP args must be [\"--stdio\"]")
+    if args != ["--stdio", "--tool-profile", "core"]:
+        fail(
+            "seatgeist MCP args must default to "
+            '["--stdio", "--tool-profile", "core"]'
+        )
 
 
 def validate_hooks(path: Path) -> None:
@@ -173,13 +183,21 @@ def validate_hooks(path: Path) -> None:
     if handler.get("type") != "command":
         fail("Seatgeist hook must use type=command")
     command = require_string(handler, "command", "Seatgeist hook")
-    expected = 'python3 "$(git rev-parse --show-toplevel)/plugin/hooks/seatgeist_audit_summary.py"'
+    hook_script = path.parent / "seatgeist_audit_summary.py"
+    expected = (
+        "sh -c 'root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; "
+        "script=\"\"; for p in "
+        "\"$root/plugin/hooks/seatgeist_audit_summary.py\" "
+        "\"${CODEX_HOME:-$HOME/.codex}/plugins/cache/seatgeist-local/seatgeist/\"*/hooks/seatgeist_audit_summary.py "
+        "\"$HOME/git/seatgeist/plugin/hooks/seatgeist_audit_summary.py\"; "
+        "do if [ -f \"$p\" ]; then script=\"$p\"; break; fi; done; "
+        "if [ -n \"$script\" ]; then python3 \"$script\"; fi'"
+    )
     if command != expected:
-        fail("Seatgeist hook command must run plugin/hooks/seatgeist_audit_summary.py from git root")
+        fail("Seatgeist hook command must run the adjacent seatgeist_audit_summary.py")
     if handler.get("timeout") != 10:
         fail("Seatgeist hook timeout must be 10 seconds")
     require_string(handler, "statusMessage", "Seatgeist hook")
-    hook_script = path.parent / "seatgeist_audit_summary.py"
     if not hook_script.is_file():
         fail("Seatgeist hook script is missing")
     validate_hook_summary_script(hook_script)

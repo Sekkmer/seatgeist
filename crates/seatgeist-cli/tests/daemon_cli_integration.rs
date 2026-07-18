@@ -197,6 +197,10 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
             human_input_quiet_ms: 1500,
             human_input_signal_fresh: false,
             human_input_signal_age_ms: None,
+            human_input_activity_backend: None,
+            human_input_activity_trusted: false,
+            human_input_last_class: None,
+            human_input_last_provenance: None,
             control_rate_limit_per_minute: Some(120),
             preview_max_edge: 1600,
             tile_max_edge: 1600,
@@ -294,11 +298,13 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
     assert!(!status.screenshot_portal.setup_hint.is_empty());
     assert!(!status.kwin_metadata.setup_hint.is_empty());
     assert!(!status.spectacle.setup_hint.is_empty());
-    if status.implemented_available_backend.is_some() {
-        assert_eq!(
-            status.implemented_available_backend.as_deref(),
-            Some("spectacle")
-        );
+    match status.implemented_available_backend.as_deref() {
+        Some("portal_screenshot") => {
+            assert!(status.screenshot_portal.screenshot_interface_available);
+        }
+        Some("spectacle") => assert!(status.spectacle.command_available),
+        None => {}
+        Some(backend) => bail!("unexpected implemented capture backend {backend}"),
     }
     assert!(!status.setup_hint.is_empty());
 
@@ -361,6 +367,10 @@ tile_max_edge = 2048
             human_input_quiet_ms: 2500,
             human_input_signal_fresh: false,
             human_input_signal_age_ms: None,
+            human_input_activity_backend: None,
+            human_input_activity_trusted: false,
+            human_input_last_class: None,
+            human_input_last_provenance: None,
             control_rate_limit_per_minute: Some(42),
             preview_max_edge: 1024,
             tile_max_edge: 2048,
@@ -749,6 +759,7 @@ require_focus_guard = true
         DaemonRequest::TypeText(TypeTextRequest {
             text: "blocked-before-input".to_string(),
             guard: None,
+            session_id: None,
         }),
         "focus_guard",
         "focus guard is required",
@@ -780,9 +791,10 @@ human_input_quiet_ms = 60000
         DaemonRequest::TypeText(TypeTextRequest {
             text: "blocked-before-input".to_string(),
             guard: None,
+            session_id: None,
         }),
         "human_input_pause",
-        "human input activity signal is fresh",
+        "human input activity is fresh",
     )?;
 
     let app_policy = DaemonFixture::start_with_config(
@@ -809,6 +821,7 @@ require_focus_guard = false
         DaemonRequest::TypeText(TypeTextRequest {
             text: "blocked-before-input".to_string(),
             guard: None,
+            session_id: None,
         }),
         "app_denied",
         "app policy could not read active window",
@@ -1068,7 +1081,7 @@ fn cli_validates_trace_without_daemon() -> Result<()> {
         serde_json::from_slice(&output.stdout).context("parse trace validation report")?;
     assert_eq!(report["type"], "trace_validation");
     assert_eq!(report["trace_version"], 1);
-    assert_eq!(report["step_count"], 14);
+    assert_eq!(report["step_count"], 15);
     assert_eq!(report["steps"][0]["label"], "health");
     assert_eq!(report["steps"][0]["method"], "health");
     assert_eq!(report["steps"][0]["expect_response_type"], "health");
@@ -1078,7 +1091,7 @@ fn cli_validates_trace_without_daemon() -> Result<()> {
     assert_eq!(report["steps"][5]["method"], "computer_use_readiness");
     assert_eq!(report["steps"][5]["expect_json_count"], 6);
     assert_eq!(report["steps"][6]["method"], "accessibility_quality_status");
-    assert_eq!(report["steps"][6]["expect_json_count"], 4);
+    assert_eq!(report["steps"][6]["expect_json_count"], 7);
     assert_eq!(report["steps"][7]["method"], "kwin_bridge_status");
     assert_eq!(report["steps"][7]["expect_json_count"], 6);
     assert_eq!(report["steps"][8]["method"], "uinput_status");
@@ -1094,6 +1107,8 @@ fn cli_validates_trace_without_daemon() -> Result<()> {
         "remote_desktop_eis_session_status"
     );
     assert_eq!(report["steps"][13]["method"], "remote_desktop_eis_stop");
+    assert_eq!(report["steps"][14]["method"], "capture_session_status");
+    assert_eq!(report["steps"][14]["expect_json_count"], 3);
     Ok(())
 }
 

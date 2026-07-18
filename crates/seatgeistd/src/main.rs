@@ -1,49 +1,126 @@
+#[cfg(test)]
+use std::fmt::Display;
 use std::{
-    collections::{BTreeMap, VecDeque},
-    env,
-    fmt::{self, Display},
-    fs,
+    collections::BTreeMap,
+    env, fs,
     fs::OpenOptions,
     io::{Read, Write},
-    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
+    os::unix::fs::{FileTypeExt, PermissionsExt},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::{Arc, Mutex, OnceLock},
-    thread,
+    sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod activity;
+mod capture;
+mod capture_backend;
+mod capture_diagnostics;
+mod capture_restore;
+mod clipboard;
+mod commands;
+mod compatibility_capture_backend;
+mod config;
+mod eis_key_combo;
+mod input_actions;
+mod input_diagnostics;
+mod input_execution;
+mod interaction;
+mod keymap;
+mod kwin_bridge;
+mod kwin_capture_backend;
+mod observation;
+mod pointer_coordinates;
+mod portal_eis_probe;
+mod portal_eis_session;
+mod post_action_capture;
+mod safety_runtime;
+mod screenshot;
+mod screenshot_image;
+mod semantic_handle;
+mod semantic_settle;
+mod session_execution;
+mod session_owner;
+mod target;
+mod window_backend;
+mod window_safety;
+mod xdg;
+
 use anyhow::{Context, Error, Result, bail};
-use clap::{Parser, ValueEnum};
-use image::{GenericImageView, Rgba, imageops::FilterType};
+use capture::capture_open;
+use capture::{CaptureSessionStore, normalize_capture_frame_request};
+use capture_backend::PortalScreenBackend;
+use capture_diagnostics::{screenshot_portal_status, status as capture_backend_status};
+use capture_restore::CaptureRestoreTokenStore;
+use clap::Parser;
+use commands::exists as command_exists;
+use config::*;
+#[cfg(test)]
+use eis_key_combo::codes_with_keymap as eis_key_combo_codes_with_keymap;
+use input_actions::{
+    click_pointer, drag_pointer, key_combo, move_pointer, page_zoom, scroll_pointer, type_text,
+};
+use input_diagnostics::uinput_status;
+#[cfg(test)]
+use input_execution::backend_with_store as input_execution_backend_with_store;
+#[cfg(test)]
+use input_execution::session_backend as eis_session_input_execution_backend;
+#[cfg(test)]
+use keymap::Settings as XkbKeymapSettings;
+use keymap::{Config as XkbKeymapConfig, resolve as effective_xkb_keymap_resolution};
+use kwin_bridge::{
+    ActiveWindowState, WindowActionQueue, WindowListState, start_kwin_bridge,
+    status as kwin_bridge_status,
+};
+use kwin_capture_backend::RoutedScreenBackend;
 use libseatgeist::{
     AccessibilityCopyTextRequest, AccessibilityCutTextRequest, AccessibilityDeleteTextRequest,
     AccessibilityFindRequest, AccessibilityInsertTextRequest, AccessibilityInvokeRequest,
     AccessibilityPasteTextRequest, AccessibilityQualityStatus, AccessibilitySetCaretRequest,
     AccessibilitySetSelectionRequest, AccessibilitySetTextRequest,
-    AccessibilityTextAttributesRequest, ActionResult, ActivateLinkRequest, ActivateTabRequest,
-    ActiveWindowGuard, BackendCapability, CapabilitySet, CaptureBackendStatus, ClickButtonRequest,
-    ClickPointerRequest, ClipboardBackendStatus, ClipboardGetRequest, ClipboardText,
+    AccessibilityTextAttributesRequest, ActionReadiness, ActionResult, ActionSettleCondition,
+    ActionSettleResult, ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard,
+    BackendCapability, CapabilitySet, CaptureOpenRequest, CaptureSourceKind, ClickButtonRequest,
     ComputerUseReadinessStatus, CoordinateSpace, DaemonClientIdentity, DaemonRequest,
-    DaemonRequestEnvelope, DaemonResponse, DesktopObservation, DesktopSessionStatus,
-    DragPointerRequest, ErrorKind, FocusTextFieldRequest, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, HealthStatus, InputBackendStatus, JournalArtifactContext,
-    JournalClientContext, JournalControlContext, JournalEntry, JournalRequestedTarget,
-    JournalWindowContext, KeyComboRequest, KwinBridgeStatus, KwinMetadataStatus, LibeiStatus,
-    MovePointerRequest, ObserveRequest, PanicStopStatus, Point, PointerButton,
-    PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
-    PointerPhysicalBounds, PolicyStatus, PortalScreenshotTarget, RemoteDesktopEisProbe,
-    RemoteDesktopEisSessionStatus, RemoteDesktopPersistMode, RemoteDesktopPortalStatus,
-    RemoteDesktopSessionProbe, RemoteDesktopSessionProbeRequest, SafetyClass, SafetyStatus,
-    ScreenshotInfo, ScreenshotPortalStatus, ScreenshotRequest, ScreenshotTileRequest,
-    ScreenshotTransform, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
-    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, SpectacleStatus, ToggleCheckRequest,
-    ToolApprovalLevel, TypeTextRequest, UinputStatus, WaitForChangeRequest, WaitForChangeResult,
-    WindowGeometry, WindowInfo, XkbKeymapStatus, current_egid, current_euid, default_journal_path,
-    default_panic_stop_path, default_socket_path,
+    DaemonRequestEnvelope, DaemonResponse, DaemonResponseOptions, DesktopSessionStatus, ErrorKind,
+    FocusTextFieldRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus,
+    InputBackendStatus, JournalArtifactContext, JournalClientContext, JournalControlContext,
+    JournalEntry, JournalRequestedTarget, JournalWindowContext, LaunchWindowRequest,
+    MoveWindowRequest, Observation, PanicStopStatus, Point, PolicyStatus, PostActionOptions,
+    ResizeWindowRequest, SafetyClass, SafetyStatus, ScreenshotInfo, SelectItemRequest,
+    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest,
+    ToggleCheckRequest, ToolApprovalLevel, WindowInfo, current_euid, default_capture_restore_path,
+    default_journal_path, default_panic_stop_path, default_socket_path,
 };
+#[cfg(test)]
+use libseatgeist::{
+    AccessibilityNode, ClickPointerRequest, DragPointerRequest, KeyComboRequest,
+    MovePointerRequest, ObserveRequest, PointerButton, PointerCalibrationPoint,
+    PointerPhysicalBounds, RemoteDesktopSessionProbeRequest, ScreenshotRequest,
+    ScreenshotTransform, ScrollPointerRequest, TypeTextRequest, WaitForChangeRequest,
+    WaitForChangeResult, WindowGeometry,
+};
+#[cfg(test)]
+use pointer_coordinates::{
+    active_window_local_to_physical_point,
+    calibration_from_monitors as pointer_calibration_status_from_monitors,
+    logical_to_physical_point, physical_pointer_bounds_from_monitors,
+    validate_physical_pointer_point,
+};
+#[cfg(test)]
+use portal_eis_probe::{
+    eis_capability_names, remote_desktop_device_types, remote_desktop_probe_timeout,
+};
+use portal_eis_probe::{remote_desktop_eis_probe, remote_desktop_session_probe};
+#[cfg(test)]
+use portal_eis_session::{DaemonPortalEisSession, DaemonPortalEisSessionMetadata};
+use portal_eis_session::{
+    PortalEisSessionStore, remote_desktop_eis_start, remote_desktop_eis_stop,
+};
+use safety_runtime::{ApprovalStore, ControlRateLimiter, PanicStopState};
+use screenshot::{capture_screenshot, capture_screenshot_tile, wait_for_change};
+use seatgeist_backend::{ScreenBackend, WindowBackend};
 use seatgeist_policy::{PolicyConfig, PolicyEngine};
-use serde::Deserialize;
+use session_owner::SessionOwner;
 use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -51,17 +128,12 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 use uuid::Uuid;
+use window_backend::{KwinWindowBackend, active_window, list_monitors, list_windows_with_monitors};
+#[cfg(test)]
+use window_backend::{active_window_with_monitors, assign_monitor_id, merge_bridge_windows};
+use window_safety::{enforce_active_window_guard, enforce_app_policy, enforce_app_policy_for_app};
 
-static SCREENSHOT_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 const SEMANTIC_CHOICE_LIMIT: usize = 5;
-const DEFAULT_REQUIRE_FOCUS_GUARD: bool = true;
-const DEFAULT_HUMAN_INPUT_QUIET_MS: u64 = 1500;
-const DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE: u32 = 120;
-const DEFAULT_PREVIEW_MAX_EDGE: u32 = 1600;
-const DEFAULT_TILE_MAX_EDGE: u32 = 1600;
-const CONTROL_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
-const PORTAL_SCREENSHOT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
-const MAX_REMOTE_DESKTOP_PROBE_TIMEOUT: Duration = Duration::from_secs(300);
 const ACCESSIBILITY_QUALITY_SAMPLE_DEPTH: usize = 4;
 const ACCESSIBILITY_QUALITY_SAMPLE_MAX_NODES: usize = 512;
 
@@ -101,7 +173,7 @@ impl ActionJournal {
             control,
             artifacts,
             ok: !matches!(response, DaemonResponse::Error { .. }),
-            summary: summarize_response(response),
+            summary: journal_response_summary(response, &self.settings),
         };
         append_journal_entry(&self.path, &entry)
     }
@@ -115,6 +187,87 @@ impl ActionJournal {
         tail_journal_entries(&self.path, limit, method_filter, ok)
     }
 
+    fn record_focus_lease_step(
+        &self,
+        method: &str,
+        session_id: &str,
+        lease_id: Uuid,
+        window: &WindowInfo,
+        backend: &str,
+        ok: bool,
+    ) -> Result<()> {
+        let mut target = journal_target("sticky_focus_lease");
+        target.add("session_id", session_id);
+        target.add("window_id", &window.id);
+        if let Some(app_id) = window.app_id.as_deref() {
+            target.add("app_id", app_id);
+        }
+        if let Some(pid) = window.pid {
+            target.add("pid", pid.to_string());
+        }
+        let entry = JournalEntry {
+            sequence: self.next_sequence()?,
+            unix_time_ms: unix_time_ms()?,
+            method: method.to_string(),
+            client: None,
+            safety_class: Some(SafetyClass::ControlSemantic),
+            guard_present: true,
+            active_window_before: None,
+            active_window_after: None,
+            control: Some(JournalControlContext {
+                action_id: Some(lease_id),
+                policy: Some(if ok { "allow" } else { "checked" }.to_string()),
+                backend: Some(backend.to_string()),
+                requested_target: Some(target),
+            }),
+            artifacts: Vec::new(),
+            ok,
+            summary: format!(
+                "sticky focus lease session={} lease={} window={} ok={}",
+                session_id, lease_id, window.id, ok
+            ),
+        };
+        append_journal_entry(&self.path, &entry)
+    }
+
+    fn record_post_action_capture_step(
+        &self,
+        method: &str,
+        session_id: &str,
+        action_id: Uuid,
+        target_window_id: Option<&str>,
+        ok: bool,
+    ) -> Result<()> {
+        let mut target = journal_target("post_action_capture");
+        target.add("session_id", session_id);
+        if let Some(window_id) = target_window_id {
+            target.add("window_id", window_id);
+        }
+        let entry = JournalEntry {
+            sequence: self.next_sequence()?,
+            unix_time_ms: unix_time_ms()?,
+            method: method.to_string(),
+            client: None,
+            safety_class: Some(SafetyClass::Observe),
+            guard_present: true,
+            active_window_before: None,
+            active_window_after: None,
+            control: Some(JournalControlContext {
+                action_id: Some(action_id),
+                policy: Some(if ok { "allow" } else { "checked" }.to_string()),
+                backend: Some("portal_screencast_pipewire".to_string()),
+                requested_target: Some(target),
+            }),
+            artifacts: Vec::new(),
+            ok,
+            summary: format!(
+                "post-action capture session={} action={} ok={}",
+                session_id, action_id, ok
+            ),
+        };
+        append_journal_entry(&self.path, &entry)
+    }
+
     fn next_sequence(&self) -> Result<u64> {
         let mut sequence = self
             .sequence
@@ -125,11 +278,6 @@ impl ActionJournal {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct JournalSettings {
-    include_artifact_metadata: bool,
-}
-
 #[derive(Debug, Clone)]
 struct JournalContext {
     client: Option<JournalClientContext>,
@@ -138,571 +286,6 @@ struct JournalContext {
     active_window_before: Option<JournalWindowContext>,
     active_window_after: Option<JournalWindowContext>,
     control: Option<JournalControlContext>,
-}
-
-const KWIN_BRIDGE_SERVICE: &str = "org.seatgeist.KWinBridge";
-const KWIN_BRIDGE_PATH: &str = "/org/seatgeist/KWinBridge1";
-const KWIN_BRIDGE_INTERFACE: &str = "org.seatgeist.KWinBridge1";
-
-#[derive(Debug, Clone, Default)]
-struct ActiveWindowState {
-    inner: Arc<Mutex<ActiveWindowSnapshot>>,
-}
-
-impl ActiveWindowState {
-    fn update_from_payload(&self, payload: &str) -> Result<()> {
-        let payload = serde_json::from_str::<KwinActiveWindowPayload>(payload)
-            .context("parse KWin active-window payload")?;
-        let window = payload.into_window()?;
-        let mut snapshot = self
-            .inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("active-window state lock is poisoned"))?;
-        snapshot.updated = true;
-        snapshot.window = window;
-        Ok(())
-    }
-
-    fn snapshot(&self) -> Result<Option<Option<WindowInfo>>> {
-        let snapshot = self
-            .inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("active-window state lock is poisoned"))?;
-        if snapshot.updated {
-            Ok(Some(snapshot.window.clone()))
-        } else {
-            Ok(None)
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct ActiveWindowSnapshot {
-    updated: bool,
-    window: Option<WindowInfo>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct WindowListState {
-    inner: Arc<Mutex<WindowListSnapshot>>,
-}
-
-impl WindowListState {
-    fn update_from_payload(&self, payload: &str) -> Result<()> {
-        let payload = serde_json::from_str::<KwinWindowListPayload>(payload)
-            .context("parse KWin window-list payload")?;
-        let mut windows = Vec::with_capacity(payload.windows.len());
-        for window in payload.windows {
-            if let Some(window) = window.into_window()? {
-                windows.push(window);
-            }
-        }
-        let mut snapshot = self
-            .inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("window-list state lock is poisoned"))?;
-        snapshot.updated = true;
-        snapshot.windows = windows;
-        Ok(())
-    }
-
-    fn snapshot(&self) -> Result<Option<Vec<WindowInfo>>> {
-        let snapshot = self
-            .inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("window-list state lock is poisoned"))?;
-        if snapshot.updated {
-            Ok(Some(snapshot.windows.clone()))
-        } else {
-            Ok(None)
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct WindowListSnapshot {
-    updated: bool,
-    windows: Vec<WindowInfo>,
-}
-
-#[derive(Debug, Clone)]
-struct PanicStopState {
-    path: PathBuf,
-}
-
-impl PanicStopState {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
-    }
-
-    fn status(&self) -> PanicStopStatus {
-        PanicStopStatus {
-            enabled: self.path.exists(),
-            path: self.path.clone(),
-        }
-    }
-
-    fn set_enabled(&self, enabled: bool) -> Result<PanicStopStatus> {
-        if enabled {
-            let parent = self.path.parent().ok_or_else(|| {
-                anyhow::anyhow!("panic-stop path has no parent: {}", self.path.display())
-            })?;
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create panic-stop dir {}", parent.display()))?;
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
-                .with_context(|| format!("set panic-stop dir permissions {}", parent.display()))?;
-            let mut file = OpenOptions::new()
-                .create(true)
-                .truncate(true)
-                .write(true)
-                .open(&self.path)
-                .with_context(|| format!("create panic-stop file {}", self.path.display()))?;
-            writeln!(file, "enabled_at_unix_ms={}", unix_time_ms()?)
-                .context("write panic-stop file")?;
-            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))
-                .with_context(|| format!("set panic-stop permissions {}", self.path.display()))?;
-        } else {
-            match fs::remove_file(&self.path) {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => {
-                    return Err(err).with_context(|| {
-                        format!("remove panic-stop file {}", self.path.display())
-                    });
-                }
-            }
-        }
-        Ok(self.status())
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ControlRateLimiter {
-    limit_per_minute: Option<u32>,
-    accepted: Arc<Mutex<VecDeque<Instant>>>,
-}
-
-impl ControlRateLimiter {
-    fn new(limit_per_minute: Option<u32>) -> Self {
-        Self {
-            limit_per_minute,
-            accepted: Arc::new(Mutex::new(VecDeque::new())),
-        }
-    }
-
-    fn check(&self, safety_class: &SafetyClass) -> Result<()> {
-        let Some(limit) = self.limit_per_minute else {
-            return Ok(());
-        };
-        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-        let now = Instant::now();
-        let mut accepted = self
-            .accepted
-            .lock()
-            .map_err(|_| anyhow::anyhow!("control rate-limit lock is poisoned"))?;
-        while accepted
-            .front()
-            .is_some_and(|timestamp| now.duration_since(*timestamp) >= CONTROL_RATE_LIMIT_WINDOW)
-        {
-            accepted.pop_front();
-        }
-        if accepted.len() >= limit {
-            bail!(
-                "control rate limit exceeded for {:?}: {} accepted control requests in {}s; wait or adjust safety.control_rate_limit_per_minute",
-                safety_class,
-                limit,
-                CONTROL_RATE_LIMIT_WINDOW.as_secs()
-            );
-        }
-        accepted.push_back(now);
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct ApprovalStore {
-    path: Option<PathBuf>,
-}
-
-impl ApprovalStore {
-    fn new(path: Option<PathBuf>) -> Self {
-        Self { path }
-    }
-
-    fn matching_prompt_approval(
-        &self,
-        safety_class: &SafetyClass,
-        method: &str,
-    ) -> Result<Option<String>> {
-        let Some(path) = &self.path else {
-            return Ok(None);
-        };
-        match fs::symlink_metadata(path) {
-            Ok(metadata) => validate_approval_file_metadata(path, &metadata)?,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err).with_context(|| format!("stat {}", path.display())),
-        }
-
-        let now = unix_time_ms()?;
-        let contents = fs::read_to_string(path)
-            .with_context(|| format!("read approval file {}", path.display()))?;
-        for (index, line) in contents.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let grant: ApprovalGrant = serde_json::from_str(line).with_context(|| {
-                format!(
-                    "parse approval grant line {} in {}",
-                    index + 1,
-                    path.display()
-                )
-            })?;
-            if grant.expires_unix_ms < now {
-                continue;
-            }
-            if &grant.safety_class != safety_class {
-                continue;
-            }
-            if grant.method != method && grant.method != "*" {
-                continue;
-            }
-            return Ok(Some(grant.reason.unwrap_or_else(|| {
-                format!("approval file grant for {safety_class:?}/{method}")
-            })));
-        }
-        Ok(None)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct ApprovalGrant {
-    safety_class: SafetyClass,
-    method: String,
-    expires_unix_ms: u64,
-    reason: Option<String>,
-}
-
-fn validate_approval_file_metadata(path: &Path, metadata: &fs::Metadata) -> Result<()> {
-    validate_approval_file_parent(path)?;
-    if !metadata.file_type().is_file() {
-        bail!("approval file must be a regular file: {}", path.display());
-    }
-    let uid = current_euid().context("read effective uid for approval file check")?;
-    if metadata.uid() != uid {
-        bail!(
-            "approval file {} is owned by uid {}, expected {}",
-            path.display(),
-            metadata.uid(),
-            uid
-        );
-    }
-    let mode = metadata.mode() & 0o777;
-    if mode & 0o077 != 0 {
-        bail!(
-            "approval file {} must not be readable, writable, or executable by group/other; mode is {:o}",
-            path.display(),
-            mode
-        );
-    }
-    Ok(())
-}
-
-fn validate_approval_file_parent(path: &Path) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("approval file has no parent: {}", path.display()))?;
-    let metadata = fs::symlink_metadata(parent)
-        .with_context(|| format!("stat approval file parent {}", parent.display()))?;
-    if !metadata.file_type().is_dir() {
-        bail!(
-            "approval file parent must be a directory: {}",
-            parent.display()
-        );
-    }
-    let uid = current_euid().context("read effective uid for approval parent check")?;
-    if metadata.uid() != uid {
-        bail!(
-            "approval file parent {} is owned by uid {}, expected {}",
-            parent.display(),
-            metadata.uid(),
-            uid
-        );
-    }
-    let mode = metadata.mode() & 0o777;
-    if mode & 0o022 != 0 {
-        bail!(
-            "approval file parent {} must not be writable by group/other; mode is {:o}",
-            parent.display(),
-            mode
-        );
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone)]
-struct KwinBridge {
-    active_window_state: ActiveWindowState,
-    window_list_state: WindowListState,
-}
-
-#[zbus::interface(name = "org.seatgeist.KWinBridge1")]
-impl KwinBridge {
-    async fn update_active_window(&self, payload: &str) -> zbus::fdo::Result<()> {
-        self.active_window_state
-            .update_from_payload(payload)
-            .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))?;
-        Ok(())
-    }
-
-    async fn update_windows(&self, payload: &str) -> zbus::fdo::Result<()> {
-        self.window_list_state
-            .update_from_payload(payload)
-            .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct KwinActiveWindowPayload {
-    active: bool,
-    id: Option<String>,
-    title: Option<String>,
-    app_id: Option<String>,
-    pid: Option<u32>,
-    geometry: Option<KwinActiveWindowGeometry>,
-}
-
-impl KwinActiveWindowPayload {
-    fn into_window(self) -> Result<Option<WindowInfo>> {
-        if !self.active {
-            return Ok(None);
-        }
-        KwinBridgeWindowPayload {
-            id: self.id,
-            title: self.title,
-            app_id: self.app_id,
-            pid: self.pid,
-            geometry: self.geometry,
-        }
-        .into_window()
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct KwinWindowListPayload {
-    windows: Vec<KwinBridgeWindowPayload>,
-}
-
-#[derive(Debug, Deserialize)]
-struct KwinBridgeWindowPayload {
-    id: Option<String>,
-    title: Option<String>,
-    app_id: Option<String>,
-    pid: Option<u32>,
-    geometry: Option<KwinActiveWindowGeometry>,
-}
-
-impl KwinBridgeWindowPayload {
-    fn into_window(self) -> Result<Option<WindowInfo>> {
-        let id = self
-            .id
-            .filter(|id| !id.trim().is_empty())
-            .ok_or_else(|| anyhow::anyhow!("KWin window payload missing id"))?;
-        Ok(Some(WindowInfo {
-            id,
-            app_id: self.app_id.filter(|app_id| !app_id.trim().is_empty()),
-            title: self.title.unwrap_or_default(),
-            pid: self.pid,
-            monitor_id: None,
-            geometry: self.geometry.map(Into::into),
-        }))
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct KwinActiveWindowGeometry {
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-}
-
-impl From<KwinActiveWindowGeometry> for WindowGeometry {
-    fn from(geometry: KwinActiveWindowGeometry) -> Self {
-        Self {
-            x: geometry.x,
-            y: geometry.y,
-            width: geometry.width.max(1),
-            height: geometry.height.max(1),
-            space: CoordinateSpace::LogicalPixel,
-        }
-    }
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct DaemonConfigFile {
-    daemon: Option<DaemonFileConfig>,
-    journal: Option<JournalFileConfig>,
-    backends: Option<BackendFileConfig>,
-    policy: Option<PolicyFileConfig>,
-    apps: Option<AppsFileConfig>,
-    safety: Option<SafetyFileConfig>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct DaemonFileConfig {
-    socket: Option<String>,
-    journal: Option<String>,
-    panic_stop_file: Option<String>,
-    approval_file: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct JournalFileConfig {
-    include_artifact_metadata: Option<bool>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct BackendFileConfig {
-    input: Option<InputBackendPreference>,
-    keymap: Option<XkbKeymapFileConfig>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct XkbKeymapFileConfig {
-    rules: Option<String>,
-    model: Option<String>,
-    layout: Option<String>,
-    variant: Option<String>,
-    options: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct XkbKeymapSettings {
-    rules: Option<String>,
-    model: Option<String>,
-    layout: Option<String>,
-    variant: Option<String>,
-    options: Option<String>,
-}
-
-impl XkbKeymapSettings {
-    fn as_names(&self) -> seatgeist_eis::XkbKeymapNames<'_> {
-        seatgeist_eis::XkbKeymapNames {
-            rules: self.rules.as_deref(),
-            model: self.model.as_deref(),
-            layout: self.layout.as_deref(),
-            variant: self.variant.as_deref(),
-            options: self.options.as_deref(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct XkbKeymapConfig {
-    configured: bool,
-    settings: XkbKeymapSettings,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct XkbKeymapResolution {
-    settings: XkbKeymapSettings,
-    status: XkbKeymapStatus,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct KdeKeyboardConfig {
-    model: Option<String>,
-    layout_list: Option<String>,
-    variant_list: Option<String>,
-    options: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, ValueEnum)]
-#[serde(rename_all = "snake_case")]
-#[value(rename_all = "snake_case")]
-enum InputBackendPreference {
-    #[default]
-    Auto,
-    PortalRemoteDesktop,
-    Libei,
-    Uinput,
-}
-
-impl InputBackendPreference {
-    fn status_name(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::PortalRemoteDesktop => "portal_remote_desktop",
-            Self::Libei => "libei",
-            Self::Uinput => "uinput",
-        }
-    }
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct PolicyFileConfig {
-    default_observe: Option<ToolApprovalLevel>,
-    default_control: Option<ToolApprovalLevel>,
-    destructive_actions: Option<ToolApprovalLevel>,
-    secret_fields: Option<ToolApprovalLevel>,
-    default_clipboard_read: Option<ToolApprovalLevel>,
-    default_clipboard_write: Option<ToolApprovalLevel>,
-    #[serde(alias = "full_resolution_screenshot")]
-    default_full_resolution_screenshot: Option<ToolApprovalLevel>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct AppsFileConfig {
-    allow: Option<Vec<String>>,
-    deny: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct AppPolicy {
-    allow: Vec<String>,
-    deny: Vec<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct SafetyFileConfig {
-    require_focus_guard: Option<bool>,
-    pause_on_human_input: Option<bool>,
-    human_input_activity_file: Option<String>,
-    human_input_quiet_ms: Option<u64>,
-    control_rate_limit_per_minute: Option<u32>,
-    preview_max_edge: Option<u32>,
-    tile_max_edge: Option<u32>,
-    redact_regions: Option<Vec<RedactRegionFileConfig>>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct RedactRegionFileConfig {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-}
-
-#[derive(Debug, Clone, Default)]
-struct SafetySettings {
-    require_focus_guard: bool,
-    pause_on_human_input: bool,
-    human_input_activity_file: Option<PathBuf>,
-    human_input_quiet_ms: u64,
-    control_rate_limit_per_minute: Option<u32>,
-    preview_max_edge: u32,
-    tile_max_edge: u32,
-    screenshot_redactions: Vec<RedactRegion>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RedactRegion {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
 }
 
 #[derive(Debug, Parser)]
@@ -722,6 +305,9 @@ struct Args {
 
     #[arg(long, env = "SEATGEIST_APPROVAL_FILE")]
     approval_file: Option<PathBuf>,
+
+    #[arg(long, env = "SEATGEIST_CAPTURE_RESTORE_FILE")]
+    capture_restore_file: Option<PathBuf>,
 
     #[arg(long, env = "SEATGEIST_INPUT_BACKEND", value_enum)]
     input_backend: Option<InputBackendPreference>,
@@ -753,7 +339,12 @@ async fn main() -> Result<()> {
             .as_ref()
             .and_then(|config| config.input),
     );
-    let xkb_keymap_config = xkb_keymap_config(file_config.backends.as_ref());
+    let xkb_keymap_config = keymap::config(
+        file_config
+            .backends
+            .as_ref()
+            .and_then(|backends| backends.keymap.as_ref()),
+    );
 
     if args.print_capabilities {
         let portal_eis_session_store = PortalEisSessionStore::default();
@@ -762,6 +353,9 @@ async fn main() -> Result<()> {
             serde_json::to_string_pretty(&capabilities(
                 input_backend_preference,
                 &portal_eis_session_store,
+                false,
+                false,
+                false,
             ))?
         );
         return Ok(());
@@ -790,6 +384,12 @@ async fn main() -> Result<()> {
         daemon_file_config.and_then(|config| config.approval_file.as_deref()),
     )
     .context("resolve daemon approval file path")?;
+    let capture_restore_file = configured_path(
+        args.capture_restore_file,
+        daemon_file_config.and_then(|config| config.capture_restore_file.as_deref()),
+        default_capture_restore_path,
+    )
+    .context("resolve daemon capture restore-token path")?;
     let policy_config = policy_config(
         file_config.policy.as_ref(),
         args.allow_control,
@@ -807,6 +407,7 @@ async fn main() -> Result<()> {
         journal_settings,
         panic_stop_path: panic_stop_file,
         approval_file_path: approval_file,
+        capture_restore_path: capture_restore_file,
         policy_config,
         app_policy,
         safety_settings,
@@ -822,6 +423,7 @@ struct RunSettings {
     journal_settings: JournalSettings,
     panic_stop_path: PathBuf,
     approval_file_path: Option<PathBuf>,
+    capture_restore_path: PathBuf,
     policy_config: PolicyConfig,
     app_policy: AppPolicy,
     safety_settings: SafetySettings,
@@ -836,6 +438,7 @@ async fn run(settings: RunSettings) -> Result<()> {
         journal_settings,
         panic_stop_path,
         approval_file_path,
+        capture_restore_path,
         policy_config,
         app_policy,
         safety_settings,
@@ -849,15 +452,40 @@ async fn run(settings: RunSettings) -> Result<()> {
     let active_window_state = ActiveWindowState::default();
     let window_list_state = WindowListState::default();
     let portal_eis_session_store = PortalEisSessionStore::default();
-    let _kwin_bridge_connection =
-        match start_kwin_bridge(active_window_state.clone(), window_list_state.clone()).await {
-            Ok(connection) => Some(connection),
-            Err(err) => {
-                warn!(error = %err, "KWin bridge DBus service is unavailable");
-                None
-            }
-        };
+    let capture_session_store = CaptureSessionStore::default();
+    let session_execution_store = session_execution::SessionExecutionStore::default();
+    let semantic_handle_store = semantic_handle::SemanticHandleStore::default();
+    let capture_restore_store = CaptureRestoreTokenStore::new(capture_restore_path);
+    let portal_screen_backend: Arc<dyn ScreenBackend> =
+        Arc::new(PortalScreenBackend::new(capture_restore_store));
+    let screen_backend: Arc<dyn ScreenBackend> =
+        Arc::new(RoutedScreenBackend::new(portal_screen_backend));
+    let interaction_session_store = interaction::InteractionSessionStore::default();
+    let activity_tracker = activity::ActivityTracker::default();
+    let window_action_queue = WindowActionQueue::default();
+    let focus_backend: Arc<dyn interaction::FocusBackend> = Arc::new(interaction::KwinFocusBackend);
+    let _kwin_bridge_connection = match start_kwin_bridge(
+        active_window_state.clone(),
+        window_list_state.clone(),
+        activity_tracker.clone(),
+        window_action_queue.clone(),
+    )
+    .await
+    {
+        Ok(connection) => Some(connection),
+        Err(err) => {
+            warn!(error = %err, "KWin bridge DBus service is unavailable");
+            None
+        }
+    };
     let kwin_bridge_registered = _kwin_bridge_connection.is_some();
+    window_action_queue.set_registered(kwin_bridge_registered);
+    let window_backend: Arc<dyn WindowBackend> = Arc::new(KwinWindowBackend::new(
+        active_window_state.clone(),
+        window_list_state.clone(),
+        focus_backend.clone(),
+        window_action_queue.clone(),
+    ));
     let runtime = DaemonRuntime {
         active_window_state,
         window_list_state,
@@ -874,6 +502,14 @@ async fn run(settings: RunSettings) -> Result<()> {
         input_backend_preference,
         xkb_keymap_config,
         portal_eis_session_store,
+        capture_session_store,
+        session_execution_store,
+        semantic_handle_store,
+        screen_backend,
+        interaction_session_store,
+        activity_tracker,
+        window_action_queue: window_action_queue.clone(),
+        window_backend,
     };
 
     prepare_socket_path(&socket)?;
@@ -896,34 +532,6 @@ async fn run(settings: RunSettings) -> Result<()> {
     }
 }
 
-async fn start_kwin_bridge(
-    active_window_state: ActiveWindowState,
-    window_list_state: WindowListState,
-) -> Result<zbus::Connection> {
-    let connection = zbus::connection::Builder::session()
-        .context("connect to session bus for KWin bridge")?
-        .name(KWIN_BRIDGE_SERVICE)
-        .context("request KWin bridge DBus service name")?
-        .serve_at(
-            KWIN_BRIDGE_PATH,
-            KwinBridge {
-                active_window_state,
-                window_list_state,
-            },
-        )
-        .context("serve KWin bridge DBus object")?
-        .build()
-        .await
-        .context("build KWin bridge DBus connection")?;
-    info!(
-        service = KWIN_BRIDGE_SERVICE,
-        path = KWIN_BRIDGE_PATH,
-        interface = KWIN_BRIDGE_INTERFACE,
-        "KWin bridge DBus service registered"
-    );
-    Ok(connection)
-}
-
 #[derive(Debug, Clone)]
 struct DaemonRuntime {
     active_window_state: ActiveWindowState,
@@ -939,6 +547,14 @@ struct DaemonRuntime {
     input_backend_preference: InputBackendPreference,
     xkb_keymap_config: XkbKeymapConfig,
     portal_eis_session_store: PortalEisSessionStore,
+    capture_session_store: CaptureSessionStore,
+    session_execution_store: session_execution::SessionExecutionStore,
+    semantic_handle_store: semantic_handle::SemanticHandleStore,
+    screen_backend: Arc<dyn ScreenBackend>,
+    interaction_session_store: interaction::InteractionSessionStore,
+    activity_tracker: activity::ActivityTracker,
+    window_action_queue: WindowActionQueue,
+    window_backend: Arc<dyn WindowBackend>,
 }
 
 async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()> {
@@ -953,11 +569,17 @@ async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()>
         bail!("empty request");
     }
 
-    let (request, request_client) = parse_daemon_request_line(&line)?;
+    let (request, request_client, response_options) = parse_daemon_request_line(&line)?;
     let client = merge_client_context(peer_client, request_client);
     let method = request.method_name();
-    let mut journal_context = journal_context_for_request(&request, &runtime, client);
-    let response = handle_request(request, &runtime).await;
+    let mut journal_context = journal_context_for_request(&request, &runtime, client.clone());
+    let response = handle_request(
+        request,
+        response_options.as_ref(),
+        client.as_ref(),
+        &runtime,
+    )
+    .await;
     journal_context.active_window_after = active_window_context_for_safety_class(
         &journal_context.safety_class,
         &runtime.active_window_state,
@@ -976,18 +598,194 @@ async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()>
     Ok(())
 }
 
-fn parse_daemon_request_line(line: &str) -> Result<(DaemonRequest, Option<JournalClientContext>)> {
+fn parse_daemon_request_line(
+    line: &str,
+) -> Result<(
+    DaemonRequest,
+    Option<JournalClientContext>,
+    Option<DaemonResponseOptions>,
+)> {
     match serde_json::from_str::<DaemonRequestEnvelope>(line) {
         Ok(envelope) => {
             let client = envelope.client.and_then(client_context_from_identity);
-            Ok((envelope.request, client))
+            Ok((envelope.request, client, envelope.response_options))
         }
         Err(_) => {
             let request =
                 serde_json::from_str::<DaemonRequest>(line).context("parse daemon request")?;
-            Ok((request, None))
+            Ok((request, None, None))
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct PreparedPostAction {
+    options: PostActionOptions,
+    condition: ActionSettleCondition,
+    before: Option<Observation>,
+}
+
+async fn prepare_post_action(
+    request: &DaemonRequest,
+    response_options: Option<&DaemonResponseOptions>,
+    runtime: &DaemonRuntime,
+) -> Result<Option<PreparedPostAction>> {
+    if !daemon_request_returns_action(request) {
+        return Ok(None);
+    }
+    let Some(options) = response_options.and_then(|options| options.post_action.as_ref()) else {
+        return Ok(None);
+    };
+    if !options.observe_after {
+        return Ok(None);
+    }
+    if options.settle_timeout_ms == 0 || options.settle_timeout_ms > 10_000 {
+        bail!("post-action settle_timeout_ms must be between 1 and 10000");
+    }
+    if options.settle_interval_ms < 10 || options.settle_interval_ms > 1_000 {
+        bail!("post-action settle_interval_ms must be between 10 and 1000");
+    }
+    let mut options = options.clone();
+    if let Some(image) = options.image.as_mut() {
+        normalize_capture_frame_request(
+            &mut image.max_edge,
+            image.timeout_ms,
+            runtime.safety_settings.preview_max_edge,
+        )?;
+        post_action_capture::validate(request, image, runtime).await?;
+    }
+    let target_event_settle = target_window_guard_for_request(request).is_some()
+        && matches!(
+            options.settle_condition,
+            ActionSettleCondition::Auto
+                | ActionSettleCondition::AccessibilityChange
+                | ActionSettleCondition::AnyChange
+        );
+    let condition = match options.settle_condition {
+        ActionSettleCondition::Auto if matches!(request, DaemonRequest::FocusWindow(_)) => {
+            ActionSettleCondition::ActiveWindowChange
+        }
+        ActionSettleCondition::Auto if target_event_settle => {
+            ActionSettleCondition::AccessibilityChange
+        }
+        ActionSettleCondition::Auto => ActionSettleCondition::Stable,
+        condition => condition,
+    };
+    let before = if condition != ActionSettleCondition::None && !target_event_settle {
+        Some(observation::post_action(runtime).await)
+    } else {
+        None
+    };
+    Ok(Some(PreparedPostAction {
+        options,
+        condition,
+        before,
+    }))
+}
+
+fn daemon_request_returns_action(request: &DaemonRequest) -> bool {
+    request.returns_action()
+}
+
+async fn finish_post_action(
+    response: DaemonResponse,
+    prepared: Option<PreparedPostAction>,
+    runtime: &DaemonRuntime,
+) -> DaemonResponse {
+    let Some(prepared) = prepared else {
+        return response;
+    };
+    let mut action = match response {
+        DaemonResponse::Action(action) => action,
+        response => return response,
+    };
+    if let Some(observation) = action.observation.as_mut() {
+        observation.active_window = runtime.window_backend.active_window().await.ok().flatten();
+        if let Some(image) = prepared.options.image.as_ref() {
+            post_action_capture::attach(image, &mut action, runtime).await;
+        }
+        return DaemonResponse::Action(action);
+    }
+    let started = Instant::now();
+    let timeout = Duration::from_millis(prepared.options.settle_timeout_ms);
+    let interval = Duration::from_millis(prepared.options.settle_interval_ms);
+    let mut previous = None;
+    let mut current = observation::post_action(runtime).await;
+    let mut samples = 1_u32;
+    let mut settled = post_action_condition_met(
+        prepared.condition,
+        prepared.before.as_ref(),
+        previous.as_ref(),
+        &current,
+    );
+
+    while !settled && started.elapsed() < timeout {
+        let remaining = timeout.saturating_sub(started.elapsed());
+        tokio::time::sleep(interval.min(remaining)).await;
+        previous = Some(current);
+        current = observation::post_action(runtime).await;
+        samples = samples.saturating_add(1);
+        settled = post_action_condition_met(
+            prepared.condition,
+            prepared.before.as_ref(),
+            previous.as_ref(),
+            &current,
+        );
+    }
+
+    let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    current.settle = Some(ActionSettleResult {
+        confirmation: if settled {
+            libseatgeist::ActionConfirmation::Confirmed
+        } else {
+            libseatgeist::ActionConfirmation::UnconfirmedTimeout
+        },
+        condition: prepared.condition,
+        backend: libseatgeist::ActionSettleBackend::Polling,
+        target_scoped: false,
+        event: None,
+        settled,
+        timed_out: !settled,
+        timeout_ms: prepared.options.settle_timeout_ms,
+        interval_ms: prepared.options.settle_interval_ms,
+        samples,
+        elapsed_ms,
+        before_revision: prepared.before.and_then(|observation| observation.revision),
+        after_revision: current.revision.clone().unwrap_or_default(),
+    });
+    action.observation = Some(current);
+    if let Some(image) = prepared.options.image.as_ref() {
+        post_action_capture::attach(image, &mut action, runtime).await;
+    }
+    DaemonResponse::Action(action)
+}
+
+fn post_action_condition_met(
+    condition: ActionSettleCondition,
+    before: Option<&Observation>,
+    previous: Option<&Observation>,
+    current: &Observation,
+) -> bool {
+    match condition {
+        ActionSettleCondition::None => true,
+        ActionSettleCondition::Stable | ActionSettleCondition::Auto => {
+            previous.is_some_and(|previous| observation_state_equal(previous, current))
+        }
+        ActionSettleCondition::ActiveWindowChange => before.is_some_and(|before| {
+            before.active_window.as_ref().map(|window| &window.id)
+                != current.active_window.as_ref().map(|window| &window.id)
+        }),
+        ActionSettleCondition::AccessibilityChange => before
+            .is_some_and(|before| before.focused_accessibility != current.focused_accessibility),
+        ActionSettleCondition::AnyChange => {
+            before.is_some_and(|before| !observation_state_equal(before, current))
+        }
+    }
+}
+
+fn observation_state_equal(left: &Observation, right: &Observation) -> bool {
+    left.active_window == right.active_window
+        && left.focused_accessibility == right.focused_accessibility
 }
 
 fn client_context_from_identity(identity: DaemonClientIdentity) -> Option<JournalClientContext> {
@@ -1033,7 +831,8 @@ fn journal_context_for_request(
     JournalContext {
         client,
         safety_class,
-        guard_present: active_window_guard_for_request(request).is_some(),
+        guard_present: active_window_guard_for_request(request).is_some()
+            || interaction_session_id_for_request(request).is_some(),
         active_window_before,
         active_window_after: None,
         control,
@@ -1125,7 +924,19 @@ fn journal_backend_for_request(
         DaemonRequest::RemoteDesktopSessionProbe(_)
         | DaemonRequest::RemoteDesktopEisProbe(_)
         | DaemonRequest::RemoteDesktopEisStart(_) => "portal_remote_desktop",
+        DaemonRequest::CaptureOpen(_)
+        | DaemonRequest::WindowCaptureOpen(_)
+        | DaemonRequest::CaptureSnapshot(_)
+        | DaemonRequest::CaptureWait(_)
+        | DaemonRequest::CaptureSessionClose(_) => "portal_screencast_pipewire",
+        DaemonRequest::CaptureSessionRenew(_) => "interaction_session",
         DaemonRequest::FocusWindow(_) => "kwin",
+        DaemonRequest::MoveWindow(_)
+        | DaemonRequest::LaunchWindow(_)
+        | DaemonRequest::ResizeWindow(_) => "kwin_script_bridge",
+        DaemonRequest::PageZoom(_) => {
+            return Some(input_backend_preference.status_name().to_string());
+        }
         DaemonRequest::AccessibilityInvoke(_)
         | DaemonRequest::AccessibilitySetText(_)
         | DaemonRequest::AccessibilityInsertText(_)
@@ -1171,9 +982,93 @@ fn journal_requested_target_for_request(request: &DaemonRequest) -> Option<Journ
             }
             target
         }
+        DaemonRequest::WindowCaptureOpen(request) => {
+            let mut target = journal_target("window_capture_session");
+            if let Some(window_id) = request.requested_window_id.as_deref() {
+                target.add("requested_window_id", window_id);
+            }
+            target.add("timeout_ms", request.timeout_ms.to_string());
+            target
+        }
+        DaemonRequest::CaptureOpen(request) => {
+            let mut target = journal_target("capture_session");
+            target.add("source_type", format!("{:?}", request.source));
+            if let Some(source_id) = request.requested_source_id.as_deref() {
+                target.add("requested_source_id", source_id);
+            }
+            target.add("timeout_ms", request.timeout_ms.to_string());
+            target
+        }
+        DaemonRequest::CaptureSnapshot(request) => {
+            let mut target = journal_target("capture_snapshot");
+            target.add("session_id", &request.session_id);
+            if let Some(max_edge) = request.max_edge {
+                target.add("max_edge", max_edge.to_string());
+            }
+            target.add("timeout_ms", request.timeout_ms.to_string());
+            target
+        }
+        DaemonRequest::CaptureWait(request) => {
+            let mut target = journal_target("capture_wait");
+            target.add("session_id", &request.session_id);
+            target.add_bool("after_revision_present", request.after_revision.is_some());
+            if let Some(max_edge) = request.max_edge {
+                target.add("max_edge", max_edge.to_string());
+            }
+            target.add("timeout_ms", request.timeout_ms.to_string());
+            target
+        }
+        DaemonRequest::CaptureSessionClose(request) => {
+            let mut target = journal_target("capture_session_close");
+            target.add("session_id", &request.session_id);
+            target
+        }
+        DaemonRequest::CaptureSessionRenew(request) => {
+            let mut target = journal_target("capture_session_renew");
+            target.add("session_id", &request.session_id);
+            target
+        }
         DaemonRequest::FocusWindow(request) => {
             let mut target = journal_target("window");
             target.add("window_id", &request.window_id);
+            target
+        }
+        DaemonRequest::MoveWindow(request) => {
+            let mut target = journal_target("window_move");
+            target.add("window_id", &request.window_id);
+            target.add("x", request.x.to_string());
+            target.add("y", request.y.to_string());
+            target
+        }
+        DaemonRequest::LaunchWindow(request) => {
+            let mut target = journal_target("window_launch");
+            target.add("desktop_entry", &request.desktop_entry);
+            target.add("anchor", format!("{:?}", request.anchor));
+            target.add("activation", format!("{:?}", request.activation));
+            if let Some(monitor_id) = request.monitor_id.as_deref() {
+                target.add("monitor_id", monitor_id);
+            }
+            if let Some(width) = request.width {
+                target.add("width", width.to_string());
+            }
+            if let Some(height) = request.height {
+                target.add("height", height.to_string());
+            }
+            target.add("margin", request.margin.to_string());
+            target.add("timeout_ms", request.timeout_ms.to_string());
+            target
+        }
+        DaemonRequest::ResizeWindow(request) => {
+            let mut target = journal_target("window_resize");
+            target.add("window_id", &request.window_id);
+            target.add("width", request.width.to_string());
+            target.add("height", request.height.to_string());
+            target
+        }
+        DaemonRequest::PageZoom(request) => {
+            let mut target = journal_target("page_zoom");
+            target.add("operation", format!("{:?}", request.operation));
+            target.add("steps", request.steps.to_string());
             target
         }
         DaemonRequest::AccessibilityInvoke(request) => {
@@ -1237,6 +1132,9 @@ fn journal_requested_target_for_request(request: &DaemonRequest) -> Option<Journ
         DaemonRequest::TypeText(request) => {
             let mut target = journal_target("keyboard_text");
             target.add("text_chars", request.text.chars().count().to_string());
+            if let Some(session_id) = request.session_id.as_deref() {
+                target.add("session_id", session_id);
+            }
             target
         }
         DaemonRequest::KeyCombo(request) => {
@@ -1250,13 +1148,25 @@ fn journal_requested_target_for_request(request: &DaemonRequest) -> Option<Journ
                     .count()
                     .to_string(),
             );
+            if let Some(session_id) = request.session_id.as_deref() {
+                target.add("session_id", session_id);
+            }
             target
         }
-        DaemonRequest::MovePointer(request) => journal_point_target("pointer_move", &request.point),
+        DaemonRequest::MovePointer(request) => {
+            let mut target = journal_point_target("pointer_move", &request.point);
+            if let Some(session_id) = request.session_id.as_deref() {
+                target.add("session_id", session_id);
+            }
+            target
+        }
         DaemonRequest::ClickPointer(request) => {
             let mut target = journal_point_target("pointer_click", &request.point);
             target.add("button", format!("{:?}", request.button));
             target.add("clicks", request.clicks.to_string());
+            if let Some(session_id) = request.session_id.as_deref() {
+                target.add("session_id", session_id);
+            }
             target
         }
         DaemonRequest::DragPointer(request) => {
@@ -1265,12 +1175,18 @@ fn journal_requested_target_for_request(request: &DaemonRequest) -> Option<Journ
             target.add_point("to", &request.to);
             target.add("button", format!("{:?}", request.button));
             target.add("duration_ms", request.duration_ms.to_string());
+            if let Some(session_id) = request.session_id.as_deref() {
+                target.add("session_id", session_id);
+            }
             target
         }
         DaemonRequest::ScrollPointer(request) => {
             let mut target = journal_target("pointer_scroll");
             target.add("vertical", request.vertical.to_string());
             target.add("horizontal", request.horizontal.to_string());
+            if let Some(session_id) = request.session_id.as_deref() {
+                target.add("session_id", session_id);
+            }
             target
         }
         DaemonRequest::ClickButton(request) => {
@@ -1282,6 +1198,7 @@ fn journal_requested_target_for_request(request: &DaemonRequest) -> Option<Journ
                 request.max_nodes,
             );
             target.add_bool("destructive", request.destructive);
+            add_target_guard_to_journal(&mut target, request.target_guard.as_ref());
             target
         }
         DaemonRequest::SetTextField(request) => {
@@ -1293,29 +1210,42 @@ fn journal_requested_target_for_request(request: &DaemonRequest) -> Option<Journ
                 request.max_nodes,
             );
             target.add("text_chars", request.text.chars().count().to_string());
+            add_target_guard_to_journal(&mut target, request.target_guard.as_ref());
             target
         }
-        DaemonRequest::FocusTextField(request) => journal_named_semantic_target(
-            "semantic_text_field_focus",
-            &request.name,
-            request.app.as_deref(),
-            request.window_name_contains.as_deref(),
-            request.max_nodes,
-        ),
-        DaemonRequest::ActivateTab(request) => journal_named_semantic_target(
-            "semantic_tab",
-            &request.name,
-            request.app.as_deref(),
-            request.window_name_contains.as_deref(),
-            request.max_nodes,
-        ),
-        DaemonRequest::ActivateLink(request) => journal_named_semantic_target(
-            "semantic_link",
-            &request.name,
-            request.app.as_deref(),
-            request.window_name_contains.as_deref(),
-            request.max_nodes,
-        ),
+        DaemonRequest::FocusTextField(request) => {
+            let mut target = journal_named_semantic_target(
+                "semantic_text_field_focus",
+                &request.name,
+                request.app.as_deref(),
+                request.window_name_contains.as_deref(),
+                request.max_nodes,
+            );
+            add_target_guard_to_journal(&mut target, request.target_guard.as_ref());
+            target
+        }
+        DaemonRequest::ActivateTab(request) => {
+            let mut target = journal_named_semantic_target(
+                "semantic_tab",
+                &request.name,
+                request.app.as_deref(),
+                request.window_name_contains.as_deref(),
+                request.max_nodes,
+            );
+            add_target_guard_to_journal(&mut target, request.target_guard.as_ref());
+            target
+        }
+        DaemonRequest::ActivateLink(request) => {
+            let mut target = journal_named_semantic_target(
+                "semantic_link",
+                &request.name,
+                request.app.as_deref(),
+                request.window_name_contains.as_deref(),
+                request.max_nodes,
+            );
+            add_target_guard_to_journal(&mut target, request.target_guard.as_ref());
+            target
+        }
         DaemonRequest::ToggleCheck(request) => {
             let mut target = journal_named_semantic_target(
                 "semantic_check",
@@ -1327,6 +1257,7 @@ fn journal_requested_target_for_request(request: &DaemonRequest) -> Option<Journ
             if let Some(checked) = request.checked {
                 target.add_bool("checked", checked);
             }
+            add_target_guard_to_journal(&mut target, request.target_guard.as_ref());
             target
         }
         DaemonRequest::SetValue(request) => {
@@ -1338,15 +1269,20 @@ fn journal_requested_target_for_request(request: &DaemonRequest) -> Option<Journ
                 request.max_nodes,
             );
             target.add("value", request.value.to_string());
+            add_target_guard_to_journal(&mut target, request.target_guard.as_ref());
             target
         }
-        DaemonRequest::SelectItem(request) => journal_named_semantic_target(
-            "semantic_item",
-            &request.name,
-            request.app.as_deref(),
-            request.window_name_contains.as_deref(),
-            request.max_nodes,
-        ),
+        DaemonRequest::SelectItem(request) => {
+            let mut target = journal_named_semantic_target(
+                "semantic_item",
+                &request.name,
+                request.app.as_deref(),
+                request.window_name_contains.as_deref(),
+                request.max_nodes,
+            );
+            add_target_guard_to_journal(&mut target, request.target_guard.as_ref());
+            target
+        }
         DaemonRequest::SelectMenu(request) => {
             let mut target = journal_target("semantic_menu");
             target.add("path_len", request.path.len().to_string());
@@ -1361,6 +1297,7 @@ fn journal_requested_target_for_request(request: &DaemonRequest) -> Option<Journ
                     window.chars().count().to_string(),
                 );
             }
+            add_target_guard_to_journal(&mut target, request.target_guard.as_ref());
             target
         }
         _ => return None,
@@ -1411,6 +1348,23 @@ fn journal_named_semantic_target(
         );
     }
     target
+}
+
+fn add_target_guard_to_journal(
+    target: &mut JournalRequestedTarget,
+    guard: Option<&libseatgeist::TargetWindowGuard>,
+) {
+    let Some(guard) = guard else {
+        return;
+    };
+    target.add("target_window_id", &guard.expected_window_id);
+    if let Some(app_id) = guard.expected_app_id.as_deref() {
+        target.add("target_app_id", app_id);
+    }
+    if let Some(pid) = guard.expected_pid {
+        target.add("target_pid", pid.to_string());
+    }
+    target.add_bool("target_title_guard_present", guard.title_contains.is_some());
 }
 
 fn journal_target(kind: impl Into<String>) -> JournalRequestedTarget {
@@ -1496,6 +1450,20 @@ fn journal_artifacts_for_response(
             "wait_for_change_screenshot",
             &result.screenshot,
         )],
+        DaemonResponse::CaptureFrame(frame) => vec![journal_artifact_for_screenshot(
+            "capture_session_snapshot",
+            &frame.screenshot,
+        )],
+        DaemonResponse::CaptureWait(result) => vec![journal_artifact_for_screenshot(
+            "capture_session_wait",
+            &result.frame.screenshot,
+        )],
+        DaemonResponse::Action(action) => action
+            .screenshot
+            .as_ref()
+            .map(|info| journal_artifact_for_screenshot("post_action_screenshot", info))
+            .into_iter()
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -1532,7 +1500,12 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> DaemonResponse {
+async fn handle_request(
+    mut request: DaemonRequest,
+    response_options: Option<&DaemonResponseOptions>,
+    client: Option<&JournalClientContext>,
+    runtime: &DaemonRuntime,
+) -> DaemonResponse {
     if let Err(err) =
         enforce_policy_with_approvals(&runtime.policy, &runtime.approval_store, &request)
     {
@@ -1542,38 +1515,106 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
     if let Err(err) = enforce_panic_stop(&runtime.panic_stop, &request) {
         return daemon_error_with_kind(err, ErrorKind::PanicStop);
     }
-    if let Err(err) = enforce_human_input_pause(&runtime.safety_settings, &request) {
+    if let Err(err) = enforce_human_input_pause(
+        &runtime.safety_settings,
+        &runtime.activity_tracker,
+        &request,
+    ) {
         return daemon_error_with_kind(err, ErrorKind::HumanInputPause);
+    }
+    if let Err(err) = enforce_capture_session_owner(
+        &request,
+        response_options,
+        client,
+        &runtime.capture_session_store,
+    )
+    .await
+    {
+        return daemon_error_with_kind(err, ErrorKind::SessionOwnerMismatch);
+    }
+    if let Err(err) = validate_interaction_session_request(&request) {
+        return daemon_error_with_kind(err, ErrorKind::Validation);
+    }
+    if let Err(err) =
+        resolve_semantic_handle_for_request(&mut request, &runtime.semantic_handle_store, client)
+    {
+        return daemon_error_with_kind(err, ErrorKind::TargetMismatch);
     }
     if let Err(err) = enforce_required_focus_guard(&runtime.safety_settings, &request) {
         return daemon_error_with_kind(err, ErrorKind::FocusGuard);
     }
-    if let Err(err) = enforce_active_window_guard(&runtime.active_window_state, &request) {
+    if let Err(err) = enforce_active_window_guard(runtime.window_backend.as_ref(), &request).await {
         return daemon_error_with_kind(err, ErrorKind::FocusGuard);
     }
     if let Err(err) = enforce_app_policy(
-        &runtime.active_window_state,
-        &runtime.window_list_state,
+        runtime.window_backend.as_ref(),
         &runtime.app_policy,
         &request,
-    ) {
+    )
+    .await
+    {
         return daemon_error_with_kind(err, ErrorKind::AppDenied);
     }
     if let Err(err) = enforce_control_rate_limit(&runtime.control_rate_limiter, &request) {
         return daemon_error_with_kind(err, ErrorKind::RateLimited);
     }
 
+    let prepared_post_action = match prepare_post_action(&request, response_options, runtime).await
+    {
+        Ok(prepared) => prepared,
+        Err(err) => return daemon_error_with_kind(err, ErrorKind::Validation),
+    };
+    let session_ids = capture_session_ids_for_request(&request, response_options)
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let method = request.method_name().to_string();
+    let safety_class = safety_class_for_request(&request);
+    let backend = journal_backend_for_request(&request, runtime.input_backend_preference);
+    let backend_role = session_backend_role_for_request(&request);
+    let response = execute_request(request, runtime, response_options, client).await;
+    let mut response = finish_post_action(response, prepared_post_action, runtime).await;
+    if let Some(backend_role) = backend_role {
+        record_session_execution_response(
+            &session_ids,
+            &method,
+            safety_class,
+            backend.as_deref(),
+            backend_role,
+            &response,
+            &runtime.session_execution_store,
+        )
+        .await;
+    }
+    attach_session_execution_status(&mut response, runtime).await;
+    response
+}
+
+async fn execute_request(
+    request: DaemonRequest,
+    runtime: &DaemonRuntime,
+    response_options: Option<&DaemonResponseOptions>,
+    client: Option<&JournalClientContext>,
+) -> DaemonResponse {
+    let post_action = response_options.and_then(|options| options.post_action.as_ref());
     match request {
         DaemonRequest::Health => DaemonResponse::Health(health()),
         DaemonRequest::Capabilities => DaemonResponse::Capabilities(capabilities(
             runtime.input_backend_preference,
             &runtime.portal_eis_session_store,
+            runtime.window_action_queue.resize_ready(),
+            runtime.window_action_queue.move_ready(),
+            runtime.window_action_queue.launch_ready(),
         )),
         DaemonRequest::PolicyStatus => {
             DaemonResponse::PolicyStatus(policy_status_from_config(runtime.policy.config()))
         }
         DaemonRequest::SafetyStatus => {
-            match safety_status(&runtime.safety_settings, &runtime.journal.settings) {
+            match safety_status(
+                &runtime.safety_settings,
+                &runtime.journal.settings,
+                &runtime.activity_tracker,
+            ) {
                 Ok(status) => DaemonResponse::SafetyStatus(status),
                 Err(err) => daemon_error(err),
             }
@@ -1582,7 +1623,7 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
             DaemonResponse::DesktopSessionStatus(desktop_session_status_from_env(std::env::vars()))
         }
         DaemonRequest::ComputerUseReadiness => {
-            DaemonResponse::ComputerUseReadiness(computer_use_readiness_status(runtime))
+            DaemonResponse::ComputerUseReadiness(computer_use_readiness_status(runtime).await)
         }
         DaemonRequest::PanicStopStatus => DaemonResponse::PanicStop(runtime.panic_stop.status()),
         DaemonRequest::SetPanicStop(request) => {
@@ -1596,6 +1637,7 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 &runtime.active_window_state,
                 &runtime.window_list_state,
                 runtime.kwin_bridge_registered,
+                &runtime.window_action_queue,
             ) {
                 Ok(status) => DaemonResponse::KwinBridgeStatus(status),
                 Err(err) => daemon_error(err),
@@ -1648,26 +1690,179 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
         DaemonRequest::CaptureBackendStatus => {
             DaemonResponse::CaptureBackendStatus(capture_backend_status())
         }
-        DaemonRequest::PointerCalibration => match pointer_calibration_status() {
-            Ok(status) => DaemonResponse::PointerCalibration(status),
-            Err(err) => daemon_error(err),
-        },
+        DaemonRequest::CaptureOpen(request) => execute_capture_open(request, client, runtime).await,
+        DaemonRequest::WindowCaptureOpen(request) => {
+            execute_capture_open(
+                CaptureOpenRequest {
+                    source: CaptureSourceKind::Window,
+                    requested_source_id: request.requested_window_id,
+                    parent_window: request.parent_window,
+                    timeout_ms: request.timeout_ms,
+                },
+                client,
+                runtime,
+            )
+            .await
+        }
+        DaemonRequest::CaptureSessionStatus => {
+            DaemonResponse::CaptureSessionStatus(capture_status(runtime, client).await)
+        }
+        DaemonRequest::CaptureSessionRenew(request) => {
+            if let Err(err) = runtime
+                .capture_session_store
+                .require_active(&request.session_id)
+                .await
+            {
+                let _ = runtime
+                    .interaction_session_store
+                    .clear(&request.session_id)
+                    .await;
+                return daemon_error_with_kind(err, ErrorKind::TargetLost);
+            }
+            let windows = match runtime.window_backend.list_windows().await {
+                Ok(windows) => windows,
+                Err(err) => return daemon_error(anyhow::Error::msg(err)),
+            };
+            let target = match runtime
+                .interaction_session_store
+                .resolve(&request.session_id, &windows)
+                .await
+            {
+                Ok(target) => target,
+                Err(err) => return daemon_error_with_kind(err, ErrorKind::TargetLost),
+            };
+            if let Err(err) = enforce_app_policy_for_app(
+                &runtime.app_policy,
+                target.window.app_id.as_deref(),
+                "pinned interaction target",
+            ) {
+                return daemon_error(err);
+            }
+            if let Err(err) = runtime
+                .interaction_session_store
+                .renew(&request.session_id)
+                .await
+            {
+                return daemon_error_with_kind(err, ErrorKind::TargetLost);
+            }
+            let capture = runtime
+                .capture_session_store
+                .status_for_session(&request.session_id)
+                .await;
+            let interaction = runtime
+                .interaction_session_store
+                .status(&request.session_id)
+                .await;
+            DaemonResponse::CaptureSessionStatus(merge_interaction_status(capture, interaction))
+        }
+        DaemonRequest::CaptureSnapshot(mut request) => {
+            match normalize_capture_frame_request(
+                &mut request.max_edge,
+                request.timeout_ms,
+                runtime.safety_settings.preview_max_edge,
+            ) {
+                Ok(()) => {}
+                Err(err) => return daemon_error_with_kind(err, ErrorKind::Validation),
+            }
+            match runtime.capture_session_store.snapshot(request).await {
+                Ok(frame) => DaemonResponse::CaptureFrame(frame),
+                Err(err) => daemon_error(err),
+            }
+        }
+        DaemonRequest::CaptureWait(mut request) => {
+            match normalize_capture_frame_request(
+                &mut request.max_edge,
+                request.timeout_ms,
+                runtime.safety_settings.preview_max_edge,
+            ) {
+                Ok(()) => {}
+                Err(err) => return daemon_error_with_kind(err, ErrorKind::Validation),
+            }
+            match runtime.capture_session_store.wait(request).await {
+                Ok(result) => DaemonResponse::CaptureWait(Box::new(result)),
+                Err(err) => daemon_error(err),
+            }
+        }
+        DaemonRequest::CaptureSessionClose(request) => {
+            let session_id = request.session_id.clone();
+            let _seat_lease = match runtime.interaction_session_store.acquire_seat_lease().await {
+                Ok(lease) => lease,
+                Err(err) => {
+                    return daemon_error_with_kind(err, ErrorKind::FocusLeaseConflict);
+                }
+            };
+            match runtime.capture_session_store.close(request).await {
+                Ok(status) => {
+                    runtime
+                        .interaction_session_store
+                        .clear_if_present(&session_id)
+                        .await;
+                    if let Err(err) = runtime.session_execution_store.clear(&session_id).await {
+                        return daemon_error(err);
+                    }
+                    DaemonResponse::CaptureSessionStatus(merge_interaction_status(
+                        status,
+                        runtime.interaction_session_store.status(&session_id).await,
+                    ))
+                }
+                Err(err) => daemon_error(err),
+            }
+        }
+        DaemonRequest::PointerCalibration => {
+            match pointer_coordinates::calibration(runtime.screen_backend.as_ref()).await {
+                Ok(status) => DaemonResponse::PointerCalibration(status),
+                Err(err) => daemon_error(err),
+            }
+        }
         DaemonRequest::ListMonitors => match list_monitors() {
             Ok(monitors) => DaemonResponse::Monitors(monitors),
             Err(err) => daemon_error(err),
         },
-        DaemonRequest::ListWindows => match list_windows(&runtime.window_list_state) {
+        DaemonRequest::ListWindows => match runtime.window_backend.list_windows().await {
             Ok(windows) => DaemonResponse::Windows(windows),
-            Err(err) => daemon_error(err),
+            Err(err) => daemon_error(anyhow::Error::msg(err)),
         },
-        DaemonRequest::ActiveWindow => match active_window(&runtime.active_window_state) {
+        DaemonRequest::ActiveWindow => match runtime.window_backend.active_window().await {
             Ok(window) => DaemonResponse::ActiveWindow(window),
-            Err(err) => daemon_error(err),
+            Err(err) => daemon_error(anyhow::Error::msg(err)),
         },
+        DaemonRequest::WindowInventory => {
+            match observation::window_inventory(runtime.window_backend.as_ref()).await {
+                Ok(mut inventory) => match runtime
+                    .semantic_handle_store
+                    .issue_for_windows(&inventory.windows, client)
+                {
+                    Ok(handles) => {
+                        inventory.semantic_handles = handles;
+                        DaemonResponse::WindowInventory(inventory)
+                    }
+                    Err(err) => daemon_error(err),
+                },
+                Err(err) => daemon_error(err),
+            }
+        }
+        DaemonRequest::WindowInventoryWait(request) => {
+            match observation::wait_for_window_inventory(runtime.window_backend.as_ref(), request)
+                .await
+            {
+                Ok(mut result) => match runtime
+                    .semantic_handle_store
+                    .issue_for_windows(&result.inventory.windows, client)
+                {
+                    Ok(handles) => {
+                        result.inventory.semantic_handles = handles;
+                        DaemonResponse::WindowInventoryWait(result)
+                    }
+                    Err(err) => daemon_error(err),
+                },
+                Err(err) => daemon_error(err),
+            }
+        }
         DaemonRequest::Observe(request) => {
-            match observe_desktop(
+            match observation::desktop(
                 request,
-                &runtime.active_window_state,
+                runtime.window_backend.as_ref(),
+                runtime.screen_backend.as_ref(),
                 &runtime.window_list_state,
                 &runtime.safety_settings,
             )
@@ -1678,7 +1873,13 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
             }
         }
         DaemonRequest::Screenshot(request) => {
-            match capture_screenshot(request, &runtime.safety_settings).await {
+            match capture_screenshot(
+                request,
+                &runtime.safety_settings,
+                &runtime.window_list_state,
+            )
+            .await
+            {
                 Ok(info) => DaemonResponse::Screenshot(info),
                 Err(err) => daemon_error(err),
             }
@@ -1690,19 +1891,25 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
             }
         }
         DaemonRequest::WaitForChange(request) => {
-            match wait_for_change(request, &runtime.safety_settings).await {
+            match wait_for_change(
+                request,
+                &runtime.safety_settings,
+                &runtime.window_list_state,
+            )
+            .await
+            {
                 Ok(result) => DaemonResponse::WaitForChange(Box::new(result)),
                 Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::ClipboardBackendStatus => {
-            DaemonResponse::ClipboardBackendStatus(clipboard_backend_status())
+            DaemonResponse::ClipboardBackendStatus(clipboard::status())
         }
-        DaemonRequest::ClipboardGet(request) => match clipboard_get_text(request) {
+        DaemonRequest::ClipboardGet(request) => match clipboard::get_text(request).await {
             Ok(text) => DaemonResponse::ClipboardText(text),
             Err(err) => daemon_error(err),
         },
-        DaemonRequest::ClipboardSet(request) => match clipboard_set_text(&request.text) {
+        DaemonRequest::ClipboardSet(request) => match clipboard::set_text(&request.text).await {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
             Err(err) => daemon_error(err),
         },
@@ -1768,105 +1975,224 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
             }
         }
         DaemonRequest::TypeText(request) => {
-            match type_text(
-                request,
-                runtime.input_backend_preference,
-                &runtime.portal_eis_session_store,
-            ) {
+            let session_id = request.session_id.clone();
+            match interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
+                type_text(
+                    request,
+                    runtime.input_backend_preference,
+                    &runtime.portal_eis_session_store,
+                )
+            })
+            .await
+            {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::KeyCombo(request) => {
-            match key_combo(
-                request,
-                runtime.input_backend_preference,
-                &runtime.xkb_keymap_config,
-                &runtime.portal_eis_session_store,
-            ) {
+            let session_id = request.session_id.clone();
+            match interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
+                key_combo(
+                    request,
+                    runtime.input_backend_preference,
+                    &runtime.xkb_keymap_config,
+                    &runtime.portal_eis_session_store,
+                )
+            })
+            .await
+            {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::MovePointer(request) => {
-            match move_pointer(
-                request,
-                &runtime.active_window_state,
-                runtime.input_backend_preference,
-                &runtime.portal_eis_session_store,
-            ) {
+            let session_id = request.session_id.clone();
+            match interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
+                move_pointer(
+                    request,
+                    runtime.window_backend.as_ref(),
+                    runtime.screen_backend.as_ref(),
+                    runtime.input_backend_preference,
+                    &runtime.portal_eis_session_store,
+                )
+                .await
+            })
+            .await
+            {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::ClickPointer(request) => {
-            match click_pointer(
-                request,
-                &runtime.active_window_state,
-                runtime.input_backend_preference,
-                &runtime.portal_eis_session_store,
-            ) {
+            let session_id = request.session_id.clone();
+            match interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
+                click_pointer(
+                    request,
+                    runtime.window_backend.as_ref(),
+                    runtime.screen_backend.as_ref(),
+                    runtime.input_backend_preference,
+                    &runtime.portal_eis_session_store,
+                )
+                .await
+            })
+            .await
+            {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::DragPointer(request) => {
-            match drag_pointer(
-                request,
-                &runtime.active_window_state,
-                runtime.input_backend_preference,
-                &runtime.portal_eis_session_store,
-            ) {
+            let session_id = request.session_id.clone();
+            match interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
+                drag_pointer(
+                    request,
+                    runtime.window_backend.as_ref(),
+                    runtime.screen_backend.as_ref(),
+                    runtime.input_backend_preference,
+                    &runtime.portal_eis_session_store,
+                )
+                .await
+            })
+            .await
+            {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::ScrollPointer(request) => {
-            match scroll_pointer(
-                request,
-                runtime.input_backend_preference,
-                &runtime.portal_eis_session_store,
-            ) {
+            let session_id = request.session_id.clone();
+            match interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
+                scroll_pointer(
+                    request,
+                    runtime.screen_backend.as_ref(),
+                    runtime.input_backend_preference,
+                    &runtime.portal_eis_session_store,
+                )
+                .await
+            })
+            .await
+            {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => daemon_error(err),
             }
         }
-        DaemonRequest::ClickButton(request) => match click_button(request) {
-            Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => daemon_error(err),
-        },
-        DaemonRequest::SetTextField(request) => match set_text_field(request) {
-            Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => daemon_error(err),
-        },
-        DaemonRequest::FocusTextField(request) => match focus_text_field(request) {
-            Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => daemon_error(err),
-        },
-        DaemonRequest::ActivateTab(request) => match activate_tab(request) {
-            Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => daemon_error(err),
-        },
-        DaemonRequest::ActivateLink(request) => match activate_link(request) {
-            Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => daemon_error(err),
-        },
-        DaemonRequest::ToggleCheck(request) => match toggle_check(request) {
-            Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => daemon_error(err),
-        },
-        DaemonRequest::SetValue(request) => match set_value(request) {
-            Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => daemon_error(err),
-        },
-        DaemonRequest::SelectItem(request) => match select_item(request) {
-            Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => daemon_error(err),
-        },
-        DaemonRequest::SelectMenu(request) => match select_menu(request) {
-            Ok(result) => DaemonResponse::Action(Box::new(result)),
-            Err(err) => daemon_error(err),
-        },
+        DaemonRequest::ClickButton(request) => {
+            match click_button(
+                request,
+                runtime.window_backend.as_ref(),
+                &runtime.app_policy,
+                post_action,
+            )
+            .await
+            {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => daemon_error(err),
+            }
+        }
+        DaemonRequest::SetTextField(request) => {
+            match set_text_field(
+                request,
+                runtime.window_backend.as_ref(),
+                &runtime.app_policy,
+                post_action,
+            )
+            .await
+            {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => daemon_error(err),
+            }
+        }
+        DaemonRequest::FocusTextField(request) => {
+            match focus_text_field(
+                request,
+                runtime.window_backend.as_ref(),
+                &runtime.app_policy,
+                post_action,
+            )
+            .await
+            {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => daemon_error(err),
+            }
+        }
+        DaemonRequest::ActivateTab(request) => {
+            match activate_tab(
+                request,
+                runtime.window_backend.as_ref(),
+                &runtime.app_policy,
+                post_action,
+            )
+            .await
+            {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => daemon_error(err),
+            }
+        }
+        DaemonRequest::ActivateLink(request) => {
+            match activate_link(
+                request,
+                runtime.window_backend.as_ref(),
+                &runtime.app_policy,
+                post_action,
+            )
+            .await
+            {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => daemon_error(err),
+            }
+        }
+        DaemonRequest::ToggleCheck(request) => {
+            match toggle_check(
+                request,
+                runtime.window_backend.as_ref(),
+                &runtime.app_policy,
+                post_action,
+            )
+            .await
+            {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => daemon_error(err),
+            }
+        }
+        DaemonRequest::SetValue(request) => {
+            match set_value(
+                request,
+                runtime.window_backend.as_ref(),
+                &runtime.app_policy,
+                post_action,
+            )
+            .await
+            {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => daemon_error(err),
+            }
+        }
+        DaemonRequest::SelectItem(request) => {
+            match select_item(
+                request,
+                runtime.window_backend.as_ref(),
+                &runtime.app_policy,
+                post_action,
+            )
+            .await
+            {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => daemon_error(err),
+            }
+        }
+        DaemonRequest::SelectMenu(request) => {
+            match select_menu(
+                request,
+                runtime.window_backend.as_ref(),
+                &runtime.app_policy,
+                post_action,
+            )
+            .await
+            {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => daemon_error(err),
+            }
+        }
         DaemonRequest::JournalTail(request) => {
             match runtime.journal.tail_filtered(
                 request.limit,
@@ -1877,10 +2203,42 @@ async fn handle_request(request: DaemonRequest, runtime: &DaemonRuntime) -> Daem
                 Err(err) => daemon_error(err),
             }
         }
-        DaemonRequest::FocusWindow(request) => match focus_window(request) {
+        DaemonRequest::FocusWindow(request) => {
+            match focus_window(request, runtime.window_backend.as_ref()).await {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => daemon_error(err),
+            }
+        }
+        DaemonRequest::MoveWindow(request) => {
+            match move_window(request, runtime.window_backend.as_ref()).await {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => daemon_error(err),
+            }
+        }
+        DaemonRequest::LaunchWindow(request) => match launch_window(request, runtime).await {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
             Err(err) => daemon_error(err),
         },
+        DaemonRequest::ResizeWindow(request) => {
+            match resize_window(request, runtime.window_backend.as_ref()).await {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => daemon_error(err),
+            }
+        }
+        DaemonRequest::PageZoom(request) => {
+            match page_zoom(
+                request,
+                runtime.window_backend.as_ref(),
+                runtime.input_backend_preference,
+                &runtime.xkb_keymap_config,
+                &runtime.portal_eis_session_store,
+            )
+            .await
+            {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => daemon_error(err),
+            }
+        }
     }
 }
 
@@ -1895,10 +2253,19 @@ fn health() -> HealthStatus {
 fn capabilities(
     input_backend_preference: InputBackendPreference,
     portal_eis_session_store: &PortalEisSessionStore,
+    window_resize_ready: bool,
+    window_move_ready: bool,
+    window_launch_ready: bool,
 ) -> CapabilitySet {
     let stored_session_active = portal_eis_session_store.active().unwrap_or(false);
     CapabilitySet {
-        capabilities: current_capabilities(input_backend_preference, stored_session_active),
+        capabilities: current_capabilities(
+            input_backend_preference,
+            stored_session_active,
+            window_resize_ready,
+            window_move_ready,
+            window_launch_ready,
+        ),
     }
 }
 
@@ -1917,8 +2284,11 @@ fn policy_status_from_config(config: &PolicyConfig) -> PolicyStatus {
 fn safety_status(
     settings: &SafetySettings,
     journal_settings: &JournalSettings,
+    activity_tracker: &activity::ActivityTracker,
 ) -> Result<SafetyStatus> {
-    let (human_input_signal_fresh, human_input_signal_age_ms) = human_input_signal_state(settings)?;
+    let (human_input_signal_fresh, human_input_signal_age_ms) =
+        human_input_signal_state(settings, activity_tracker)?;
+    let activity = activity_tracker.status();
     Ok(SafetyStatus {
         require_focus_guard: settings.require_focus_guard,
         pause_on_human_input: settings.pause_on_human_input,
@@ -1926,6 +2296,10 @@ fn safety_status(
         human_input_quiet_ms: settings.human_input_quiet_ms,
         human_input_signal_fresh,
         human_input_signal_age_ms,
+        human_input_activity_backend: activity.backend,
+        human_input_activity_trusted: activity.trusted,
+        human_input_last_class: activity.last_class.map(str::to_string),
+        human_input_last_provenance: activity.last_provenance.map(str::to_string),
         control_rate_limit_per_minute: settings.control_rate_limit_per_minute,
         preview_max_edge: settings.preview_max_edge,
         tile_max_edge: settings.tile_max_edge,
@@ -1934,11 +2308,15 @@ fn safety_status(
     })
 }
 
-fn computer_use_readiness_status(runtime: &DaemonRuntime) -> ComputerUseReadinessStatus {
+async fn computer_use_readiness_status(runtime: &DaemonRuntime) -> ComputerUseReadinessStatus {
     let mut issues = Vec::new();
     let mut next_steps = Vec::new();
 
-    let safety = match safety_status(&runtime.safety_settings, &runtime.journal.settings) {
+    let safety = match safety_status(
+        &runtime.safety_settings,
+        &runtime.journal.settings,
+        &runtime.activity_tracker,
+    ) {
         Ok(status) => status,
         Err(err) => {
             issues.push(format!("safety status unavailable: {err}"));
@@ -1953,6 +2331,10 @@ fn computer_use_readiness_status(runtime: &DaemonRuntime) -> ComputerUseReadines
                 human_input_quiet_ms: runtime.safety_settings.human_input_quiet_ms,
                 human_input_signal_fresh: false,
                 human_input_signal_age_ms: None,
+                human_input_activity_backend: None,
+                human_input_activity_trusted: false,
+                human_input_last_class: None,
+                human_input_last_provenance: None,
                 control_rate_limit_per_minute: runtime
                     .safety_settings
                     .control_rate_limit_per_minute,
@@ -1969,7 +2351,7 @@ fn computer_use_readiness_status(runtime: &DaemonRuntime) -> ComputerUseReadines
     let desktop = desktop_session_status_from_env(std::env::vars());
     let panic_stop = runtime.panic_stop.status();
     let capture = capture_backend_status();
-    let clipboard = clipboard_backend_status();
+    let clipboard = clipboard::status();
     let accessibility = accessibility_quality_status();
     let input = match input_backend_status(
         runtime.input_backend_preference,
@@ -2029,15 +2411,77 @@ fn computer_use_readiness_status(runtime: &DaemonRuntime) -> ComputerUseReadines
     let control_blocked =
         panic_stop.enabled || (safety.pause_on_human_input && safety.human_input_signal_fresh);
 
+    let policy = runtime.policy.config();
+    let observe_state =
+        action_readiness(desktop_session_ready, false, &policy.default_observe, false);
+    let screenshot_state = action_readiness(
+        capture.implemented_available_backend.is_some(),
+        false,
+        &policy.default_observe,
+        false,
+    );
+    let window_control_state = action_readiness(
+        desktop_session_ready,
+        control_blocked,
+        &policy.default_control,
+        safety.require_focus_guard,
+    );
+    let keyboard_input_state = action_readiness(
+        input_backend.is_some(),
+        control_blocked,
+        &policy.default_control,
+        safety.require_focus_guard,
+    );
+    let pointer_input_state = keyboard_input_state.clone();
+    let semantic_action_state = action_readiness(
+        accessibility.semantic_targeting_reliable,
+        control_blocked,
+        &policy.default_control,
+        safety.require_focus_guard,
+    );
+    let clipboard_read_state = action_readiness(
+        clipboard.read_backend.is_some(),
+        false,
+        &policy.default_clipboard_read,
+        false,
+    );
+    let clipboard_write_state = action_readiness(
+        clipboard.write_backend.is_some(),
+        false,
+        &policy.default_clipboard_write,
+        false,
+    );
+    if matches!(window_control_state, ActionReadiness::NeedsApproval) {
+        issues.push("control policy requires an approval grant".to_string());
+        next_steps.push("create a scoped seatgeist approval grant before control".to_string());
+    } else if matches!(window_control_state, ActionReadiness::NeedsGuard) {
+        issues.push("control requires a current desktop guard revision".to_string());
+        next_steps
+            .push("reuse desktop_revision from readiness or observe in the action".to_string());
+    }
+    let desktop_revision = match runtime.window_backend.active_window().await {
+        Ok(active_window) => Some(observation::active_window_revision(&active_window)),
+        Err(_) => None,
+    };
+
     ComputerUseReadinessStatus {
-        ready_for_observe: desktop_session_ready,
-        ready_for_screenshot: capture.implemented_available_backend.is_some(),
-        ready_for_window_control: desktop_session_ready && !control_blocked,
-        ready_for_keyboard_input: input_backend.is_some() && !control_blocked,
-        ready_for_pointer_input: input_backend.is_some() && !control_blocked,
-        ready_for_semantic_actions: accessibility.semantic_targeting_reliable && !control_blocked,
-        ready_for_clipboard_read: clipboard.read_backend.is_some(),
-        ready_for_clipboard_write: clipboard.write_backend.is_some(),
+        ready_for_observe: observe_state == ActionReadiness::Ready,
+        ready_for_screenshot: screenshot_state == ActionReadiness::Ready,
+        ready_for_window_control: window_control_state == ActionReadiness::Ready,
+        ready_for_keyboard_input: keyboard_input_state == ActionReadiness::Ready,
+        ready_for_pointer_input: pointer_input_state == ActionReadiness::Ready,
+        ready_for_semantic_actions: semantic_action_state == ActionReadiness::Ready,
+        ready_for_clipboard_read: clipboard_read_state == ActionReadiness::Ready,
+        ready_for_clipboard_write: clipboard_write_state == ActionReadiness::Ready,
+        observe_state,
+        screenshot_state,
+        window_control_state,
+        keyboard_input_state,
+        pointer_input_state,
+        semantic_action_state,
+        clipboard_read_state,
+        clipboard_write_state,
+        desktop_revision,
         focus_guard_required: safety.require_focus_guard,
         panic_stop_enabled: panic_stop.enabled,
         human_input_pause_enabled: safety.pause_on_human_input,
@@ -2053,6 +2497,27 @@ fn computer_use_readiness_status(runtime: &DaemonRuntime) -> ComputerUseReadines
         issues,
         next_steps,
     }
+}
+
+fn action_readiness(
+    available: bool,
+    blocked: bool,
+    policy: &ToolApprovalLevel,
+    needs_guard: bool,
+) -> ActionReadiness {
+    if !available {
+        return ActionReadiness::Unavailable;
+    }
+    if blocked || matches!(policy, ToolApprovalLevel::Deny) {
+        return ActionReadiness::Blocked;
+    }
+    if matches!(policy, ToolApprovalLevel::Prompt) {
+        return ActionReadiness::NeedsApproval;
+    }
+    if needs_guard {
+        return ActionReadiness::NeedsGuard;
+    }
+    ActionReadiness::Ready
 }
 
 fn desktop_session_status_from_env<I, K, V>(vars: I) -> DesktopSessionStatus
@@ -2124,2037 +2589,14 @@ fn desktop_session_setup_hint(status: &DesktopSessionStatus) -> String {
     }
 }
 
-fn load_daemon_config(explicit_path: Option<&Path>) -> Result<DaemonConfigFile> {
-    let path = explicit_path
-        .map(Path::to_path_buf)
-        .unwrap_or_else(default_config_path);
-
-    if !path.exists() {
-        if explicit_path.is_some() {
-            bail!("config file does not exist: {}", path.display());
-        }
-        return Ok(DaemonConfigFile::default());
-    }
-
-    let contents = fs::read_to_string(&path)
-        .with_context(|| format!("read config file {}", path.display()))?;
-    toml::from_str(&contents).with_context(|| format!("parse config file {}", path.display()))
-}
-
-fn default_config_path() -> PathBuf {
-    xdg_config_home().join("seatgeist/config.toml")
-}
-
-fn configured_path(
-    cli_path: Option<PathBuf>,
-    config_path: Option<&str>,
-    default_path: impl FnOnce() -> std::io::Result<PathBuf>,
-) -> Result<PathBuf> {
-    if let Some(path) = cli_path {
-        return Ok(path);
-    }
-    if let Some(path) = config_path {
-        return expand_config_path(path);
-    }
-    default_path().map_err(Into::into)
-}
-
-fn configured_optional_path(
-    cli_path: Option<PathBuf>,
-    config_path: Option<&str>,
-) -> Result<Option<PathBuf>> {
-    if let Some(path) = cli_path {
-        return Ok(Some(path));
-    }
-    config_path.map(expand_config_path).transpose()
-}
-
-fn input_backend_preference(
-    cli_backend: Option<InputBackendPreference>,
-    config_backend: Option<InputBackendPreference>,
-) -> InputBackendPreference {
-    cli_backend.or(config_backend).unwrap_or_default()
-}
-
-fn xkb_keymap_config(file_backends: Option<&BackendFileConfig>) -> XkbKeymapConfig {
-    let Some(keymap) = file_backends.and_then(|backends| backends.keymap.as_ref()) else {
-        return XkbKeymapConfig::default();
-    };
-    XkbKeymapConfig {
-        configured: true,
-        settings: XkbKeymapSettings {
-            rules: clean_config_value(keymap.rules.as_deref()),
-            model: clean_config_value(keymap.model.as_deref()),
-            layout: clean_config_value(keymap.layout.as_deref()),
-            variant: clean_config_value(keymap.variant.as_deref()),
-            options: keymap.options.clone(),
-        },
-    }
-}
-
-fn effective_xkb_keymap_resolution(config: &XkbKeymapConfig) -> XkbKeymapResolution {
-    if config.configured {
-        let settings = config.settings.clone();
-        return XkbKeymapResolution {
-            status: xkb_keymap_status(
-                "config",
-                &settings,
-                None,
-                None,
-                "using explicit [backends.keymap] RMLVO names for EIS key-combo lookup",
-            ),
-            settings,
-        };
-    }
-
-    let kde_current_layout = kde_current_keyboard_layout();
-    let kde_config = kde_keyboard_config();
-    let kde_config_layouts = kde_config
-        .as_ref()
-        .and_then(|config| config.layout_list.clone());
-
-    let mut settings = XkbKeymapSettings {
-        model: kde_config.as_ref().and_then(|config| config.model.clone()),
-        options: kde_config
-            .as_ref()
-            .and_then(|config| config.options.clone()),
-        ..XkbKeymapSettings::default()
-    };
-
-    if let Some((layout, variant)) = kde_current_layout
-        .as_deref()
-        .and_then(parse_kde_layout_name)
-    {
-        settings.layout = Some(layout);
-        settings.variant = variant;
-        return XkbKeymapResolution {
-            status: xkb_keymap_status(
-                "kde_current_layout",
-                &settings,
-                kde_current_layout,
-                kde_config_layouts,
-                "using KDE current keyboard layout DBus metadata for EIS key-combo lookup",
-            ),
-            settings,
-        };
-    }
-
-    if let Some(config) = kde_config
-        && let Some(layout) = first_csv_value(config.layout_list.as_deref())
-    {
-        settings.layout = Some(layout);
-        settings.variant = first_csv_value(config.variant_list.as_deref());
-        return XkbKeymapResolution {
-            status: xkb_keymap_status(
-                "kde_kxkbrc",
-                &settings,
-                kde_current_layout,
-                kde_config_layouts,
-                "using first configured KDE kxkbrc layout for EIS key-combo lookup; current-layout DBus metadata was unavailable",
-            ),
-            settings,
-        };
-    }
-
-    let settings = XkbKeymapSettings::default();
-    XkbKeymapResolution {
-        status: xkb_keymap_status(
-            "xkbcommon_default",
-            &settings,
-            kde_current_layout,
-            kde_config_layouts,
-            "KDE keyboard layout metadata was unavailable; using xkbcommon defaults for EIS key-combo lookup",
-        ),
-        settings,
-    }
-}
-
-fn xkb_keymap_status(
-    source: impl Into<String>,
-    settings: &XkbKeymapSettings,
-    kde_current_layout: Option<String>,
-    kde_config_layouts: Option<String>,
-    setup_hint: impl Into<String>,
-) -> XkbKeymapStatus {
-    XkbKeymapStatus {
-        source: source.into(),
-        rules: settings.rules.clone(),
-        model: settings.model.clone(),
-        layout: settings.layout.clone(),
-        variant: settings.variant.clone(),
-        options: settings.options.clone(),
-        kde_current_layout,
-        kde_config_layouts,
-        setup_hint: setup_hint.into(),
-    }
-}
-
-fn kde_current_keyboard_layout() -> Option<String> {
-    command_output_trimmed(
-        "qdbus6",
-        &[
-            "org.kde.keyboard",
-            "/Layouts",
-            "org.kde.KeyboardLayouts.getCurrentLayout",
-        ],
-    )
-    .or_else(|| {
-        command_output_trimmed(
-            "qdbus6",
-            &["org.kde.keyboard", "/Layouts", "getCurrentLayout"],
-        )
-    })
-}
-
-fn kde_keyboard_config() -> Option<KdeKeyboardConfig> {
-    let config = KdeKeyboardConfig {
-        model: kreadconfig_layout_key("Model").and_then(|value| clean_config_value(Some(&value))),
-        layout_list: kreadconfig_layout_key("LayoutList")
-            .and_then(|value| clean_config_value(Some(&value))),
-        variant_list: kreadconfig_layout_key("VariantList"),
-        options: kreadconfig_layout_key("Options"),
-    };
-    if config.model.is_some()
-        || config.layout_list.is_some()
-        || config.variant_list.is_some()
-        || config.options.is_some()
-    {
-        Some(config)
-    } else {
-        None
-    }
-}
-
-fn kreadconfig_layout_key(key: &str) -> Option<String> {
-    command_output_trimmed(
-        "kreadconfig6",
-        &["--file", "kxkbrc", "--group", "Layout", "--key", key],
-    )
-}
-
-fn command_output_trimmed(program: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(program).args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let value = String::from_utf8(output.stdout).ok()?;
-    clean_config_value(Some(&value))
-}
-
-fn parse_kde_layout_name(value: &str) -> Option<(String, Option<String>)> {
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-    if let Some((layout, variant)) = value
-        .strip_suffix(')')
-        .and_then(|value| value.split_once('('))
-    {
-        let layout = clean_layout_token(layout)?;
-        let variant =
-            clean_config_value(Some(variant)).and_then(|value| clean_layout_token(&value));
-        return Some((layout, variant));
-    }
-    clean_layout_token(value).map(|layout| (layout, None))
-}
-
-fn clean_layout_token(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty()
-        || !value
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
-    {
-        return None;
-    }
-    Some(value.to_string())
-}
-
-fn first_csv_value(value: Option<&str>) -> Option<String> {
-    value
-        .and_then(|value| value.split(',').next())
-        .and_then(|value| clean_config_value(Some(value)))
-}
-
-fn clean_config_value(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn expand_config_path(value: &str) -> Result<PathBuf> {
-    let mut expanded = value.to_string();
-    for name in [
-        "XDG_RUNTIME_DIR",
-        "XDG_STATE_HOME",
-        "XDG_CONFIG_HOME",
-        "HOME",
-    ] {
-        let marker = format!("${name}");
-        if expanded.contains(&marker) {
-            let replacement = env::var(name)
-                .with_context(|| format!("{name} is required to expand config path {value}"))?;
-            expanded = expanded.replace(&marker, &replacement);
-        }
-    }
-    Ok(PathBuf::from(expanded))
-}
-
-fn policy_config(
-    file_policy: Option<&PolicyFileConfig>,
-    allow_control: bool,
-    allow_clipboard_read: bool,
-    allow_full_resolution_screenshot: bool,
-) -> PolicyConfig {
-    let mut config = PolicyConfig::default();
-    if let Some(file_policy) = file_policy {
-        if let Some(level) = &file_policy.default_observe {
-            config.default_observe = level.clone();
-        }
-        if let Some(level) = &file_policy.default_control {
-            config.default_control = level.clone();
-        }
-        if let Some(level) = &file_policy.destructive_actions {
-            config.default_destructive_actions = level.clone();
-        }
-        if let Some(level) = &file_policy.secret_fields {
-            config.default_secret_fields = level.clone();
-        }
-        if let Some(level) = &file_policy.default_clipboard_read {
-            config.default_clipboard_read = level.clone();
-        }
-        if let Some(level) = &file_policy.default_clipboard_write {
-            config.default_clipboard_write = level.clone();
-        }
-        if let Some(level) = &file_policy.default_full_resolution_screenshot {
-            config.default_full_resolution_screenshot = level.clone();
-        }
-    }
-    if allow_control {
-        config.default_control = ToolApprovalLevel::Allow;
-    }
-    if allow_clipboard_read {
-        config.default_clipboard_read = ToolApprovalLevel::Allow;
-    }
-    if allow_full_resolution_screenshot {
-        config.default_full_resolution_screenshot = ToolApprovalLevel::Allow;
-    }
-    config
-}
-
-fn app_policy(file_apps: Option<&AppsFileConfig>) -> AppPolicy {
-    let Some(file_apps) = file_apps else {
-        return AppPolicy::default();
-    };
-    AppPolicy {
-        allow: normalize_app_policy_list(file_apps.allow.as_deref().unwrap_or(&[])),
-        deny: normalize_app_policy_list(file_apps.deny.as_deref().unwrap_or(&[])),
-    }
-}
-
-fn journal_settings(file_journal: Option<&JournalFileConfig>) -> JournalSettings {
-    JournalSettings {
-        include_artifact_metadata: file_journal
-            .and_then(|journal| journal.include_artifact_metadata)
-            .unwrap_or(false),
-    }
-}
-
-fn normalize_app_policy_list(values: &[String]) -> Vec<String> {
-    let mut normalized: Vec<String> = Vec::new();
-    for value in values {
-        let value = value.trim();
-        if !value.is_empty() && !normalized.iter().any(|seen| app_id_matches(seen, value)) {
-            normalized.push(value.to_string());
-        }
-    }
-    normalized
-}
-
-fn safety_settings(file_safety: Option<&SafetyFileConfig>) -> Result<SafetySettings> {
-    let screenshot_redactions = file_safety
-        .and_then(|safety| safety.redact_regions.as_deref())
-        .map(redact_regions)
-        .unwrap_or_default();
-    let pause_on_human_input = file_safety
-        .and_then(|safety| safety.pause_on_human_input)
-        .unwrap_or(false);
-    let human_input_activity_file = if pause_on_human_input {
-        Some(
-            match file_safety.and_then(|safety| safety.human_input_activity_file.as_deref()) {
-                Some(path) => expand_config_path(path)?,
-                None => default_human_input_activity_path()?,
-            },
-        )
-    } else {
-        None
-    };
-
-    Ok(SafetySettings {
-        require_focus_guard: file_safety
-            .and_then(|safety| safety.require_focus_guard)
-            .unwrap_or(DEFAULT_REQUIRE_FOCUS_GUARD),
-        pause_on_human_input,
-        human_input_activity_file,
-        human_input_quiet_ms: file_safety
-            .and_then(|safety| safety.human_input_quiet_ms)
-            .unwrap_or(DEFAULT_HUMAN_INPUT_QUIET_MS),
-        control_rate_limit_per_minute: file_safety
-            .and_then(|safety| safety.control_rate_limit_per_minute)
-            .map(|limit| if limit == 0 { None } else { Some(limit) })
-            .unwrap_or(Some(DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE)),
-        preview_max_edge: configured_positive_u32(
-            file_safety.and_then(|safety| safety.preview_max_edge),
-            DEFAULT_PREVIEW_MAX_EDGE,
-            "safety.preview_max_edge",
-        )?,
-        tile_max_edge: configured_positive_u32(
-            file_safety.and_then(|safety| safety.tile_max_edge),
-            DEFAULT_TILE_MAX_EDGE,
-            "safety.tile_max_edge",
-        )?,
-        screenshot_redactions,
-    })
-}
-
-fn configured_positive_u32(value: Option<u32>, default: u32, name: &str) -> Result<u32> {
-    match value {
-        Some(0) => bail!("{name} must be greater than zero"),
-        Some(value) => Ok(value),
-        None => Ok(default),
-    }
-}
-
-fn default_human_input_activity_path() -> Result<PathBuf> {
-    Ok(default_panic_stop_path()?.with_file_name("human-input-active"))
-}
-
-fn redact_regions(values: &[RedactRegionFileConfig]) -> Vec<RedactRegion> {
-    values
-        .iter()
-        .filter(|region| region.width > 0 && region.height > 0)
-        .map(|region| RedactRegion {
-            x: region.x,
-            y: region.y,
-            width: region.width,
-            height: region.height,
-        })
-        .collect()
-}
-
-fn kwin_bridge_status(
-    active_window_state: &ActiveWindowState,
-    window_list_state: &WindowListState,
-    dbus_service_registered: bool,
-) -> Result<KwinBridgeStatus> {
-    let active_window_snapshot = active_window_state.snapshot()?;
-    let active_window_update_seen = active_window_snapshot.is_some();
-    let active_window = active_window_snapshot.flatten();
-    let window_list_snapshot = window_list_state.snapshot()?;
-    let window_list_update_seen = window_list_snapshot.is_some();
-    let window_count = window_list_snapshot.map_or(0, |windows| windows.len());
-    let package_dir = xdg_data_home().join("kwin/scripts/seatgeist-bridge");
-    let config_path = xdg_config_home().join("kwinrc");
-    let script_enabled = read_kwin_bridge_enabled(&config_path)?;
-
-    Ok(KwinBridgeStatus {
-        dbus_service_registered,
-        active_window_update_seen,
-        window_list_update_seen,
-        window_count,
-        active_window,
-        package_installed: package_dir.join("metadata.json").is_file(),
-        package_dir,
-        config_path,
-        script_enabled,
-    })
-}
-
-fn xdg_data_home() -> PathBuf {
-    env::var_os("XDG_DATA_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from(".local/share"))
-}
-
-fn xdg_config_home() -> PathBuf {
-    env::var_os("XDG_CONFIG_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .unwrap_or_else(|| PathBuf::from(".config"))
-}
-
-fn read_kwin_bridge_enabled(config_path: &Path) -> Result<Option<bool>> {
-    let content = match fs::read_to_string(config_path) {
-        Ok(content) => content,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err).with_context(|| format!("read {}", config_path.display())),
-    };
-    Ok(parse_kwin_bridge_enabled(&content))
-}
-
-fn parse_kwin_bridge_enabled(content: &str) -> Option<bool> {
-    let mut in_plugins = false;
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-            continue;
-        }
-        if line.starts_with('[') && line.ends_with(']') {
-            in_plugins = line == "[Plugins]";
-            continue;
-        }
-        if !in_plugins {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim() != "seatgeist-bridgeEnabled" {
-            continue;
-        }
-        return parse_bool_config_value(value.trim());
-    }
-    None
-}
-
-fn uinput_status() -> Result<UinputStatus> {
-    let path = seatgeist_uinput::uinput_path().to_path_buf();
-    let metadata = match fs::metadata(&path) {
-        Ok(metadata) => Some(metadata),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-        Err(err) => return Err(err).with_context(|| format!("stat {}", path.display())),
-    };
-    let available = seatgeist_uinput::available();
-    let exists = metadata.is_some();
-    let is_char_device = metadata
-        .as_ref()
-        .is_some_and(|metadata| metadata.file_type().is_char_device());
-    let mode = metadata
-        .as_ref()
-        .map(|metadata| metadata.permissions().mode() & 0o7777);
-    let owner_uid = metadata.as_ref().map(MetadataExt::uid);
-    let owner_gid = metadata.as_ref().map(MetadataExt::gid);
-    let process_uid = current_euid().context("read daemon effective uid")?;
-    let process_gid = current_egid().context("read daemon effective gid")?;
-
-    Ok(UinputStatus {
-        path,
-        available,
-        exists,
-        is_char_device,
-        mode,
-        owner_uid,
-        owner_gid,
-        process_uid,
-        process_gid,
-        setup_hint: uinput_setup_hint(available, exists, is_char_device),
-    })
-}
-
-fn uinput_setup_hint(available: bool, exists: bool, is_char_device: bool) -> String {
-    if available {
-        return "uinput available to daemon process".to_string();
-    }
-    if !exists {
-        return "load the uinput kernel module and install the udev rule before starting seatgeistd"
-            .to_string();
-    }
-    if !is_char_device {
-        return "refusing /dev/uinput because it is not a character device".to_string();
-    }
-    "grant the daemon read/write access to /dev/uinput with the packaged udev rule, reload udev, add the user to the configured group, then restart the user session or service".to_string()
-}
-
 fn input_backend_status(
     preference: InputBackendPreference,
     portal_eis_session_store: &PortalEisSessionStore,
     xkb_keymap_config: &XkbKeymapConfig,
 ) -> Result<InputBackendStatus> {
-    let uinput = uinput_status()?;
-    let remote_desktop_portal = remote_desktop_portal_status();
-    let libei = libei_status();
     let xkb_keymap = effective_xkb_keymap_resolution(xkb_keymap_config).status;
-    let preferred_available_backend =
-        preferred_input_backend(&remote_desktop_portal, &libei, uinput.available);
     let stored_session_active = portal_eis_session_store.active()?;
-    let implemented_available_backend =
-        implemented_input_backend(preference, uinput.available, stored_session_active);
-    let setup_hint = input_backend_setup_hint(
-        preference,
-        preferred_available_backend.as_deref(),
-        implemented_available_backend.as_deref(),
-        &remote_desktop_portal,
-        &libei,
-        uinput.available,
-        stored_session_active,
-    );
-
-    Ok(InputBackendStatus {
-        uinput_available: uinput.available,
-        remote_desktop_portal,
-        libei,
-        eis_keymap: xkb_keymap,
-        configured_backend: preference.status_name().to_string(),
-        preferred_available_backend,
-        implemented_available_backend,
-        setup_hint,
-    })
-}
-
-async fn remote_desktop_session_probe(
-    request: RemoteDesktopSessionProbeRequest,
-) -> Result<RemoteDesktopSessionProbe> {
-    let portal_status = remote_desktop_portal_status();
-    if !portal_status.remote_desktop_interface_available {
-        bail!(
-            "xdg-desktop-portal RemoteDesktop is not available: {}",
-            portal_status.setup_hint
-        );
-    }
-
-    let (requested_devices, options, timeout) = remote_desktop_probe_setup(request)?;
-
-    let result = seatgeist_portal::request_remote_desktop_session_zbus(&options, timeout)
-        .await
-        .context("request transient portal RemoteDesktop session")?;
-    let Some(session) = result else {
-        return Ok(RemoteDesktopSessionProbe {
-            started: false,
-            requested_devices,
-            selected_devices: Vec::new(),
-            clipboard_enabled: false,
-            restore_token: None,
-            session_handle: None,
-            create_request_path: None,
-            select_request_path: None,
-            start_request_path: None,
-            transient_session_closed: true,
-            setup_hint:
-                "portal RemoteDesktop interaction was cancelled or ended before Start completed"
-                    .to_string(),
-        });
-    };
-
-    Ok(RemoteDesktopSessionProbe {
-        started: true,
-        requested_devices,
-        selected_devices: remote_desktop_device_names(session.start.devices),
-        clipboard_enabled: session.start.clipboard_enabled,
-        restore_token: session.start.restore_token,
-        session_handle: Some(session.session.actual_session_path),
-        create_request_path: Some(session.create_request_path),
-        select_request_path: Some(session.select_request_path),
-        start_request_path: Some(session.start_request_path),
-        transient_session_closed: true,
-        setup_hint: "transient portal RemoteDesktop session reached Start; Seatgeist closed it after the probe and did not call ConnectToEIS or send input".to_string(),
-    })
-}
-
-async fn remote_desktop_eis_probe(
-    request: RemoteDesktopSessionProbeRequest,
-) -> Result<RemoteDesktopEisProbe> {
-    let portal_status = remote_desktop_portal_status();
-    if !portal_status.remote_desktop_interface_available {
-        bail!(
-            "xdg-desktop-portal RemoteDesktop is not available: {}",
-            portal_status.setup_hint
-        );
-    }
-
-    let (requested_devices, options, timeout) = remote_desktop_probe_setup(request)?;
-    let result = seatgeist_portal::request_remote_desktop_eis_zbus(
-        &options,
-        &seatgeist_portal::PortalConnectToEisOptions::new(),
-        timeout,
-    )
-    .await
-    .context("request transient portal RemoteDesktop EIS connection")?;
-    let Some(session) = result else {
-        return Ok(RemoteDesktopEisProbe {
-            started: false,
-            eis_connected: false,
-            eis_runtime_connected: false,
-            eis_event_count: 0,
-            eis_bound_capabilities: Vec::new(),
-            eis_resumed_device_count: 0,
-            requested_devices,
-            selected_devices: Vec::new(),
-            clipboard_enabled: false,
-            restore_token: None,
-            session_handle: None,
-            create_request_path: None,
-            select_request_path: None,
-            start_request_path: None,
-            eis_fd_closed: true,
-            transient_session_closed: true,
-            setup_hint:
-                "portal RemoteDesktop interaction was cancelled or ended before EIS connected"
-                    .to_string(),
-        });
-    };
-
-    let mut session = DaemonPortalEisSession::from_portal_session(session)
-        .context("initialize transient daemon EIS runtime")?;
-    let metadata = session.metadata().clone();
-    let snapshots = session.dispatch_pending();
-    let runtime_connected = session.state().connected();
-    let bound_capabilities = eis_capability_names(session.state().bound_capabilities());
-    let resumed_device_count = session
-        .state()
-        .devices()
-        .iter()
-        .filter(|device| device.resumed)
-        .count();
-    drop(session);
-
-    Ok(RemoteDesktopEisProbe {
-        started: true,
-        eis_connected: true,
-        eis_runtime_connected: runtime_connected,
-        eis_event_count: snapshots.len(),
-        eis_bound_capabilities: bound_capabilities,
-        eis_resumed_device_count: resumed_device_count,
-        requested_devices,
-        selected_devices: metadata.selected_devices,
-        clipboard_enabled: metadata.clipboard_enabled,
-        restore_token: metadata.restore_token,
-        session_handle: Some(metadata.session_handle),
-        create_request_path: Some(metadata.create_request_path),
-        select_request_path: Some(metadata.select_request_path),
-        start_request_path: Some(metadata.start_request_path),
-        eis_fd_closed: true,
-        transient_session_closed: true,
-        setup_hint: "transient portal RemoteDesktop session reached Start, initialized a daemon EIS runtime, polled pending events, closed the EIS FD, and sent no input".to_string(),
-    })
-}
-
-async fn remote_desktop_eis_start(
-    request: RemoteDesktopSessionProbeRequest,
-    store: &PortalEisSessionStore,
-) -> Result<RemoteDesktopEisSessionStatus> {
-    let portal_status = remote_desktop_portal_status();
-    if !portal_status.remote_desktop_interface_available {
-        bail!(
-            "xdg-desktop-portal RemoteDesktop is not available: {}",
-            portal_status.setup_hint
-        );
-    }
-
-    let (_requested_devices, options, timeout) = remote_desktop_probe_setup(request)?;
-    let result = seatgeist_portal::request_remote_desktop_eis_zbus(
-        &options,
-        &seatgeist_portal::PortalConnectToEisOptions::new(),
-        timeout,
-    )
-    .await
-    .context("request stored portal RemoteDesktop EIS connection")?;
-    let Some(session) = result else {
-        return Ok(remote_desktop_eis_session_status(
-            None,
-            None,
-            "portal RemoteDesktop interaction was cancelled or ended before a stored EIS session was created".to_string(),
-        ));
-    };
-
-    let mut session = DaemonPortalEisSession::from_portal_session(session)
-        .context("initialize stored daemon EIS runtime")?;
-    let snapshots = session.dispatch_pending();
-    let status = remote_desktop_eis_session_status(
-        Some(session.metadata()),
-        Some(session.state()),
-        format!(
-            "stored portal RemoteDesktop EIS session initialized and polled {} pending events; no input was sent",
-            snapshots.len()
-        ),
-    );
-    store.replace(session)?;
-    Ok(status)
-}
-
-fn remote_desktop_eis_stop(store: &PortalEisSessionStore) -> Result<RemoteDesktopEisSessionStatus> {
-    let was_active = store.clear()?;
-    Ok(remote_desktop_eis_session_status(
-        None,
-        None,
-        if was_active {
-            "stored portal RemoteDesktop EIS session was dropped; no input was sent".to_string()
-        } else {
-            "no stored portal RemoteDesktop EIS session was active".to_string()
-        },
-    ))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DaemonPortalEisSessionMetadata {
-    selected_devices: Vec<String>,
-    clipboard_enabled: bool,
-    restore_token: Option<String>,
-    session_handle: String,
-    create_request_path: String,
-    select_request_path: String,
-    start_request_path: String,
-}
-
-struct DaemonPortalEisSession<S = seatgeist_eis::LibeiSenderContext> {
-    metadata: DaemonPortalEisSessionMetadata,
-    runtime: seatgeist_eis::EisSessionRuntime<S>,
-}
-
-struct PortalEisSessionStore<S = seatgeist_eis::LibeiSenderContext> {
-    inner: Arc<Mutex<Option<DaemonPortalEisSession<S>>>>,
-}
-
-impl<S> Clone for PortalEisSessionStore<S> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
-    }
-}
-
-impl<S> fmt::Debug for PortalEisSessionStore<S> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PortalEisSessionStore")
-            .finish_non_exhaustive()
-    }
-}
-
-impl<S> Default for PortalEisSessionStore<S> {
-    fn default() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(None)),
-        }
-    }
-}
-
-impl<S: seatgeist_eis::EisEventSource> PortalEisSessionStore<S> {
-    fn replace(&self, session: DaemonPortalEisSession<S>) -> Result<()> {
-        let mut stored = self
-            .inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("portal EIS session store lock is poisoned"))?;
-        *stored = Some(session);
-        Ok(())
-    }
-
-    fn clear(&self) -> Result<bool> {
-        let mut stored = self
-            .inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("portal EIS session store lock is poisoned"))?;
-        Ok(stored.take().is_some())
-    }
-
-    fn active(&self) -> Result<bool> {
-        let stored = self
-            .inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("portal EIS session store lock is poisoned"))?;
-        Ok(stored.is_some())
-    }
-
-    fn status(&self) -> Result<RemoteDesktopEisSessionStatus> {
-        let stored = self
-            .inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("portal EIS session store lock is poisoned"))?;
-        Ok(match stored.as_ref() {
-            Some(session) => remote_desktop_eis_session_status(
-                Some(session.metadata()),
-                Some(session.state()),
-                "stored portal RemoteDesktop EIS session is active; explicit portal/libei raw input uses this session after the per-plan readiness gate passes".to_string(),
-            ),
-            None => remote_desktop_eis_session_status(
-                None,
-                None,
-                "no stored portal RemoteDesktop EIS session; start one before selecting portal/libei execution".to_string(),
-            ),
-        })
-    }
-}
-
-impl<S> PortalEisSessionStore<S>
-where
-    S: seatgeist_eis::EisEventSource + seatgeist_eis::EisSelectedDeviceExecutor,
-    S::Error: Display,
-{
-    fn execute_ready_plan(
-        &self,
-        backend_name: &'static str,
-        plan: &seatgeist_eis::EisActionPlan,
-    ) -> Result<()> {
-        let mut stored = self
-            .inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("portal EIS session store lock is poisoned"))?;
-        let session = stored.as_mut().ok_or_else(|| {
-            anyhow::anyhow!(
-                "configured input backend {backend_name} requires a stored RemoteDesktop EIS session; run remote_desktop_eis_start before selecting portal/libei execution"
-            )
-        })?;
-        session.execute_ready_plan(plan)?;
-        Ok(())
-    }
-}
-
-impl DaemonPortalEisSession<seatgeist_eis::LibeiSenderContext> {
-    fn from_portal_session(
-        session: seatgeist_portal::PortalRemoteDesktopEisSession,
-    ) -> Result<Self> {
-        let seatgeist_portal::PortalRemoteDesktopEisSession { session_start, eis } = session;
-        let metadata =
-            DaemonPortalEisSessionMetadata::from_session_start(&session_start, eis.session_handle);
-        let runtime = seatgeist_eis::EisSessionRuntime::from_owned_fd(eis.fd, "Seatgeist")
-            .map_err(|err| anyhow::anyhow!(err))?;
-        Ok(Self { metadata, runtime })
-    }
-}
-
-impl DaemonPortalEisSessionMetadata {
-    fn from_session_start(
-        session_start: &seatgeist_portal::PortalRemoteDesktopSessionStart,
-        session_handle: String,
-    ) -> Self {
-        Self {
-            selected_devices: remote_desktop_device_names(session_start.start.devices),
-            clipboard_enabled: session_start.start.clipboard_enabled,
-            restore_token: session_start.start.restore_token.clone(),
-            session_handle,
-            create_request_path: session_start.create_request_path.clone(),
-            select_request_path: session_start.select_request_path.clone(),
-            start_request_path: session_start.start_request_path.clone(),
-        }
-    }
-}
-
-fn remote_desktop_eis_session_status(
-    metadata: Option<&DaemonPortalEisSessionMetadata>,
-    state: Option<&seatgeist_eis::EisRuntimeState>,
-    setup_hint: String,
-) -> RemoteDesktopEisSessionStatus {
-    RemoteDesktopEisSessionStatus {
-        active: metadata.is_some(),
-        runtime_connected: state.is_some_and(seatgeist_eis::EisRuntimeState::connected),
-        bound_capabilities: state
-            .map(|state| eis_capability_names(state.bound_capabilities()))
-            .unwrap_or_default(),
-        resumed_device_count: state
-            .map(|state| {
-                state
-                    .devices()
-                    .iter()
-                    .filter(|device| device.resumed)
-                    .count()
-            })
-            .unwrap_or_default(),
-        selected_devices: metadata
-            .map(|metadata| metadata.selected_devices.clone())
-            .unwrap_or_default(),
-        clipboard_enabled: metadata.is_some_and(|metadata| metadata.clipboard_enabled),
-        restore_token: metadata.and_then(|metadata| metadata.restore_token.clone()),
-        session_handle: metadata.map(|metadata| metadata.session_handle.clone()),
-        create_request_path: metadata.map(|metadata| metadata.create_request_path.clone()),
-        select_request_path: metadata.map(|metadata| metadata.select_request_path.clone()),
-        start_request_path: metadata.map(|metadata| metadata.start_request_path.clone()),
-        setup_hint,
-    }
-}
-
-impl<S: seatgeist_eis::EisEventSource> DaemonPortalEisSession<S> {
-    #[cfg(test)]
-    fn from_runtime(
-        session_start: seatgeist_portal::PortalRemoteDesktopSessionStart,
-        session_handle: String,
-        runtime: seatgeist_eis::EisSessionRuntime<S>,
-    ) -> Self {
-        let metadata =
-            DaemonPortalEisSessionMetadata::from_session_start(&session_start, session_handle);
-        Self { metadata, runtime }
-    }
-
-    fn metadata(&self) -> &DaemonPortalEisSessionMetadata {
-        &self.metadata
-    }
-
-    fn state(&self) -> &seatgeist_eis::EisRuntimeState {
-        self.runtime.state()
-    }
-
-    fn dispatch_pending(&mut self) -> Vec<seatgeist_eis::LibeiEventSnapshot> {
-        self.runtime.dispatch_pending()
-    }
-
-    #[cfg(test)]
-    fn refresh_execution_readiness(
-        &mut self,
-        plan: &seatgeist_eis::EisActionPlan,
-    ) -> seatgeist_eis::EisExecutionReadiness {
-        self.runtime.refresh_execution_readiness(plan)
-    }
-}
-
-// Production request routing constructs this after stored-session input routing
-// lands; tests exercise the ready-session execution path now.
-#[allow(dead_code)]
-impl<S> DaemonPortalEisSession<S>
-where
-    S: seatgeist_eis::EisEventSource + seatgeist_eis::EisSelectedDeviceExecutor,
-    S::Error: Display,
-{
-    fn execute_ready_plan(
-        &mut self,
-        plan: &seatgeist_eis::EisActionPlan,
-    ) -> Result<seatgeist_eis::EisExecutedPlan> {
-        self.runtime
-            .execute_ready_plan(plan)
-            .map_err(|err| anyhow::anyhow!("{err}"))
-    }
-}
-
-fn remote_desktop_probe_setup(
-    request: RemoteDesktopSessionProbeRequest,
-) -> Result<(
-    Vec<String>,
-    seatgeist_portal::PortalRemoteDesktopOptions,
-    Duration,
-)> {
-    let requested_devices = remote_desktop_requested_devices(&request);
-    let device_types = remote_desktop_device_types(&request)?;
-    let timeout = remote_desktop_probe_timeout(request.timeout_ms)?;
-    let token_seed = Uuid::new_v4().simple().to_string();
-    let mut options = seatgeist_portal::PortalRemoteDesktopOptions::new(
-        format!("seatgeist_create_{token_seed}"),
-        format!("seatgeist_session_{token_seed}"),
-        format!("seatgeist_select_{token_seed}"),
-        format!("seatgeist_start_{token_seed}"),
-    );
-    options.select_devices.types = Some(device_types);
-    options.select_devices.restore_token = request.restore_token;
-    options.select_devices.persist_mode = request.persist_mode.map(remote_desktop_persist_mode);
-    options.start.parent_window = request.parent_window.unwrap_or_default();
-    Ok((requested_devices, options, timeout))
-}
-
-fn eis_capability_names(capabilities: &[seatgeist_eis::EisCapability]) -> Vec<String> {
-    capabilities
-        .iter()
-        .map(|capability| match capability {
-            seatgeist_eis::EisCapability::PointerAbsolute => "pointer_absolute",
-            seatgeist_eis::EisCapability::Keyboard => "keyboard",
-            seatgeist_eis::EisCapability::Button => "button",
-            seatgeist_eis::EisCapability::Scroll => "scroll",
-            seatgeist_eis::EisCapability::Text => "text",
-        })
-        .map(str::to_string)
-        .collect()
-}
-
-fn remote_desktop_requested_devices(request: &RemoteDesktopSessionProbeRequest) -> Vec<String> {
-    let mut devices = Vec::new();
-    if request.keyboard {
-        devices.push("keyboard".to_string());
-    }
-    if request.pointer {
-        devices.push("pointer".to_string());
-    }
-    if request.touchscreen {
-        devices.push("touchscreen".to_string());
-    }
-    devices
-}
-
-fn remote_desktop_device_types(
-    request: &RemoteDesktopSessionProbeRequest,
-) -> Result<seatgeist_portal::RemoteDesktopDeviceTypes> {
-    let mut bits = 0;
-    if request.keyboard {
-        bits |= seatgeist_portal::RemoteDesktopDeviceTypes::KEYBOARD.bits();
-    }
-    if request.pointer {
-        bits |= seatgeist_portal::RemoteDesktopDeviceTypes::POINTER.bits();
-    }
-    if request.touchscreen {
-        bits |= seatgeist_portal::RemoteDesktopDeviceTypes::TOUCHSCREEN.bits();
-    }
-    if bits == 0 {
-        bail!("remote desktop session probe must request at least one input device");
-    }
-    seatgeist_portal::RemoteDesktopDeviceTypes::try_from(bits).map_err(|err| anyhow::anyhow!(err))
-}
-
-fn remote_desktop_device_names(devices: seatgeist_portal::RemoteDesktopDeviceTypes) -> Vec<String> {
-    let mut names = Vec::new();
-    if devices.contains(seatgeist_portal::RemoteDesktopDeviceTypes::KEYBOARD) {
-        names.push("keyboard".to_string());
-    }
-    if devices.contains(seatgeist_portal::RemoteDesktopDeviceTypes::POINTER) {
-        names.push("pointer".to_string());
-    }
-    if devices.contains(seatgeist_portal::RemoteDesktopDeviceTypes::TOUCHSCREEN) {
-        names.push("touchscreen".to_string());
-    }
-    names
-}
-
-fn remote_desktop_persist_mode(
-    mode: RemoteDesktopPersistMode,
-) -> seatgeist_portal::RemoteDesktopPersistMode {
-    match mode {
-        RemoteDesktopPersistMode::DoNotPersist => {
-            seatgeist_portal::RemoteDesktopPersistMode::DoNotPersist
-        }
-        RemoteDesktopPersistMode::ApplicationLifetime => {
-            seatgeist_portal::RemoteDesktopPersistMode::ApplicationLifetime
-        }
-        RemoteDesktopPersistMode::ExplicitlyRevoked => {
-            seatgeist_portal::RemoteDesktopPersistMode::ExplicitlyRevoked
-        }
-    }
-}
-
-fn remote_desktop_probe_timeout(timeout_ms: u64) -> Result<Duration> {
-    if timeout_ms == 0 {
-        bail!("remote desktop session probe timeout_ms must be greater than zero");
-    }
-    let timeout = Duration::from_millis(timeout_ms);
-    if timeout > MAX_REMOTE_DESKTOP_PROBE_TIMEOUT {
-        bail!(
-            "remote desktop session probe timeout_ms must be at most {}",
-            MAX_REMOTE_DESKTOP_PROBE_TIMEOUT.as_millis()
-        );
-    }
-    Ok(timeout)
-}
-
-fn capture_backend_status() -> CaptureBackendStatus {
-    let screenshot_portal = screenshot_portal_status();
-    let kwin_metadata = kwin_metadata_status();
-    let spectacle = spectacle_status();
-    let preferred_available_backend =
-        preferred_capture_backend(&screenshot_portal, spectacle.command_available);
-    let implemented_available_backend =
-        implemented_capture_backend(&screenshot_portal, spectacle.command_available);
-    let setup_hint = capture_backend_setup_hint(
-        preferred_available_backend.as_deref(),
-        implemented_available_backend.as_deref(),
-        &screenshot_portal,
-        &kwin_metadata,
-        &spectacle,
-    );
-
-    CaptureBackendStatus {
-        screenshot_portal,
-        kwin_metadata,
-        spectacle,
-        preferred_available_backend,
-        implemented_available_backend,
-        setup_hint,
-    }
-}
-
-fn screenshot_portal_status() -> ScreenshotPortalStatus {
-    let busctl_available = command_exists("busctl");
-    if !busctl_available {
-        return ScreenshotPortalStatus {
-            busctl_available,
-            portal_service_available: false,
-            screenshot_interface_available: false,
-            screenshot_interface_version: None,
-            screenshot_available_targets_mask: None,
-            screenshot_available_targets: Vec::new(),
-            screenshot_target_option_supported: false,
-            screencast_interface_available: false,
-            kde_portal_service_available: false,
-            setup_hint: screenshot_portal_setup_hint(false, false, false, None, None, false, false),
-        };
-    }
-
-    let service_list =
-        command_stdout("busctl", &["--user", "--no-pager", "--list"]).unwrap_or_default();
-    let portal_service_available = service_list.contains("org.freedesktop.portal.Desktop");
-    let kde_portal_service_available =
-        service_list.contains("org.freedesktop.impl.portal.desktop.kde");
-    let screenshot_interface_available = portal_service_available
-        && command_success(
-            "busctl",
-            &[
-                "--user",
-                "--no-pager",
-                "introspect",
-                "org.freedesktop.portal.Desktop",
-                "/org/freedesktop/portal/desktop",
-                "org.freedesktop.portal.Screenshot",
-            ],
-        );
-    let screencast_interface_available = portal_service_available
-        && command_success(
-            "busctl",
-            &[
-                "--user",
-                "--no-pager",
-                "introspect",
-                "org.freedesktop.portal.Desktop",
-                "/org/freedesktop/portal/desktop",
-                "org.freedesktop.portal.ScreenCast",
-            ],
-        );
-    let screenshot_interface_version = screenshot_interface_available
-        .then(|| busctl_user_get_u32_property("org.freedesktop.portal.Screenshot", "version"))
-        .flatten();
-    let screenshot_available_targets_mask = screenshot_interface_available
-        .then(|| {
-            busctl_user_get_u32_property("org.freedesktop.portal.Screenshot", "AvailableTargets")
-        })
-        .flatten();
-    let screenshot_available_targets = screenshot_available_targets_mask
-        .map(decode_screenshot_available_targets)
-        .unwrap_or_default();
-    let screenshot_target_option_supported =
-        screenshot_interface_version.is_some_and(|version| version >= 3);
-
-    ScreenshotPortalStatus {
-        busctl_available,
-        portal_service_available,
-        screenshot_interface_available,
-        screenshot_interface_version,
-        screenshot_available_targets_mask,
-        screenshot_available_targets,
-        screenshot_target_option_supported,
-        screencast_interface_available,
-        kde_portal_service_available,
-        setup_hint: screenshot_portal_setup_hint(
-            busctl_available,
-            portal_service_available,
-            screenshot_interface_available,
-            screenshot_interface_version,
-            screenshot_available_targets_mask,
-            screencast_interface_available,
-            kde_portal_service_available,
-        ),
-    }
-}
-
-fn busctl_user_get_u32_property(interface: &str, property: &str) -> Option<u32> {
-    let output = command_stdout(
-        "busctl",
-        &[
-            "--user",
-            "--no-pager",
-            "get-property",
-            "org.freedesktop.portal.Desktop",
-            "/org/freedesktop/portal/desktop",
-            interface,
-            property,
-        ],
-    )
-    .ok()?;
-    parse_busctl_u32_property(&output)
-}
-
-fn parse_busctl_u32_property(output: &str) -> Option<u32> {
-    let mut parts = output.split_whitespace();
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some("u"), Some(value), None) => value.parse().ok(),
-        _ => None,
-    }
-}
-
-fn decode_screenshot_available_targets(mask: u32) -> Vec<String> {
-    let mut targets = Vec::new();
-    if mask & seatgeist_portal::PortalScreenshotTarget::Screen.value() != 0 {
-        targets.push("screen".to_string());
-    }
-    if mask & seatgeist_portal::PortalScreenshotTarget::Window.value() != 0 {
-        targets.push("window".to_string());
-    }
-    if mask & seatgeist_portal::PortalScreenshotTarget::Area.value() != 0 {
-        targets.push("area".to_string());
-    }
-    if mask & seatgeist_portal::PortalScreenshotTarget::ActiveWindow.value() != 0 {
-        targets.push("active_window".to_string());
-    }
-    targets
-}
-
-fn kwin_metadata_status() -> KwinMetadataStatus {
-    let busctl_available = command_exists("busctl");
-    let kwin_service_available = busctl_available
-        && command_stdout("busctl", &["--user", "--no-pager", "--list"])
-            .unwrap_or_default()
-            .contains("org.kde.KWin");
-    let support_information_available = command_exists("qdbus6")
-        && command_success(
-            "qdbus6",
-            &["org.kde.KWin", "/KWin", "org.kde.KWin.supportInformation"],
-        );
-
-    KwinMetadataStatus {
-        busctl_available,
-        kwin_service_available,
-        support_information_available,
-        setup_hint: kwin_metadata_setup_hint(
-            busctl_available,
-            kwin_service_available,
-            support_information_available,
-        ),
-    }
-}
-
-fn spectacle_status() -> SpectacleStatus {
-    let command_available = command_exists("spectacle");
-    SpectacleStatus {
-        command_available,
-        setup_hint: spectacle_setup_hint(command_available),
-    }
-}
-
-fn preferred_capture_backend(
-    screenshot_portal: &ScreenshotPortalStatus,
-    spectacle_available: bool,
-) -> Option<String> {
-    if screenshot_portal.screenshot_interface_available {
-        return Some("portal_screenshot".to_string());
-    }
-    if spectacle_available {
-        return Some("spectacle".to_string());
-    }
-    None
-}
-
-fn implemented_capture_backend(
-    screenshot_portal: &ScreenshotPortalStatus,
-    spectacle_available: bool,
-) -> Option<String> {
-    if screenshot_portal.screenshot_interface_available {
-        return Some("portal_screenshot".to_string());
-    }
-    spectacle_available.then(|| "spectacle".to_string())
-}
-
-fn tile_capture_backend(
-    screenshot_portal: &ScreenshotPortalStatus,
-    spectacle_available: bool,
-) -> Option<&'static str> {
-    if screenshot_portal.screenshot_interface_available {
-        return Some("portal_screenshot");
-    }
-    spectacle_available.then_some("spectacle")
-}
-
-fn capture_backend_setup_hint(
-    preferred: Option<&str>,
-    implemented: Option<&str>,
-    screenshot_portal: &ScreenshotPortalStatus,
-    kwin_metadata: &KwinMetadataStatus,
-    spectacle: &SpectacleStatus,
-) -> String {
-    match (preferred, implemented) {
-        (Some("portal_screenshot"), Some("portal_screenshot"))
-            if kwin_metadata.support_information_available =>
-        {
-            "using portal Screenshot for full-screen capture with KWin metadata for monitor scale and coordinate mapping; Spectacle remains the tile and compatibility fallback".to_string()
-        }
-        (Some("portal_screenshot"), Some("portal_screenshot")) => {
-            "using portal Screenshot for full-screen capture; KWin supportInformation is unavailable, so monitor scale metadata may be incomplete and Spectacle remains the tile fallback".to_string()
-        }
-        (Some("portal_screenshot"), _) => {
-            "portal Screenshot is visible, but no executable capture backend was selected; inspect portal diagnostics and Spectacle fallback state".to_string()
-        }
-        (Some("spectacle"), Some("spectacle")) if kwin_metadata.support_information_available => {
-            "using Spectacle command fallback with KWin metadata for monitor scale and coordinate mapping".to_string()
-        }
-        (Some("spectacle"), Some("spectacle")) => {
-            "using Spectacle command fallback; KWin supportInformation is unavailable, so monitor scale metadata may be incomplete".to_string()
-        }
-        _ if !screenshot_portal.busctl_available && !spectacle.command_available => {
-            "install busctl/systemd tools or Spectacle before probing or using capture backends".to_string()
-        }
-        _ if !screenshot_portal.screenshot_interface_available && !spectacle.command_available => {
-            "no capture backend is currently available; configure xdg-desktop-portal Screenshot or install Spectacle".to_string()
-        }
-        _ => "capture backend state is partial; inspect portal, KWin metadata, and Spectacle fields".to_string(),
-    }
-}
-
-fn screenshot_portal_setup_hint(
-    busctl_available: bool,
-    portal_service_available: bool,
-    screenshot_interface_available: bool,
-    screenshot_interface_version: Option<u32>,
-    screenshot_available_targets_mask: Option<u32>,
-    screencast_interface_available: bool,
-    kde_portal_service_available: bool,
-) -> String {
-    if !busctl_available {
-        return "busctl is unavailable; cannot probe xdg-desktop-portal capture interfaces"
-            .to_string();
-    }
-    if !portal_service_available {
-        return "org.freedesktop.portal.Desktop is not visible on the user bus".to_string();
-    }
-    if !screenshot_interface_available && !screencast_interface_available {
-        return "portal service is visible, but Screenshot and ScreenCast did not introspect successfully".to_string();
-    }
-    if !kde_portal_service_available {
-        return "portal capture interface is visible; KDE portal backend service was not listed"
-            .to_string();
-    }
-    if screenshot_interface_available
-        && screenshot_interface_version.is_some_and(|version| version < 3)
-    {
-        return format!(
-            "portal Screenshot v{} and KDE portal backend are visible; target-specific Screenshot v3/AvailableTargets is unavailable, so requests use the v2 full-screen contract",
-            screenshot_interface_version.unwrap_or_default()
-        );
-    }
-    if screenshot_interface_available
-        && screenshot_interface_version.is_some_and(|version| version >= 3)
-        && screenshot_available_targets_mask.is_none()
-    {
-        return "portal Screenshot v3+ and KDE portal backend are visible, but AvailableTargets did not read successfully"
-            .to_string();
-    }
-    if screenshot_interface_available && screencast_interface_available {
-        return "portal Screenshot, ScreenCast, and KDE portal backend are visible".to_string();
-    }
-    if screenshot_interface_available {
-        return "portal Screenshot and KDE portal backend are visible".to_string();
-    }
-    "portal ScreenCast and KDE portal backend are visible; still need a Screenshot or stream capture implementation".to_string()
-}
-
-fn kwin_metadata_setup_hint(
-    busctl_available: bool,
-    kwin_service_available: bool,
-    support_information_available: bool,
-) -> String {
-    if support_information_available {
-        return "KWin supportInformation is available for monitor scale and geometry metadata"
-            .to_string();
-    }
-    if !busctl_available {
-        return "busctl is unavailable; cannot confirm org.kde.KWin on the user bus".to_string();
-    }
-    if !kwin_service_available {
-        return "org.kde.KWin is not visible on the user bus".to_string();
-    }
-    "org.kde.KWin is visible, but qdbus6 supportInformation did not succeed".to_string()
-}
-
-fn spectacle_setup_hint(command_available: bool) -> String {
-    if command_available {
-        return "Spectacle command backend is available as the current fallback".to_string();
-    }
-    "Spectacle command backend is not on PATH".to_string()
-}
-
-fn remote_desktop_portal_status() -> RemoteDesktopPortalStatus {
-    let busctl_available = command_exists("busctl");
-    if !busctl_available {
-        return RemoteDesktopPortalStatus {
-            busctl_available,
-            portal_service_available: false,
-            remote_desktop_interface_available: false,
-            kde_portal_service_available: false,
-            setup_hint: remote_desktop_portal_setup_hint(false, false, false, false),
-        };
-    }
-
-    let service_list =
-        command_stdout("busctl", &["--user", "--no-pager", "--list"]).unwrap_or_default();
-    let portal_service_available = service_list.contains("org.freedesktop.portal.Desktop");
-    let kde_portal_service_available =
-        service_list.contains("org.freedesktop.impl.portal.desktop.kde");
-    let remote_desktop_interface_available = portal_service_available
-        && command_success(
-            "busctl",
-            &[
-                "--user",
-                "--no-pager",
-                "introspect",
-                "org.freedesktop.portal.Desktop",
-                "/org/freedesktop/portal/desktop",
-                "org.freedesktop.portal.RemoteDesktop",
-            ],
-        );
-
-    RemoteDesktopPortalStatus {
-        busctl_available,
-        portal_service_available,
-        remote_desktop_interface_available,
-        kde_portal_service_available,
-        setup_hint: remote_desktop_portal_setup_hint(
-            busctl_available,
-            portal_service_available,
-            remote_desktop_interface_available,
-            kde_portal_service_available,
-        ),
-    }
-}
-
-fn libei_status() -> LibeiStatus {
-    let pkg_config_available = command_exists("pkg-config");
-    let client_library_available =
-        pkg_config_available && command_success("pkg-config", &["--exists", "libei-1.0"]);
-    let socket_env_present = env::var_os("LIBEI_SOCKET").is_some();
-
-    LibeiStatus {
-        pkg_config_available,
-        client_library_available,
-        socket_env_present,
-        setup_hint: libei_setup_hint(
-            pkg_config_available,
-            client_library_available,
-            socket_env_present,
-        ),
-    }
-}
-
-fn preferred_input_backend(
-    remote_desktop_portal: &RemoteDesktopPortalStatus,
-    libei: &LibeiStatus,
-    uinput_available: bool,
-) -> Option<String> {
-    if remote_desktop_portal.remote_desktop_interface_available {
-        return Some("portal_remote_desktop".to_string());
-    }
-    if libei.socket_env_present || libei.client_library_available {
-        return Some("libei".to_string());
-    }
-    if uinput_available {
-        return Some("uinput".to_string());
-    }
-    None
-}
-
-fn implemented_input_backend(
-    preference: InputBackendPreference,
-    uinput_available: bool,
-    stored_session_active: bool,
-) -> Option<String> {
-    match preference {
-        InputBackendPreference::Auto | InputBackendPreference::Uinput => {
-            uinput_available.then(|| "uinput".to_string())
-        }
-        InputBackendPreference::PortalRemoteDesktop => {
-            stored_session_active.then(|| "portal_remote_desktop".to_string())
-        }
-        InputBackendPreference::Libei => stored_session_active.then(|| "libei".to_string()),
-    }
-}
-
-fn input_backend_setup_hint(
-    preference: InputBackendPreference,
-    preferred: Option<&str>,
-    implemented: Option<&str>,
-    remote_desktop_portal: &RemoteDesktopPortalStatus,
-    libei: &LibeiStatus,
-    uinput_available: bool,
-    stored_session_active: bool,
-) -> String {
-    match preference {
-        InputBackendPreference::PortalRemoteDesktop => {
-            if stored_session_active {
-                return "configured input backend portal_remote_desktop will use the stored RemoteDesktop EIS session after policy, panic-stop, active-window guard, and per-plan readiness checks".to_string();
-            }
-            if remote_desktop_portal.remote_desktop_interface_available {
-                return "configured input backend portal_remote_desktop is visible; run remote_desktop_eis_start to create a stored session before raw input execution".to_string();
-            }
-            return "configured input backend portal_remote_desktop is not visible on the user bus; run in a KDE session with xdg-desktop-portal RemoteDesktop or configure input = \"auto\"/\"uinput\"".to_string();
-        }
-        InputBackendPreference::Libei => {
-            if stored_session_active {
-                return "configured input backend libei will use the stored EIS session after policy, panic-stop, active-window guard, and per-plan readiness checks".to_string();
-            }
-            if libei.socket_env_present || libei.client_library_available {
-                return "configured input backend libei is visible; run remote_desktop_eis_start or provide a stored EIS session before raw input execution".to_string();
-            }
-            return "configured input backend libei is not visible and no stored EIS session is active; configure input = \"auto\"/\"uinput\" or create an EIS session".to_string();
-        }
-        InputBackendPreference::Uinput if implemented == Some("uinput") => {
-            return "configured input backend uinput is available; keep it behind policy, panic-stop, active-window guards, and journal checks".to_string();
-        }
-        InputBackendPreference::Uinput => {
-            return "configured input backend uinput is unavailable; install the uinput rule or configure input = \"auto\" after another backend lands".to_string();
-        }
-        InputBackendPreference::Auto => {}
-    }
-
-    match (preferred, implemented) {
-        (Some("portal_remote_desktop"), Some("portal_remote_desktop")) => {
-            "portal RemoteDesktop is visible and a stored EIS session is active for explicit portal_remote_desktop input".to_string()
-        }
-        (Some("libei"), Some("libei")) => {
-            "libei support is visible and a stored EIS session is active for explicit libei input".to_string()
-        }
-        (Some("portal_remote_desktop"), Some("uinput")) => {
-            "portal RemoteDesktop is visible; auto input currently uses uinput until an explicit stored-session backend is selected".to_string()
-        }
-        (Some("portal_remote_desktop"), _) => {
-            "portal RemoteDesktop is visible; run remote_desktop_eis_start and select portal_remote_desktop to use the stored EIS session".to_string()
-        }
-        (Some("libei"), Some("uinput")) => {
-            "libei client support is visible; auto input currently uses uinput until an explicit stored-session backend is selected".to_string()
-        }
-        (Some("libei"), _) => {
-            "libei client support is visible; create or attach a stored EIS session and select libei for raw input".to_string()
-        }
-        (Some("uinput"), Some("uinput")) => {
-            "only uinput is currently available; keep it behind policy, panic-stop, active-window guards, and journal checks".to_string()
-        }
-        _ if !remote_desktop_portal.busctl_available => {
-            "install busctl/systemd tools or run in a user session with DBus before probing portal RemoteDesktop; configure libei or uinput fallback as needed".to_string()
-        }
-        _ if !remote_desktop_portal.remote_desktop_interface_available
-            && !libei.client_library_available
-            && !libei.socket_env_present
-            && !uinput_available =>
-        {
-            "no input backend is currently available; configure portal RemoteDesktop/libei or install the uinput rule".to_string()
-        }
-        _ => "input backend state is partial; inspect individual portal, libei, and uinput fields".to_string(),
-    }
-}
-
-trait InputExecutionBackend {
-    fn name(&self) -> &'static str;
-    fn type_text(&mut self, text: &str) -> Result<()>;
-    fn key_combo(&mut self, combo: &str) -> Result<usize>;
-    fn move_pointer(&mut self, point: Point, bounds: seatgeist_uinput::PointerBounds)
-    -> Result<()>;
-    fn click_pointer(
-        &mut self,
-        point: Point,
-        bounds: seatgeist_uinput::PointerBounds,
-        button: PointerButton,
-        clicks: u8,
-    ) -> Result<()>;
-    fn drag_pointer(
-        &mut self,
-        from: Point,
-        to: Point,
-        bounds: seatgeist_uinput::PointerBounds,
-        button: PointerButton,
-        duration_ms: u64,
-    ) -> Result<()>;
-    fn scroll_pointer(
-        &mut self,
-        vertical: i32,
-        horizontal: i32,
-        bounds: seatgeist_uinput::PointerBounds,
-    ) -> Result<()>;
-}
-
-struct UinputInputExecutionBackend;
-
-const EIS_PLAN_SEQUENCE: u32 = 1;
-
-impl InputExecutionBackend for UinputInputExecutionBackend {
-    fn name(&self) -> &'static str {
-        "uinput"
-    }
-
-    fn type_text(&mut self, text: &str) -> Result<()> {
-        seatgeist_uinput::type_text(text).map_err(|err| anyhow::anyhow!(err))
-    }
-
-    fn key_combo(&mut self, combo: &str) -> Result<usize> {
-        seatgeist_uinput::key_combo(combo).map_err(|err| anyhow::anyhow!(err))
-    }
-
-    fn move_pointer(
-        &mut self,
-        point: Point,
-        bounds: seatgeist_uinput::PointerBounds,
-    ) -> Result<()> {
-        seatgeist_uinput::move_pointer(point.x, point.y, bounds).map_err(|err| anyhow::anyhow!(err))
-    }
-
-    fn click_pointer(
-        &mut self,
-        point: Point,
-        bounds: seatgeist_uinput::PointerBounds,
-        button: PointerButton,
-        clicks: u8,
-    ) -> Result<()> {
-        seatgeist_uinput::click_pointer(
-            point.x,
-            point.y,
-            bounds,
-            pointer_button_to_uinput(button),
-            clicks,
-        )
-        .map_err(|err| anyhow::anyhow!(err))
-    }
-
-    fn drag_pointer(
-        &mut self,
-        from: Point,
-        to: Point,
-        bounds: seatgeist_uinput::PointerBounds,
-        button: PointerButton,
-        duration_ms: u64,
-    ) -> Result<()> {
-        seatgeist_uinput::drag_pointer(
-            from.x,
-            from.y,
-            to.x,
-            to.y,
-            bounds,
-            pointer_button_to_uinput(button),
-            duration_ms,
-        )
-        .map_err(|err| anyhow::anyhow!(err))
-    }
-
-    fn scroll_pointer(
-        &mut self,
-        vertical: i32,
-        horizontal: i32,
-        bounds: seatgeist_uinput::PointerBounds,
-    ) -> Result<()> {
-        seatgeist_uinput::scroll_pointer(vertical, horizontal, bounds)
-            .map_err(|err| anyhow::anyhow!(err))
-    }
-}
-
-fn eis_key_combo_codes(combo: &str, keymap_settings: &XkbKeymapSettings) -> Result<Vec<u16>> {
-    let keymap = seatgeist_eis::XkbKeymap::new_from_names(keymap_settings.as_names())
-        .map_err(|err| anyhow::anyhow!(err))?;
-    eis_key_combo_codes_with_keymap(combo, &keymap)
-}
-
-fn eis_key_combo_codes_with_keymap(
-    combo: &str,
-    keymap: &seatgeist_eis::XkbKeymap,
-) -> Result<Vec<u16>> {
-    match seatgeist_uinput::parse_key_combo(combo) {
-        Ok(codes) => return Ok(codes),
-        Err(err) => tracing::debug!(%err, "falling back to XKB symbol key-combo lookup"),
-    }
-
-    let parts = combo
-        .split('+')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if parts.is_empty() {
-        bail!("key combo must contain at least one key");
-    }
-    if parts.len() > 8 {
-        bail!("key combo may contain at most 8 keys");
-    }
-
-    parts
-        .iter()
-        .map(|part| eis_key_combo_part_code(part, keymap))
-        .collect()
-}
-
-fn eis_key_combo_part_code(part: &str, keymap: &seatgeist_eis::XkbKeymap) -> Result<u16> {
-    if let Ok(codes) = seatgeist_uinput::parse_key_combo(part)
-        && let [code] = codes.as_slice()
-    {
-        return Ok(*code);
-    }
-
-    let mut chars = part.chars();
-    let Some(character) = chars.next() else {
-        bail!("key combo must contain at least one key");
-    };
-    if chars.next().is_some() {
-        bail!("unsupported key name in EIS combo: {part}");
-    }
-
-    let keysym =
-        seatgeist_eis::unicode_char_to_keysym(character).map_err(|err| anyhow::anyhow!(err))?;
-    keymap
-        .evdev_keycode_for_keysym_level0(keysym)
-        .with_context(|| {
-            format!(
-                "key combo symbol {character:?} does not map to a level-0 evdev keycode in the current XKB keymap"
-            )
-        })
-}
-
-#[cfg(test)]
-struct EisSessionInputExecutionBackend<'a, S> {
-    backend_name: &'static str,
-    session: &'a mut DaemonPortalEisSession<S>,
-}
-
-#[cfg(test)]
-impl<S> EisSessionInputExecutionBackend<'_, S>
-where
-    S: seatgeist_eis::EisEventSource + seatgeist_eis::EisSelectedDeviceExecutor,
-    S::Error: Display,
-{
-    fn execute_plan(&mut self, plan: seatgeist_eis::EisActionPlan) -> Result<()> {
-        self.session.execute_ready_plan(&plan)?;
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-impl<S> InputExecutionBackend for EisSessionInputExecutionBackend<'_, S>
-where
-    S: seatgeist_eis::EisEventSource + seatgeist_eis::EisSelectedDeviceExecutor,
-    S::Error: Display,
-{
-    fn name(&self) -> &'static str {
-        self.backend_name
-    }
-
-    fn type_text(&mut self, text: &str) -> Result<()> {
-        let plan = seatgeist_eis::plan_text_utf8(EIS_PLAN_SEQUENCE, text)
-            .map_err(|err| anyhow::anyhow!(err))?;
-        self.execute_plan(plan)
-    }
-
-    fn key_combo(&mut self, combo: &str) -> Result<usize> {
-        let codes = eis_key_combo_codes(combo, &XkbKeymapSettings::default())?;
-        let plan = seatgeist_eis::plan_key_combo_evdev(EIS_PLAN_SEQUENCE, &codes)
-            .map_err(|err| anyhow::anyhow!(err))?;
-        let key_count = codes.len();
-        self.execute_plan(plan)?;
-        Ok(key_count)
-    }
-
-    fn move_pointer(
-        &mut self,
-        point: Point,
-        _bounds: seatgeist_uinput::PointerBounds,
-    ) -> Result<()> {
-        self.execute_plan(seatgeist_eis::plan_pointer_move_absolute(
-            EIS_PLAN_SEQUENCE,
-            point,
-        ))
-    }
-
-    fn click_pointer(
-        &mut self,
-        point: Point,
-        _bounds: seatgeist_uinput::PointerBounds,
-        button: PointerButton,
-        clicks: u8,
-    ) -> Result<()> {
-        let plan =
-            seatgeist_eis::plan_pointer_click_absolute(EIS_PLAN_SEQUENCE, point, button, clicks)
-                .map_err(|err| anyhow::anyhow!(err))?;
-        self.execute_plan(plan)
-    }
-
-    fn drag_pointer(
-        &mut self,
-        from: Point,
-        to: Point,
-        _bounds: seatgeist_uinput::PointerBounds,
-        button: PointerButton,
-        _duration_ms: u64,
-    ) -> Result<()> {
-        self.execute_plan(seatgeist_eis::plan_pointer_drag_absolute(
-            EIS_PLAN_SEQUENCE,
-            from,
-            to,
-            button,
-        ))
-    }
-
-    fn scroll_pointer(
-        &mut self,
-        vertical: i32,
-        horizontal: i32,
-        _bounds: seatgeist_uinput::PointerBounds,
-    ) -> Result<()> {
-        let plan =
-            seatgeist_eis::plan_pointer_scroll_discrete(EIS_PLAN_SEQUENCE, vertical, horizontal)
-                .map_err(|err| anyhow::anyhow!(err))?;
-        self.execute_plan(plan)
-    }
-}
-
-struct StoredEisSessionInputExecutionBackend<'a, S> {
-    backend_name: &'static str,
-    keymap_settings: XkbKeymapSettings,
-    store: &'a PortalEisSessionStore<S>,
-}
-
-impl<S> StoredEisSessionInputExecutionBackend<'_, S>
-where
-    S: seatgeist_eis::EisEventSource + seatgeist_eis::EisSelectedDeviceExecutor,
-    S::Error: Display,
-{
-    fn execute_plan(&mut self, plan: seatgeist_eis::EisActionPlan) -> Result<()> {
-        self.store.execute_ready_plan(self.backend_name, &plan)
-    }
-}
-
-impl<S> InputExecutionBackend for StoredEisSessionInputExecutionBackend<'_, S>
-where
-    S: seatgeist_eis::EisEventSource + seatgeist_eis::EisSelectedDeviceExecutor,
-    S::Error: Display,
-{
-    fn name(&self) -> &'static str {
-        self.backend_name
-    }
-
-    fn type_text(&mut self, text: &str) -> Result<()> {
-        let plan = seatgeist_eis::plan_text_utf8(EIS_PLAN_SEQUENCE, text)
-            .map_err(|err| anyhow::anyhow!(err))?;
-        self.execute_plan(plan)
-    }
-
-    fn key_combo(&mut self, combo: &str) -> Result<usize> {
-        let codes = eis_key_combo_codes(combo, &self.keymap_settings)?;
-        let plan = seatgeist_eis::plan_key_combo_evdev(EIS_PLAN_SEQUENCE, &codes)
-            .map_err(|err| anyhow::anyhow!(err))?;
-        let key_count = codes.len();
-        self.execute_plan(plan)?;
-        Ok(key_count)
-    }
-
-    fn move_pointer(
-        &mut self,
-        point: Point,
-        _bounds: seatgeist_uinput::PointerBounds,
-    ) -> Result<()> {
-        self.execute_plan(seatgeist_eis::plan_pointer_move_absolute(
-            EIS_PLAN_SEQUENCE,
-            point,
-        ))
-    }
-
-    fn click_pointer(
-        &mut self,
-        point: Point,
-        _bounds: seatgeist_uinput::PointerBounds,
-        button: PointerButton,
-        clicks: u8,
-    ) -> Result<()> {
-        let plan =
-            seatgeist_eis::plan_pointer_click_absolute(EIS_PLAN_SEQUENCE, point, button, clicks)
-                .map_err(|err| anyhow::anyhow!(err))?;
-        self.execute_plan(plan)
-    }
-
-    fn drag_pointer(
-        &mut self,
-        from: Point,
-        to: Point,
-        _bounds: seatgeist_uinput::PointerBounds,
-        button: PointerButton,
-        _duration_ms: u64,
-    ) -> Result<()> {
-        self.execute_plan(seatgeist_eis::plan_pointer_drag_absolute(
-            EIS_PLAN_SEQUENCE,
-            from,
-            to,
-            button,
-        ))
-    }
-
-    fn scroll_pointer(
-        &mut self,
-        vertical: i32,
-        horizontal: i32,
-        _bounds: seatgeist_uinput::PointerBounds,
-    ) -> Result<()> {
-        let plan =
-            seatgeist_eis::plan_pointer_scroll_discrete(EIS_PLAN_SEQUENCE, vertical, horizontal)
-                .map_err(|err| anyhow::anyhow!(err))?;
-        self.execute_plan(plan)
-    }
-}
-
-fn input_execution_backend(
-    preference: InputBackendPreference,
-    portal_eis_session_store: &PortalEisSessionStore,
-) -> Result<Box<dyn InputExecutionBackend + '_>> {
-    input_execution_backend_with_store(
-        preference,
-        portal_eis_session_store,
-        &XkbKeymapSettings::default(),
-    )
-}
-
-fn input_execution_backend_with_store<'a, S>(
-    preference: InputBackendPreference,
-    portal_eis_session_store: &'a PortalEisSessionStore<S>,
-    keymap_settings: &XkbKeymapSettings,
-) -> Result<Box<dyn InputExecutionBackend + 'a>>
-where
-    S: seatgeist_eis::EisEventSource + seatgeist_eis::EisSelectedDeviceExecutor + 'a,
-    S::Error: Display,
-{
-    match preference {
-        InputBackendPreference::Auto | InputBackendPreference::Uinput => {
-            Ok(Box::new(UinputInputExecutionBackend))
-        }
-        InputBackendPreference::PortalRemoteDesktop => {
-            Ok(Box::new(StoredEisSessionInputExecutionBackend {
-                backend_name: "portal_remote_desktop",
-                keymap_settings: keymap_settings.clone(),
-                store: portal_eis_session_store,
-            }))
-        }
-        InputBackendPreference::Libei => Ok(Box::new(StoredEisSessionInputExecutionBackend {
-            backend_name: "libei",
-            keymap_settings: keymap_settings.clone(),
-            store: portal_eis_session_store,
-        })),
-    }
-}
-
-fn remote_desktop_portal_setup_hint(
-    busctl_available: bool,
-    portal_service_available: bool,
-    remote_desktop_interface_available: bool,
-    kde_portal_service_available: bool,
-) -> String {
-    if !busctl_available {
-        return "busctl is unavailable; cannot probe xdg-desktop-portal RemoteDesktop".to_string();
-    }
-    if !portal_service_available {
-        return "org.freedesktop.portal.Desktop is not visible on the user bus".to_string();
-    }
-    if !remote_desktop_interface_available {
-        return "portal service is visible, but org.freedesktop.portal.RemoteDesktop did not introspect successfully".to_string();
-    }
-    if !kde_portal_service_available {
-        return "RemoteDesktop portal is visible; KDE portal backend service was not listed"
-            .to_string();
-    }
-    "portal RemoteDesktop interface and KDE portal backend are visible".to_string()
-}
-
-fn libei_setup_hint(
-    pkg_config_available: bool,
-    client_library_available: bool,
-    socket_env_present: bool,
-) -> String {
-    if socket_env_present {
-        return "LIBEI_SOCKET is set; verify the socket belongs to the intended compositor or broker".to_string();
-    }
-    if client_library_available {
-        return "libei client library is available; an EIS connection still needs compositor or portal mediation".to_string();
-    }
-    if !pkg_config_available {
-        return "pkg-config is unavailable; cannot probe libei client library metadata".to_string();
-    }
-    "libei client library metadata was not found by pkg-config".to_string()
-}
-
-fn parse_bool_config_value(value: &str) -> Option<bool> {
-    match value.to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "on" => Some(true),
-        "false" | "0" | "no" | "off" => Some(false),
-        _ => None,
-    }
+    input_diagnostics::status(preference, stored_session_active, xkb_keymap)
 }
 
 #[cfg(test)]
@@ -4204,7 +2646,11 @@ fn enforce_panic_stop(panic_stop: &PanicStopState, request: &DaemonRequest) -> R
     Ok(())
 }
 
-fn enforce_human_input_pause(settings: &SafetySettings, request: &DaemonRequest) -> Result<()> {
+fn enforce_human_input_pause(
+    settings: &SafetySettings,
+    activity_tracker: &activity::ActivityTracker,
+    request: &DaemonRequest,
+) -> Result<()> {
     if !settings.pause_on_human_input {
         return Ok(());
     }
@@ -4212,19 +2658,160 @@ fn enforce_human_input_pause(settings: &SafetySettings, request: &DaemonRequest)
     if !is_control_safety_class(&safety_class) {
         return Ok(());
     }
-    let Some(path) = &settings.human_input_activity_file else {
-        return Ok(());
-    };
-    let (fresh, _) = human_input_signal_state(settings)?;
+    let (fresh, _) = human_input_signal_state(settings, activity_tracker)?;
     if fresh {
+        let activity_backend = activity_tracker
+            .status()
+            .backend
+            .unwrap_or_else(|| "legacy_file".to_string());
         bail!(
-            "human input activity signal is fresh at {}; refusing {:?} until quiet for {}ms",
-            path.display(),
+            "human input activity is fresh from {}; refusing {:?} until quiet for {}ms",
+            activity_backend,
             safety_class,
             settings.human_input_quiet_ms
         );
     }
     Ok(())
+}
+
+async fn enforce_capture_session_owner(
+    request: &DaemonRequest,
+    response_options: Option<&DaemonResponseOptions>,
+    client: Option<&JournalClientContext>,
+    capture_session_store: &CaptureSessionStore,
+) -> Result<()> {
+    for session_id in capture_session_ids_for_request(request, response_options) {
+        capture_session_store
+            .require_owner(session_id, client)
+            .await?;
+    }
+    Ok(())
+}
+
+fn capture_session_ids_for_request<'a>(
+    request: &'a DaemonRequest,
+    response_options: Option<&'a DaemonResponseOptions>,
+) -> Vec<&'a str> {
+    let mut session_ids = Vec::with_capacity(2);
+    let lifecycle_session_id = match request {
+        DaemonRequest::CaptureSessionRenew(request)
+        | DaemonRequest::CaptureSessionClose(request) => Some(request.session_id.as_str()),
+        DaemonRequest::CaptureSnapshot(request) => Some(request.session_id.as_str()),
+        DaemonRequest::CaptureWait(request) => Some(request.session_id.as_str()),
+        _ => interaction_session_id_for_request(request),
+    };
+    if let Some(session_id) = lifecycle_session_id {
+        session_ids.push(session_id);
+    }
+    if let Some(session_id) = response_options
+        .and_then(|options| options.post_action.as_ref())
+        .filter(|options| options.observe_after)
+        .and_then(|options| options.image.as_ref())
+        .map(|image| image.session_id.as_str())
+        && !session_ids.contains(&session_id)
+    {
+        session_ids.push(session_id);
+    }
+    session_ids
+}
+
+fn session_backend_role_for_request(
+    request: &DaemonRequest,
+) -> Option<session_execution::BackendRole> {
+    match request {
+        DaemonRequest::TypeText(_)
+        | DaemonRequest::KeyCombo(_)
+        | DaemonRequest::MovePointer(_)
+        | DaemonRequest::ClickPointer(_)
+        | DaemonRequest::DragPointer(_)
+        | DaemonRequest::ScrollPointer(_) => Some(session_execution::BackendRole::RawInput),
+        DaemonRequest::AccessibilityInvoke(_)
+        | DaemonRequest::AccessibilitySetText(_)
+        | DaemonRequest::AccessibilityInsertText(_)
+        | DaemonRequest::AccessibilityDeleteText(_)
+        | DaemonRequest::AccessibilityCopyText(_)
+        | DaemonRequest::AccessibilityCutText(_)
+        | DaemonRequest::AccessibilityPasteText(_)
+        | DaemonRequest::AccessibilitySetCaret(_)
+        | DaemonRequest::AccessibilitySetSelection(_)
+        | DaemonRequest::ClickButton(_)
+        | DaemonRequest::SetTextField(_)
+        | DaemonRequest::FocusTextField(_)
+        | DaemonRequest::ActivateTab(_)
+        | DaemonRequest::ActivateLink(_)
+        | DaemonRequest::ToggleCheck(_)
+        | DaemonRequest::SetValue(_)
+        | DaemonRequest::SelectItem(_)
+        | DaemonRequest::SelectMenu(_) => Some(session_execution::BackendRole::Semantic),
+        DaemonRequest::FocusWindow(_)
+        | DaemonRequest::MoveWindow(_)
+        | DaemonRequest::LaunchWindow(_)
+        | DaemonRequest::ResizeWindow(_) => Some(session_execution::BackendRole::Other),
+        DaemonRequest::PageZoom(_) => Some(session_execution::BackendRole::RawInput),
+        _ => None,
+    }
+}
+
+async fn record_session_execution_response(
+    session_ids: &[String],
+    method: &str,
+    safety_class: SafetyClass,
+    request_backend: Option<&str>,
+    backend_role: session_execution::BackendRole,
+    response: &DaemonResponse,
+    store: &session_execution::SessionExecutionStore,
+) {
+    if !response.ok()
+        || matches!(response, DaemonResponse::Action(action) if !action.ok)
+        || method == "capture_session_close"
+    {
+        return;
+    }
+    let response_backend = journal_backend_from_response(response);
+    let backend = response_backend.as_deref().or(request_backend);
+    let (action_id, settle) = match response {
+        DaemonResponse::Action(action) => (
+            Some(action.id),
+            action
+                .observation
+                .as_ref()
+                .and_then(|observation| observation.settle.as_ref()),
+        ),
+        _ => (None, None),
+    };
+    for session_id in session_ids {
+        if let Err(err) = store
+            .record_success(
+                session_id,
+                session_execution::SuccessfulExecution {
+                    method: method.to_string(),
+                    safety_class: safety_class.clone(),
+                    backend: backend.map(str::to_string),
+                    backend_role,
+                    action_id,
+                    settle: settle.cloned(),
+                },
+            )
+            .await
+        {
+            warn!(session_id, method, %err, "could not record session execution metadata");
+        }
+    }
+}
+
+async fn attach_session_execution_status(response: &mut DaemonResponse, runtime: &DaemonRuntime) {
+    let DaemonResponse::CaptureSessionStatus(status) = response else {
+        return;
+    };
+    let Some(session_id) = status.session_id.as_deref() else {
+        status.execution = None;
+        return;
+    };
+    status.execution = runtime
+        .session_execution_store
+        .status(session_id)
+        .await
+        .map(Box::new);
 }
 
 fn enforce_control_rate_limit(limiter: &ControlRateLimiter, request: &DaemonRequest) -> Result<()> {
@@ -4235,12 +2822,20 @@ fn enforce_control_rate_limit(limiter: &ControlRateLimiter, request: &DaemonRequ
     limiter.check(&safety_class)
 }
 
-fn human_input_signal_state(settings: &SafetySettings) -> Result<(bool, Option<u64>)> {
+fn human_input_signal_state(
+    settings: &SafetySettings,
+    activity_tracker: &activity::ActivityTracker,
+) -> Result<(bool, Option<u64>)> {
     if !settings.pause_on_human_input {
         return Ok((false, None));
     }
+    let quiet_for = Duration::from_millis(settings.human_input_quiet_ms);
+    let tracked = activity_tracker.interference_state(quiet_for);
+    if tracked.0 {
+        return Ok(tracked);
+    }
     let Some(path) = &settings.human_input_activity_file else {
-        return Ok((false, None));
+        return Ok(tracked);
     };
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
@@ -4263,6 +2858,7 @@ fn human_input_signal_state(settings: &SafetySettings) -> Result<(bool, Option<u
 fn enforce_required_focus_guard(settings: &SafetySettings, request: &DaemonRequest) -> Result<()> {
     if pointer_request_uses_window_local(request)
         && active_window_guard_for_request(request).is_none()
+        && interaction_session_id_for_request(request).is_none()
     {
         bail!("active-window guard is required for window_local pointer coordinates");
     }
@@ -4270,6 +2866,12 @@ fn enforce_required_focus_guard(settings: &SafetySettings, request: &DaemonReque
         return Ok(());
     }
     if !is_control_safety_class(&safety_class_for_request(request)) {
+        return Ok(());
+    }
+    if target_window_guard_for_request(request).is_some() {
+        return Ok(());
+    }
+    if interaction_session_id_for_request(request).is_some() {
         return Ok(());
     }
     if active_window_guard_for_request(request).is_some() {
@@ -4293,72 +2895,6 @@ fn pointer_request_uses_window_local(request: &DaemonRequest) -> bool {
     }
 }
 
-fn enforce_app_policy(
-    active_window_state: &ActiveWindowState,
-    window_list_state: &WindowListState,
-    app_policy: &AppPolicy,
-    request: &DaemonRequest,
-) -> Result<()> {
-    if app_policy.allow.is_empty() && app_policy.deny.is_empty() {
-        return Ok(());
-    }
-    if !is_control_safety_class(&safety_class_for_request(request)) {
-        return Ok(());
-    }
-
-    if let DaemonRequest::FocusWindow(request) = request {
-        let windows =
-            list_windows(window_list_state).context("app policy could not list focus targets")?;
-        let target = windows
-            .iter()
-            .find(|window| window.id == request.window_id)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "app policy could not find focus target window {}",
-                    request.window_id
-                )
-            })?;
-        return enforce_app_policy_for_app(app_policy, target.app_id.as_deref(), "focus target");
-    }
-
-    let window = active_window(active_window_state)
-        .context("app policy could not read active window")?
-        .ok_or_else(|| anyhow::anyhow!("app policy requires an active window for control"))?;
-    enforce_app_policy_for_app(app_policy, window.app_id.as_deref(), "active window")
-}
-
-fn enforce_app_policy_for_app(
-    app_policy: &AppPolicy,
-    app_id: Option<&str>,
-    context: &str,
-) -> Result<()> {
-    let app_id = app_id
-        .map(str::trim)
-        .filter(|app_id| !app_id.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("app policy could not determine {context} app id"))?;
-
-    if app_policy
-        .deny
-        .iter()
-        .any(|denied| app_id_matches(denied, app_id))
-    {
-        bail!("app policy denied {context} app {}", app_id);
-    }
-    if !app_policy.allow.is_empty()
-        && !app_policy
-            .allow
-            .iter()
-            .any(|allowed| app_id_matches(allowed, app_id))
-    {
-        bail!("app policy did not allow {context} app {}", app_id);
-    }
-    Ok(())
-}
-
-fn app_id_matches(policy_value: &str, app_id: &str) -> bool {
-    policy_value.eq_ignore_ascii_case(app_id)
-}
-
 fn is_control_safety_class(safety_class: &SafetyClass) -> bool {
     matches!(
         safety_class,
@@ -4370,52 +2906,34 @@ fn is_control_safety_class(safety_class: &SafetyClass) -> bool {
     )
 }
 
-fn enforce_active_window_guard(
-    active_window_state: &ActiveWindowState,
-    request: &DaemonRequest,
-) -> Result<()> {
-    let Some(guard) = active_window_guard_for_request(request) else {
-        return Ok(());
-    };
-    let window = active_window(active_window_state)
-        .context("active-window guard could not read active window")?
-        .ok_or_else(|| anyhow::anyhow!("active-window guard failed: no active window"))?;
-
-    if let Some(expected) = &guard.expected_window_id
-        && window.id != *expected
+fn validate_interaction_session_request(request: &DaemonRequest) -> Result<()> {
+    if interaction_session_id_for_request(request).is_some()
+        && active_window_guard_for_request(request).is_some()
     {
-        bail!(
-            "active-window guard failed: expected window id {}, got {}",
-            expected,
-            window.id
-        );
-    }
-    if let Some(expected) = &guard.expected_app_id
-        && window.app_id.as_deref() != Some(expected.as_str())
-    {
-        bail!(
-            "active-window guard failed: expected app id {}, got {}",
-            expected,
-            window.app_id.as_deref().unwrap_or("")
-        );
-    }
-    if let Some(expected) = &guard.title_contains {
-        let title = window.title.to_ascii_lowercase();
-        let expected = expected.to_ascii_lowercase();
-        if !title.contains(&expected) {
-            bail!(
-                "active-window guard failed: expected title containing {}, got {}",
-                guard.title_contains.as_deref().unwrap_or(""),
-                window.title
-            );
-        }
+        bail!("session_id cannot be combined with an active-window guard");
     }
     Ok(())
+}
+
+fn interaction_session_id_for_request(request: &DaemonRequest) -> Option<&str> {
+    match request {
+        DaemonRequest::TypeText(request) => request.session_id.as_deref(),
+        DaemonRequest::KeyCombo(request) => request.session_id.as_deref(),
+        DaemonRequest::MovePointer(request) => request.session_id.as_deref(),
+        DaemonRequest::ClickPointer(request) => request.session_id.as_deref(),
+        DaemonRequest::DragPointer(request) => request.session_id.as_deref(),
+        DaemonRequest::ScrollPointer(request) => request.session_id.as_deref(),
+        _ => None,
+    }
 }
 
 fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWindowGuard> {
     match request {
         DaemonRequest::FocusWindow(request) => request.guard.as_ref(),
+        DaemonRequest::MoveWindow(request) => request.guard.as_ref(),
+        DaemonRequest::LaunchWindow(request) => request.guard.as_ref(),
+        DaemonRequest::ResizeWindow(request) => request.guard.as_ref(),
+        DaemonRequest::PageZoom(request) => Some(&request.guard),
         DaemonRequest::AccessibilityInvoke(request) => request.guard.as_ref(),
         DaemonRequest::AccessibilitySetText(request) => request.guard.as_ref(),
         DaemonRequest::AccessibilityInsertText(request) => request.guard.as_ref(),
@@ -4447,6 +2965,50 @@ fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWin
     }
 }
 
+fn target_window_guard_for_request(
+    request: &DaemonRequest,
+) -> Option<&libseatgeist::TargetWindowGuard> {
+    match request {
+        DaemonRequest::ClickButton(request) => request.target_guard.as_ref(),
+        DaemonRequest::SetTextField(request) => request.target_guard.as_ref(),
+        DaemonRequest::FocusTextField(request) => request.target_guard.as_ref(),
+        DaemonRequest::ActivateTab(request) => request.target_guard.as_ref(),
+        DaemonRequest::ActivateLink(request) => request.target_guard.as_ref(),
+        DaemonRequest::ToggleCheck(request) => request.target_guard.as_ref(),
+        DaemonRequest::SetValue(request) => request.target_guard.as_ref(),
+        DaemonRequest::SelectItem(request) => request.target_guard.as_ref(),
+        DaemonRequest::SelectMenu(request) => request.target_guard.as_ref(),
+        _ => None,
+    }
+}
+
+fn resolve_semantic_handle_for_request(
+    request: &mut DaemonRequest,
+    store: &semantic_handle::SemanticHandleStore,
+    client: Option<&JournalClientContext>,
+) -> Result<()> {
+    let guard = match request {
+        DaemonRequest::ClickButton(request) => request.target_guard.as_mut(),
+        DaemonRequest::SetTextField(request) => request.target_guard.as_mut(),
+        DaemonRequest::FocusTextField(request) => request.target_guard.as_mut(),
+        DaemonRequest::ActivateTab(request) => request.target_guard.as_mut(),
+        DaemonRequest::ActivateLink(request) => request.target_guard.as_mut(),
+        DaemonRequest::ToggleCheck(request) => request.target_guard.as_mut(),
+        DaemonRequest::SetValue(request) => request.target_guard.as_mut(),
+        DaemonRequest::SelectItem(request) => request.target_guard.as_mut(),
+        DaemonRequest::SelectMenu(request) => request.target_guard.as_mut(),
+        _ => None,
+    };
+    let Some(guard) = guard else {
+        return Ok(());
+    };
+    let Some(handle) = semantic_handle::encoded_handle(guard).map(str::to_string) else {
+        return Ok(());
+    };
+    *guard = store.consume(&handle, client)?;
+    Ok(())
+}
+
 fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
     match request {
         DaemonRequest::Health
@@ -4462,16 +3024,25 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::RemoteDesktopEisSessionStatus
         | DaemonRequest::RemoteDesktopEisStop
         | DaemonRequest::CaptureBackendStatus
+        | DaemonRequest::CaptureSessionStatus
+        | DaemonRequest::CaptureSessionRenew(_)
+        | DaemonRequest::CaptureSessionClose(_)
         | DaemonRequest::PointerCalibration
         | DaemonRequest::ClipboardBackendStatus
         | DaemonRequest::AccessibilityQualityStatus
         | DaemonRequest::JournalTail(_) => SafetyClass::Policy,
         DaemonRequest::ListMonitors
         | DaemonRequest::ListWindows
+        | DaemonRequest::WindowInventory
+        | DaemonRequest::WindowInventoryWait(_)
         | DaemonRequest::KwinBridgeStatus
         | DaemonRequest::ActiveWindow
         | DaemonRequest::ScreenshotTile(_)
         | DaemonRequest::WaitForChange(_)
+        | DaemonRequest::CaptureOpen(_)
+        | DaemonRequest::WindowCaptureOpen(_)
+        | DaemonRequest::CaptureSnapshot(_)
+        | DaemonRequest::CaptureWait(_)
         | DaemonRequest::FocusedAccessibilityTree(_)
         | DaemonRequest::AccessibilityFind(_)
         | DaemonRequest::AccessibilityTextAttributes(_) => SafetyClass::Observe,
@@ -4508,8 +3079,13 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::ClickPointer(_)
         | DaemonRequest::DragPointer(_)
         | DaemonRequest::ScrollPointer(_) => SafetyClass::ControlPointer,
-        DaemonRequest::TypeText(_) | DaemonRequest::KeyCombo(_) => SafetyClass::ControlKeyboard,
+        DaemonRequest::TypeText(_) | DaemonRequest::KeyCombo(_) | DaemonRequest::PageZoom(_) => {
+            SafetyClass::ControlKeyboard
+        }
         DaemonRequest::FocusWindow(_)
+        | DaemonRequest::MoveWindow(_)
+        | DaemonRequest::LaunchWindow(_)
+        | DaemonRequest::ResizeWindow(_)
         | DaemonRequest::AccessibilitySetText(_)
         | DaemonRequest::AccessibilityInsertText(_)
         | DaemonRequest::AccessibilityDeleteText(_)
@@ -4636,6 +3212,9 @@ fn set_panic_stop(
 fn current_capabilities(
     input_backend_preference: InputBackendPreference,
     stored_session_active: bool,
+    window_resize_ready: bool,
+    window_move_ready: bool,
+    window_launch_ready: bool,
 ) -> Vec<BackendCapability> {
     let mut capabilities = vec![
         BackendCapability::DaemonHealth,
@@ -4651,8 +3230,17 @@ fn current_capabilities(
         capabilities.push(BackendCapability::MonitorMetadata);
         capabilities.push(BackendCapability::WindowList);
         capabilities.push(BackendCapability::WindowFocus);
+        if window_resize_ready {
+            capabilities.push(BackendCapability::WindowResize);
+        }
+        if window_move_ready {
+            capabilities.push(BackendCapability::WindowMove);
+        }
+        if window_launch_ready {
+            capabilities.push(BackendCapability::WindowLaunch);
+        }
     }
-    if clipboard_read_backend().is_some() && clipboard_write_backend().is_some() {
+    if clipboard::available() {
         capabilities.push(BackendCapability::ClipboardText);
     }
     if raw_input_capability_available(input_backend_preference, stored_session_active) {
@@ -4680,945 +3268,370 @@ fn raw_input_capability_available(
     }
 }
 
-fn command_exists(command: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-
-    std::env::split_paths(&path).any(|dir| {
-        let candidate = dir.join(command);
-        candidate.is_file()
-    })
-}
-
-fn command_success(command: &str, args: &[&str]) -> bool {
-    Command::new(command)
-        .args(args)
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-fn command_stdout(command: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new(command)
-        .args(args)
-        .output()
-        .with_context(|| format!("run {command}"))?;
-    if !output.status.success() {
-        bail!("{command} exited with status {}", output.status);
-    }
-    String::from_utf8(output.stdout).with_context(|| format!("{command} stdout is not UTF-8"))
-}
-
-async fn capture_screenshot(
-    request: ScreenshotRequest,
-    safety_settings: &SafetySettings,
-) -> Result<ScreenshotInfo> {
-    if !request.full_resolution && request.max_edge == Some(0) {
-        bail!("max_edge must be greater than zero");
-    }
-    prepare_screenshot_output(&request.output)?;
-
-    let screenshot_portal = screenshot_portal_status();
-    validate_portal_screenshot_target_request(&request, &screenshot_portal)?;
-
-    if screenshot_portal.screenshot_interface_available {
-        match capture_screenshot_portal(request.clone(), safety_settings).await {
-            Ok(Some(info)) => return Ok(info),
-            Ok(None) => {
-                bail!(
-                    "portal screenshot request was cancelled or ended without a screenshot; not falling back to Spectacle"
-                );
-            }
-            Err(err) => {
-                if !command_exists("spectacle") {
-                    return Err(err)
-                        .context("portal screenshot backend failed and Spectacle is unavailable");
-                }
-                warn!(
-                    error = %err,
-                    "portal screenshot backend failed; falling back to Spectacle"
-                );
-            }
-        }
-    }
-
-    capture_screenshot_spectacle(request, safety_settings)
-}
-
-async fn capture_screenshot_portal(
-    request: ScreenshotRequest,
-    safety_settings: &SafetySettings,
-) -> Result<Option<ScreenshotInfo>> {
-    let handle_token = format!("seatgeist_{}", Uuid::new_v4().simple());
-    let mut options = seatgeist_portal::PortalScreenshotOptions::new(handle_token);
-    options.interactive = request.portal_interactive;
-    options.target = request.portal_target.map(portal_screenshot_target_to_xdg);
-    let Some(capture) =
-        seatgeist_portal::request_screenshot_zbus(&options, PORTAL_SCREENSHOT_RESPONSE_TIMEOUT)
-            .await
-            .map_err(|err| anyhow::anyhow!(err))?
-    else {
-        return Ok(None);
-    };
-    let (source_width, source_height) = read_png_dimensions_with_retry(&capture.path)
-        .with_context(|| {
-            format!(
-                "read portal screenshot dimensions from {}",
-                capture.path.display()
-            )
+async fn resolve_interaction_window(
+    window_id: &str,
+    window_backend: &dyn WindowBackend,
+    app_policy: &AppPolicy,
+) -> Result<WindowInfo> {
+    let window = window_backend
+        .list_windows()
+        .await
+        .map_err(anyhow::Error::msg)?
+        .into_iter()
+        .find(|window| window.id == window_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!("interaction target lost: requested window does not exist")
         })?;
-    let (output_width, output_height) = if request.full_resolution {
-        fs::copy(&capture.path, &request.output).with_context(|| {
-            format!(
-                "copy portal screenshot from {} to {}",
-                capture.path.display(),
-                request.output.display()
-            )
-        })?;
-        (source_width, source_height)
-    } else {
-        write_preview_or_copy(
-            &capture.path,
-            &request.output,
-            source_width,
-            source_height,
-            request.max_edge.unwrap_or(safety_settings.preview_max_edge),
-        )?
-    };
-    Ok(Some(screenshot_info_from_capture(
-        request.output,
-        "portal_screenshot",
-        source_width,
-        source_height,
-        output_width,
-        output_height,
-        0,
-        0,
-        source_width,
-        source_height,
-        safety_settings,
-    )?))
-}
-
-fn validate_portal_screenshot_target_request(
-    request: &ScreenshotRequest,
-    screenshot_portal: &ScreenshotPortalStatus,
-) -> Result<()> {
-    let Some(target) = request.portal_target else {
-        return Ok(());
-    };
-    if !screenshot_portal.screenshot_interface_available {
-        bail!(
-            "portal screenshot target {target} requires xdg-desktop-portal Screenshot; no portal screenshot backend is visible"
-        );
-    }
-    if !screenshot_portal.screenshot_target_option_supported {
-        let version = screenshot_portal
-            .screenshot_interface_version
-            .map(|version| version.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        bail!(
-            "portal screenshot target {target} requires xdg-desktop-portal Screenshot v3/AvailableTargets; current Screenshot interface version is {version}"
-        );
-    }
-    if let Some(mask) = screenshot_portal.screenshot_available_targets_mask {
-        let target_mask = portal_screenshot_target_to_xdg(target).value();
-        if mask & target_mask == 0 {
-            bail!(
-                "portal screenshot target {target} is not advertised by AvailableTargets mask {mask}"
-            );
-        }
-    }
-    Ok(())
-}
-
-fn portal_screenshot_target_to_xdg(
-    target: PortalScreenshotTarget,
-) -> seatgeist_portal::PortalScreenshotTarget {
-    match target {
-        PortalScreenshotTarget::Screen => seatgeist_portal::PortalScreenshotTarget::Screen,
-        PortalScreenshotTarget::Window => seatgeist_portal::PortalScreenshotTarget::Window,
-        PortalScreenshotTarget::Area => seatgeist_portal::PortalScreenshotTarget::Area,
-        PortalScreenshotTarget::ActiveWindow => {
-            seatgeist_portal::PortalScreenshotTarget::ActiveWindow
-        }
-    }
-}
-
-fn capture_screenshot_spectacle(
-    request: ScreenshotRequest,
-    safety_settings: &SafetySettings,
-) -> Result<ScreenshotInfo> {
-    let _guard = SCREENSHOT_CAPTURE_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .map_err(|_| anyhow::anyhow!("screenshot capture lock is poisoned"))?;
-    if !command_exists("spectacle") {
-        bail!("spectacle command is not available for KDE screenshot capture");
-    }
-
-    let capture_output = if request.full_resolution {
-        request.output.clone()
-    } else {
-        temporary_capture_path(&request.output)
-    };
-    prepare_screenshot_output(&capture_output)?;
-
-    let status = Command::new("spectacle")
-        .args(["-b", "-f", "-n", "-o"])
-        .arg(&capture_output)
-        .status()
-        .context("run spectacle screenshot backend")?;
-    if !status.success() {
-        bail!("spectacle screenshot backend exited with status {status}");
-    }
-
-    let (source_width, source_height) = read_png_dimensions_with_retry(&capture_output)
-        .with_context(|| {
-            format!(
-                "read screenshot dimensions from {}",
-                capture_output.display()
-            )
-        })?;
-
-    let (output_width, output_height) = if request.full_resolution {
-        (source_width, source_height)
-    } else {
-        write_preview_or_copy(
-            &capture_output,
-            &request.output,
-            source_width,
-            source_height,
-            request.max_edge.unwrap_or(safety_settings.preview_max_edge),
-        )?
-    };
-
-    let info = screenshot_info_from_capture(
-        request.output,
-        "spectacle",
-        source_width,
-        source_height,
-        output_width,
-        output_height,
-        0,
-        0,
-        source_width,
-        source_height,
-        safety_settings,
+    enforce_app_policy_for_app(
+        app_policy,
+        window.app_id.as_deref(),
+        "pinned interaction target",
     )?;
-
-    if capture_output != info.path {
-        fs::remove_file(&capture_output).ok();
-    }
-
-    Ok(info)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn screenshot_info_from_capture(
-    path: PathBuf,
-    backend: &str,
-    source_width: u32,
-    source_height: u32,
-    output_width: u32,
-    output_height: u32,
-    source_origin_x: u32,
-    source_origin_y: u32,
-    transform_source_width: u32,
-    transform_source_height: u32,
-    safety_settings: &SafetySettings,
-) -> Result<ScreenshotInfo> {
-    let monitors = list_monitors().unwrap_or_default();
-    let info = ScreenshotInfo {
-        path,
-        backend: backend.to_string(),
-        source_width,
-        source_height,
-        output_width,
-        output_height,
-        transform: ScreenshotTransform {
-            source_coordinate_space: CoordinateSpace::PhysicalPixel,
-            output_coordinate_space: CoordinateSpace::PhysicalPixel,
-            source_origin_x,
-            source_origin_y,
-            scale_x: f64::from(output_width) / f64::from(transform_source_width),
-            scale_y: f64::from(output_height) / f64::from(transform_source_height),
-        },
-        coordinate_space: CoordinateSpace::PhysicalPixel,
-        monitors,
-    };
-    apply_screenshot_redactions(&info, &safety_settings.screenshot_redactions)?;
-    Ok(info)
-}
-
-#[derive(Debug)]
-struct TileCaptureSource {
-    path: PathBuf,
-    backend: &'static str,
-    cleanup_after_use: bool,
-}
-
-async fn capture_screenshot_tile(
-    request: ScreenshotTileRequest,
-    safety_settings: &SafetySettings,
-) -> Result<ScreenshotInfo> {
-    validate_tile_request(&request)?;
-    prepare_screenshot_output(&request.output)?;
-    let capture = capture_tile_source(&request.output, request.portal_interactive).await?;
-
-    let (source_width, source_height) = read_png_dimensions_with_retry(&capture.path)
-        .with_context(|| format!("read screenshot dimensions from {}", capture.path.display()))?;
-    validate_tile_bounds(&request, source_width, source_height)?;
-    let (output_width, output_height) = write_tile_preview(
-        &capture.path,
-        &request,
-        request.max_edge.unwrap_or(safety_settings.tile_max_edge),
-    )?;
-
-    let monitors = list_monitors().unwrap_or_default();
-
-    let info = ScreenshotInfo {
-        path: request.output,
-        backend: capture.backend.to_string(),
-        source_width,
-        source_height,
-        output_width,
-        output_height,
-        transform: ScreenshotTransform {
-            source_coordinate_space: CoordinateSpace::PhysicalPixel,
-            output_coordinate_space: CoordinateSpace::PhysicalPixel,
-            source_origin_x: request.x,
-            source_origin_y: request.y,
-            scale_x: f64::from(output_width) / f64::from(request.width),
-            scale_y: f64::from(output_height) / f64::from(request.height),
-        },
-        coordinate_space: CoordinateSpace::PhysicalPixel,
-        monitors,
-    };
-    apply_screenshot_redactions(&info, &safety_settings.screenshot_redactions)?;
-
-    if capture.cleanup_after_use {
-        fs::remove_file(&capture.path).ok();
-    }
-    Ok(info)
-}
-
-async fn capture_tile_source(output: &Path, portal_interactive: bool) -> Result<TileCaptureSource> {
-    let screenshot_portal = screenshot_portal_status();
-    let spectacle_available = command_exists("spectacle");
-    if tile_capture_backend(&screenshot_portal, spectacle_available) == Some("portal_screenshot") {
-        match capture_tile_source_portal(portal_interactive).await {
-            Ok(Some(capture)) => return Ok(capture),
-            Ok(None) => {
-                bail!(
-                    "portal screenshot request was cancelled or ended without a screenshot; not falling back to Spectacle"
-                );
-            }
-            Err(err) => {
-                if !spectacle_available {
-                    return Err(err)
-                        .context("portal screenshot backend failed and Spectacle is unavailable");
-                }
-                warn!(
-                    error = %err,
-                    "portal screenshot backend failed for tile capture; falling back to Spectacle"
-                );
-            }
-        }
-    }
-
-    capture_tile_source_spectacle(output)
-}
-
-async fn capture_tile_source_portal(portal_interactive: bool) -> Result<Option<TileCaptureSource>> {
-    let handle_token = format!("seatgeist_{}", Uuid::new_v4().simple());
-    let mut options = seatgeist_portal::PortalScreenshotOptions::new(handle_token);
-    options.interactive = portal_interactive;
-    let Some(capture) =
-        seatgeist_portal::request_screenshot_zbus(&options, PORTAL_SCREENSHOT_RESPONSE_TIMEOUT)
-            .await
-            .map_err(|err| anyhow::anyhow!(err))?
-    else {
-        return Ok(None);
-    };
-
-    Ok(Some(TileCaptureSource {
-        path: capture.path,
-        backend: "portal_screenshot",
-        cleanup_after_use: false,
-    }))
-}
-
-fn capture_tile_source_spectacle(output: &Path) -> Result<TileCaptureSource> {
-    let _guard = SCREENSHOT_CAPTURE_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .map_err(|_| anyhow::anyhow!("screenshot capture lock is poisoned"))?;
-    if !command_exists("spectacle") {
-        bail!("spectacle command is not available for KDE screenshot capture");
-    }
-
-    let capture_output = temporary_capture_path(output);
-    prepare_screenshot_output(&capture_output)?;
-    let status = Command::new("spectacle")
-        .args(["-b", "-f", "-n", "-o"])
-        .arg(&capture_output)
-        .status()
-        .context("run spectacle screenshot backend")?;
-    if !status.success() {
-        bail!("spectacle screenshot backend exited with status {status}");
-    }
-
-    Ok(TileCaptureSource {
-        path: capture_output,
-        backend: "spectacle",
-        cleanup_after_use: true,
-    })
-}
-
-async fn wait_for_change(
-    request: WaitForChangeRequest,
-    safety_settings: &SafetySettings,
-) -> Result<WaitForChangeResult> {
-    validate_wait_for_change_request(&request)?;
-    let timeout = Duration::from_millis(request.timeout_ms);
-    let interval = Duration::from_millis(request.interval_ms);
-    let started = Instant::now();
-    let screenshot_request = || ScreenshotRequest {
-        output: request.output.clone(),
-        max_edge: request.max_edge.or(Some(safety_settings.preview_max_edge)),
-        full_resolution: false,
-        portal_interactive: false,
-        portal_target: None,
-    };
-
-    let baseline_info = capture_screenshot(screenshot_request(), safety_settings).await?;
-    let baseline = read_image_sample(&baseline_info.path)?;
-    let mut final_info = baseline_info;
-    let mut captures = 1;
-    let mut score = 0.0;
-    let mut changed = false;
-
-    while started.elapsed() < timeout {
-        let remaining = timeout.saturating_sub(started.elapsed());
-        thread::sleep(interval.min(remaining));
-        final_info = capture_screenshot(screenshot_request(), safety_settings).await?;
-        captures += 1;
-
-        let candidate = read_image_sample(&final_info.path)?;
-        score = normalized_image_difference(&baseline, &candidate)?;
-        if score >= request.threshold {
-            changed = true;
-            break;
-        }
-    }
-
-    Ok(WaitForChangeResult {
-        changed,
-        timed_out: !changed,
-        timeout_ms: request.timeout_ms,
-        interval_ms: request.interval_ms,
-        captures,
-        elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
-        score,
-        threshold: request.threshold,
-        screenshot: final_info,
-    })
-}
-
-fn validate_wait_for_change_request(request: &WaitForChangeRequest) -> Result<()> {
-    if request.timeout_ms == 0 {
-        bail!("timeout_ms must be greater than zero");
-    }
-    if request.interval_ms == 0 {
-        bail!("interval_ms must be greater than zero");
-    }
-    if request.max_edge == Some(0) {
-        bail!("max_edge must be greater than zero");
-    }
-    if !request.threshold.is_finite() || request.threshold <= 0.0 || request.threshold > 1.0 {
-        bail!("threshold must be greater than 0.0 and less than or equal to 1.0");
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ImageSample {
-    width: u32,
-    height: u32,
-    rgba: Vec<u8>,
-}
-
-fn read_image_sample(path: &Path) -> Result<ImageSample> {
-    let image = image::open(path)
-        .with_context(|| format!("read wait_for_change image {}", path.display()))?
-        .to_rgba8();
-    Ok(ImageSample {
-        width: image.width(),
-        height: image.height(),
-        rgba: image.into_raw(),
-    })
-}
-
-fn normalized_image_difference(baseline: &ImageSample, candidate: &ImageSample) -> Result<f64> {
-    if baseline.width != candidate.width || baseline.height != candidate.height {
-        bail!(
-            "wait_for_change image size changed from {}x{} to {}x{}",
-            baseline.width,
-            baseline.height,
-            candidate.width,
-            candidate.height
-        );
-    }
-    if baseline.rgba.len() != candidate.rgba.len() {
-        bail!("wait_for_change image buffers have different lengths");
-    }
-
-    let mut sum = 0u64;
-    let mut channels = 0u64;
-    for (baseline, candidate) in baseline
-        .rgba
-        .chunks_exact(4)
-        .zip(candidate.rgba.chunks_exact(4))
-    {
-        for index in 0..3 {
-            sum += u64::from(baseline[index].abs_diff(candidate[index]));
-            channels += 1;
-        }
-    }
-    if channels == 0 {
-        return Ok(0.0);
-    }
-    Ok(sum as f64 / (channels as f64 * 255.0))
-}
-
-fn list_monitors() -> Result<Vec<libseatgeist::MonitorInfo>> {
-    seatgeist_kwin::list_monitors().map_err(|err| anyhow::anyhow!(err))
-}
-
-fn list_windows(window_list_state: &WindowListState) -> Result<Vec<libseatgeist::WindowInfo>> {
-    let monitors = list_monitors().unwrap_or_default();
-    list_windows_with_monitors(window_list_state, &monitors)
-}
-
-fn list_windows_with_monitors(
-    window_list_state: &WindowListState,
-    monitors: &[libseatgeist::MonitorInfo],
-) -> Result<Vec<libseatgeist::WindowInfo>> {
-    let bridge_windows = window_list_state.snapshot()?;
-    let mut windows = match seatgeist_kwin::list_windows() {
-        Ok(windows) => windows,
-        Err(err) => match bridge_windows {
-            Some(mut windows) => {
-                assign_monitor_ids(&mut windows, monitors);
-                return Ok(windows);
-            }
-            None => return Err(anyhow::anyhow!(err)),
-        },
-    };
-    if let Some(bridge_windows) = bridge_windows {
-        merge_bridge_windows(&mut windows, bridge_windows);
-    }
-    assign_monitor_ids(&mut windows, monitors);
-    Ok(windows)
-}
-
-fn merge_bridge_windows(windows: &mut Vec<WindowInfo>, bridge_windows: Vec<WindowInfo>) {
-    for bridge_window in bridge_windows {
-        match windows
-            .iter_mut()
-            .find(|window| window.id == bridge_window.id)
-        {
-            Some(window) => merge_bridge_window(window, bridge_window),
-            None => windows.push(bridge_window),
-        }
-    }
-}
-
-fn merge_bridge_window(window: &mut WindowInfo, bridge_window: WindowInfo) {
-    if let Some(app_id) = bridge_window.app_id {
-        window.app_id = Some(app_id);
-    }
-    if !bridge_window.title.trim().is_empty() {
-        window.title = bridge_window.title;
-    }
-    if bridge_window.pid.is_some() {
-        window.pid = bridge_window.pid;
-    }
-    if bridge_window.geometry.is_some() {
-        window.geometry = bridge_window.geometry;
-    }
-    if bridge_window.monitor_id.is_some() {
-        window.monitor_id = bridge_window.monitor_id;
-    }
-}
-
-fn active_window(active_window_state: &ActiveWindowState) -> Result<Option<WindowInfo>> {
-    let monitors = list_monitors().unwrap_or_default();
-    active_window_with_monitors(active_window_state, &monitors)
-}
-
-fn active_window_with_monitors(
-    active_window_state: &ActiveWindowState,
-    monitors: &[libseatgeist::MonitorInfo],
-) -> Result<Option<WindowInfo>> {
-    if let Some(window) = active_window_state.snapshot()? {
-        return Ok(window.map(|mut window| {
-            assign_monitor_id(&mut window, monitors);
-            window
-        }));
-    }
-    let mut window = seatgeist_kwin::active_window().map_err(|err| anyhow::anyhow!(err))?;
-    if let Some(window) = window.as_mut() {
-        assign_monitor_id(window, monitors);
+    if window.pid.is_none() {
+        bail!("interaction target lost: requested window has no process id");
     }
     Ok(window)
 }
 
-fn assign_monitor_ids(windows: &mut [WindowInfo], monitors: &[libseatgeist::MonitorInfo]) {
-    for window in windows {
-        assign_monitor_id(window, monitors);
+fn merge_interaction_status(
+    mut capture: libseatgeist::CaptureSessionStatus,
+    interaction: interaction::InteractionStatus,
+) -> libseatgeist::CaptureSessionStatus {
+    let same_session = interaction.session_id.as_deref() == capture.session_id.as_deref();
+    capture.sticky_target_bound = same_session && interaction.bound;
+    if same_session {
+        capture.target_window_id = interaction.window_id;
+        capture.target_app_id = interaction.app_id;
+        capture.target_pid = interaction.pid;
+        capture.target_expires_in_ms = interaction.expires_in_ms;
     }
+    capture
 }
 
-fn assign_monitor_id(window: &mut WindowInfo, monitors: &[libseatgeist::MonitorInfo]) {
-    if window.monitor_id.is_none() {
-        window.monitor_id = window_monitor_id(window, monitors);
-    }
-}
-
-fn window_monitor_id(
-    window: &WindowInfo,
-    monitors: &[libseatgeist::MonitorInfo],
-) -> Option<String> {
-    let geometry = window.geometry.as_ref()?;
-    if geometry.space != CoordinateSpace::LogicalPixel {
-        return None;
-    }
-    monitors
-        .iter()
-        .filter_map(|monitor| {
-            let area = logical_overlap_area(geometry, monitor);
-            (area > 0).then(|| (area, monitor.id.clone()))
-        })
-        .max_by_key(|(area, _)| *area)
-        .map(|(_, id)| id)
-}
-
-fn logical_overlap_area(geometry: &WindowGeometry, monitor: &libseatgeist::MonitorInfo) -> i64 {
-    let window_left = i64::from(geometry.x);
-    let window_top = i64::from(geometry.y);
-    let window_right = window_left + i64::from(geometry.width);
-    let window_bottom = window_top + i64::from(geometry.height);
-    let monitor_left = i64::from(monitor.logical_origin_x);
-    let monitor_top = i64::from(monitor.logical_origin_y);
-    let monitor_right = monitor_left + i64::from(monitor.logical_width);
-    let monitor_bottom = monitor_top + i64::from(monitor.logical_height);
-
-    let overlap_width = (window_right.min(monitor_right) - window_left.max(monitor_left)).max(0);
-    let overlap_height = (window_bottom.min(monitor_bottom) - window_top.max(monitor_top)).max(0);
-    overlap_width * overlap_height
-}
-
-async fn observe_desktop(
-    request: ObserveRequest,
-    active_window_state: &ActiveWindowState,
-    window_list_state: &WindowListState,
-    safety_settings: &SafetySettings,
-) -> Result<DesktopObservation> {
-    let monitors = list_monitors().unwrap_or_default();
-    let windows = list_windows_with_monitors(window_list_state, &monitors).unwrap_or_default();
-    let active_window =
-        active_window_with_monitors(active_window_state, &monitors).unwrap_or_default();
-    let screenshot = match request.screenshot {
-        Some(request) => Some(capture_screenshot(request, safety_settings).await?),
-        None => None,
+async fn execute_capture_open(
+    request: CaptureOpenRequest,
+    client: Option<&JournalClientContext>,
+    runtime: &DaemonRuntime,
+) -> DaemonResponse {
+    let owner = match SessionOwner::from_client(client) {
+        Ok(owner) => owner,
+        Err(err) => return daemon_error_with_kind(err, ErrorKind::SessionOwnerMismatch),
     };
-
-    Ok(DesktopObservation {
-        active_window,
-        windows,
-        monitors,
-        screenshot,
-    })
+    let sticky_target = if request.source == CaptureSourceKind::Window {
+        match request.requested_source_id.as_deref() {
+            Some(window_id) => match resolve_interaction_window(
+                window_id,
+                runtime.window_backend.as_ref(),
+                &runtime.app_policy,
+            )
+            .await
+            {
+                Ok(window) => Some(window),
+                Err(err) => return daemon_error_with_kind(err, ErrorKind::TargetLost),
+            },
+            None => None,
+        }
+    } else {
+        None
+    };
+    let open_result = capture_open(
+        request,
+        owner.clone(),
+        &runtime.capture_session_store,
+        runtime.screen_backend.as_ref(),
+        runtime.safety_settings.preview_max_edge,
+    )
+    .await;
+    match open_result {
+        Ok(status) => {
+            let Some(session_id) = status.session_id.clone() else {
+                return daemon_error(anyhow::anyhow!(
+                    "capture session opened without a session id"
+                ));
+            };
+            let Some(capture_backend) = status.backend.clone() else {
+                return daemon_error(anyhow::anyhow!(
+                    "capture session opened without backend metadata"
+                ));
+            };
+            runtime
+                .session_execution_store
+                .open(session_id.clone(), capture_backend, sticky_target.is_some())
+                .await;
+            if let Some(window) = sticky_target {
+                if let Err(err) = runtime
+                    .interaction_session_store
+                    .bind(session_id.clone(), &window, owner)
+                    .await
+                {
+                    return daemon_error(err);
+                }
+                if let Err(err) = runtime
+                    .session_execution_store
+                    .record_target_policy(&session_id, "allow")
+                    .await
+                {
+                    return daemon_error(err);
+                }
+            }
+            let capture = runtime
+                .capture_session_store
+                .status_for_session(&session_id)
+                .await;
+            let interaction = runtime.interaction_session_store.status(&session_id).await;
+            DaemonResponse::CaptureSessionStatus(merge_interaction_status(capture, interaction))
+        }
+        Err(err) => daemon_error(err),
+    }
 }
 
-fn focus_window(request: FocusWindowRequest) -> Result<ActionResult> {
+async fn capture_status(
+    runtime: &DaemonRuntime,
+    client: Option<&JournalClientContext>,
+) -> libseatgeist::CaptureSessionStatus {
+    let mut capture = match SessionOwner::from_client(client) {
+        Ok(owner) if owner.tool() == Some("seatgeist-cli") => {
+            runtime.capture_session_store.status().await
+        }
+        Ok(owner) => runtime.capture_session_store.status_for_owner(&owner).await,
+        Err(_) => runtime.capture_session_store.status().await,
+    };
+    let session_id = capture.session_id.clone().unwrap_or_default();
+    let mut interaction = runtime.interaction_session_store.status(&session_id).await;
+    if capture.active
+        && interaction.bound
+        && let Ok(windows) = runtime.window_backend.list_windows().await
+        && runtime
+            .interaction_session_store
+            .clear_if_target_invalid(&session_id, &windows)
+            .await
+            .unwrap_or(false)
+    {
+        interaction = runtime.interaction_session_store.status(&session_id).await;
+    }
+    if let Some(session_id) = capture.session_id.as_deref() {
+        capture.execution = runtime
+            .session_execution_store
+            .status(session_id)
+            .await
+            .map(Box::new);
+    }
+    merge_interaction_status(capture, interaction)
+}
+
+async fn focus_window(
+    request: FocusWindowRequest,
+    window_backend: &dyn WindowBackend,
+) -> Result<ActionResult> {
     if request.window_id.trim().is_empty() {
         bail!("window id must not be empty");
     }
-    seatgeist_kwin::focus_window(&request.window_id).map_err(|err| anyhow::anyhow!(err))?;
+    window_backend
+        .focus_window(request.window_id.clone())
+        .await
+        .map_err(anyhow::Error::msg)?;
     Ok(ActionResult {
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
+
+        screenshot: None,
         message: Some(format!("focused window {}", request.window_id)),
     })
 }
 
-fn clipboard_get_text(request: ClipboardGetRequest) -> Result<ClipboardText> {
-    if request.max_bytes == Some(0) {
-        bail!("clipboard max_bytes must be greater than zero");
+async fn move_window(
+    request: MoveWindowRequest,
+    window_backend: &dyn WindowBackend,
+) -> Result<ActionResult> {
+    if request.window_id.trim().is_empty() {
+        bail!("window id must not be empty");
     }
-    let backend = clipboard_read_backend()
-        .ok_or_else(|| anyhow::anyhow!("no clipboard text read backend is available"))?;
-    let text = match backend {
-        ClipboardBackend::WlClipboard => clipboard_get_text_wl()?,
-        ClipboardBackend::KdeKlipper => clipboard_get_text_klipper()?,
-    };
-    Ok(bound_clipboard_text(
-        text,
-        request.max_bytes,
-        backend.name().to_string(),
-    ))
-}
-
-fn clipboard_backend_status() -> ClipboardBackendStatus {
-    let wl_paste_available = command_exists("wl-paste");
-    let wl_copy_available = command_exists("wl-copy");
-    let kde_klipper_available = kde_klipper_available();
-    let read_backend =
-        clipboard_read_backend_from_availability(wl_paste_available, kde_klipper_available)
-            .map(|backend| backend.name().to_string());
-    let write_backend =
-        clipboard_write_backend_from_availability(wl_copy_available, kde_klipper_available)
-            .map(|backend| backend.name().to_string());
-    let setup_hint = clipboard_backend_setup_hint(
-        read_backend.as_deref(),
-        write_backend.as_deref(),
-        wl_paste_available,
-        wl_copy_available,
-        kde_klipper_available,
-    );
-
-    ClipboardBackendStatus {
-        wl_paste_available,
-        wl_copy_available,
-        kde_klipper_available,
-        read_backend,
-        write_backend,
-        setup_hint,
-    }
-}
-
-fn clipboard_backend_setup_hint(
-    read_backend: Option<&str>,
-    write_backend: Option<&str>,
-    wl_paste_available: bool,
-    wl_copy_available: bool,
-    kde_klipper_available: bool,
-) -> String {
-    match (read_backend, write_backend) {
-        (Some(read), Some(write)) if read == write => {
-            format!("clipboard text read/write backends are available through {read}")
-        }
-        (Some(read), Some(write)) => {
-            format!("clipboard text read backend={read} write backend={write}")
-        }
-        (Some(read), None) => {
-            format!("clipboard text read backend={read}; install wl-copy or enable KDE Klipper DBus for writes")
-        }
-        (None, Some(write)) => {
-            format!("clipboard text write backend={write}; install wl-paste or enable KDE Klipper DBus for reads")
-        }
-        (None, None) if !wl_paste_available && !wl_copy_available && !kde_klipper_available => {
-            "no clipboard text backend is available; install wl-clipboard or run inside a KDE session with Klipper DBus".to_string()
-        }
-        (None, None) => {
-            "clipboard backend probes are partially visible but no complete text read/write path is available".to_string()
-        }
-    }
-}
-
-fn clipboard_get_text_wl() -> Result<String> {
-    let output = Command::new("wl-paste")
-        .arg("--no-newline")
-        .output()
-        .context("run wl-paste clipboard backend")?;
-    if !output.status.success() {
-        bail!(
-            "wl-paste clipboard backend exited with status {}",
-            output.status
-        );
-    }
-
-    String::from_utf8(output.stdout).context("clipboard text is not valid UTF-8")
-}
-
-fn clipboard_get_text_klipper() -> Result<String> {
-    let output = Command::new("qdbus6")
-        .args([
-            "org.kde.klipper",
-            "/klipper",
-            "org.kde.klipper.klipper.getClipboardContents",
-        ])
-        .output()
-        .context("run KDE Klipper clipboard read backend")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "KDE Klipper clipboard read backend exited with status {}: {stderr}",
-            output.status
-        );
-    }
-    let mut text =
-        String::from_utf8(output.stdout).context("KDE Klipper clipboard text is not UTF-8")?;
-    if text.ends_with('\n') {
-        text.pop();
-    }
-    Ok(text)
-}
-
-fn bound_clipboard_text(
-    mut text: String,
-    max_bytes: Option<usize>,
-    backend: String,
-) -> ClipboardText {
-    let original_bytes = text.len();
-    let Some(max_bytes) = max_bytes else {
-        return ClipboardText {
-            text,
-            truncated: false,
-            original_bytes,
-            backend,
-        };
-    };
-    if original_bytes <= max_bytes {
-        return ClipboardText {
-            text,
-            truncated: false,
-            original_bytes,
-            backend,
-        };
-    }
-
-    let mut end = max_bytes;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text.truncate(end);
-    ClipboardText {
-        text,
-        truncated: true,
-        original_bytes,
-        backend,
-    }
-}
-
-fn clipboard_set_text(text: &str) -> Result<ActionResult> {
-    let backend = clipboard_write_backend()
-        .ok_or_else(|| anyhow::anyhow!("no clipboard text write backend is available"))?;
-    match backend {
-        ClipboardBackend::WlClipboard => clipboard_set_text_wl(text)?,
-        ClipboardBackend::KdeKlipper => clipboard_set_text_klipper(text)?,
-    }
-
+    let geometry = window_backend
+        .move_window(request.window_id.clone(), request.x, request.y)
+        .await
+        .map_err(anyhow::Error::msg)?;
     Ok(ActionResult {
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
+        screenshot: None,
         message: Some(format!(
-            "set clipboard text length={} backend={}",
-            text.len(),
-            backend.name()
+            "moved window {} requested={},{} actual={},{} size={}x{} backend={}",
+            request.window_id,
+            request.x,
+            request.y,
+            geometry.x,
+            geometry.y,
+            geometry.width,
+            geometry.height,
+            window_backend.backend_name()
         )),
     })
 }
 
-fn clipboard_set_text_wl(text: &str) -> Result<()> {
-    let mut child = Command::new("wl-copy")
-        .arg("--type")
-        .arg("text/plain;charset=utf-8")
-        .stdin(Stdio::piped())
-        .spawn()
-        .context("start wl-copy clipboard backend")?;
+fn normalize_desktop_entry(value: &str) -> Result<String> {
+    let value = value.trim();
+    let value = value.strip_suffix(".desktop").unwrap_or(value);
+    if value.is_empty() || value.len() > 255 {
+        bail!("desktop entry id must contain between 1 and 255 characters");
+    }
+    if value.starts_with('.')
+        || !value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
     {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("wl-copy stdin is unavailable"))?;
-        stdin
-            .write_all(text.as_bytes())
-            .context("write text to wl-copy")?;
+        bail!("desktop entry id may contain only ASCII letters, digits, '.', '_' and '-'");
     }
-    let status = child.wait().context("wait for wl-copy clipboard backend")?;
-    if !status.success() {
-        bail!("wl-copy clipboard backend exited with status {status}");
-    }
-    Ok(())
+    Ok(value.to_string())
 }
 
-fn clipboard_set_text_klipper(text: &str) -> Result<()> {
-    let status = Command::new("qdbus6")
-        .args([
-            "org.kde.klipper",
-            "/klipper",
-            "org.kde.klipper.klipper.setClipboardContents",
-            text,
-        ])
-        .status()
-        .context("run KDE Klipper clipboard write backend")?;
-    if !status.success() {
-        bail!("KDE Klipper clipboard write backend exited with status {status}");
+async fn launch_window(
+    request: LaunchWindowRequest,
+    runtime: &DaemonRuntime,
+) -> Result<ActionResult> {
+    let desktop_entry = normalize_desktop_entry(&request.desktop_entry)?;
+    if request
+        .monitor_id
+        .as_ref()
+        .is_some_and(|id| id.trim().is_empty())
+    {
+        bail!("monitor id must not be empty");
     }
-    Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClipboardBackend {
-    WlClipboard,
-    KdeKlipper,
-}
-
-impl ClipboardBackend {
-    fn name(self) -> &'static str {
-        match self {
-            Self::WlClipboard => "wl-clipboard",
-            Self::KdeKlipper => "kde-klipper",
+    for (label, value) in [("width", request.width), ("height", request.height)] {
+        if let Some(value) = value
+            && !(64..=32_768).contains(&value)
+        {
+            bail!("launch window {label} must be between 64 and 32768 logical pixels");
         }
     }
-}
-
-fn clipboard_read_backend() -> Option<ClipboardBackend> {
-    clipboard_read_backend_from_availability(command_exists("wl-paste"), kde_klipper_available())
-}
-
-fn clipboard_read_backend_from_availability(
-    wl_paste_available: bool,
-    kde_klipper_available: bool,
-) -> Option<ClipboardBackend> {
-    if wl_paste_available {
-        return Some(ClipboardBackend::WlClipboard);
+    if request.margin > 32_768 {
+        bail!("launch window margin must be at most 32768 logical pixels");
     }
-    if kde_klipper_available {
-        return Some(ClipboardBackend::KdeKlipper);
+    if !(1_000..=30_000).contains(&request.timeout_ms) {
+        bail!("launch window timeout must be between 1000 and 30000 milliseconds");
     }
-    None
+
+    let ticket = runtime
+        .window_action_queue
+        .arm_launch_window(
+            &desktop_entry,
+            request.anchor,
+            request.monitor_id.as_deref(),
+            request.width,
+            request.height,
+            request.margin,
+            request.activation,
+            request.timeout_ms,
+        )
+        .await?;
+    let launch_id = ticket.id().to_string();
+    let mut child = match std::process::Command::new("gtk-launch")
+        .arg(&desktop_entry)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => {
+            runtime
+                .window_action_queue
+                .cancel_launch_window(&launch_id)?;
+            return Err(err).context("start desktop entry through gtk-launch");
+        }
+    };
+    let launcher_status = tokio::task::spawn_blocking(move || child.wait());
+    if let Ok(joined) = tokio::time::timeout(Duration::from_secs(2), launcher_status).await {
+        let status = joined.context("join gtk-launch status task")??;
+        if !status.success() {
+            runtime
+                .window_action_queue
+                .cancel_launch_window(&launch_id)?;
+            bail!("gtk-launch rejected desktop entry {desktop_entry}");
+        }
+    }
+
+    let outcome = runtime
+        .window_action_queue
+        .finish_launch_window(ticket, Duration::from_millis(request.timeout_ms + 1_000))
+        .await?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let active_window = runtime.active_window_state.snapshot()?.flatten();
+    let mut windows = runtime.window_list_state.snapshot()?.unwrap_or_default();
+    if !windows.iter().any(|window| window.id == outcome.window.id) {
+        windows.push(outcome.window.clone());
+    }
+    let geometry = outcome
+        .window
+        .geometry
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("launch confirmation omitted window geometry"))?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: Some(Observation {
+            active_window,
+            target_window: Some(outcome.window.clone()),
+            windows,
+            monitors: Vec::new(),
+            focused_accessibility: None,
+            target_accessibility: None,
+            screenshot_path: None,
+            revision: None,
+            issues: Vec::new(),
+            settle: None,
+        }),
+        screenshot: None,
+        message: Some(format!(
+            "launched desktop entry {} window={} position={},{} size={}x{} anchor={:?} activation={:?} focus_preserved={} backend=kwin_script_bridge",
+            desktop_entry,
+            outcome.window.id,
+            geometry.x,
+            geometry.y,
+            geometry.width,
+            geometry.height,
+            request.anchor,
+            request.activation,
+            outcome.focus_preserved,
+        )),
+    })
 }
 
-fn clipboard_write_backend() -> Option<ClipboardBackend> {
-    clipboard_write_backend_from_availability(command_exists("wl-copy"), kde_klipper_available())
-}
-
-fn clipboard_write_backend_from_availability(
-    wl_copy_available: bool,
-    kde_klipper_available: bool,
-) -> Option<ClipboardBackend> {
-    if wl_copy_available {
-        return Some(ClipboardBackend::WlClipboard);
+async fn resize_window(
+    request: ResizeWindowRequest,
+    window_backend: &dyn WindowBackend,
+) -> Result<ActionResult> {
+    if request.window_id.trim().is_empty() {
+        bail!("window id must not be empty");
     }
-    if kde_klipper_available {
-        return Some(ClipboardBackend::KdeKlipper);
+    if request.width < 64 || request.height < 64 {
+        bail!("window width and height must each be at least 64 logical pixels");
     }
-    None
-}
-
-fn kde_klipper_available() -> bool {
-    Command::new("qdbus6")
-        .args(["org.kde.klipper", "/klipper"])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    if request.width > 32_768 || request.height > 32_768 {
+        bail!("window width and height must each be at most 32768 logical pixels");
+    }
+    let geometry = window_backend
+        .resize_window(request.window_id.clone(), request.width, request.height)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: None,
+        screenshot: None,
+        message: Some(format!(
+            "resized window {} requested={}x{} actual={}x{} position={},{} backend={}",
+            request.window_id,
+            request.width,
+            request.height,
+            geometry.width,
+            geometry.height,
+            geometry.x,
+            geometry.y,
+            window_backend.backend_name()
+        )),
+    })
 }
 
 fn focused_accessibility_tree(
@@ -5635,6 +3648,12 @@ fn accessibility_find(
     request: AccessibilityFindRequest,
 ) -> Result<Vec<libseatgeist::AccessibilityNode>> {
     seatgeist_atspi::find(request).map_err(|err| anyhow::anyhow!(err))
+}
+
+fn accessibility_find_with_context(
+    request: AccessibilityFindRequest,
+) -> Result<Vec<seatgeist_atspi::AccessibilityMatch>> {
+    seatgeist_atspi::find_with_context(request).map_err(|err| anyhow::anyhow!(err))
 }
 
 #[derive(Default)]
@@ -5671,6 +3690,9 @@ fn accessibility_quality_unavailable_status(
 ) -> AccessibilityQualityStatus {
     AccessibilityQualityStatus {
         atspi_available: false,
+        target_event_settle_available: false,
+        event_backend: "atspi_registry".to_string(),
+        target_event_classes: target_event_classes(),
         focused_node_present: false,
         sample_depth,
         sample_max_nodes,
@@ -5698,6 +3720,9 @@ fn accessibility_quality_status_from_sample(
         Err(err) => {
             return AccessibilityQualityStatus {
                 atspi_available: true,
+                target_event_settle_available: true,
+                event_backend: "atspi_registry".to_string(),
+                target_event_classes: target_event_classes(),
                 focused_node_present: false,
                 sample_depth,
                 sample_max_nodes,
@@ -5722,6 +3747,9 @@ fn accessibility_quality_status_from_sample(
     let Some(root) = focused else {
         return AccessibilityQualityStatus {
             atspi_available: true,
+            target_event_settle_available: true,
+            event_backend: "atspi_registry".to_string(),
+            target_event_classes: target_event_classes(),
             focused_node_present: false,
             sample_depth,
             sample_max_nodes,
@@ -5766,6 +3794,9 @@ fn accessibility_quality_status_from_sample(
 
     AccessibilityQualityStatus {
         atspi_available: true,
+        target_event_settle_available: true,
+        event_backend: "atspi_registry".to_string(),
+        target_event_classes: target_event_classes(),
         focused_node_present: true,
         sample_depth,
         sample_max_nodes,
@@ -5781,6 +3812,13 @@ fn accessibility_quality_status_from_sample(
         recommended_fallback: recommended_fallback.to_string(),
         setup_hint,
     }
+}
+
+fn target_event_classes() -> Vec<String> {
+    ["object", "window", "focus"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 fn collect_accessibility_quality_counts(
@@ -5852,6 +3890,8 @@ fn accessibility_invoke(request: AccessibilityInvokeRequest) -> Result<ActionRes
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
+
+        screenshot: None,
         message: Some(format!(
             "invoked accessibility action={} node={}",
             request.action.as_str(),
@@ -5870,6 +3910,8 @@ fn accessibility_set_text(request: AccessibilitySetTextRequest) -> Result<Action
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
+
+        screenshot: None,
         message: Some(format!(
             "set accessibility text length={} node={}",
             request.text.chars().count(),
@@ -5891,6 +3933,8 @@ fn accessibility_insert_text(request: AccessibilityInsertTextRequest) -> Result<
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
+
+        screenshot: None,
         message: Some(format!(
             "inserted accessibility text length={} offset={} node={}",
             request.text.chars().count(),
@@ -5916,6 +3960,8 @@ fn accessibility_delete_text(request: AccessibilityDeleteTextRequest) -> Result<
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
+
+        screenshot: None,
         message: Some(format!(
             "deleted accessibility text range={}..{} node={}",
             request.start_offset, request.end_offset, request.node_id
@@ -5939,6 +3985,8 @@ fn accessibility_copy_text(request: AccessibilityCopyTextRequest) -> Result<Acti
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
+
+        screenshot: None,
         message: Some(format!(
             "copied accessibility text range={}..{} node={}",
             request.start_offset, request.end_offset, request.node_id
@@ -5962,6 +4010,8 @@ fn accessibility_cut_text(request: AccessibilityCutTextRequest) -> Result<Action
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
+
+        screenshot: None,
         message: Some(format!(
             "cut accessibility text range={}..{} node={}",
             request.start_offset, request.end_offset, request.node_id
@@ -5982,6 +4032,8 @@ fn accessibility_paste_text(request: AccessibilityPasteTextRequest) -> Result<Ac
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
+
+        screenshot: None,
         message: Some(format!(
             "pasted accessibility clipboard text offset={} node={}",
             request.offset, request.node_id
@@ -6002,6 +4054,8 @@ fn accessibility_set_caret(request: AccessibilitySetCaretRequest) -> Result<Acti
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
+
+        screenshot: None,
         message: Some(format!(
             "set accessibility caret offset={} node={}",
             request.offset, request.node_id
@@ -6033,6 +4087,8 @@ fn accessibility_set_selection(request: AccessibilitySetSelectionRequest) -> Res
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
+
+        screenshot: None,
         message: Some(format!(
             "set accessibility selection index={} range={}..{} node={}",
             request.selection_num, request.start_offset, request.end_offset, request.node_id
@@ -6040,489 +4096,44 @@ fn accessibility_set_selection(request: AccessibilitySetSelectionRequest) -> Res
     })
 }
 
-fn type_text(
-    request: TypeTextRequest,
-    input_backend_preference: InputBackendPreference,
-    portal_eis_session_store: &PortalEisSessionStore,
-) -> Result<ActionResult> {
-    if request.text.is_empty() {
-        bail!("text must be non-empty");
-    }
-    if request.text.chars().count() > 8192 {
-        bail!("text must be at most 8192 characters");
-    }
-    let mut backend = input_execution_backend(input_backend_preference, portal_eis_session_store)?;
-    backend.type_text(&request.text)?;
-    Ok(ActionResult {
-        id: Uuid::new_v4(),
-        ok: true,
-        observation: None,
-        message: Some(format!(
-            "typed text length={} backend={}",
-            request.text.chars().count(),
-            backend.name()
-        )),
-    })
-}
-
-fn key_combo(
-    request: KeyComboRequest,
-    input_backend_preference: InputBackendPreference,
-    xkb_keymap_config: &XkbKeymapConfig,
-    portal_eis_session_store: &PortalEisSessionStore,
-) -> Result<ActionResult> {
-    if request.combo.trim().is_empty() {
-        bail!("combo must be non-empty");
-    }
-    let xkb_keymap_settings = match input_backend_preference {
-        InputBackendPreference::PortalRemoteDesktop | InputBackendPreference::Libei => {
-            effective_xkb_keymap_resolution(xkb_keymap_config).settings
-        }
-        InputBackendPreference::Auto | InputBackendPreference::Uinput => {
-            XkbKeymapSettings::default()
-        }
+async fn prepare_semantic_settle(
+    target: &target::SemanticActionTarget,
+    options: Option<&PostActionOptions>,
+) -> Option<semantic_settle::PreparedSemanticSettle> {
+    let (Some(event_target), Some(window)) = (&target.event_target, &target.window) else {
+        return None;
     };
-    let mut backend = input_execution_backend_with_store(
-        input_backend_preference,
-        portal_eis_session_store,
-        &xkb_keymap_settings,
-    )?;
-    let key_count = backend.key_combo(&request.combo)?;
-    Ok(ActionResult {
-        id: Uuid::new_v4(),
-        ok: true,
-        observation: None,
-        message: Some(format!(
-            "sent key combo keys={key_count} backend={}",
-            backend.name()
-        )),
-    })
-}
-
-fn pointer_calibration_status() -> Result<PointerCalibrationStatus> {
-    let monitors = list_monitors()?;
-    pointer_calibration_status_from_monitors(&monitors)
-}
-
-fn pointer_calibration_status_from_monitors(
-    monitors: &[libseatgeist::MonitorInfo],
-) -> Result<PointerCalibrationStatus> {
-    let bounds = physical_pointer_bounds_from_monitors(monitors)?;
-    let monitors = pointer_monitor_calibrations(monitors)?;
-    let physical_bounds = PointerPhysicalBounds {
-        min_x: bounds.min_x,
-        min_y: bounds.min_y,
-        max_x: bounds.min_x + i32::try_from(bounds.width)? - 1,
-        max_y: bounds.min_y + i32::try_from(bounds.height)? - 1,
-        width: bounds.width,
-        height: bounds.height,
-    };
-    let center_x = bounds.min_x + i32::try_from(bounds.width / 2)?;
-    let center_y = bounds.min_y + i32::try_from(bounds.height / 2)?;
-    Ok(PointerCalibrationStatus {
-        coordinate_space: CoordinateSpace::PhysicalPixel,
-        bounds: physical_bounds,
-        monitors,
-        sample_points: vec![
-            PointerCalibrationPoint {
-                label: "top_left".to_string(),
-                x: bounds.min_x,
-                y: bounds.min_y,
-            },
-            PointerCalibrationPoint {
-                label: "center".to_string(),
-                x: center_x,
-                y: center_y,
-            },
-            PointerCalibrationPoint {
-                label: "bottom_right".to_string(),
-                x: bounds.min_x + i32::try_from(bounds.width)? - 1,
-                y: bounds.min_y + i32::try_from(bounds.height)? - 1,
-            },
-        ],
-        setup_hint: "physical_pixel pointer coordinates are derived from KWin monitor logical origins, scale factors, and physical sizes; verify with a guarded disposable test window before production click use".to_string(),
-    })
-}
-
-fn pointer_monitor_calibrations(
-    monitors: &[libseatgeist::MonitorInfo],
-) -> Result<Vec<PointerMonitorCalibration>> {
-    monitors
-        .iter()
-        .map(|monitor| {
-            Ok(PointerMonitorCalibration {
-                id: monitor.id.clone(),
-                name: monitor.name.clone(),
-                logical_origin_x: monitor.logical_origin_x,
-                logical_origin_y: monitor.logical_origin_y,
-                logical_width: monitor.logical_width,
-                logical_height: monitor.logical_height,
-                physical_origin_x: scaled_physical_origin(
-                    monitor.logical_origin_x,
-                    monitor.scale_factor,
-                )?,
-                physical_origin_y: scaled_physical_origin(
-                    monitor.logical_origin_y,
-                    monitor.scale_factor,
-                )?,
-                physical_width: monitor.physical_width,
-                physical_height: monitor.physical_height,
-                scale_factor: monitor.scale_factor,
-                transform: monitor.transform.clone(),
-            })
-        })
-        .collect()
-}
-
-fn move_pointer(
-    request: MovePointerRequest,
-    active_window_state: &ActiveWindowState,
-    input_backend_preference: InputBackendPreference,
-    portal_eis_session_store: &PortalEisSessionStore,
-) -> Result<ActionResult> {
-    let mut backend = input_execution_backend(input_backend_preference, portal_eis_session_store)?;
-    let (point, bounds) = resolve_pointer_point(request.point, active_window_state)?;
-    backend.move_pointer(point, bounds)?;
-    Ok(ActionResult {
-        id: Uuid::new_v4(),
-        ok: true,
-        observation: None,
-        message: Some(format!(
-            "moved pointer x={:.0} y={:.0} space={:?} backend={}",
-            point.x,
-            point.y,
-            request.point.space,
-            backend.name()
-        )),
-    })
-}
-
-fn click_pointer(
-    request: ClickPointerRequest,
-    active_window_state: &ActiveWindowState,
-    input_backend_preference: InputBackendPreference,
-    portal_eis_session_store: &PortalEisSessionStore,
-) -> Result<ActionResult> {
-    if request.clicks == 0 || request.clicks > 2 {
-        bail!("clicks must be 1 or 2");
-    }
-    let mut backend = input_execution_backend(input_backend_preference, portal_eis_session_store)?;
-    let (point, bounds) = resolve_pointer_point(request.point, active_window_state)?;
-    backend.click_pointer(point, bounds, request.button, request.clicks)?;
-    Ok(ActionResult {
-        id: Uuid::new_v4(),
-        ok: true,
-        observation: None,
-        message: Some(format!(
-            "clicked pointer button={:?} clicks={} x={:.0} y={:.0} space={:?} backend={}",
-            request.button,
-            request.clicks,
-            point.x,
-            point.y,
-            request.point.space,
-            backend.name()
-        )),
-    })
-}
-
-fn drag_pointer(
-    request: DragPointerRequest,
-    active_window_state: &ActiveWindowState,
-    input_backend_preference: InputBackendPreference,
-    portal_eis_session_store: &PortalEisSessionStore,
-) -> Result<ActionResult> {
-    if request.duration_ms > 10_000 {
-        bail!("duration_ms must be at most 10000");
-    }
-    if request.from.space != request.to.space {
-        bail!(
-            "drag pointer coordinates must use one coordinate space, got {:?} and {:?}",
-            request.from.space,
-            request.to.space
-        );
-    }
-    let mut backend = input_execution_backend(input_backend_preference, portal_eis_session_store)?;
-    let (from, bounds) = resolve_pointer_point(request.from, active_window_state)?;
-    let (to, to_bounds) = resolve_pointer_point(request.to, active_window_state)?;
-    if bounds != to_bounds {
-        bail!("resolved drag pointer bounds changed while mapping coordinates");
-    }
-    backend.drag_pointer(from, to, bounds, request.button, request.duration_ms)?;
-    Ok(ActionResult {
-        id: Uuid::new_v4(),
-        ok: true,
-        observation: None,
-        message: Some(format!(
-            "dragged pointer button={:?} from={:.0},{:.0} to={:.0},{:.0} duration_ms={} space={:?} backend={}",
-            request.button,
-            from.x,
-            from.y,
-            to.x,
-            to.y,
-            request.duration_ms,
-            request.from.space,
-            backend.name()
-        )),
-    })
-}
-
-fn scroll_pointer(
-    request: ScrollPointerRequest,
-    input_backend_preference: InputBackendPreference,
-    portal_eis_session_store: &PortalEisSessionStore,
-) -> Result<ActionResult> {
-    if request.vertical == 0 && request.horizontal == 0 {
-        bail!("scroll request must include a non-zero delta");
-    }
-    let mut backend = input_execution_backend(input_backend_preference, portal_eis_session_store)?;
-    let bounds = physical_pointer_bounds()?;
-    backend.scroll_pointer(request.vertical, request.horizontal, bounds)?;
-    Ok(ActionResult {
-        id: Uuid::new_v4(),
-        ok: true,
-        observation: None,
-        message: Some(format!(
-            "scrolled pointer vertical={} horizontal={} backend={}",
-            request.vertical,
-            request.horizontal,
-            backend.name()
-        )),
-    })
-}
-
-fn physical_pointer_bounds() -> Result<seatgeist_uinput::PointerBounds> {
-    physical_pointer_bounds_from_monitors(&list_monitors()?)
-}
-
-fn resolve_pointer_point(
-    point: Point,
-    active_window_state: &ActiveWindowState,
-) -> Result<(Point, seatgeist_uinput::PointerBounds)> {
-    let monitors = list_monitors()?;
-    let bounds = physical_pointer_bounds_from_monitors(&monitors)?;
-    let point = match point.space {
-        CoordinateSpace::PhysicalPixel => point,
-        CoordinateSpace::LogicalPixel => logical_to_physical_point(point, &monitors)?,
-        CoordinateSpace::WindowLocal => {
-            active_window_local_to_physical_point(point, active_window_state, &monitors)?
+    match semantic_settle::prepare(event_target.clone(), window.clone(), options).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            tracing::warn!(%error, "AT-SPI event subscription unavailable; using polling settle fallback");
+            None
         }
-        CoordinateSpace::AccessibilityNode => {
-            bail!(
-                "pointer actions currently support physical_pixel, logical_pixel, and active-window window_local coordinate spaces, got {:?}",
-                point.space
-            );
-        }
-    };
-    validate_physical_pointer_point(point, bounds)?;
-    Ok((point, bounds))
-}
-
-fn logical_to_physical_point(
-    point: Point,
-    monitors: &[libseatgeist::MonitorInfo],
-) -> Result<Point> {
-    if !point.x.is_finite() || !point.y.is_finite() {
-        bail!("logical_pixel pointer coordinates must be finite");
-    }
-    let monitor = monitor_for_global_logical_point(point.x, point.y, monitors)?;
-    logical_point_on_monitor_to_physical(point.x, point.y, monitor)
-}
-
-fn active_window_local_to_physical_point(
-    point: Point,
-    active_window_state: &ActiveWindowState,
-    monitors: &[libseatgeist::MonitorInfo],
-) -> Result<Point> {
-    if !point.x.is_finite() || !point.y.is_finite() {
-        bail!("window-local pointer coordinates must be finite");
-    }
-    let window = active_window_with_monitors(active_window_state, monitors)?.ok_or_else(|| {
-        anyhow::anyhow!("window_local pointer coordinates require an active window")
-    })?;
-    let geometry = window.geometry.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("active window has no geometry for window_local pointer coordinates")
-    })?;
-    if geometry.space != CoordinateSpace::LogicalPixel {
-        bail!(
-            "active window geometry must be logical_pixel for window_local pointer coordinates, got {:?}",
-            geometry.space
-        );
-    }
-    if geometry.width == 0 || geometry.height == 0 {
-        bail!("active window geometry has invalid size");
-    }
-    if point.x < 0.0
-        || point.y < 0.0
-        || point.x >= f64::from(geometry.width)
-        || point.y >= f64::from(geometry.height)
-    {
-        bail!(
-            "window_local pointer coordinate {},{} is outside active window {} {}x{}",
-            point.x,
-            point.y,
-            window.id,
-            geometry.width,
-            geometry.height
-        );
-    }
-    let monitor = monitor_for_window_point(&window, geometry, point, monitors)?;
-    let global_logical_x = f64::from(geometry.x) + point.x;
-    let global_logical_y = f64::from(geometry.y) + point.y;
-    logical_point_on_monitor_to_physical(global_logical_x, global_logical_y, monitor)
-}
-
-fn monitor_for_window_point<'a>(
-    window: &WindowInfo,
-    geometry: &WindowGeometry,
-    point: Point,
-    monitors: &'a [libseatgeist::MonitorInfo],
-) -> Result<&'a libseatgeist::MonitorInfo> {
-    if let Some(monitor_id) = window.monitor_id.as_deref()
-        && let Some(monitor) = monitors.iter().find(|monitor| monitor.id == monitor_id)
-    {
-        return Ok(monitor);
-    }
-
-    let global_x = f64::from(geometry.x) + point.x;
-    let global_y = f64::from(geometry.y) + point.y;
-    monitor_for_global_logical_point(global_x, global_y, monitors).map_err(|_| {
-        anyhow::anyhow!("window_local pointer coordinate does not map to a known monitor")
-    })
-}
-
-fn monitor_for_global_logical_point(
-    x: f64,
-    y: f64,
-    monitors: &[libseatgeist::MonitorInfo],
-) -> Result<&libseatgeist::MonitorInfo> {
-    monitors
-        .iter()
-        .find(|monitor| {
-            let left = f64::from(monitor.logical_origin_x);
-            let top = f64::from(monitor.logical_origin_y);
-            let right = left + f64::from(monitor.logical_width);
-            let bottom = top + f64::from(monitor.logical_height);
-            x >= left && x < right && y >= top && y < bottom
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!("logical_pixel pointer coordinate does not map to a known monitor")
-        })
-}
-
-fn logical_point_on_monitor_to_physical(
-    x: f64,
-    y: f64,
-    monitor: &libseatgeist::MonitorInfo,
-) -> Result<Point> {
-    if monitor.logical_width == 0 || monitor.logical_height == 0 {
-        bail!("monitor {} has invalid logical dimensions", monitor.id);
-    }
-    let physical_origin_x = scaled_physical_origin(monitor.logical_origin_x, monitor.scale_factor)?;
-    let physical_origin_y = scaled_physical_origin(monitor.logical_origin_y, monitor.scale_factor)?;
-    Ok(Point {
-        x: f64::from(physical_origin_x)
-            + (x - f64::from(monitor.logical_origin_x)) * monitor.scale_factor,
-        y: f64::from(physical_origin_y)
-            + (y - f64::from(monitor.logical_origin_y)) * monitor.scale_factor,
-        space: CoordinateSpace::PhysicalPixel,
-    })
-}
-
-fn physical_pointer_bounds_from_monitors(
-    monitors: &[libseatgeist::MonitorInfo],
-) -> Result<seatgeist_uinput::PointerBounds> {
-    if monitors.is_empty() {
-        bail!("no monitor metadata available for physical pointer bounds");
-    }
-
-    let mut min_x = i32::MAX;
-    let mut min_y = i32::MAX;
-    let mut max_x = i32::MIN;
-    let mut max_y = i32::MIN;
-    for monitor in monitors {
-        if monitor.physical_width < 2 || monitor.physical_height < 2 {
-            bail!("monitor {} has invalid physical dimensions", monitor.id);
-        }
-        let origin_x = scaled_physical_origin(monitor.logical_origin_x, monitor.scale_factor)?;
-        let origin_y = scaled_physical_origin(monitor.logical_origin_y, monitor.scale_factor)?;
-        let end_x = origin_x
-            .checked_add(i32::try_from(monitor.physical_width)?)
-            .ok_or_else(|| anyhow::anyhow!("monitor {} physical x range overflows", monitor.id))?;
-        let end_y = origin_y
-            .checked_add(i32::try_from(monitor.physical_height)?)
-            .ok_or_else(|| anyhow::anyhow!("monitor {} physical y range overflows", monitor.id))?;
-        min_x = min_x.min(origin_x);
-        min_y = min_y.min(origin_y);
-        max_x = max_x.max(end_x);
-        max_y = max_y.max(end_y);
-    }
-
-    let width = u32::try_from(max_x - min_x).context("physical pointer width is invalid")?;
-    let height = u32::try_from(max_y - min_y).context("physical pointer height is invalid")?;
-    if width < 2 || height < 2 {
-        bail!("physical pointer bounds must be at least 2x2 pixels");
-    }
-    Ok(seatgeist_uinput::PointerBounds {
-        min_x,
-        min_y,
-        width,
-        height,
-    })
-}
-
-fn scaled_physical_origin(origin: i32, scale_factor: f64) -> Result<i32> {
-    if !scale_factor.is_finite() || scale_factor <= 0.0 {
-        bail!("monitor scale factor must be finite and positive");
-    }
-    let scaled = f64::from(origin) * scale_factor;
-    if scaled < f64::from(i32::MIN) || scaled > f64::from(i32::MAX) {
-        bail!("scaled monitor origin overflows i32");
-    }
-    Ok(scaled.round() as i32)
-}
-
-fn validate_physical_pointer_point(
-    point: Point,
-    bounds: seatgeist_uinput::PointerBounds,
-) -> Result<()> {
-    if point.space != CoordinateSpace::PhysicalPixel {
-        bail!(
-            "resolved pointer actions require physical_pixel coordinate space, got {:?}",
-            point.space
-        );
-    }
-    if !point.x.is_finite() || !point.y.is_finite() {
-        bail!("pointer coordinates must be finite");
-    }
-    let max_x = f64::from(bounds.min_x) + f64::from(bounds.width - 1);
-    let max_y = f64::from(bounds.min_y) + f64::from(bounds.height - 1);
-    if point.x < f64::from(bounds.min_x)
-        || point.x > max_x
-        || point.y < f64::from(bounds.min_y)
-        || point.y > max_y
-    {
-        bail!(
-            "pointer coordinate {},{} is outside physical desktop bounds {},{} {}x{}",
-            point.x,
-            point.y,
-            bounds.min_x,
-            bounds.min_y,
-            bounds.width,
-            bounds.height
-        );
-    }
-    Ok(())
-}
-
-fn pointer_button_to_uinput(button: PointerButton) -> seatgeist_uinput::PointerButton {
-    match button {
-        PointerButton::Left => seatgeist_uinput::PointerButton::Left,
-        PointerButton::Middle => seatgeist_uinput::PointerButton::Middle,
-        PointerButton::Right => seatgeist_uinput::PointerButton::Right,
     }
 }
 
-fn click_button(request: ClickButtonRequest) -> Result<ActionResult> {
+async fn semantic_action_result(
+    message: String,
+    prepared: Option<semantic_settle::PreparedSemanticSettle>,
+) -> ActionResult {
+    ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: match prepared {
+            Some(prepared) => Some(semantic_settle::finish(prepared).await),
+            None => None,
+        },
+        screenshot: None,
+        message: Some(message),
+    }
+}
+
+async fn click_button(
+    request: ClickButtonRequest,
+    window_backend: &dyn WindowBackend,
+    app_policy: &AppPolicy,
+    post_action: Option<&PostActionOptions>,
+) -> Result<ActionResult> {
     let name = request.name.trim();
     if name.is_empty() {
         bail!("button name must be non-empty");
@@ -6531,7 +4142,7 @@ fn click_button(request: ClickButtonRequest) -> Result<ActionResult> {
         bail!("max_nodes must be greater than zero");
     }
 
-    let matches = accessibility_find(AccessibilityFindRequest {
+    let matches = accessibility_find_with_context(AccessibilityFindRequest {
         role: Some("button".to_string()),
         name_contains: Some(name.to_string()),
         app: request.app.clone(),
@@ -6540,22 +4151,41 @@ fn click_button(request: ClickButtonRequest) -> Result<ActionResult> {
         max_results: 5,
         max_nodes: request.max_nodes,
     })?;
-    let target = resolve_click_button_match(name, matches)?;
+    let target = resolve_click_button_match(
+        name,
+        matches
+            .iter()
+            .map(|candidate| candidate.node.clone())
+            .collect(),
+    )?;
+    let target = target::authorize_semantic_target(
+        target,
+        matches,
+        request.target_guard.as_ref(),
+        window_backend,
+        app_policy,
+    )
+    .await?;
+    let prepared = prepare_semantic_settle(&target, post_action).await;
     seatgeist_atspi::invoke(&target.id, libseatgeist::AccessibilityAction::Press)
         .map_err(|err| anyhow::anyhow!(err))?;
-    Ok(ActionResult {
-        id: Uuid::new_v4(),
-        ok: true,
-        observation: None,
-        message: Some(format!(
+    Ok(semantic_action_result(
+        format!(
             "clicked button name={} node={}",
             target.name.as_deref().unwrap_or(name),
             target.id
-        )),
-    })
+        ),
+        prepared,
+    )
+    .await)
 }
 
-fn set_text_field(request: SetTextFieldRequest) -> Result<ActionResult> {
+async fn set_text_field(
+    request: SetTextFieldRequest,
+    window_backend: &dyn WindowBackend,
+    app_policy: &AppPolicy,
+    post_action: Option<&PostActionOptions>,
+) -> Result<ActionResult> {
     let name = request.name.trim();
     if name.is_empty() {
         bail!("text field name must be non-empty");
@@ -6564,7 +4194,7 @@ fn set_text_field(request: SetTextFieldRequest) -> Result<ActionResult> {
         bail!("max_nodes must be greater than zero");
     }
 
-    let matches = accessibility_find(AccessibilityFindRequest {
+    let matches = accessibility_find_with_context(AccessibilityFindRequest {
         role: None,
         name_contains: Some(name.to_string()),
         app: request.app.clone(),
@@ -6573,22 +4203,41 @@ fn set_text_field(request: SetTextFieldRequest) -> Result<ActionResult> {
         max_results: 10,
         max_nodes: request.max_nodes,
     })?;
-    let target = resolve_text_field_match(name, matches)?;
+    let target = resolve_text_field_match(
+        name,
+        matches
+            .iter()
+            .map(|candidate| candidate.node.clone())
+            .collect(),
+    )?;
+    let target = target::authorize_semantic_target(
+        target,
+        matches,
+        request.target_guard.as_ref(),
+        window_backend,
+        app_policy,
+    )
+    .await?;
+    let prepared = prepare_semantic_settle(&target, post_action).await;
     seatgeist_atspi::set_text(&target.id, &request.text).map_err(|err| anyhow::anyhow!(err))?;
-    Ok(ActionResult {
-        id: Uuid::new_v4(),
-        ok: true,
-        observation: None,
-        message: Some(format!(
+    Ok(semantic_action_result(
+        format!(
             "set text field name={} length={} node={}",
             target.name.as_deref().unwrap_or(name),
             request.text.chars().count(),
             target.id
-        )),
-    })
+        ),
+        prepared,
+    )
+    .await)
 }
 
-fn focus_text_field(request: FocusTextFieldRequest) -> Result<ActionResult> {
+async fn focus_text_field(
+    request: FocusTextFieldRequest,
+    window_backend: &dyn WindowBackend,
+    app_policy: &AppPolicy,
+    post_action: Option<&PostActionOptions>,
+) -> Result<ActionResult> {
     let name = request.name.trim();
     if name.is_empty() {
         bail!("text field name must be non-empty");
@@ -6597,7 +4246,7 @@ fn focus_text_field(request: FocusTextFieldRequest) -> Result<ActionResult> {
         bail!("max_nodes must be greater than zero");
     }
 
-    let matches = accessibility_find(AccessibilityFindRequest {
+    let matches = accessibility_find_with_context(AccessibilityFindRequest {
         role: None,
         name_contains: Some(name.to_string()),
         app: request.app.clone(),
@@ -6606,22 +4255,41 @@ fn focus_text_field(request: FocusTextFieldRequest) -> Result<ActionResult> {
         max_results: 10,
         max_nodes: request.max_nodes,
     })?;
-    let target = resolve_focus_text_field_match(name, matches)?;
+    let target = resolve_focus_text_field_match(
+        name,
+        matches
+            .iter()
+            .map(|candidate| candidate.node.clone())
+            .collect(),
+    )?;
+    let target = target::authorize_semantic_target(
+        target,
+        matches,
+        request.target_guard.as_ref(),
+        window_backend,
+        app_policy,
+    )
+    .await?;
+    let prepared = prepare_semantic_settle(&target, post_action).await;
     seatgeist_atspi::invoke(&target.id, libseatgeist::AccessibilityAction::Focus)
         .map_err(|err| anyhow::anyhow!(err))?;
-    Ok(ActionResult {
-        id: Uuid::new_v4(),
-        ok: true,
-        observation: None,
-        message: Some(format!(
+    Ok(semantic_action_result(
+        format!(
             "focused text field name={} node={}",
             target.name.as_deref().unwrap_or(name),
             target.id
-        )),
-    })
+        ),
+        prepared,
+    )
+    .await)
 }
 
-fn activate_tab(request: ActivateTabRequest) -> Result<ActionResult> {
+async fn activate_tab(
+    request: ActivateTabRequest,
+    window_backend: &dyn WindowBackend,
+    app_policy: &AppPolicy,
+    post_action: Option<&PostActionOptions>,
+) -> Result<ActionResult> {
     let name = request.name.trim();
     if name.is_empty() {
         bail!("tab name must be non-empty");
@@ -6630,7 +4298,7 @@ fn activate_tab(request: ActivateTabRequest) -> Result<ActionResult> {
         bail!("max_nodes must be greater than zero");
     }
 
-    let matches = accessibility_find(AccessibilityFindRequest {
+    let matches = accessibility_find_with_context(AccessibilityFindRequest {
         role: None,
         name_contains: Some(name.to_string()),
         app: request.app.clone(),
@@ -6639,22 +4307,41 @@ fn activate_tab(request: ActivateTabRequest) -> Result<ActionResult> {
         max_results: 10,
         max_nodes: request.max_nodes,
     })?;
-    let (target, action) = resolve_tab_match(name, matches)?;
+    let (target, action) = resolve_tab_match(
+        name,
+        matches
+            .iter()
+            .map(|candidate| candidate.node.clone())
+            .collect(),
+    )?;
+    let target = target::authorize_semantic_target(
+        target,
+        matches,
+        request.target_guard.as_ref(),
+        window_backend,
+        app_policy,
+    )
+    .await?;
+    let prepared = prepare_semantic_settle(&target, post_action).await;
     seatgeist_atspi::invoke(&target.id, action.clone()).map_err(|err| anyhow::anyhow!(err))?;
-    Ok(ActionResult {
-        id: Uuid::new_v4(),
-        ok: true,
-        observation: None,
-        message: Some(format!(
+    Ok(semantic_action_result(
+        format!(
             "activated tab name={} action={} node={}",
             target.name.as_deref().unwrap_or(name),
             action.as_str(),
             target.id
-        )),
-    })
+        ),
+        prepared,
+    )
+    .await)
 }
 
-fn activate_link(request: ActivateLinkRequest) -> Result<ActionResult> {
+async fn activate_link(
+    request: ActivateLinkRequest,
+    window_backend: &dyn WindowBackend,
+    app_policy: &AppPolicy,
+    post_action: Option<&PostActionOptions>,
+) -> Result<ActionResult> {
     let name = request.name.trim();
     if name.is_empty() {
         bail!("link name must be non-empty");
@@ -6663,7 +4350,7 @@ fn activate_link(request: ActivateLinkRequest) -> Result<ActionResult> {
         bail!("max_nodes must be greater than zero");
     }
 
-    let matches = accessibility_find(AccessibilityFindRequest {
+    let matches = accessibility_find_with_context(AccessibilityFindRequest {
         role: Some("link".to_string()),
         name_contains: Some(name.to_string()),
         app: request.app.clone(),
@@ -6672,22 +4359,41 @@ fn activate_link(request: ActivateLinkRequest) -> Result<ActionResult> {
         max_results: 10,
         max_nodes: request.max_nodes,
     })?;
-    let (target, action) = resolve_link_match(name, matches)?;
+    let (target, action) = resolve_link_match(
+        name,
+        matches
+            .iter()
+            .map(|candidate| candidate.node.clone())
+            .collect(),
+    )?;
+    let target = target::authorize_semantic_target(
+        target,
+        matches,
+        request.target_guard.as_ref(),
+        window_backend,
+        app_policy,
+    )
+    .await?;
+    let prepared = prepare_semantic_settle(&target, post_action).await;
     seatgeist_atspi::invoke(&target.id, action.clone()).map_err(|err| anyhow::anyhow!(err))?;
-    Ok(ActionResult {
-        id: Uuid::new_v4(),
-        ok: true,
-        observation: None,
-        message: Some(format!(
+    Ok(semantic_action_result(
+        format!(
             "activated link name={} action={} node={}",
             target.name.as_deref().unwrap_or(name),
             action.as_str(),
             target.id
-        )),
-    })
+        ),
+        prepared,
+    )
+    .await)
 }
 
-fn toggle_check(request: ToggleCheckRequest) -> Result<ActionResult> {
+async fn toggle_check(
+    request: ToggleCheckRequest,
+    window_backend: &dyn WindowBackend,
+    app_policy: &AppPolicy,
+    post_action: Option<&PostActionOptions>,
+) -> Result<ActionResult> {
     let name = request.name.trim();
     if name.is_empty() {
         bail!("check name must be non-empty");
@@ -6696,7 +4402,7 @@ fn toggle_check(request: ToggleCheckRequest) -> Result<ActionResult> {
         bail!("max_nodes must be greater than zero");
     }
 
-    let matches = accessibility_find(AccessibilityFindRequest {
+    let matches = accessibility_find_with_context(AccessibilityFindRequest {
         role: None,
         name_contains: Some(name.to_string()),
         app: request.app.clone(),
@@ -6705,16 +4411,38 @@ fn toggle_check(request: ToggleCheckRequest) -> Result<ActionResult> {
         max_results: 10,
         max_nodes: request.max_nodes,
     })?;
-    let (target, action) = resolve_check_match(name, matches)?;
+    let (target, action) = resolve_check_match(
+        name,
+        matches
+            .iter()
+            .map(|candidate| candidate.node.clone())
+            .collect(),
+    )?;
+    let target = target::authorize_semantic_target(
+        target,
+        matches,
+        request.target_guard.as_ref(),
+        window_backend,
+        app_policy,
+    )
+    .await?;
     let was_checked = node_checked_state(&target);
     if request
         .checked
         .is_some_and(|desired| desired == was_checked)
     {
+        let observation = post_action
+            .filter(|options| options.observe_after)
+            .and_then(|options| {
+                target.window.clone().map(|window| {
+                    semantic_settle::unchanged_observation(window, target.node.clone(), options)
+                })
+            });
         return Ok(ActionResult {
             id: Uuid::new_v4(),
             ok: true,
-            observation: None,
+            observation,
+            screenshot: None,
             message: Some(format!(
                 "check state already name={} checked={} node={}",
                 target.name.as_deref().unwrap_or(name),
@@ -6724,12 +4452,10 @@ fn toggle_check(request: ToggleCheckRequest) -> Result<ActionResult> {
         });
     }
 
+    let prepared = prepare_semantic_settle(&target, post_action).await;
     seatgeist_atspi::invoke(&target.id, action.clone()).map_err(|err| anyhow::anyhow!(err))?;
-    Ok(ActionResult {
-        id: Uuid::new_v4(),
-        ok: true,
-        observation: None,
-        message: Some(format!(
+    Ok(semantic_action_result(
+        format!(
             "toggled check name={} action={} previous_checked={} requested_checked={} node={}",
             target.name.as_deref().unwrap_or(name),
             action.as_str(),
@@ -6739,11 +4465,18 @@ fn toggle_check(request: ToggleCheckRequest) -> Result<ActionResult> {
                 .map(|checked| checked.to_string())
                 .unwrap_or_else(|| "toggle".to_string()),
             target.id
-        )),
-    })
+        ),
+        prepared,
+    )
+    .await)
 }
 
-fn set_value(request: SetValueRequest) -> Result<ActionResult> {
+async fn set_value(
+    request: SetValueRequest,
+    window_backend: &dyn WindowBackend,
+    app_policy: &AppPolicy,
+    post_action: Option<&PostActionOptions>,
+) -> Result<ActionResult> {
     let name = request.name.trim();
     if name.is_empty() {
         bail!("value control name must be non-empty");
@@ -6755,7 +4488,7 @@ fn set_value(request: SetValueRequest) -> Result<ActionResult> {
         bail!("max_nodes must be greater than zero");
     }
 
-    let matches = accessibility_find(AccessibilityFindRequest {
+    let matches = accessibility_find_with_context(AccessibilityFindRequest {
         role: None,
         name_contains: Some(name.to_string()),
         app: request.app.clone(),
@@ -6764,24 +4497,43 @@ fn set_value(request: SetValueRequest) -> Result<ActionResult> {
         max_results: 10,
         max_nodes: request.max_nodes,
     })?;
-    let target = resolve_value_match(name, matches)?;
+    let target = resolve_value_match(
+        name,
+        matches
+            .iter()
+            .map(|candidate| candidate.node.clone())
+            .collect(),
+    )?;
+    let target = target::authorize_semantic_target(
+        target,
+        matches,
+        request.target_guard.as_ref(),
+        window_backend,
+        app_policy,
+    )
+    .await?;
+    let prepared = prepare_semantic_settle(&target, post_action).await;
     seatgeist_atspi::set_current_value(&target.id, request.value)
         .map_err(|err| anyhow::anyhow!(err))?;
-    Ok(ActionResult {
-        id: Uuid::new_v4(),
-        ok: true,
-        observation: None,
-        message: Some(format!(
+    Ok(semantic_action_result(
+        format!(
             "set value name={} value={} previous_value={} node={}",
             target.name.as_deref().unwrap_or(name),
             request.value,
             target.value.as_deref().unwrap_or("unknown"),
             target.id
-        )),
-    })
+        ),
+        prepared,
+    )
+    .await)
 }
 
-fn select_item(request: SelectItemRequest) -> Result<ActionResult> {
+async fn select_item(
+    request: SelectItemRequest,
+    window_backend: &dyn WindowBackend,
+    app_policy: &AppPolicy,
+    post_action: Option<&PostActionOptions>,
+) -> Result<ActionResult> {
     let name = request.name.trim();
     if name.is_empty() {
         bail!("item name must be non-empty");
@@ -6790,7 +4542,7 @@ fn select_item(request: SelectItemRequest) -> Result<ActionResult> {
         bail!("max_nodes must be greater than zero");
     }
 
-    let matches = accessibility_find(AccessibilityFindRequest {
+    let matches = accessibility_find_with_context(AccessibilityFindRequest {
         role: None,
         name_contains: Some(name.to_string()),
         app: request.app.clone(),
@@ -6799,22 +4551,41 @@ fn select_item(request: SelectItemRequest) -> Result<ActionResult> {
         max_results: 10,
         max_nodes: request.max_nodes,
     })?;
-    let (target, action) = resolve_select_item_match(name, matches)?;
+    let (target, action) = resolve_select_item_match(
+        name,
+        matches
+            .iter()
+            .map(|candidate| candidate.node.clone())
+            .collect(),
+    )?;
+    let target = target::authorize_semantic_target(
+        target,
+        matches,
+        request.target_guard.as_ref(),
+        window_backend,
+        app_policy,
+    )
+    .await?;
+    let prepared = prepare_semantic_settle(&target, post_action).await;
     seatgeist_atspi::invoke(&target.id, action.clone()).map_err(|err| anyhow::anyhow!(err))?;
-    Ok(ActionResult {
-        id: Uuid::new_v4(),
-        ok: true,
-        observation: None,
-        message: Some(format!(
+    Ok(semantic_action_result(
+        format!(
             "selected item name={} action={} node={}",
             target.name.as_deref().unwrap_or(name),
             action.as_str(),
             target.id
-        )),
-    })
+        ),
+        prepared,
+    )
+    .await)
 }
 
-fn select_menu(request: SelectMenuRequest) -> Result<ActionResult> {
+async fn select_menu(
+    request: SelectMenuRequest,
+    window_backend: &dyn WindowBackend,
+    app_policy: &AppPolicy,
+    post_action: Option<&PostActionOptions>,
+) -> Result<ActionResult> {
     let path = normalize_semantic_path(&request.path);
     if path.is_empty() {
         bail!("menu path must contain at least one non-empty segment");
@@ -6824,7 +4595,7 @@ fn select_menu(request: SelectMenuRequest) -> Result<ActionResult> {
     }
     let first = path[0].clone();
     let search_depth = path.len().saturating_add(2);
-    let matches = accessibility_find(AccessibilityFindRequest {
+    let matches = accessibility_find_with_context(AccessibilityFindRequest {
         role: None,
         name_contains: Some(first),
         app: request.app.clone(),
@@ -6833,19 +4604,33 @@ fn select_menu(request: SelectMenuRequest) -> Result<ActionResult> {
         max_results: 20,
         max_nodes: request.max_nodes,
     })?;
-    let (target, action) = resolve_menu_path_match(&path, matches)?;
+    let (target, action) = resolve_menu_path_match(
+        &path,
+        matches
+            .iter()
+            .map(|candidate| candidate.node.clone())
+            .collect(),
+    )?;
+    let target = target::authorize_semantic_target(
+        target,
+        matches,
+        request.target_guard.as_ref(),
+        window_backend,
+        app_policy,
+    )
+    .await?;
+    let prepared = prepare_semantic_settle(&target, post_action).await;
     seatgeist_atspi::invoke(&target.id, action.clone()).map_err(|err| anyhow::anyhow!(err))?;
-    Ok(ActionResult {
-        id: Uuid::new_v4(),
-        ok: true,
-        observation: None,
-        message: Some(format!(
+    Ok(semantic_action_result(
+        format!(
             "selected menu path={} action={} node={}",
             path.join("/"),
             action.as_str(),
             target.id
-        )),
-    })
+        ),
+        prepared,
+    )
+    .await)
 }
 
 fn resolve_click_button_match(
@@ -7527,205 +5312,6 @@ fn is_text_field_candidate(node: &libseatgeist::AccessibilityNode) -> bool {
             .contains(&libseatgeist::AccessibilityAction::SetText)
 }
 
-fn temporary_capture_path(output: &Path) -> PathBuf {
-    let file_name = output
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("screenshot.png");
-    let temp_name = format!(".seatgeist-full-{}-{file_name}", std::process::id());
-    output.with_file_name(temp_name)
-}
-
-fn write_preview_or_copy(
-    source: &Path,
-    output: &Path,
-    source_width: u32,
-    source_height: u32,
-    max_edge: u32,
-) -> Result<(u32, u32)> {
-    if max_edge == 0 {
-        bail!("max_edge must be greater than zero");
-    }
-
-    let largest_edge = source_width.max(source_height);
-    if largest_edge <= max_edge {
-        fs::copy(source, output)
-            .with_context(|| format!("copy screenshot preview to {}", output.display()))?;
-        return Ok((source_width, source_height));
-    }
-
-    let scale = f64::from(max_edge) / f64::from(largest_edge);
-    let output_width = scaled_dimension(source_width, scale);
-    let output_height = scaled_dimension(source_height, scale);
-    let image =
-        image::open(source).with_context(|| format!("open screenshot {}", source.display()))?;
-    let resized = image.resize(output_width, output_height, FilterType::Lanczos3);
-    resized
-        .save(output)
-        .with_context(|| format!("write screenshot preview {}", output.display()))?;
-    Ok((output_width, output_height))
-}
-
-fn write_tile_preview(
-    source: &Path,
-    request: &ScreenshotTileRequest,
-    max_edge: u32,
-) -> Result<(u32, u32)> {
-    if max_edge == 0 {
-        bail!("max_edge must be greater than zero");
-    }
-
-    let image =
-        image::open(source).with_context(|| format!("open screenshot {}", source.display()))?;
-    let cropped = image.crop_imm(request.x, request.y, request.width, request.height);
-    let largest_edge = request.width.max(request.height);
-    let output_image = if largest_edge > max_edge {
-        let scale = f64::from(max_edge) / f64::from(largest_edge);
-        let output_width = scaled_dimension(request.width, scale);
-        let output_height = scaled_dimension(request.height, scale);
-        cropped.resize(output_width, output_height, FilterType::Lanczos3)
-    } else {
-        cropped
-    };
-
-    let (output_width, output_height) = output_image.dimensions();
-    output_image
-        .save(&request.output)
-        .with_context(|| format!("write screenshot tile {}", request.output.display()))?;
-    Ok((output_width, output_height))
-}
-
-fn apply_screenshot_redactions(info: &ScreenshotInfo, redactions: &[RedactRegion]) -> Result<()> {
-    if redactions.is_empty() {
-        return Ok(());
-    }
-
-    let mut image = image::open(&info.path)
-        .with_context(|| format!("open screenshot for redaction {}", info.path.display()))?
-        .to_rgba8();
-    let (width, height) = image.dimensions();
-    let mut changed = false;
-    for redaction in redactions {
-        let Some(rect) = output_redaction_rect(redaction, &info.transform, width, height) else {
-            continue;
-        };
-        changed = true;
-        for y in rect.y..rect.y + rect.height {
-            for x in rect.x..rect.x + rect.width {
-                image.put_pixel(x, y, Rgba([0, 0, 0, 255]));
-            }
-        }
-    }
-
-    if changed {
-        image
-            .save(&info.path)
-            .with_context(|| format!("write redacted screenshot {}", info.path.display()))?;
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct OutputRedactionRect {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-}
-
-fn output_redaction_rect(
-    redaction: &RedactRegion,
-    transform: &ScreenshotTransform,
-    output_width: u32,
-    output_height: u32,
-) -> Option<OutputRedactionRect> {
-    if transform.scale_x <= 0.0 || transform.scale_y <= 0.0 {
-        return None;
-    }
-
-    let source_left = f64::from(transform.source_origin_x);
-    let source_top = f64::from(transform.source_origin_y);
-    let source_right = source_left + f64::from(output_width) / transform.scale_x;
-    let source_bottom = source_top + f64::from(output_height) / transform.scale_y;
-
-    let redact_left = f64::from(redaction.x);
-    let redact_top = f64::from(redaction.y);
-    let redact_right = redact_left + f64::from(redaction.width);
-    let redact_bottom = redact_top + f64::from(redaction.height);
-
-    let left = redact_left.max(source_left);
-    let top = redact_top.max(source_top);
-    let right = redact_right.min(source_right);
-    let bottom = redact_bottom.min(source_bottom);
-    if right <= left || bottom <= top {
-        return None;
-    }
-
-    let output_left = ((left - source_left) * transform.scale_x)
-        .floor()
-        .clamp(0.0, f64::from(output_width)) as u32;
-    let output_top = ((top - source_top) * transform.scale_y)
-        .floor()
-        .clamp(0.0, f64::from(output_height)) as u32;
-    let output_right = ((right - source_left) * transform.scale_x)
-        .ceil()
-        .clamp(0.0, f64::from(output_width)) as u32;
-    let output_bottom = ((bottom - source_top) * transform.scale_y)
-        .ceil()
-        .clamp(0.0, f64::from(output_height)) as u32;
-    if output_right <= output_left || output_bottom <= output_top {
-        return None;
-    }
-
-    Some(OutputRedactionRect {
-        x: output_left,
-        y: output_top,
-        width: output_right - output_left,
-        height: output_bottom - output_top,
-    })
-}
-
-fn scaled_dimension(value: u32, scale: f64) -> u32 {
-    (f64::from(value) * scale).round().max(1.0) as u32
-}
-
-fn validate_tile_request(request: &ScreenshotTileRequest) -> Result<()> {
-    if request.width == 0 || request.height == 0 {
-        bail!("tile width and height must be greater than zero");
-    }
-    if request.max_edge == Some(0) {
-        bail!("max_edge must be greater than zero");
-    }
-    Ok(())
-}
-
-fn validate_tile_bounds(
-    request: &ScreenshotTileRequest,
-    source_width: u32,
-    source_height: u32,
-) -> Result<()> {
-    let Some(end_x) = request.x.checked_add(request.width) else {
-        bail!("tile x + width overflows u32");
-    };
-    let Some(end_y) = request.y.checked_add(request.height) else {
-        bail!("tile y + height overflows u32");
-    };
-
-    if end_x > source_width || end_y > source_height {
-        bail!(
-            "tile {}x{} at {},{} is outside source screenshot {}x{}",
-            request.width,
-            request.height,
-            request.x,
-            request.y,
-            source_width,
-            source_height
-        );
-    }
-
-    Ok(())
-}
-
 fn format_error_chain(err: &Error) -> String {
     err.chain()
         .map(std::string::ToString::to_string)
@@ -7761,20 +5347,38 @@ fn policy_error_kind(err: &Error) -> ErrorKind {
 
 fn classify_error_message(message: &str) -> ErrorKind {
     let lower = message.to_ascii_lowercase();
-    if lower.starts_with("policy prompt required") {
-        ErrorKind::PolicyPromptRequired
-    } else if lower.starts_with("policy denied") {
-        ErrorKind::PolicyDenied
-    } else if lower.contains("app policy") {
+    if lower.contains("app policy") {
         ErrorKind::AppDenied
+    } else if lower.contains("policy prompt required") {
+        ErrorKind::PolicyPromptRequired
+    } else if lower.contains("policy denied") {
+        ErrorKind::PolicyDenied
+    } else if lower.contains("target-window guard") || lower.contains("target-window correlation") {
+        ErrorKind::TargetMismatch
+    } else if lower.contains("session owner mismatch")
+        || lower.contains("capture session owner requires")
+        || lower.contains("active capture session has no owner")
+    {
+        ErrorKind::SessionOwnerMismatch
+    } else if lower.contains("interaction target lost") {
+        ErrorKind::TargetLost
+    } else if lower.contains("focus lease conflict") {
+        ErrorKind::FocusLeaseConflict
     } else if lower.contains("active-window guard") || lower.contains("focus guard") {
         ErrorKind::FocusGuard
-    } else if lower.contains("human input activity signal is fresh") {
+    } else if lower.contains("human input activity") {
         ErrorKind::HumanInputPause
     } else if lower.contains("panic-stop is active") {
         ErrorKind::PanicStop
     } else if lower.contains("rate limit") || lower.contains("rate-limited") {
         ErrorKind::RateLimited
+    } else if (lower.contains("portal") || lower.contains("screencast consent"))
+        && (lower.contains("cancelled")
+            || lower.contains("canceled")
+            || lower.contains("consent was cancelled")
+            || lower.contains("consent was denied"))
+    {
+        ErrorKind::ConsentCancelled
     } else if lower.contains("xdg-desktop-portal remotedesktop is not available")
         || lower.contains("portal remotedesktop is not available")
         || lower.contains("portal screenshot target")
@@ -7881,10 +5485,15 @@ fn summarize_response(response: &DaemonResponse) -> String {
         }
         DaemonResponse::PolicyStatus(_) => "policy status".to_string(),
         DaemonResponse::SafetyStatus(status) => format!(
-            "safety focus_guard={} human_pause={} human_fresh={} control_rate_limit_per_minute={} preview_max_edge={} tile_max_edge={} redactions={} journal_artifacts={}",
+            "safety focus_guard={} human_pause={} human_fresh={} activity_backend={} activity_trusted={} control_rate_limit_per_minute={} preview_max_edge={} tile_max_edge={} redactions={} journal_artifacts={}",
             status.require_focus_guard,
             status.pause_on_human_input,
             status.human_input_signal_fresh,
+            status
+                .human_input_activity_backend
+                .as_deref()
+                .unwrap_or("none"),
+            status.human_input_activity_trusted,
             status
                 .control_rate_limit_per_minute
                 .map(|limit| limit.to_string())
@@ -7902,15 +5511,16 @@ fn summarize_response(response: &DaemonResponse) -> String {
             status.xdg_runtime_dir_present
         ),
         DaemonResponse::ComputerUseReadiness(status) => format!(
-            "computer_use_readiness observe={} screenshot={} window_control={} keyboard={} pointer={} semantic={} clipboard_read={} clipboard_write={} focus_guard={} panic_stop={} issues={} capture_backend={} input_backend={} a11y={}",
-            status.ready_for_observe,
-            status.ready_for_screenshot,
-            status.ready_for_window_control,
-            status.ready_for_keyboard_input,
-            status.ready_for_pointer_input,
-            status.ready_for_semantic_actions,
-            status.ready_for_clipboard_read,
-            status.ready_for_clipboard_write,
+            "computer_use_readiness observe={} screenshot={} window_control={} keyboard={} pointer={} semantic={} clipboard_read={} clipboard_write={} desktop_revision={} focus_guard={} panic_stop={} issues={} capture_backend={} input_backend={} a11y={}",
+            status.observe_state.as_str(),
+            status.screenshot_state.as_str(),
+            status.window_control_state.as_str(),
+            status.keyboard_input_state.as_str(),
+            status.pointer_input_state.as_str(),
+            status.semantic_action_state.as_str(),
+            status.clipboard_read_state.as_str(),
+            status.clipboard_write_state.as_str(),
+            status.desktop_revision.as_deref().unwrap_or("none"),
             status.focus_guard_required,
             status.panic_stop_enabled,
             status.issues.len(),
@@ -8045,6 +5655,53 @@ fn summarize_response(response: &DaemonResponse) -> String {
             status.kwin_metadata.support_information_available,
             status.spectacle.command_available
         ),
+        DaemonResponse::CaptureSessionStatus(status) => format!(
+            "capture_session active={} opening={} id={} backend={} source={} occlusion_possible={} requested_source={} requested_id={} owner_tool={} owner_scope={} owner_pid={} restore_ref={} revision={} sticky_target={} target_window={} expires_ms={} end_reason={}",
+            status.active,
+            status.opening,
+            status.session_id.as_deref().unwrap_or("none"),
+            status.backend.as_deref().unwrap_or("none"),
+            status.source_type.as_deref().unwrap_or("none"),
+            status.occlusion_possible,
+            status.requested_source_type.as_deref().unwrap_or("none"),
+            status.requested_source_id.as_deref().unwrap_or("none"),
+            status.owner_tool.as_deref().unwrap_or("none"),
+            status.owner_scope.as_deref().unwrap_or("none"),
+            status
+                .owner_pid
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            status.restore_token_reference.as_deref().unwrap_or("none"),
+            status.latest_revision.as_deref().unwrap_or("none"),
+            status.sticky_target_bound,
+            status.target_window_id.as_deref().unwrap_or("none"),
+            status
+                .target_expires_in_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            status.last_end_reason.as_deref().unwrap_or("none")
+        ),
+        DaemonResponse::CaptureFrame(frame) => format!(
+            "capture frame session={} revision={} sequence={} output={}x{} backend={} occlusion_possible={}",
+            frame.session_id,
+            frame.revision,
+            frame.sequence,
+            frame.screenshot.output_width,
+            frame.screenshot.output_height,
+            frame.screenshot.backend,
+            frame.screenshot.occlusion_possible
+        ),
+        DaemonResponse::CaptureWait(result) => format!(
+            "capture wait session={} changed={} timed_out={} elapsed_ms={} revision={} sequence={} backend={} occlusion_possible={}",
+            result.frame.session_id,
+            result.changed,
+            result.timed_out,
+            result.elapsed_ms,
+            result.frame.revision,
+            result.frame.sequence,
+            result.frame.screenshot.backend,
+            result.frame.screenshot.occlusion_possible
+        ),
         DaemonResponse::PointerCalibration(status) => format!(
             "pointer calibration bounds={},{} {}x{} monitors={} coordinate_space={:?}",
             status.bounds.min_x,
@@ -8070,17 +5727,36 @@ fn summarize_response(response: &DaemonResponse) -> String {
             )
         }
         DaemonResponse::ActiveWindow(None) => "no active window".to_string(),
+        DaemonResponse::WindowInventory(inventory) => format!(
+            "window inventory revision={} windows={} active={}",
+            inventory.revision,
+            inventory.windows.len(),
+            inventory
+                .active_window
+                .as_ref()
+                .map(|window| window.id.as_str())
+                .unwrap_or("none")
+        ),
+        DaemonResponse::WindowInventoryWait(result) => format!(
+            "window inventory wait changed={} timed_out={} elapsed_ms={} revision={} windows={}",
+            result.changed,
+            result.timed_out,
+            result.elapsed_ms,
+            result.inventory.revision,
+            result.inventory.windows.len()
+        ),
         DaemonResponse::Screenshot(info) => format!(
-            "screenshot {}x{} from {}x{} backend={} path={}",
+            "screenshot {}x{} from {}x{} backend={} occlusion_possible={} path={}",
             info.output_width,
             info.output_height,
             info.source_width,
             info.source_height,
             info.backend,
+            info.occlusion_possible,
             info.path.display()
         ),
         DaemonResponse::WaitForChange(result) => format!(
-            "wait_for_change changed={} timed_out={} captures={} elapsed_ms={} timeout_ms={} interval_ms={} score={:.6} threshold={:.6} backend={} path={}",
+            "wait_for_change changed={} timed_out={} captures={} elapsed_ms={} timeout_ms={} interval_ms={} score={:.6} threshold={:.6} backend={} occlusion_possible={} path={}",
             result.changed,
             result.timed_out,
             result.captures,
@@ -8090,6 +5766,7 @@ fn summarize_response(response: &DaemonResponse) -> String {
             result.score,
             result.threshold,
             result.screenshot.backend,
+            result.screenshot.occlusion_possible,
             result.screenshot.path.display()
         ),
         DaemonResponse::ClipboardBackendStatus(status) => format!(
@@ -8138,13 +5815,42 @@ fn summarize_response(response: &DaemonResponse) -> String {
             attributes.node_id
         ),
         DaemonResponse::Journal(entries) => format!("{} journal entries", entries.len()),
-        DaemonResponse::Action(result) => result
-            .message
-            .clone()
-            .unwrap_or_else(|| format!("action {}", result.id)),
+        DaemonResponse::Action(result) => {
+            let message = result
+                .message
+                .clone()
+                .unwrap_or_else(|| format!("action {}", result.id));
+            match result
+                .observation
+                .as_ref()
+                .and_then(|observation| observation.settle.as_ref())
+            {
+                Some(settle) => format!(
+                    "{message} settle={:?} backend={:?} target_scoped={} event={} settled={} timed_out={} samples={} elapsed_ms={}",
+                    settle.condition,
+                    settle.backend,
+                    settle.target_scoped,
+                    settle.event.as_deref().unwrap_or("none"),
+                    settle.settled,
+                    settle.timed_out,
+                    settle.samples,
+                    settle.elapsed_ms
+                ),
+                None => message,
+            }
+        }
         DaemonResponse::Error { kind, message } => {
             format!("error kind={kind:?}: {message}")
         }
+    }
+}
+
+fn journal_response_summary(response: &DaemonResponse, settings: &JournalSettings) -> String {
+    match response {
+        DaemonResponse::Error { kind, .. } if !settings.include_error_details => {
+            format!("error kind={}", kind.as_str())
+        }
+        _ => summarize_response(response),
     }
 }
 
@@ -8153,65 +5859,6 @@ fn unix_time_ms() -> Result<u64> {
         .duration_since(UNIX_EPOCH)
         .context("system time is before Unix epoch")?;
     Ok(duration.as_millis().try_into().unwrap_or(u64::MAX))
-}
-
-fn prepare_screenshot_output(output: &Path) -> Result<()> {
-    if output.extension().and_then(|ext| ext.to_str()) != Some("png") {
-        bail!(
-            "screenshot output must be a .png path: {}",
-            output.display()
-        );
-    }
-
-    if let Ok(metadata) = fs::symlink_metadata(output) {
-        if metadata.file_type().is_symlink() {
-            bail!(
-                "refusing to write screenshot through symlink {}",
-                output.display()
-            );
-        }
-        if metadata.is_dir() {
-            bail!("screenshot output is a directory: {}", output.display());
-        }
-    }
-
-    let parent = output
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("screenshot output has no parent: {}", output.display()))?;
-    if !parent.as_os_str().is_empty() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create screenshot output dir {}", parent.display()))?;
-    }
-    Ok(())
-}
-
-fn read_png_dimensions(path: &Path) -> Result<(u32, u32)> {
-    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    if bytes.len() < 24 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
-        bail!("screenshot is not a valid PNG: {}", path.display());
-    }
-
-    let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
-    let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
-    Ok((width, height))
-}
-
-fn read_png_dimensions_with_retry(path: &Path) -> Result<(u32, u32)> {
-    let mut last_error = None;
-    for _ in 0..10 {
-        match read_png_dimensions(path) {
-            Ok(dimensions) => return Ok(dimensions),
-            Err(err) => {
-                last_error = Some(err);
-                thread::sleep(Duration::from_millis(50));
-            }
-        }
-    }
-
-    match last_error {
-        Some(err) => Err(err),
-        None => bail!("could not read screenshot dimensions"),
-    }
 }
 
 fn prepare_socket_path(socket: &Path) -> Result<()> {
@@ -8324,7 +5971,7 @@ fn compact_client_tool_name(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::fd::RawFd;
+    use std::{collections::VecDeque, os::fd::RawFd};
 
     #[derive(Default)]
     struct MockEisSource {
@@ -8644,11 +6291,7 @@ mod tests {
 
     #[test]
     fn journal_appends_and_tails_entries() {
-        let path = std::env::temp_dir().join(format!(
-            "seatgeist-journal-test-{}-{}.jsonl",
-            std::process::id(),
-            unix_time_ms().expect("time is available")
-        ));
+        let path = temp_test_path("journal-test").with_extension("jsonl");
         let journal = ActionJournal::new(path.clone(), JournalSettings::default());
 
         journal
@@ -8711,6 +6354,8 @@ mod tests {
                     id: Uuid::nil(),
                     ok: true,
                     observation: None,
+
+                    screenshot: None,
                     message: Some("focused window".to_string()),
                 })),
             )
@@ -8785,12 +6430,69 @@ mod tests {
     }
 
     #[test]
+    fn journal_redacts_error_details_unless_privately_enabled() {
+        let response = DaemonResponse::Error {
+            kind: ErrorKind::TargetMismatch,
+            message: "target Secret Project window uuid-123 disappeared".to_string(),
+        };
+        let context = || JournalContext {
+            client: None,
+            safety_class: SafetyClass::ControlSemantic,
+            guard_present: true,
+            active_window_before: None,
+            active_window_after: None,
+            control: None,
+        };
+
+        let private_default = temp_test_path("journal-redacted").with_extension("jsonl");
+        ActionJournal::new(private_default.clone(), JournalSettings::default())
+            .record("click_button", context(), &response)
+            .expect("redacted error journals");
+        let entry = tail_journal_entries(&private_default, 1, None, None)
+            .expect("redacted journal reads")
+            .pop()
+            .expect("redacted entry exists");
+        assert_eq!(entry.summary, "error kind=target_mismatch");
+        assert!(!entry.summary.contains("Secret Project"));
+
+        let diagnostic = temp_test_path("journal-diagnostic").with_extension("jsonl");
+        ActionJournal::new(
+            diagnostic.clone(),
+            JournalSettings {
+                include_artifact_metadata: false,
+                include_error_details: true,
+            },
+        )
+        .record("click_button", context(), &response)
+        .expect("diagnostic error journals");
+        let entry = tail_journal_entries(&diagnostic, 1, None, None)
+            .expect("diagnostic journal reads")
+            .pop()
+            .expect("diagnostic entry exists");
+        assert!(entry.summary.contains("Secret Project"));
+        fs::remove_file(private_default).ok();
+        fs::remove_file(diagnostic).ok();
+    }
+
+    #[test]
+    fn actionable_readiness_prioritizes_policy_then_guard() {
+        assert_eq!(
+            action_readiness(true, false, &ToolApprovalLevel::Prompt, true),
+            ActionReadiness::NeedsApproval
+        );
+        assert_eq!(
+            action_readiness(true, false, &ToolApprovalLevel::Allow, true),
+            ActionReadiness::NeedsGuard
+        );
+        assert_eq!(
+            action_readiness(false, false, &ToolApprovalLevel::Allow, false),
+            ActionReadiness::Unavailable
+        );
+    }
+
+    #[test]
     fn journal_artifact_metadata_is_opt_in_and_hashes_written_files() {
-        let path = std::env::temp_dir().join(format!(
-            "seatgeist-journal-artifact-test-{}-{}.jsonl",
-            std::process::id(),
-            unix_time_ms().expect("time is available")
-        ));
+        let path = temp_test_path("journal-artifact-test").with_extension("jsonl");
         let artifact_path = temp_test_path("journal-artifact").with_extension("png");
         fs::write(&artifact_path, b"abc").expect("artifact fixture is written");
         let mut screenshot = sample_screenshot_info("test");
@@ -8820,6 +6522,7 @@ mod tests {
             path.clone(),
             JournalSettings {
                 include_artifact_metadata: true,
+                include_error_details: false,
             },
         );
         enabled
@@ -8848,6 +6551,24 @@ mod tests {
             artifact.sha256.as_deref(),
             Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
         );
+
+        let mut action_screenshot = sample_screenshot_info("test");
+        action_screenshot.path = artifact_path.clone();
+        let action_artifacts = journal_artifacts_for_response(
+            &DaemonResponse::Action(Box::new(ActionResult {
+                id: Uuid::nil(),
+                ok: true,
+                observation: None,
+                screenshot: Some(action_screenshot),
+                message: None,
+            })),
+            &JournalSettings {
+                include_artifact_metadata: true,
+                include_error_details: false,
+            },
+        );
+        assert_eq!(action_artifacts.len(), 1);
+        assert_eq!(action_artifacts[0].kind, "post_action_screenshot");
 
         fs::remove_file(&path).ok();
         fs::remove_file(&artifact_path).ok();
@@ -8879,13 +6600,14 @@ mod tests {
 
     #[test]
     fn parse_daemon_request_line_accepts_legacy_and_enveloped_requests() {
-        let (legacy, legacy_client) =
+        let (legacy, legacy_client, legacy_options) =
             parse_daemon_request_line(r#"{"method":"health"}"#).expect("legacy request parses");
         assert_eq!(legacy, DaemonRequest::Health);
         assert_eq!(legacy_client, None);
+        assert_eq!(legacy_options, None);
 
-        let (enveloped, client) = parse_daemon_request_line(
-            r#"{"request":{"method":"health"},"client":{"tool":"seatgeist-mcp"}}"#,
+        let (enveloped, client, response_options) = parse_daemon_request_line(
+            r#"{"request":{"method":"health"},"client":{"tool":"seatgeist-mcp"},"response_options":{"post_action":{"observe_after":true,"settle_condition":"stable","settle_timeout_ms":1000,"settle_interval_ms":100}}}"#,
         )
         .expect("enveloped request parses");
         assert_eq!(enveloped, DaemonRequest::Health);
@@ -8893,6 +6615,69 @@ mod tests {
             client.and_then(|client| client.tool),
             Some("seatgeist-mcp".to_string())
         );
+        assert_eq!(
+            response_options
+                .and_then(|options| options.post_action)
+                .map(|options| options.settle_condition),
+            Some(ActionSettleCondition::Stable)
+        );
+    }
+
+    #[test]
+    fn post_action_conditions_distinguish_stability_and_change() {
+        let observation = |id: &str| Observation {
+            active_window: Some(WindowInfo {
+                id: id.to_string(),
+                app_id: Some("org.example.App".to_string()),
+                title: "Window".to_string(),
+                pid: Some(42),
+                monitor_id: None,
+                geometry: None,
+            }),
+            target_window: None,
+            windows: Vec::new(),
+            monitors: Vec::new(),
+            focused_accessibility: None,
+            target_accessibility: None,
+            screenshot_path: None,
+            revision: Some(id.to_string()),
+            issues: Vec::new(),
+            settle: None,
+        };
+        let before = observation("window-a");
+        let same = observation("window-a");
+        let changed = observation("window-b");
+
+        assert!(post_action_condition_met(
+            ActionSettleCondition::None,
+            Some(&before),
+            None,
+            &same
+        ));
+        assert!(post_action_condition_met(
+            ActionSettleCondition::Stable,
+            Some(&before),
+            Some(&before),
+            &same
+        ));
+        assert!(post_action_condition_met(
+            ActionSettleCondition::ActiveWindowChange,
+            Some(&before),
+            None,
+            &changed
+        ));
+        assert!(post_action_condition_met(
+            ActionSettleCondition::AnyChange,
+            Some(&before),
+            None,
+            &changed
+        ));
+        assert!(!post_action_condition_met(
+            ActionSettleCondition::AnyChange,
+            Some(&before),
+            None,
+            &same
+        ));
     }
 
     #[test]
@@ -8921,10 +6706,12 @@ mod tests {
         let request = DaemonRequest::TypeText(TypeTextRequest {
             text: "secret text".to_string(),
             guard: Some(ActiveWindowGuard {
+                desktop_revision: None,
                 expected_window_id: None,
                 expected_app_id: Some("org.kde.kate".to_string()),
                 title_contains: None,
             }),
+            session_id: None,
         });
         let context = journal_control_context_for_request(
             &request,
@@ -8949,6 +6736,218 @@ mod tests {
     }
 
     #[test]
+    fn internal_focus_lease_steps_are_correlated_and_title_free() {
+        let path = temp_test_path("sticky-focus-journal");
+        let journal = ActionJournal::new(
+            path.clone(),
+            JournalSettings {
+                include_artifact_metadata: false,
+                include_error_details: false,
+            },
+        );
+        let lease_id = Uuid::new_v4();
+        let window = WindowInfo {
+            id: "firefox-window-1".to_string(),
+            app_id: Some("org.mozilla.firefox".to_string()),
+            title: "Private browsing title".to_string(),
+            pid: Some(4242),
+            monitor_id: None,
+            geometry: None,
+        };
+        journal
+            .record_focus_lease_step(
+                "interaction_focus",
+                "capture-1",
+                lease_id,
+                &window,
+                "kwin",
+                true,
+            )
+            .expect("internal focus step journals");
+        let entries = journal
+            .tail_filtered(4, Some("interaction_focus"), Some(true))
+            .expect("internal focus entry reads");
+
+        assert_eq!(entries.len(), 1);
+        let control = entries[0]
+            .control
+            .as_ref()
+            .expect("control metadata exists");
+        assert_eq!(control.action_id, Some(lease_id));
+        assert_eq!(control.backend.as_deref(), Some("kwin"));
+        let encoded = serde_json::to_string(&entries).expect("journal serializes");
+        assert!(encoded.contains("capture-1"));
+        assert!(encoded.contains("firefox-window-1"));
+        assert!(!encoded.contains("Private browsing title"));
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn internal_post_action_capture_steps_share_the_parent_action_id() {
+        let path = temp_test_path("post-action-capture-journal");
+        let journal = ActionJournal::new(path.clone(), JournalSettings::default());
+        let action_id = Uuid::new_v4();
+        journal
+            .record_post_action_capture_step(
+                "interaction_post_action_capture_start",
+                "capture-1",
+                action_id,
+                Some("window-1"),
+                true,
+            )
+            .expect("post-action capture step journals");
+        let entries = journal
+            .tail_filtered(2, Some("interaction_post_action_capture_start"), Some(true))
+            .expect("post-action capture entry reads");
+        assert_eq!(entries.len(), 1);
+        let control = entries[0].control.as_ref().expect("control context");
+        assert_eq!(control.action_id, Some(action_id));
+        assert_eq!(
+            control.backend.as_deref(),
+            Some("portal_screencast_pipewire")
+        );
+        let target = control.requested_target.as_ref().expect("target context");
+        assert_eq!(
+            target.fields.get("session_id"),
+            Some(&"capture-1".to_string())
+        );
+        assert_eq!(
+            target.fields.get("window_id"),
+            Some(&"window-1".to_string())
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn retained_capture_journal_target_omits_output_paths_and_revisions() {
+        let request = DaemonRequest::CaptureWait(libseatgeist::CaptureWaitRequest {
+            session_id: "capture-1".to_string(),
+            after_revision: Some("private-revision".to_string()),
+            output: PathBuf::from("/tmp/private-window-name.png"),
+            max_edge: Some(800),
+            timeout_ms: 5_000,
+        });
+        let target = journal_requested_target_for_request(&request)
+            .expect("capture wait has compact journal target metadata");
+
+        assert_eq!(target.kind, "capture_wait");
+        assert_eq!(
+            target.fields.get("session_id").map(String::as_str),
+            Some("capture-1")
+        );
+        assert_eq!(
+            target
+                .fields
+                .get("after_revision_present")
+                .map(String::as_str),
+            Some("true")
+        );
+        let encoded = serde_json::to_string(&target).expect("target serializes");
+        assert!(!encoded.contains("private-revision"));
+        assert!(!encoded.contains("private-window-name"));
+
+        let monitor = DaemonRequest::CaptureOpen(CaptureOpenRequest {
+            source: CaptureSourceKind::Monitor,
+            requested_source_id: Some("DP-1".to_string()),
+            parent_window: "wayland:private-parent".to_string(),
+            timeout_ms: 30_000,
+        });
+        let target = journal_requested_target_for_request(&monitor)
+            .expect("generic capture open has compact target metadata");
+        assert_eq!(
+            target.fields.get("source_type").map(String::as_str),
+            Some("Monitor")
+        );
+        assert_eq!(
+            target.fields.get("requested_source_id").map(String::as_str),
+            Some("DP-1")
+        );
+        let encoded = serde_json::to_string(&target).expect("target serializes");
+        assert!(!encoded.contains("private-parent"));
+    }
+
+    #[test]
+    fn semantic_target_guard_journal_omits_title_text() {
+        let request = DaemonRequest::ClickButton(ClickButtonRequest {
+            name: "Continue".to_string(),
+            destructive: false,
+            app: Some("Firefox".to_string()),
+            window_name_contains: Some("Meeting".to_string()),
+            max_nodes: 128,
+            guard: None,
+            target_guard: Some(libseatgeist::TargetWindowGuard {
+                expected_window_id: "kwin-firefox-1".to_string(),
+                expected_app_id: Some("org.mozilla.firefox".to_string()),
+                expected_pid: Some(4242),
+                title_contains: Some("private meeting title".to_string()),
+            }),
+        });
+        let target = journal_requested_target_for_request(&request)
+            .expect("semantic action has compact target metadata");
+
+        assert_eq!(
+            target.fields.get("target_window_id").map(String::as_str),
+            Some("kwin-firefox-1")
+        );
+        assert_eq!(
+            target.fields.get("target_app_id").map(String::as_str),
+            Some("org.mozilla.firefox")
+        );
+        assert_eq!(
+            target.fields.get("target_pid").map(String::as_str),
+            Some("4242")
+        );
+        assert_eq!(
+            target
+                .fields
+                .get("target_title_guard_present")
+                .map(String::as_str),
+            Some("true")
+        );
+        let encoded = serde_json::to_string(&target).expect("target serializes");
+        assert!(!encoded.contains("private meeting title"));
+        assert!(!encoded.contains("Continue"));
+        assert!(!encoded.contains("Meeting"));
+    }
+
+    #[test]
+    fn retained_capture_lifecycle_uses_policy_engine_and_bounded_safety_classes() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let open = DaemonRequest::WindowCaptureOpen(libseatgeist::WindowCaptureOpenRequest {
+            requested_window_id: Some("kwin-window-7".to_string()),
+            parent_window: String::new(),
+            timeout_ms: 30_000,
+        });
+        assert_eq!(safety_class_for_request(&open), SafetyClass::Observe);
+        enforce_policy(&policy, &open).expect("capture open passes observe policy");
+
+        let monitor = DaemonRequest::CaptureOpen(CaptureOpenRequest {
+            source: CaptureSourceKind::Monitor,
+            requested_source_id: Some("DP-1".to_string()),
+            parent_window: String::new(),
+            timeout_ms: 30_000,
+        });
+        assert_eq!(safety_class_for_request(&monitor), SafetyClass::Observe);
+        enforce_policy(&policy, &monitor).expect("monitor capture open passes observe policy");
+
+        let status = DaemonRequest::CaptureSessionStatus;
+        assert_eq!(safety_class_for_request(&status), SafetyClass::Policy);
+        enforce_policy(&policy, &status).expect("capture status passes policy");
+
+        let renew = DaemonRequest::CaptureSessionRenew(libseatgeist::CaptureSessionRequest {
+            session_id: "capture-1".to_string(),
+        });
+        assert_eq!(safety_class_for_request(&renew), SafetyClass::Policy);
+        enforce_policy(&policy, &renew).expect("capture renew passes policy");
+
+        let close = DaemonRequest::CaptureSessionClose(libseatgeist::CaptureSessionRequest {
+            session_id: "capture-1".to_string(),
+        });
+        assert_eq!(safety_class_for_request(&close), SafetyClass::Policy);
+        enforce_policy(&policy, &close).expect("capture close passes policy");
+    }
+
+    #[test]
     fn observe_requests_pass_default_policy() {
         let policy = PolicyEngine::new(PolicyConfig::default());
         enforce_policy(&policy, &DaemonRequest::ListWindows)
@@ -8966,6 +6965,7 @@ mod tests {
                 full_resolution: false,
                 portal_interactive: false,
                 portal_target: None,
+                visible_window_crop_id: None,
             }),
         )
         .expect("bounded screenshot requests are allowed by default");
@@ -9013,6 +7013,146 @@ mod tests {
     }
 
     #[test]
+    fn action_settle_summary_excludes_observation_content() {
+        let sensitive_value = "do-not-journal-this-value";
+        let summary = summarize_response(&DaemonResponse::Action(Box::new(ActionResult {
+            id: Uuid::nil(),
+            ok: true,
+            observation: Some(Observation {
+                active_window: None,
+                target_window: None,
+                windows: Vec::new(),
+                monitors: Vec::new(),
+                focused_accessibility: Some(AccessibilityNode {
+                    id: "node-1".to_string(),
+                    role: "text".to_string(),
+                    name: Some("field".to_string()),
+                    value: Some(sensitive_value.to_string()),
+                    value_truncated: false,
+                    sensitive: false,
+                    states: Vec::new(),
+                    bounds: None,
+                    available_actions: Vec::new(),
+                    actions: Vec::new(),
+                    children: Vec::new(),
+                }),
+                target_accessibility: None,
+                screenshot_path: None,
+                revision: Some("after-revision".to_string()),
+                issues: Vec::new(),
+                settle: Some(ActionSettleResult {
+                    confirmation: libseatgeist::ActionConfirmation::Confirmed,
+                    condition: ActionSettleCondition::Stable,
+                    backend: libseatgeist::ActionSettleBackend::Polling,
+                    target_scoped: false,
+                    event: None,
+                    settled: true,
+                    timed_out: false,
+                    timeout_ms: 1_500,
+                    interval_ms: 100,
+                    samples: 2,
+                    elapsed_ms: 100,
+                    before_revision: Some("before-revision".to_string()),
+                    after_revision: "after-revision".to_string(),
+                }),
+            }),
+            screenshot: None,
+            message: Some("set text length=25".to_string()),
+        })));
+
+        assert!(summary.contains("settle=Stable"));
+        assert!(summary.contains("backend=Polling"));
+        assert!(summary.contains("target_scoped=false"));
+        assert!(summary.contains("settled=true"));
+        assert!(summary.contains("samples=2"));
+        assert!(!summary.contains(sensitive_value));
+        assert!(!summary.contains("before-revision"));
+        assert!(!summary.contains("after-revision"));
+    }
+
+    #[tokio::test]
+    async fn successful_response_records_resolved_session_backend_and_settle_only() {
+        let store = session_execution::SessionExecutionStore::default();
+        store
+            .open(
+                "capture-1".to_string(),
+                "portal_screencast_pipewire".to_string(),
+                true,
+            )
+            .await;
+        let sensitive_value = "do-not-persist-this-input";
+        let response = DaemonResponse::Action(Box::new(ActionResult {
+            id: Uuid::nil(),
+            ok: true,
+            observation: Some(Observation {
+                active_window: None,
+                target_window: None,
+                windows: Vec::new(),
+                monitors: Vec::new(),
+                focused_accessibility: Some(AccessibilityNode {
+                    id: "node-1".to_string(),
+                    role: "text".to_string(),
+                    name: Some("field".to_string()),
+                    value: Some(sensitive_value.to_string()),
+                    value_truncated: false,
+                    sensitive: true,
+                    states: Vec::new(),
+                    bounds: None,
+                    available_actions: Vec::new(),
+                    actions: Vec::new(),
+                    children: Vec::new(),
+                }),
+                target_accessibility: None,
+                screenshot_path: None,
+                revision: Some("after-revision".to_string()),
+                issues: Vec::new(),
+                settle: Some(ActionSettleResult {
+                    confirmation: libseatgeist::ActionConfirmation::Confirmed,
+                    condition: ActionSettleCondition::AccessibilityChange,
+                    backend: libseatgeist::ActionSettleBackend::AtspiEvent,
+                    target_scoped: true,
+                    event: Some("object:text-changed".to_string()),
+                    settled: true,
+                    timed_out: false,
+                    timeout_ms: 1_000,
+                    interval_ms: 100,
+                    samples: 1,
+                    elapsed_ms: 12,
+                    before_revision: Some("before-revision".to_string()),
+                    after_revision: "after-revision".to_string(),
+                }),
+            }),
+            screenshot: None,
+            message: Some("typed text backend=uinput".to_string()),
+        }));
+
+        record_session_execution_response(
+            &["capture-1".to_string()],
+            "type_text",
+            SafetyClass::ControlKeyboard,
+            Some("auto"),
+            session_execution::BackendRole::RawInput,
+            &response,
+            &store,
+        )
+        .await;
+
+        let status = store.status("capture-1").await.expect("status records");
+        assert_eq!(status.raw_input_backend.as_deref(), Some("uinput"));
+        assert_eq!(status.last_action_backend.as_deref(), Some("uinput"));
+        assert_eq!(status.last_action_method.as_deref(), Some("type_text"));
+        assert_eq!(status.last_policy_result.as_deref(), Some("allow"));
+        assert_eq!(status.last_action_id, Some(Uuid::nil()));
+        assert_eq!(
+            status.settle.as_ref().map(|settle| settle.backend),
+            Some(libseatgeist::ActionSettleBackend::AtspiEvent)
+        );
+        let serialized = serde_json::to_string(&status).expect("status serializes");
+        assert!(!serialized.contains(sensitive_value));
+        assert!(!serialized.contains("focused_accessibility"));
+    }
+
+    #[test]
     fn full_resolution_screenshot_fails_closed_by_default() {
         let policy = PolicyEngine::new(PolicyConfig::default());
         let err = enforce_policy(
@@ -9023,6 +7163,7 @@ mod tests {
                 full_resolution: true,
                 portal_interactive: false,
                 portal_target: None,
+                visible_window_crop_id: None,
             }),
         )
         .expect_err("full-resolution screenshots require approval by default");
@@ -9041,6 +7182,7 @@ mod tests {
                     full_resolution: true,
                     portal_interactive: false,
                     portal_target: None,
+                    visible_window_crop_id: None,
                 }),
             }),
         )
@@ -9059,6 +7201,7 @@ mod tests {
                 full_resolution: true,
                 portal_interactive: false,
                 portal_target: None,
+                visible_window_crop_id: None,
             }),
         )
         .expect("explicit full-resolution screenshot override allows capture");
@@ -9145,75 +7288,6 @@ mod tests {
             config.backends.and_then(|backends| backends.input),
             Some(InputBackendPreference::PortalRemoteDesktop)
         );
-    }
-
-    #[test]
-    fn xkb_keymap_config_resolves_backend_config() {
-        assert_eq!(xkb_keymap_config(None), XkbKeymapConfig::default());
-
-        let backends = BackendFileConfig {
-            input: None,
-            keymap: Some(XkbKeymapFileConfig {
-                rules: Some(" evdev ".to_string()),
-                model: Some(" pc105 ".to_string()),
-                layout: Some(" de ".to_string()),
-                variant: Some(" ".to_string()),
-                options: Some("".to_string()),
-            }),
-        };
-
-        assert_eq!(
-            xkb_keymap_config(Some(&backends)),
-            XkbKeymapConfig {
-                configured: true,
-                settings: XkbKeymapSettings {
-                    rules: Some("evdev".to_string()),
-                    model: Some("pc105".to_string()),
-                    layout: Some("de".to_string()),
-                    variant: None,
-                    options: Some("".to_string()),
-                },
-            }
-        );
-    }
-
-    #[test]
-    fn parses_kde_keyboard_layout_names() {
-        assert_eq!(
-            parse_kde_layout_name("gb(intl)"),
-            Some(("gb".to_string(), Some("intl".to_string())))
-        );
-        assert_eq!(
-            parse_kde_layout_name(" us "),
-            Some(("us".to_string(), None))
-        );
-        assert_eq!(parse_kde_layout_name("English (US)"), None);
-        assert_eq!(
-            first_csv_value(Some("de(nodeadkeys),us")),
-            Some("de(nodeadkeys)".to_string())
-        );
-        assert_eq!(first_csv_value(Some(" ,us")), None);
-    }
-
-    #[test]
-    fn xkb_keymap_status_reports_config_source() {
-        let config = XkbKeymapConfig {
-            configured: true,
-            settings: XkbKeymapSettings {
-                rules: Some("evdev".to_string()),
-                model: Some("pc105".to_string()),
-                layout: Some("us".to_string()),
-                variant: None,
-                options: Some("".to_string()),
-            },
-        };
-        let resolution = effective_xkb_keymap_resolution(&config);
-
-        assert_eq!(resolution.settings.layout.as_deref(), Some("us"));
-        assert_eq!(resolution.status.source, "config");
-        assert_eq!(resolution.status.layout.as_deref(), Some("us"));
-        assert_eq!(resolution.status.options.as_deref(), Some(""));
-        assert!(resolution.status.kde_current_layout.is_none());
     }
 
     #[test]
@@ -9485,138 +7559,6 @@ mod tests {
     }
 
     #[test]
-    fn redaction_rect_maps_source_region_to_preview_output() {
-        let rect = output_redaction_rect(
-            &RedactRegion {
-                x: 400,
-                y: 200,
-                width: 200,
-                height: 100,
-            },
-            &ScreenshotTransform {
-                source_coordinate_space: CoordinateSpace::PhysicalPixel,
-                output_coordinate_space: CoordinateSpace::PhysicalPixel,
-                source_origin_x: 0,
-                source_origin_y: 0,
-                scale_x: 0.5,
-                scale_y: 0.5,
-            },
-            800,
-            450,
-        )
-        .expect("redaction overlaps preview");
-
-        assert_eq!(
-            rect,
-            OutputRedactionRect {
-                x: 200,
-                y: 100,
-                width: 100,
-                height: 50,
-            }
-        );
-    }
-
-    #[test]
-    fn redaction_rect_maps_source_region_to_tile_output() {
-        let rect = output_redaction_rect(
-            &RedactRegion {
-                x: 150,
-                y: 250,
-                width: 100,
-                height: 100,
-            },
-            &ScreenshotTransform {
-                source_coordinate_space: CoordinateSpace::PhysicalPixel,
-                output_coordinate_space: CoordinateSpace::PhysicalPixel,
-                source_origin_x: 100,
-                source_origin_y: 200,
-                scale_x: 0.5,
-                scale_y: 0.5,
-            },
-            200,
-            100,
-        )
-        .expect("redaction overlaps tile");
-
-        assert_eq!(
-            rect,
-            OutputRedactionRect {
-                x: 25,
-                y: 25,
-                width: 50,
-                height: 50,
-            }
-        );
-    }
-
-    #[test]
-    fn redaction_rect_ignores_non_overlapping_region() {
-        let rect = output_redaction_rect(
-            &RedactRegion {
-                x: 1000,
-                y: 1000,
-                width: 100,
-                height: 100,
-            },
-            &ScreenshotTransform {
-                source_coordinate_space: CoordinateSpace::PhysicalPixel,
-                output_coordinate_space: CoordinateSpace::PhysicalPixel,
-                source_origin_x: 0,
-                source_origin_y: 0,
-                scale_x: 1.0,
-                scale_y: 1.0,
-            },
-            100,
-            100,
-        );
-
-        assert_eq!(rect, None);
-    }
-
-    #[test]
-    fn screenshot_redaction_blacks_output_pixels() {
-        let path = temp_test_path("redacted-screenshot").with_extension("png");
-        let image = image::RgbaImage::from_pixel(4, 4, Rgba([255, 255, 255, 255]));
-        image.save(&path).expect("fixture image is written");
-        let info = ScreenshotInfo {
-            path: path.clone(),
-            backend: "test".to_string(),
-            source_width: 4,
-            source_height: 4,
-            output_width: 4,
-            output_height: 4,
-            transform: ScreenshotTransform {
-                source_coordinate_space: CoordinateSpace::PhysicalPixel,
-                output_coordinate_space: CoordinateSpace::PhysicalPixel,
-                source_origin_x: 0,
-                source_origin_y: 0,
-                scale_x: 1.0,
-                scale_y: 1.0,
-            },
-            coordinate_space: CoordinateSpace::PhysicalPixel,
-            monitors: Vec::new(),
-        };
-
-        apply_screenshot_redactions(
-            &info,
-            &[RedactRegion {
-                x: 1,
-                y: 1,
-                width: 2,
-                height: 2,
-            }],
-        )
-        .expect("redaction succeeds");
-
-        let redacted = image::open(&path).expect("redacted image opens").to_rgba8();
-        assert_eq!(*redacted.get_pixel(0, 0), Rgba([255, 255, 255, 255]));
-        assert_eq!(*redacted.get_pixel(1, 1), Rgba([0, 0, 0, 255]));
-        assert_eq!(*redacted.get_pixel(2, 2), Rgba([0, 0, 0, 255]));
-        fs::remove_file(&path).ok();
-    }
-
-    #[test]
     fn require_focus_guard_blocks_unguarded_control() {
         let settings = SafetySettings {
             require_focus_guard: true,
@@ -9634,11 +7576,200 @@ mod tests {
             &DaemonRequest::TypeText(TypeTextRequest {
                 text: "guarded only".to_string(),
                 guard: None,
+                session_id: None,
             }),
         )
         .expect_err("unguarded control is rejected");
 
         assert!(err.to_string().contains("focus guard is required"));
+    }
+
+    #[test]
+    fn sticky_session_replaces_active_guard_only_for_raw_action() {
+        let settings = SafetySettings {
+            require_focus_guard: true,
+            ..SafetySettings::default()
+        };
+        let sticky = DaemonRequest::TypeText(TypeTextRequest {
+            text: "hello".to_string(),
+            guard: None,
+            session_id: Some("capture-1".to_string()),
+        });
+        enforce_required_focus_guard(&settings, &sticky)
+            .expect("sticky session satisfies raw focus guard");
+        validate_interaction_session_request(&sticky)
+            .expect("session without active guard is valid");
+
+        let ambiguous = DaemonRequest::TypeText(TypeTextRequest {
+            text: "hello".to_string(),
+            guard: Some(ActiveWindowGuard {
+                desktop_revision: None,
+                expected_window_id: Some("firefox-window-1".to_string()),
+                expected_app_id: None,
+                title_contains: None,
+            }),
+            session_id: Some("capture-1".to_string()),
+        });
+        assert!(validate_interaction_session_request(&ambiguous).is_err());
+    }
+
+    #[test]
+    fn retained_session_execution_tracks_controls_but_not_observation_lifecycle() {
+        let raw = DaemonRequest::TypeText(TypeTextRequest {
+            text: "hello".to_string(),
+            guard: None,
+            session_id: Some("capture-1".to_string()),
+        });
+        let focus = DaemonRequest::FocusWindow(FocusWindowRequest {
+            window_id: "window-1".to_string(),
+            guard: None,
+        });
+        let snapshot = DaemonRequest::CaptureSnapshot(libseatgeist::CaptureSnapshotRequest {
+            session_id: "capture-1".to_string(),
+            output: temp_test_path("execution-observation.png"),
+            max_edge: Some(800),
+            timeout_ms: 1_000,
+        });
+
+        assert_eq!(
+            session_backend_role_for_request(&raw),
+            Some(session_execution::BackendRole::RawInput)
+        );
+        assert_eq!(
+            session_backend_role_for_request(&focus),
+            Some(session_execution::BackendRole::Other)
+        );
+        assert_eq!(session_backend_role_for_request(&snapshot), None);
+    }
+
+    fn test_client(tool: &str, pid: u32, process_name: &str) -> JournalClientContext {
+        JournalClientContext {
+            tool: Some(tool.to_string()),
+            pid: Some(pid),
+            process_name: Some(process_name.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_gate_rejects_cross_process_capture_raw_and_post_action_uses() {
+        let capture_session_store = CaptureSessionStore::default();
+        let backend = seatgeist_testkit::MockScreenBackend::default();
+        let owner_client = test_client("seatgeist-mcp", 100, "seatgeist-mcp");
+        let intruder = test_client("seatgeist-mcp", 101, "seatgeist-mcp");
+        let status = capture_open(
+            CaptureOpenRequest {
+                source: CaptureSourceKind::Monitor,
+                requested_source_id: Some("monitor-1".to_string()),
+                parent_window: String::new(),
+                timeout_ms: 30_000,
+            },
+            SessionOwner::from_client(Some(&owner_client)).expect("owner constructs"),
+            &capture_session_store,
+            &backend,
+            DEFAULT_PREVIEW_MAX_EDGE,
+        )
+        .await
+        .expect("mock capture opens");
+        let session_id = status.session_id.expect("capture session id");
+
+        let snapshot = DaemonRequest::CaptureSnapshot(libseatgeist::CaptureSnapshotRequest {
+            session_id: session_id.clone(),
+            output: temp_test_path("owner-gate-snapshot.png"),
+            max_edge: Some(800),
+            timeout_ms: 1_000,
+        });
+        enforce_capture_session_owner(&snapshot, None, Some(&owner_client), &capture_session_store)
+            .await
+            .expect("the opening process may use capture");
+        let error =
+            enforce_capture_session_owner(&snapshot, None, Some(&intruder), &capture_session_store)
+                .await
+                .expect_err("another MCP process cannot snapshot");
+        assert!(error.to_string().contains("session owner mismatch"));
+
+        let raw = DaemonRequest::TypeText(TypeTextRequest {
+            text: "x".to_string(),
+            guard: None,
+            session_id: Some(session_id.clone()),
+        });
+        assert!(
+            enforce_capture_session_owner(&raw, None, Some(&intruder), &capture_session_store,)
+                .await
+                .is_err()
+        );
+
+        let focus = DaemonRequest::FocusWindow(FocusWindowRequest {
+            window_id: "window-1".to_string(),
+            guard: None,
+        });
+        let post_action = DaemonResponseOptions {
+            post_action: Some(PostActionOptions {
+                observe_after: true,
+                settle_condition: ActionSettleCondition::None,
+                settle_timeout_ms: 1_000,
+                settle_interval_ms: 100,
+                image: Some(libseatgeist::PostActionImageOptions {
+                    session_id,
+                    output: temp_test_path("owner-gate-post-action.png"),
+                    max_edge: Some(800),
+                    timeout_ms: 1_000,
+                }),
+            }),
+        };
+        assert!(
+            enforce_capture_session_owner(
+                &focus,
+                Some(&post_action),
+                Some(&intruder),
+                &capture_session_store,
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            backend
+                .snapshot_requests()
+                .expect("mock snapshot calls read")
+                .is_empty(),
+            "owner denials happen before capture side effects"
+        );
+    }
+
+    #[tokio::test]
+    async fn sticky_focus_verification_waits_for_pinned_target() {
+        let initial = WindowInfo {
+            id: "kate-1".to_string(),
+            title: "Kate".to_string(),
+            app_id: Some("org.kde.kate".to_string()),
+            pid: Some(7),
+            monitor_id: None,
+            geometry: None,
+        };
+        let target = WindowInfo {
+            id: "firefox-1".to_string(),
+            title: "Firefox".to_string(),
+            app_id: Some("org.mozilla.firefox".to_string()),
+            pid: Some(42),
+            monitor_id: None,
+            geometry: None,
+        };
+        let backend = seatgeist_testkit::MockWindowBackend::new(
+            vec![initial.clone(), target.clone()],
+            Some(initial),
+        );
+        let updated = backend.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            updated
+                .set_active_window(Some(target))
+                .expect("focused target update loads");
+        });
+
+        assert!(
+            interaction::wait_for_active_target(&backend, "firefox-1", Duration::from_millis(100))
+                .await
+                .expect("focus verification succeeds")
+        );
     }
 
     #[test]
@@ -9665,6 +7796,7 @@ mod tests {
                 button: PointerButton::Left,
                 clicks: 1,
                 guard: None,
+                session_id: None,
             }),
         )
         .expect_err("window-local pointer requests need a guard");
@@ -9681,10 +7813,12 @@ mod tests {
                 button: PointerButton::Left,
                 clicks: 1,
                 guard: Some(ActiveWindowGuard {
+                    desktop_revision: None,
                     expected_window_id: Some("window-1".to_string()),
                     expected_app_id: None,
                     title_contains: None,
                 }),
+                session_id: None,
             }),
         )
         .expect("guarded window-local pointer request passes precheck");
@@ -9710,10 +7844,12 @@ mod tests {
             &DaemonRequest::TypeText(TypeTextRequest {
                 text: "guarded only".to_string(),
                 guard: Some(ActiveWindowGuard {
+                    desktop_revision: None,
                     expected_window_id: None,
                     expected_app_id: Some("org.kde.kate".to_string()),
                     title_contains: None,
                 }),
+                session_id: None,
             }),
         )
         .expect("guarded control is accepted by require-focus-guard precheck");
@@ -9736,18 +7872,54 @@ mod tests {
 
         let err = enforce_human_input_pause(
             &settings,
+            &activity::ActivityTracker::default(),
             &DaemonRequest::TypeText(TypeTextRequest {
                 text: "hello".to_string(),
                 guard: None,
+                session_id: None,
             }),
         )
         .expect_err("fresh human input signal blocks control");
 
-        assert!(
-            err.to_string()
-                .contains("human input activity signal is fresh")
-        );
+        assert!(err.to_string().contains("human input activity is fresh"));
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn human_input_pause_uses_trusted_activity_and_ignores_own_injection() {
+        let settings = SafetySettings {
+            require_focus_guard: false,
+            pause_on_human_input: true,
+            human_input_activity_file: None,
+            human_input_quiet_ms: 60_000,
+            control_rate_limit_per_minute: Some(DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE),
+            preview_max_edge: DEFAULT_PREVIEW_MAX_EDGE,
+            tile_max_edge: DEFAULT_TILE_MAX_EDGE,
+            screenshot_redactions: Vec::new(),
+        };
+        let request = DaemonRequest::TypeText(TypeTextRequest {
+            text: "hello".to_string(),
+            guard: None,
+            session_id: None,
+        });
+        let injected = activity::ActivityTracker::default();
+        injected
+            .record_payload(
+                r#"{"backend":"kwin_input_spy_v1","seat":"default","class":"keyboard","provenance":"seatgeist_injected","monotonic_ms":1}"#,
+            )
+            .expect("injected activity records");
+        enforce_human_input_pause(&settings, &injected, &request)
+            .expect("Seatgeist injection does not trigger human pause");
+
+        let physical = activity::ActivityTracker::default();
+        physical
+            .record_payload(
+                r#"{"backend":"kwin_input_spy_v1","seat":"default","class":"pointer","provenance":"trusted_physical","monotonic_ms":2}"#,
+            )
+            .expect("physical activity records");
+        let err = enforce_human_input_pause(&settings, &physical, &request)
+            .expect_err("trusted physical activity triggers human pause");
+        assert!(err.to_string().contains("kwin_input_spy_v1"));
     }
 
     #[test]
@@ -9770,8 +7942,25 @@ mod tests {
                 ErrorKind::FocusGuard,
             ),
             (
-                "human input activity signal is fresh at /tmp/pilot; refusing ControlKeyboard until quiet for 1000ms",
+                "target-window correlation failed: KWin title does not match accessibility window",
+                ErrorKind::TargetMismatch,
+            ),
+            (
+                "interaction target lost: pinned window closed",
+                ErrorKind::TargetLost,
+            ),
+            ("session owner mismatch", ErrorKind::SessionOwnerMismatch),
+            (
+                "focus lease conflict: pinned target did not become active before input",
+                ErrorKind::FocusLeaseConflict,
+            ),
+            (
+                "human input activity is fresh from kwin_input_spy_v1; refusing ControlKeyboard until quiet for 1000ms",
                 ErrorKind::HumanInputPause,
+            ),
+            (
+                "backend unavailable: ScreenCast consent was cancelled or denied",
+                ErrorKind::ConsentCancelled,
             ),
             (
                 "xdg-desktop-portal RemoteDesktop is not available: org.freedesktop.portal.Desktop is missing",
@@ -9810,13 +7999,19 @@ mod tests {
             tile_max_edge: DEFAULT_TILE_MAX_EDGE,
             screenshot_redactions: Vec::new(),
         };
-        enforce_human_input_pause(&settings, &DaemonRequest::ListWindows)
-            .expect("human input pause does not block observe requests");
         enforce_human_input_pause(
             &settings,
+            &activity::ActivityTracker::default(),
+            &DaemonRequest::ListWindows,
+        )
+        .expect("human input pause does not block observe requests");
+        enforce_human_input_pause(
+            &settings,
+            &activity::ActivityTracker::default(),
             &DaemonRequest::TypeText(TypeTextRequest {
                 text: "hello".to_string(),
                 guard: None,
+                session_id: None,
             }),
         )
         .expect("missing human input signal does not block control");
@@ -9836,9 +8031,11 @@ mod tests {
         std::thread::sleep(Duration::from_millis(2));
         enforce_human_input_pause(
             &settings,
+            &activity::ActivityTracker::default(),
             &DaemonRequest::TypeText(TypeTextRequest {
                 text: "hello".to_string(),
                 guard: None,
+                session_id: None,
             }),
         )
         .expect("quiet human input signal does not block control");
@@ -9853,6 +8050,7 @@ mod tests {
         let request = DaemonRequest::TypeText(TypeTextRequest {
             text: "hello".to_string(),
             guard: None,
+            session_id: None,
         });
 
         enforce_control_rate_limit(&limiter, &request).expect("first control request is allowed");
@@ -9879,6 +8077,7 @@ socket = "$XDG_RUNTIME_DIR/seatgeist/configured.sock"
 journal = "$XDG_STATE_HOME/seatgeist/configured.jsonl"
 panic_stop_file = "$XDG_RUNTIME_DIR/seatgeist/configured-panic-stop"
 approval_file = "$XDG_RUNTIME_DIR/seatgeist/approvals.jsonl"
+capture_restore_file = "$XDG_STATE_HOME/seatgeist/capture-restore.json"
 
 [journal]
 include_artifact_metadata = true
@@ -9933,6 +8132,10 @@ height = 40
         assert_eq!(
             daemon.approval_file.as_deref(),
             Some("$XDG_RUNTIME_DIR/seatgeist/approvals.jsonl")
+        );
+        assert_eq!(
+            daemon.capture_restore_file.as_deref(),
+            Some("$XDG_STATE_HOME/seatgeist/capture-restore.json")
         );
         let journal = config.journal.expect("journal section is present");
         assert_eq!(journal.include_artifact_metadata, Some(true));
@@ -10128,135 +8331,239 @@ height = 40
         fs::remove_file(&path).ok();
     }
 
-    #[test]
-    fn active_window_guard_allows_matching_active_window() {
-        let state = ActiveWindowState::default();
-        state
-            .update_from_payload(
-                r#"{
-                    "active": true,
-                    "id": "current-window",
-                    "title": "main.rs - Kate",
-                    "app_id": "org.kde.kate",
-                    "pid": 1234,
-                    "geometry": {"x": 10, "y": 20, "width": 800, "height": 600}
-                }"#,
-            )
-            .expect("payload updates active-window state");
+    #[tokio::test]
+    async fn active_window_guard_allows_matching_injected_window() {
+        let window = WindowInfo {
+            id: "current-window".to_string(),
+            title: "main.rs - Kate".to_string(),
+            app_id: Some("org.kde.kate".to_string()),
+            pid: Some(1234),
+            monitor_id: None,
+            geometry: None,
+        };
+        let backend = seatgeist_testkit::MockWindowBackend::new(vec![window.clone()], Some(window));
 
         enforce_active_window_guard(
-            &state,
+            &backend,
             &DaemonRequest::FocusWindow(FocusWindowRequest {
                 window_id: "target-window".to_string(),
                 guard: Some(ActiveWindowGuard {
+                    desktop_revision: None,
                     expected_window_id: Some("current-window".to_string()),
                     expected_app_id: Some("org.kde.kate".to_string()),
                     title_contains: Some("main.rs".to_string()),
                 }),
             }),
         )
+        .await
         .expect("matching active-window guard passes");
     }
 
-    #[test]
-    fn active_window_guard_rejects_changed_active_window() {
-        let state = ActiveWindowState::default();
-        state
-            .update_from_payload(
-                r#"{
-                    "active": true,
-                    "id": "other-window",
-                    "title": "Terminal",
-                    "app_id": "org.kde.konsole"
-                }"#,
-            )
-            .expect("payload updates active-window state");
+    #[tokio::test]
+    async fn active_window_guard_rejects_changed_injected_window() {
+        let window = WindowInfo {
+            id: "other-window".to_string(),
+            title: "Terminal".to_string(),
+            app_id: Some("org.kde.konsole".to_string()),
+            pid: None,
+            monitor_id: None,
+            geometry: None,
+        };
+        let backend = seatgeist_testkit::MockWindowBackend::new(vec![window.clone()], Some(window));
 
         let err = enforce_active_window_guard(
-            &state,
+            &backend,
             &DaemonRequest::FocusWindow(FocusWindowRequest {
                 window_id: "target-window".to_string(),
                 guard: Some(ActiveWindowGuard {
+                    desktop_revision: None,
                     expected_window_id: Some("current-window".to_string()),
                     expected_app_id: None,
                     title_contains: None,
                 }),
             }),
         )
+        .await
         .expect_err("stale active-window guard fails");
         assert!(err.to_string().contains("active-window guard failed"));
     }
 
-    #[test]
-    fn app_policy_blocks_control_for_denied_active_app() {
-        let state = ActiveWindowState::default();
-        state
-            .update_from_payload(
-                r#"{
-                    "active": true,
-                    "id": "secrets-window",
-                    "title": "Vault",
-                    "app_id": "org.keepassxc.KeePassXC"
-                }"#,
-            )
-            .expect("payload updates active-window state");
+    #[tokio::test]
+    async fn opaque_desktop_revision_guards_the_active_window() {
+        let window = seatgeist_testkit::sample_window();
+        let backend =
+            seatgeist_testkit::MockWindowBackend::new(vec![window.clone()], Some(window.clone()));
+        let revision = observation::active_window_revision(&Some(window));
+        enforce_active_window_guard(
+            &backend,
+            &DaemonRequest::FocusWindow(FocusWindowRequest {
+                window_id: "target-window".to_string(),
+                guard: Some(ActiveWindowGuard {
+                    desktop_revision: Some(revision),
+                    expected_window_id: None,
+                    expected_app_id: None,
+                    title_contains: None,
+                }),
+            }),
+        )
+        .await
+        .expect("current opaque revision passes");
+
+        let err = enforce_active_window_guard(
+            &backend,
+            &DaemonRequest::FocusWindow(FocusWindowRequest {
+                window_id: "target-window".to_string(),
+                guard: Some(ActiveWindowGuard {
+                    desktop_revision: Some("aw1:stale".to_string()),
+                    expected_window_id: None,
+                    expected_app_id: None,
+                    title_contains: None,
+                }),
+            }),
+        )
+        .await
+        .expect_err("stale opaque revision fails");
+        assert_eq!(
+            err.to_string(),
+            "active-window guard failed: desktop revision changed"
+        );
+    }
+
+    #[tokio::test]
+    async fn app_policy_blocks_control_for_denied_injected_active_app() {
+        let window = WindowInfo {
+            id: "secrets-window".to_string(),
+            title: "Vault".to_string(),
+            app_id: Some("org.keepassxc.KeePassXC".to_string()),
+            pid: None,
+            monitor_id: None,
+            geometry: None,
+        };
+        let backend = seatgeist_testkit::MockWindowBackend::new(vec![window.clone()], Some(window));
         let policy = AppPolicy {
             allow: Vec::new(),
             deny: vec!["org.keepassxc.KeePassXC".to_string()],
         };
 
         let err = enforce_app_policy(
-            &state,
-            &WindowListState::default(),
+            &backend,
             &policy,
             &DaemonRequest::TypeText(TypeTextRequest {
                 text: "should-not-type".to_string(),
                 guard: None,
+                session_id: None,
             }),
         )
+        .await
         .expect_err("denied active app blocks keyboard control");
 
         assert!(err.to_string().contains("app policy denied active window"));
     }
 
-    #[test]
-    fn validates_wait_for_change_request() {
-        validate_wait_for_change_request(&WaitForChangeRequest {
-            output: temp_test_path("wait-valid.png"),
-            max_edge: Some(1600),
-            timeout_ms: 1000,
-            interval_ms: 100,
-            threshold: libseatgeist::DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
-        })
-        .expect("valid wait request passes");
+    #[tokio::test]
+    async fn app_policy_checks_focus_target_through_injected_window_backend() {
+        let target = WindowInfo {
+            id: "target-window".to_string(),
+            title: "Vault".to_string(),
+            app_id: Some("org.keepassxc.KeePassXC".to_string()),
+            pid: None,
+            monitor_id: None,
+            geometry: None,
+        };
+        let backend = seatgeist_testkit::MockWindowBackend::new(vec![target], None);
+        let policy = AppPolicy {
+            allow: Vec::new(),
+            deny: vec!["org.keepassxc.KeePassXC".to_string()],
+        };
 
-        let err = validate_wait_for_change_request(&WaitForChangeRequest {
-            output: temp_test_path("wait-invalid.png"),
-            max_edge: Some(1600),
-            timeout_ms: 1000,
-            interval_ms: 100,
-            threshold: 0.0,
-        })
-        .expect_err("zero threshold is rejected");
-        assert!(err.to_string().contains("threshold"));
+        let err = enforce_app_policy(
+            &backend,
+            &policy,
+            &DaemonRequest::FocusWindow(FocusWindowRequest {
+                window_id: "target-window".to_string(),
+                guard: None,
+            }),
+        )
+        .await
+        .expect_err("denied focus target is checked through injected window list");
+
+        assert!(err.to_string().contains("app policy denied focus target"));
     }
 
-    #[test]
-    fn image_difference_reports_normalized_rgb_delta() {
-        let baseline = ImageSample {
-            width: 1,
-            height: 1,
-            rgba: vec![0, 0, 0, 255],
+    #[tokio::test]
+    async fn resolved_semantic_target_is_authorized_through_injected_window_backend() {
+        let window = WindowInfo {
+            id: "kwin-firefox-1".to_string(),
+            title: "Example - Mozilla Firefox".to_string(),
+            app_id: Some("org.mozilla.firefox".to_string()),
+            pid: Some(4242),
+            monitor_id: None,
+            geometry: None,
         };
-        let candidate = ImageSample {
-            width: 1,
-            height: 1,
-            rgba: vec![255, 0, 0, 255],
+        let window_backend = seatgeist_testkit::MockWindowBackend::new(vec![window], None);
+        let guard = libseatgeist::TargetWindowGuard {
+            expected_window_id: "kwin-firefox-1".to_string(),
+            expected_app_id: Some("org.mozilla.firefox".to_string()),
+            expected_pid: Some(4242),
+            title_contains: Some("Example".to_string()),
         };
+        let request = DaemonRequest::ClickButton(ClickButtonRequest {
+            name: "Continue".to_string(),
+            destructive: false,
+            app: Some("Firefox".to_string()),
+            window_name_contains: Some("Example".to_string()),
+            max_nodes: 256,
+            guard: None,
+            target_guard: Some(guard.clone()),
+        });
+        let safety = SafetySettings {
+            require_focus_guard: true,
+            ..SafetySettings::default()
+        };
+        enforce_required_focus_guard(&safety, &request)
+            .expect("target guard replaces active guard for semantic operation");
 
-        let score =
-            normalized_image_difference(&baseline, &candidate).expect("same dimensions compare");
-        assert!((score - (1.0 / 3.0)).abs() < f64::EPSILON);
+        let mut candidate_node = button_node("button-1", "Continue");
+        candidate_node.id =
+            "atspi://org.mozilla.firefox/org/a11y/atspi/accessible/button-1".to_string();
+        let candidate = seatgeist_atspi::AccessibilityMatch {
+            node: candidate_node,
+            application_name: "Firefox".to_string(),
+            application_bus_name: "org.mozilla.firefox".to_string(),
+            process_id: Some(4242),
+            window_name: Some("Example - Mozilla Firefox".to_string()),
+            window_node_id: Some(
+                "atspi://org.mozilla.firefox/org/a11y/atspi/accessible/window-1".to_string(),
+            ),
+        };
+        let denied = AppPolicy {
+            allow: Vec::new(),
+            deny: vec!["org.mozilla.firefox".to_string()],
+        };
+        let err = target::authorize_semantic_target(
+            candidate.node.clone(),
+            vec![candidate.clone()],
+            Some(&guard),
+            &window_backend,
+            &denied,
+        )
+        .await
+        .expect_err("resolved target app policy runs before the caller invokes AT-SPI");
+        assert!(
+            err.to_string()
+                .contains("app policy denied resolved semantic target")
+        );
+
+        let allowed = target::authorize_semantic_target(
+            candidate.node.clone(),
+            vec![candidate],
+            Some(&guard),
+            &window_backend,
+            &AppPolicy::default(),
+        )
+        .await
+        .expect("matching target resolves without consulting active window");
+        assert!(allowed.id.ends_with("button-1"));
     }
 
     #[test]
@@ -10273,52 +8580,6 @@ height = 40
             }),
         )
         .expect("wait_for_change is observe policy");
-    }
-
-    #[test]
-    fn parses_kwin_bridge_enabled_from_plugins_group() {
-        let config = r#"
-            [Other]
-            seatgeist-bridgeEnabled=false
-
-            [Plugins]
-            unrelated=true
-            seatgeist-bridgeEnabled=true
-        "#;
-        assert_eq!(parse_kwin_bridge_enabled(config), Some(true));
-        assert_eq!(
-            parse_kwin_bridge_enabled("[Plugins]\nseatgeist-bridgeEnabled=off\n"),
-            Some(false)
-        );
-        assert_eq!(
-            parse_kwin_bridge_enabled("[Plugins]\nunrelated=true\n"),
-            None
-        );
-    }
-
-    #[test]
-    fn kwin_bridge_status_reports_window_list_snapshot() {
-        let active_window_state = ActiveWindowState::default();
-        let window_list_state = WindowListState::default();
-        window_list_state
-            .update_from_payload(
-                r#"{
-                    "windows": [
-                        {"id": "window-1", "title": "One", "app_id": "org.example.One"},
-                        {"id": "window-2", "title": "Two", "app_id": "org.example.Two"}
-                    ]
-                }"#,
-            )
-            .expect("window list payload updates state");
-
-        let status = kwin_bridge_status(&active_window_state, &window_list_state, true)
-            .expect("bridge status succeeds");
-
-        assert!(status.dbus_service_registered);
-        assert!(!status.active_window_update_seen);
-        assert!(status.window_list_update_seen);
-        assert_eq!(status.window_count, 2);
-        assert!(status.active_window.is_none());
     }
 
     #[test]
@@ -10658,10 +8919,8 @@ height = 40
         );
 
         {
-            let mut backend = EisSessionInputExecutionBackend {
-                backend_name: "portal_remote_desktop",
-                session: &mut session,
-            };
+            let mut backend =
+                eis_session_input_execution_backend("portal_remote_desktop", &mut session);
             backend
                 .type_text("hello")
                 .expect("ready EIS text execution");
@@ -10705,10 +8964,8 @@ height = 40
             runtime,
         );
 
-        let mut backend = EisSessionInputExecutionBackend {
-            backend_name: "portal_remote_desktop",
-            session: &mut session,
-        };
+        let mut backend =
+            eis_session_input_execution_backend("portal_remote_desktop", &mut session);
         let err = backend
             .type_text("hello")
             .expect_err("EIS execution must require a ready selected device");
@@ -10717,6 +8974,7 @@ height = 40
             err.to_string()
                 .contains("no resumed EIS device provides the required capabilities")
         );
+        drop(backend);
         assert!(session.runtime.source().executed_plans.is_empty());
     }
 
@@ -10786,145 +9044,6 @@ height = 40
 
         assert_eq!(status.xdg_current_desktop.as_deref(), Some("GNOME"));
         assert!(status.setup_hint.contains("KDE Plasma was not detected"));
-    }
-
-    #[test]
-    fn uinput_setup_hint_reports_access_state() {
-        assert_eq!(
-            uinput_setup_hint(true, true, true),
-            "uinput available to daemon process"
-        );
-        assert!(uinput_setup_hint(false, false, false).contains("load the uinput kernel module"));
-        assert!(uinput_setup_hint(false, true, false).contains("not a character device"));
-        assert!(
-            uinput_setup_hint(false, true, true).contains("grant the daemon read/write access")
-        );
-    }
-
-    #[test]
-    fn input_backend_preference_uses_portal_libei_then_uinput() {
-        let portal = remote_desktop_status(true);
-        let libei = libei_status_fixture(true, false);
-        assert_eq!(
-            preferred_input_backend(&portal, &libei, true).as_deref(),
-            Some("portal_remote_desktop")
-        );
-
-        let portal = remote_desktop_status(false);
-        assert_eq!(
-            preferred_input_backend(&portal, &libei, true).as_deref(),
-            Some("libei")
-        );
-
-        let libei = libei_status_fixture(false, false);
-        assert_eq!(
-            preferred_input_backend(&portal, &libei, true).as_deref(),
-            Some("uinput")
-        );
-        assert_eq!(preferred_input_backend(&portal, &libei, false), None);
-        assert_eq!(
-            implemented_input_backend(InputBackendPreference::Auto, true, false).as_deref(),
-            Some("uinput")
-        );
-        assert_eq!(
-            implemented_input_backend(InputBackendPreference::Uinput, true, false).as_deref(),
-            Some("uinput")
-        );
-        assert_eq!(
-            implemented_input_backend(InputBackendPreference::PortalRemoteDesktop, true, false),
-            None
-        );
-        assert_eq!(
-            implemented_input_backend(InputBackendPreference::Libei, true, false),
-            None
-        );
-        assert_eq!(
-            implemented_input_backend(InputBackendPreference::PortalRemoteDesktop, true, true)
-                .as_deref(),
-            Some("portal_remote_desktop")
-        );
-        assert_eq!(
-            implemented_input_backend(InputBackendPreference::Libei, true, true).as_deref(),
-            Some("libei")
-        );
-        assert_eq!(
-            implemented_input_backend(InputBackendPreference::Auto, false, true),
-            None
-        );
-    }
-
-    #[test]
-    fn input_backend_setup_hints_report_missing_probe_paths() {
-        let portal = RemoteDesktopPortalStatus {
-            busctl_available: false,
-            portal_service_available: false,
-            remote_desktop_interface_available: false,
-            kde_portal_service_available: false,
-            setup_hint: String::new(),
-        };
-        let libei = libei_status_fixture(false, false);
-        let hint = input_backend_setup_hint(
-            InputBackendPreference::Auto,
-            None,
-            None,
-            &portal,
-            &libei,
-            false,
-            false,
-        );
-        assert!(hint.contains("busctl"));
-
-        let visible_portal_hint = input_backend_setup_hint(
-            InputBackendPreference::Auto,
-            Some("portal_remote_desktop"),
-            None,
-            &remote_desktop_status(true),
-            &libei,
-            false,
-            false,
-        );
-        assert!(visible_portal_hint.contains("remote_desktop_eis_start"));
-
-        let configured_portal_hint = input_backend_setup_hint(
-            InputBackendPreference::PortalRemoteDesktop,
-            Some("portal_remote_desktop"),
-            None,
-            &remote_desktop_status(true),
-            &libei,
-            true,
-            false,
-        );
-        assert!(configured_portal_hint.contains("remote_desktop_eis_start"));
-
-        let configured_active_portal_hint = input_backend_setup_hint(
-            InputBackendPreference::PortalRemoteDesktop,
-            Some("portal_remote_desktop"),
-            Some("portal_remote_desktop"),
-            &remote_desktop_status(true),
-            &libei,
-            true,
-            true,
-        );
-        assert!(configured_active_portal_hint.contains("stored RemoteDesktop EIS session"));
-
-        let configured_uinput_hint = input_backend_setup_hint(
-            InputBackendPreference::Uinput,
-            Some("portal_remote_desktop"),
-            Some("uinput"),
-            &remote_desktop_status(true),
-            &libei,
-            true,
-            false,
-        );
-        assert!(configured_uinput_hint.contains("configured input backend uinput is available"));
-
-        assert!(remote_desktop_portal_setup_hint(false, false, false, false).contains("busctl"));
-        assert!(
-            remote_desktop_portal_setup_hint(true, true, false, true)
-                .contains("did not introspect")
-        );
-        assert!(libei_setup_hint(false, false, false).contains("pkg-config"));
-        assert!(libei_setup_hint(true, false, true).contains("LIBEI_SOCKET"));
     }
 
     #[test]
@@ -11164,7 +9283,13 @@ height = 40
 
     #[test]
     fn inactive_eis_backend_selection_removes_raw_input_capabilities() {
-        let capabilities = current_capabilities(InputBackendPreference::PortalRemoteDesktop, false);
+        let capabilities = current_capabilities(
+            InputBackendPreference::PortalRemoteDesktop,
+            false,
+            false,
+            false,
+            false,
+        );
 
         assert!(
             !capabilities
@@ -11180,7 +9305,13 @@ height = 40
 
     #[test]
     fn active_eis_backend_selection_reports_raw_input_capabilities() {
-        let capabilities = current_capabilities(InputBackendPreference::PortalRemoteDesktop, true);
+        let capabilities = current_capabilities(
+            InputBackendPreference::PortalRemoteDesktop,
+            true,
+            false,
+            false,
+            false,
+        );
 
         assert!(
             capabilities
@@ -11192,127 +9323,6 @@ height = 40
                 .iter()
                 .any(|capability| capability == &BackendCapability::PointerInput)
         );
-    }
-
-    #[test]
-    fn capture_backend_preference_uses_portal_then_spectacle() {
-        let portal = screenshot_portal_status_fixture(true, true);
-        assert_eq!(
-            preferred_capture_backend(&portal, true).as_deref(),
-            Some("portal_screenshot")
-        );
-
-        let portal = screenshot_portal_status_fixture(false, true);
-        assert_eq!(
-            preferred_capture_backend(&portal, true).as_deref(),
-            Some("spectacle")
-        );
-        assert_eq!(preferred_capture_backend(&portal, false), None);
-        let portal = screenshot_portal_status_fixture(true, true);
-        assert_eq!(
-            implemented_capture_backend(&portal, true).as_deref(),
-            Some("portal_screenshot")
-        );
-        let portal = screenshot_portal_status_fixture(false, true);
-        assert_eq!(
-            implemented_capture_backend(&portal, true).as_deref(),
-            Some("spectacle")
-        );
-        assert_eq!(implemented_capture_backend(&portal, false), None);
-    }
-
-    #[test]
-    fn tile_capture_backend_prefers_portal_then_spectacle() {
-        let portal = screenshot_portal_status_fixture(true, true);
-        assert_eq!(
-            tile_capture_backend(&portal, true),
-            Some("portal_screenshot")
-        );
-        assert_eq!(
-            tile_capture_backend(&portal, false),
-            Some("portal_screenshot")
-        );
-
-        let portal = screenshot_portal_status_fixture(false, true);
-        assert_eq!(tile_capture_backend(&portal, true), Some("spectacle"));
-        assert_eq!(tile_capture_backend(&portal, false), None);
-    }
-
-    #[test]
-    fn capture_backend_setup_hints_report_missing_probe_paths() {
-        let portal = screenshot_portal_status_fixture(false, false);
-        let kwin = KwinMetadataStatus {
-            busctl_available: false,
-            kwin_service_available: false,
-            support_information_available: false,
-            setup_hint: String::new(),
-        };
-        let spectacle = SpectacleStatus {
-            command_available: false,
-            setup_hint: String::new(),
-        };
-
-        let hint = capture_backend_setup_hint(None, None, &portal, &kwin, &spectacle);
-        assert!(hint.contains("busctl") || hint.contains("capture backend"));
-        let visible_portal_hint = capture_backend_setup_hint(
-            Some("portal_screenshot"),
-            Some("portal_screenshot"),
-            &screenshot_portal_status_fixture(true, true),
-            &kwin,
-            &spectacle,
-        );
-        assert!(visible_portal_hint.contains("using portal Screenshot"));
-        assert!(
-            screenshot_portal_setup_hint(false, false, false, None, None, false, false)
-                .contains("busctl")
-        );
-        assert!(
-            screenshot_portal_setup_hint(true, true, false, None, None, false, true)
-                .contains("did not introspect")
-        );
-        assert!(
-            screenshot_portal_setup_hint(true, true, true, Some(2), None, true, true)
-                .contains("v2 full-screen contract")
-        );
-        assert!(kwin_metadata_setup_hint(false, false, false).contains("busctl"));
-        assert!(kwin_metadata_setup_hint(true, false, false).contains("org.kde.KWin"));
-        assert!(spectacle_setup_hint(false).contains("not on PATH"));
-    }
-
-    #[test]
-    fn portal_screenshot_target_requires_advertised_v3_support() {
-        let request = ScreenshotRequest {
-            output: temp_test_path("portal-target.png"),
-            max_edge: Some(1600),
-            full_resolution: false,
-            portal_interactive: false,
-            portal_target: Some(PortalScreenshotTarget::ActiveWindow),
-        };
-
-        let mut portal = screenshot_portal_status_fixture(true, true);
-        portal.screenshot_interface_version = Some(2);
-        portal.screenshot_available_targets_mask = None;
-        portal.screenshot_available_targets = Vec::new();
-        portal.screenshot_target_option_supported = false;
-        let err = validate_portal_screenshot_target_request(&request, &portal)
-            .expect_err("v2 portal must reject target-specific capture");
-        assert!(err.to_string().contains("Screenshot v3"));
-
-        portal.screenshot_interface_version = Some(3);
-        portal.screenshot_available_targets_mask =
-            Some(seatgeist_portal::PortalScreenshotTarget::Screen.value());
-        portal.screenshot_available_targets = vec!["screen".to_string()];
-        portal.screenshot_target_option_supported = true;
-        let err = validate_portal_screenshot_target_request(&request, &portal)
-            .expect_err("missing AvailableTargets bit must reject target-specific capture");
-        assert!(err.to_string().contains("not advertised"));
-
-        portal.screenshot_available_targets_mask = Some(
-            seatgeist_portal::PortalScreenshotTarget::Screen.value()
-                | seatgeist_portal::PortalScreenshotTarget::ActiveWindow.value(),
-        );
-        validate_portal_screenshot_target_request(&request, &portal)
-            .expect("advertised v3 target is accepted");
     }
 
     #[test]
@@ -11330,6 +9340,173 @@ height = 40
     }
 
     #[test]
+    fn window_geometry_launch_and_page_zoom_are_control_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let launch = DaemonRequest::LaunchWindow(LaunchWindowRequest {
+            desktop_entry: "org.kde.kcalc".to_string(),
+            anchor: libseatgeist::WindowPlacementAnchor::TopRight,
+            monitor_id: None,
+            width: Some(400),
+            height: Some(300),
+            margin: 20,
+            activation: libseatgeist::WindowActivationMode::PreserveFocus,
+            timeout_ms: 10_000,
+            guard: None,
+        });
+        assert_eq!(
+            safety_class_for_request(&launch),
+            SafetyClass::ControlSemantic
+        );
+        assert!(enforce_policy(&policy, &launch).is_err());
+
+        let resize = DaemonRequest::ResizeWindow(ResizeWindowRequest {
+            window_id: "window-1".to_string(),
+            width: 1280,
+            height: 720,
+            guard: None,
+        });
+        assert_eq!(
+            safety_class_for_request(&resize),
+            SafetyClass::ControlSemantic
+        );
+        assert!(enforce_policy(&policy, &resize).is_err());
+
+        let zoom = DaemonRequest::PageZoom(libseatgeist::PageZoomRequest {
+            operation: libseatgeist::PageZoomOperation::Out,
+            steps: 2,
+            guard: ActiveWindowGuard {
+                desktop_revision: None,
+                expected_window_id: Some("window-1".to_string()),
+                expected_app_id: Some("org.mozilla.firefox".to_string()),
+                title_contains: None,
+            },
+        });
+        assert_eq!(
+            safety_class_for_request(&zoom),
+            SafetyClass::ControlKeyboard
+        );
+        assert!(enforce_policy(&policy, &zoom).is_err());
+        assert_eq!(
+            normalize_desktop_entry("org.kde.kcalc.desktop").expect("desktop suffix accepted"),
+            "org.kde.kcalc"
+        );
+        assert!(normalize_desktop_entry("/usr/bin/kcalc").is_err());
+        assert!(normalize_desktop_entry("kcalc --evil").is_err());
+    }
+
+    #[tokio::test]
+    async fn direct_focus_uses_shared_injected_backend_after_validation() {
+        let backend = seatgeist_testkit::MockWindowBackend::default();
+        let result = focus_window(
+            FocusWindowRequest {
+                window_id: "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}".to_string(),
+                guard: None,
+            },
+            &backend,
+        )
+        .await
+        .expect("valid focus request reaches injected backend");
+        assert!(result.ok);
+        assert_eq!(
+            backend
+                .focused_windows()
+                .expect("focus calls are available")
+                .as_slice(),
+            ["{96d3c5da-75ec-4a2a-b75f-05c4c077153b}"]
+        );
+
+        let error = focus_window(
+            FocusWindowRequest {
+                window_id: "  ".to_string(),
+                guard: None,
+            },
+            &backend,
+        )
+        .await
+        .expect_err("empty id fails before backend execution");
+        assert!(error.to_string().contains("must not be empty"));
+        assert_eq!(
+            backend
+                .focused_windows()
+                .expect("focus calls are available")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_resize_uses_shared_backend_and_reports_actual_geometry() {
+        let backend = seatgeist_testkit::MockWindowBackend::default();
+        let result = resize_window(
+            ResizeWindowRequest {
+                window_id: "window-1".to_string(),
+                width: 1280,
+                height: 720,
+                guard: None,
+            },
+            &backend,
+        )
+        .await
+        .expect("valid resize reaches injected backend");
+        assert!(result.ok);
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("actual=1280x720"))
+        );
+        assert_eq!(
+            backend
+                .resized_windows()
+                .expect("resize calls are available"),
+            vec![("window-1".to_string(), 1280, 720)]
+        );
+
+        let error = resize_window(
+            ResizeWindowRequest {
+                window_id: "window-1".to_string(),
+                width: 32,
+                height: 720,
+                guard: None,
+            },
+            &backend,
+        )
+        .await
+        .expect_err("undersized geometry fails before backend execution");
+        assert!(error.to_string().contains("at least 64"));
+        assert_eq!(
+            backend
+                .resized_windows()
+                .expect("resize calls persist")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_move_uses_shared_backend_and_reports_actual_geometry() {
+        let backend = seatgeist_testkit::MockWindowBackend::default();
+        let result = move_window(
+            MoveWindowRequest {
+                window_id: "window-1".to_string(),
+                x: -20,
+                y: 40,
+                guard: None,
+            },
+            &backend,
+        )
+        .await
+        .expect("valid move reaches injected backend");
+        assert!(result.ok);
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("actual=-20,40"))
+        );
+    }
+
+    #[test]
     fn keyboard_input_is_control_keyboard_policy() {
         let policy = PolicyEngine::new(PolicyConfig::default());
         let err = enforce_policy(
@@ -11337,6 +9514,7 @@ height = 40
             &DaemonRequest::TypeText(TypeTextRequest {
                 text: "hello".to_string(),
                 guard: None,
+                session_id: None,
             }),
         )
         .expect_err("type_text requires keyboard control approval by default");
@@ -11347,6 +9525,7 @@ height = 40
             &DaemonRequest::KeyCombo(KeyComboRequest {
                 combo: "Ctrl+L".to_string(),
                 guard: None,
+                session_id: None,
             }),
         )
         .expect_err("key_combo requires keyboard control approval by default");
@@ -11361,6 +9540,7 @@ height = 40
             &DaemonRequest::MovePointer(MovePointerRequest {
                 point: physical_point(3840.0, 2160.0),
                 guard: None,
+                session_id: None,
             }),
         )
         .expect_err("move pointer requires pointer control approval by default");
@@ -11373,6 +9553,7 @@ height = 40
                 button: PointerButton::Left,
                 clicks: 1,
                 guard: None,
+                session_id: None,
             }),
         )
         .expect_err("click pointer requires pointer control approval by default");
@@ -11386,6 +9567,7 @@ height = 40
                 button: PointerButton::Left,
                 duration_ms: 250,
                 guard: None,
+                session_id: None,
             }),
         )
         .expect_err("drag pointer requires pointer control approval by default");
@@ -11397,6 +9579,7 @@ height = 40
                 vertical: -1,
                 horizontal: 0,
                 guard: None,
+                session_id: None,
             }),
         )
         .expect_err("scroll pointer requires pointer control approval by default");
@@ -11414,6 +9597,7 @@ height = 40
             &DaemonRequest::TypeText(TypeTextRequest {
                 text: "hello".to_string(),
                 guard: None,
+                session_id: None,
             }),
         )
         .expect_err("panic-stop blocks keyboard control");
@@ -11434,6 +9618,7 @@ height = 40
                 button: PointerButton::Left,
                 clicks: 1,
                 guard: None,
+                session_id: None,
             }),
         )
         .expect_err("panic-stop blocks pointer control");
@@ -11558,6 +9743,10 @@ height = 40
             )
             .expect("active window updates");
         let monitors = vec![monitor("main-8k", 0, 0, 7680, 4320, 5120, 2880, 1.5)];
+        let active = state
+            .snapshot()
+            .expect("active-window snapshot succeeds")
+            .flatten();
 
         let point = active_window_local_to_physical_point(
             Point {
@@ -11565,7 +9754,7 @@ height = 40
                 y: 60.0,
                 space: CoordinateSpace::WindowLocal,
             },
-            &state,
+            active.as_ref(),
             &monitors,
         )
         .expect("window-local point maps");
@@ -11590,6 +9779,10 @@ height = 40
             )
             .expect("active window updates");
         let monitors = vec![monitor("main", 0, 0, 1920, 1080, 1920, 1080, 1.0)];
+        let active = state
+            .snapshot()
+            .expect("active-window snapshot succeeds")
+            .flatten();
 
         let err = active_window_local_to_physical_point(
             Point {
@@ -11597,7 +9790,7 @@ height = 40
                 y: 10.0,
                 space: CoordinateSpace::WindowLocal,
             },
-            &state,
+            active.as_ref(),
             &monitors,
         )
         .expect_err("edge outside active window is rejected");
@@ -11606,10 +9799,6 @@ height = 40
 
     #[test]
     fn rejects_window_local_pointer_points_without_active_window() {
-        let state = active_window_state_fixture();
-        state
-            .update_from_payload(r#"{"active": false}"#)
-            .expect("inactive payload updates");
         let monitors = vec![monitor("main", 0, 0, 1920, 1080, 1920, 1080, 1.0)];
 
         let err = active_window_local_to_physical_point(
@@ -11618,7 +9807,7 @@ height = 40
                 y: 10.0,
                 space: CoordinateSpace::WindowLocal,
             },
-            &state,
+            None,
             &monitors,
         )
         .expect_err("missing active window is rejected");
@@ -11824,6 +10013,7 @@ height = 40
                 window_name_contains: Some("settings".to_string()),
                 max_nodes: 256,
                 guard: None,
+                target_guard: None,
             }),
         )
         .expect_err("click button requires control approval by default");
@@ -11842,6 +10032,7 @@ height = 40
                 window_name_contains: Some("settings".to_string()),
                 max_nodes: 256,
                 guard: None,
+                target_guard: None,
             }),
         )
         .expect_err("set text field requires control approval by default");
@@ -11859,6 +10050,7 @@ height = 40
                 window_name_contains: Some("settings".to_string()),
                 max_nodes: 256,
                 guard: None,
+                target_guard: None,
             }),
         )
         .expect_err("focus text field requires control approval by default");
@@ -11882,6 +10074,7 @@ height = 40
                 window_name_contains: Some("sign in".to_string()),
                 max_nodes: 256,
                 guard: None,
+                target_guard: None,
             }),
         )
         .expect_err("secret-looking text fields use secret-field policy");
@@ -11896,6 +10089,7 @@ height = 40
                 window_name_contains: Some("settings".to_string()),
                 max_nodes: 256,
                 guard: None,
+                target_guard: None,
             }),
         )
         .expect("non-secret text fields still use default control policy");
@@ -11908,6 +10102,7 @@ height = 40
                 window_name_contains: Some("sign in".to_string()),
                 max_nodes: 256,
                 guard: None,
+                target_guard: None,
             }),
         )
         .expect_err("secret-looking focus targets use secret-field policy");
@@ -11925,6 +10120,7 @@ height = 40
                 window_name_contains: Some("preferences".to_string()),
                 max_nodes: 256,
                 guard: None,
+                target_guard: None,
             }),
         )
         .expect_err("activate tab requires control approval by default");
@@ -11942,6 +10138,7 @@ height = 40
                 window_name_contains: Some("docs".to_string()),
                 max_nodes: 256,
                 guard: None,
+                target_guard: None,
             }),
         )
         .expect_err("activate link requires control approval by default");
@@ -11960,6 +10157,7 @@ height = 40
                 window_name_contains: Some("preferences".to_string()),
                 max_nodes: 256,
                 guard: None,
+                target_guard: None,
             }),
         )
         .expect_err("toggle check requires control approval by default");
@@ -11978,6 +10176,7 @@ height = 40
                 window_name_contains: Some("sound".to_string()),
                 max_nodes: 256,
                 guard: None,
+                target_guard: None,
             }),
         )
         .expect_err("set value requires control approval by default");
@@ -11995,6 +10194,7 @@ height = 40
                 window_name_contains: Some("devices".to_string()),
                 max_nodes: 256,
                 guard: None,
+                target_guard: None,
             }),
         )
         .expect_err("select item requires control approval by default");
@@ -12013,6 +10213,7 @@ height = 40
                 window_name_contains: Some("editor".to_string()),
                 max_nodes: 256,
                 guard: None,
+                target_guard: None,
             }),
         )
         .expect_err("select menu requires control approval by default");
@@ -12036,6 +10237,7 @@ height = 40
                 window_name_contains: Some("confirm".to_string()),
                 max_nodes: 256,
                 guard: None,
+                target_guard: None,
             }),
         )
         .expect_err("explicit destructive button uses destructive policy");
@@ -12050,6 +10252,7 @@ height = 40
                 window_name_contains: Some("editor".to_string()),
                 max_nodes: 256,
                 guard: None,
+                target_guard: None,
             }),
         )
         .expect_err("destructive menu label uses destructive policy");
@@ -12064,6 +10267,7 @@ height = 40
                 window_name_contains: Some("dialog".to_string()),
                 max_nodes: 256,
                 guard: None,
+                target_guard: None,
             }),
         )
         .expect("non-destructive semantic control still uses default control policy");
@@ -12695,7 +10899,7 @@ height = 40
         let policy = PolicyEngine::new(PolicyConfig::default());
         let err = enforce_policy(
             &policy,
-            &DaemonRequest::ClipboardGet(ClipboardGetRequest {
+            &DaemonRequest::ClipboardGet(libseatgeist::ClipboardGetRequest {
                 max_bytes: Some(1024),
             }),
         )
@@ -12708,7 +10912,7 @@ height = 40
         let policy = PolicyEngine::new(policy_config(None, false, true, false));
         enforce_policy(
             &policy,
-            &DaemonRequest::ClipboardGet(ClipboardGetRequest {
+            &DaemonRequest::ClipboardGet(libseatgeist::ClipboardGetRequest {
                 max_bytes: Some(1024),
             }),
         )
@@ -12717,66 +10921,6 @@ height = 40
             policy_status_from_config(policy.config()).default_clipboard_read,
             ToolApprovalLevel::Allow
         );
-    }
-
-    #[test]
-    fn clipboard_text_is_bounded_on_utf8_boundary() {
-        let bounded = bound_clipboard_text("abécd".to_string(), Some(4), "test".to_string());
-        assert_eq!(bounded.text, "abé");
-        assert!(bounded.truncated);
-        assert_eq!(bounded.original_bytes, 6);
-        assert_eq!(bounded.backend, "test");
-    }
-
-    #[test]
-    fn clipboard_text_can_be_unbounded() {
-        let bounded = bound_clipboard_text("hello".to_string(), None, "test".to_string());
-        assert_eq!(bounded.text, "hello");
-        assert!(!bounded.truncated);
-        assert_eq!(bounded.original_bytes, 5);
-        assert_eq!(bounded.backend, "test");
-    }
-
-    #[test]
-    fn clipboard_backend_prefers_wl_then_klipper() {
-        assert_eq!(
-            clipboard_read_backend_from_availability(true, true),
-            Some(ClipboardBackend::WlClipboard)
-        );
-        assert_eq!(
-            clipboard_read_backend_from_availability(false, true),
-            Some(ClipboardBackend::KdeKlipper)
-        );
-        assert_eq!(clipboard_read_backend_from_availability(false, false), None);
-        assert_eq!(
-            clipboard_write_backend_from_availability(true, true),
-            Some(ClipboardBackend::WlClipboard)
-        );
-        assert_eq!(
-            clipboard_write_backend_from_availability(false, true),
-            Some(ClipboardBackend::KdeKlipper)
-        );
-        assert_eq!(
-            clipboard_write_backend_from_availability(false, false),
-            None
-        );
-    }
-
-    #[test]
-    fn clipboard_status_setup_hint_reports_backend_shape() {
-        let hint = clipboard_backend_setup_hint(
-            Some("wl-clipboard"),
-            Some("kde-klipper"),
-            true,
-            false,
-            true,
-        );
-        assert!(hint.contains("read backend=wl-clipboard"));
-        assert!(hint.contains("write backend=kde-klipper"));
-
-        let missing = clipboard_backend_setup_hint(None, None, false, false, false);
-        assert!(missing.contains("no clipboard text backend"));
-        assert!(missing.contains("wl-clipboard"));
     }
 
     #[test]
@@ -13054,9 +11198,7 @@ height = 40
     }
 
     fn active_window_state_fixture() -> ActiveWindowState {
-        ActiveWindowState {
-            inner: Arc::new(Mutex::new(ActiveWindowSnapshot::default())),
-        }
+        ActiveWindowState::default()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -13084,59 +11226,11 @@ height = 40
         }
     }
 
-    fn remote_desktop_status(available: bool) -> RemoteDesktopPortalStatus {
-        RemoteDesktopPortalStatus {
-            busctl_available: true,
-            portal_service_available: available,
-            remote_desktop_interface_available: available,
-            kde_portal_service_available: available,
-            setup_hint: String::new(),
-        }
-    }
-
-    fn screenshot_portal_status_fixture(
-        screenshot_available: bool,
-        busctl_available: bool,
-    ) -> ScreenshotPortalStatus {
-        ScreenshotPortalStatus {
-            busctl_available,
-            portal_service_available: screenshot_available,
-            screenshot_interface_available: screenshot_available,
-            screenshot_interface_version: screenshot_available.then_some(3),
-            screenshot_available_targets_mask: screenshot_available.then_some(15),
-            screenshot_available_targets: if screenshot_available {
-                vec![
-                    "screen".to_string(),
-                    "window".to_string(),
-                    "area".to_string(),
-                    "active_window".to_string(),
-                ]
-            } else {
-                Vec::new()
-            },
-            screenshot_target_option_supported: screenshot_available,
-            screencast_interface_available: screenshot_available,
-            kde_portal_service_available: screenshot_available,
-            setup_hint: String::new(),
-        }
-    }
-
-    fn libei_status_fixture(
-        client_library_available: bool,
-        socket_env_present: bool,
-    ) -> LibeiStatus {
-        LibeiStatus {
-            pkg_config_available: client_library_available,
-            client_library_available,
-            socket_env_present,
-            setup_hint: String::new(),
-        }
-    }
-
     fn sample_screenshot_info(backend: &str) -> ScreenshotInfo {
         ScreenshotInfo {
             path: PathBuf::from("/tmp/seatgeist-summary.png"),
             backend: backend.to_string(),
+            occlusion_possible: false,
             source_width: 7680,
             source_height: 4320,
             output_width: 1600,
@@ -13155,11 +11249,13 @@ height = 40
     }
 
     fn temp_test_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "seatgeist-{name}-{}-{}",
-            std::process::id(),
-            unix_time_ms().expect("time is available")
-        ))
+        static NEXT_TEST_PATH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let root = std::env::temp_dir().join(format!("seatgeist-tests-{}", std::process::id()));
+        fs::create_dir_all(&root).expect("private test root is created");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+            .expect("private test root permissions are strict");
+        let sequence = NEXT_TEST_PATH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        root.join(format!("{name}-{sequence}"))
     }
 
     fn temp_test_private_dir(name: &str) -> PathBuf {

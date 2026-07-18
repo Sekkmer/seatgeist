@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Seatgeist Daemon
+NoDisplay=true
+Exec=@SEATGEISTD_EXECUTABLE@
+X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2

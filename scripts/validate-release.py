@@ -38,6 +38,16 @@ def require_executable(path: str) -> str:
 
 
 def main() -> None:
+    readme = read("README.md")
+    require_contains("README.md", readme, "# Seatgeist")
+    require_contains("README.md", readme, "KDE Plasma 6 Wayland")
+    require_contains("README.md", readme, "make verify")
+
+    security = read("SECURITY.md")
+    require_contains("SECURITY.md", security, "# Security Policy")
+    require_contains("SECURITY.md", security, "sekkmer@gmail.com")
+    require_contains("SECURITY.md", security, "desktop-control")
+
     cargo = read("Cargo.toml")
     require_contains("Cargo.toml", cargo, 'license = "MIT OR Apache-2.0"')
 
@@ -84,6 +94,13 @@ def main() -> None:
     require_contains("Makefile", makefile, "scripts/run-release-live-evals.sh")
     require_contains("Makefile", makefile, "portal-screenshot-v3-status:")
     require_contains("Makefile", makefile, "scripts/portal-screenshot-v3-status.py")
+    require_contains("Makefile", makefile, "deploy-user-daemon:")
+    require_contains("Makefile", makefile, "scripts/deploy-seatgeistd-user.py")
+    require_contains(
+        "Makefile", makefile, "scripts/install-kwin-screenshot-authorization.py"
+    )
+    require_executable("scripts/deploy-seatgeistd-user.py")
+    require_executable("scripts/install-kwin-screenshot-authorization.py")
 
     package_release = require_executable("scripts/package-release.sh")
     for needle in [
@@ -98,6 +115,8 @@ def main() -> None:
         "\"plugin\": \"$(basename \"$plugin_archive\")\"",
         "\"source\": \"$(basename \"$source_archive\")\"",
         "cp -a scripts/. \"$stage/scripts/\"",
+        "cp -a desktop/. \"$stage/desktop/\"",
+        "README.md SECURITY.md",
         "seatgeist-panic-stop-hotkey",
         "MANIFEST.json",
         "git ls-files -z",
@@ -132,6 +151,10 @@ def main() -> None:
         "scripts/sign-release-artifacts.sh",
         "scripts/verify-release-signatures.sh",
         "scripts/portal-screenshot-v3-status.py",
+        "scripts/deploy-seatgeistd-user.py",
+        "scripts/deploy_user_daemon.py",
+        "desktop/org.seatgeist.daemon.desktop.in",
+        "scripts/install-kwin-screenshot-authorization.py",
         "scripts/check-public-name.py",
         "scripts/release-readiness.py",
         "scripts/release-external-preflight.py",

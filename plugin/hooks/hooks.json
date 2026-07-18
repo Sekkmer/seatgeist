@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/plugin/hooks/seatgeist_audit_summary.py\"",
+            "command": "sh -c 'root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; script=\"\"; for p in \"$root/plugin/hooks/seatgeist_audit_summary.py\" \"${CODEX_HOME:-$HOME/.codex}/plugins/cache/seatgeist-local/seatgeist/\"*/hooks/seatgeist_audit_summary.py \"$HOME/git/seatgeist/plugin/hooks/seatgeist_audit_summary.py\"; do if [ -f \"$p\" ]; then script=\"$p\"; break; fi; done; if [ -n \"$script\" ]; then python3 \"$script\"; fi'",
             "timeout": 10,
             "statusMessage": "Writing Seatgeist audit summary"
           }

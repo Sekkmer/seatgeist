@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate repo-shipped systemd, udev, and polkit install assets."""
+"""Validate repo-shipped desktop, systemd, udev, and polkit install assets."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def validate_systemd(root: Path) -> None:
         service_path,
         "Service",
         "ExecStart",
-        "%h/.cargo/bin/seatgeistd --socket %t/seatgeist/seatgeistd.sock",
+        "%h/.local/bin/seatgeistd --socket %t/seatgeist/seatgeistd.sock",
     )
     require_unit_value(service, service_path, "Service", "Restart", "on-failure")
     require_unit_value(service, service_path, "Service", "NoNewPrivileges", "true")
@@ -67,6 +67,27 @@ def validate_systemd(root: Path) -> None:
     require_unit_value(socket, socket_path, "Socket", "SocketMode", "0600")
     require_unit_value(socket, socket_path, "Socket", "DirectoryMode", "0700")
     require_unit_value(socket, socket_path, "Install", "WantedBy", "sockets.target")
+
+
+def validate_kwin_screenshot_authorization(root: Path) -> None:
+    path = root / "desktop" / "org.seatgeist.daemon.desktop.in"
+    desktop = read_systemd_unit(path)
+    require_unit_value(desktop, path, "Desktop Entry", "Type", "Application")
+    require_unit_value(desktop, path, "Desktop Entry", "NoDisplay", "true")
+    require_unit_value(
+        desktop,
+        path,
+        "Desktop Entry",
+        "Exec",
+        "@SEATGEISTD_EXECUTABLE@",
+    )
+    require_unit_value(
+        desktop,
+        path,
+        "Desktop Entry",
+        "X-KDE-DBUS-Restricted-Interfaces",
+        "org.kde.KWin.ScreenShot2",
+    )
 
 
 def validate_udev(root: Path) -> None:
@@ -155,6 +176,7 @@ def main() -> None:
     root = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
     if not root.is_dir():
         fail(f"{root} is not a repository directory")
+    validate_kwin_screenshot_authorization(root)
     validate_systemd(root)
     validate_udev(root)
     validate_polkit(root)

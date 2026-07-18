@@ -15,14 +15,17 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 clap.workspace = true
 image.workspace = true
 libseatgeist.workspace = true
 seatgeist-atspi.workspace = true
+seatgeist-backend.workspace = true
 seatgeist-eis.workspace = true
 seatgeist-policy.workspace = true
 seatgeist-kwin.workspace = true
 seatgeist-portal.workspace = true
+seatgeist-pipewire.workspace = true
 seatgeist-uinput.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -33,6 +36,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 zbus.workspace = true
+
+[dev-dependencies]
+seatgeist-testkit.workspace = true
 
 [lints]
 workspace = true

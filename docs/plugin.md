@@ -5,7 +5,8 @@ The repository ships a local Codex plugin bundle under `plugin/`.
 ## Contents
 
 - `plugin/.codex-plugin/plugin.json`: plugin metadata, skill path, and MCP config path.
-- `plugin/.mcp.json`: stdio MCP server entry for `seatgeist-mcp --stdio`.
+- `plugin/.mcp.json`: bounded core-profile stdio MCP server entry for
+  `seatgeist-mcp --stdio --tool-profile core`.
 - `plugin/skills/`: Seatgeist operating workflows for computer use, GUI testing, browser debugging, and desktop triage.
 - `plugin/hooks/hooks.json`: Codex `Stop` hook config for writing a compact local audit summary.
 - `plugin/hooks/seatgeist_audit_summary.py`: fail-open audit hook that writes `target/seatgeist-hook-audit/latest.json` with git status, recent Seatgeist journal metadata, failure counts, unguarded-control counts, method/safety-class/client tool counts with process/pid fallback, compact active-window context, and opt-in artifact metadata when present.
@@ -43,11 +44,11 @@ Register the checkout as a local marketplace and install the plugin:
 ```bash
 codex plugin marketplace add .
 codex plugin list --marketplace seatgeist-local --available
-codex plugin add seatgeist@seatgeist-local
+make refresh-local-codex-plugin
 codex plugin list --marketplace seatgeist-local
 ```
 
-Restart Codex or start a new thread after installing. The plugin should make the four Seatgeist skills available and load `seatgeist-mcp --stdio` as the bundled MCP server when the binary is on `PATH`.
+Restart Codex or start a new thread after installing. The plugin should make the four Seatgeist skills available and load `seatgeist-mcp --stdio --tool-profile core` as the bundled MCP server when the binary is on `PATH`. Run an explicit standalone MCP process with `--tool-profile expert` only for diagnostics or compatibility tools outside the normal agent workflow.
 
 For a repeatable noninteractive install smoke that does not mutate your real Codex config, run:
 
@@ -69,7 +70,16 @@ To check the real local Codex install after moving or renaming a checkout, run:
 make check-local-codex-install
 ```
 
-This reads `$CODEX_HOME` or `~/.codex`, verifies that the `seatgeist-local` marketplace source points at the current checkout, validates the installed plugin cache, and checks that `seatgeist-mcp`, `seatgeist-cli`, and `seatgeistd` resolve and are not stale links to an old checkout path.
+This reads `$CODEX_HOME` or `~/.codex`, verifies that the `seatgeist-local` marketplace source points at the current checkout, validates and hashes the installed plugin cache against the complete source plugin tree, and checks that `seatgeist-mcp`, `seatgeist-cli`, and `seatgeistd` resolve and are not stale links to an old checkout path.
+
+Development reinstalls use the version currently declared in
+`plugin/.codex-plugin/plugin.json`, including a Codex cachebuster suffix. The
+installed-cache check follows that version instead of assuming `0.1.0`, and the
+Stop hook resolves any cachebuster directory rather than embedding one version.
+`make refresh-local-codex-plugin` uses the Codex plugin-creator cachebuster
+helper, runs `codex plugin add seatgeist@seatgeist-local --json`, and requires
+the strict tree hash to match. Start a new Codex thread afterward so the updated
+skills and MCP contract are loaded.
 
 ## Validation
 
@@ -87,7 +97,7 @@ make verify
 
 The validator checks manifest metadata, relative plugin paths, MCP server config, skill frontmatter, the required four skill names, the bundled Stop audit hook, and the hook's compact audit aggregation behavior.
 
-`make check-local-codex-install` is intentionally separate from `make verify` because it inspects the operator's personal Codex config and `PATH`, not only repository files.
+`make check-local-codex-install` is intentionally separate from `make verify` because it inspects the operator's personal Codex config, installed plugin tree, and `PATH`, not only repository files.
 
 ## Hook Trust
 

@@ -6,7 +6,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+mod capture;
+mod target;
+
 use anyhow::{Context, Result, bail};
+use capture::CaptureCommand;
 use clap::{Parser, Subcommand, ValueEnum};
 use libseatgeist::{
     AccessibilityAction, AccessibilityCopyTextRequest, AccessibilityCutTextRequest,
@@ -19,17 +23,20 @@ use libseatgeist::{
     DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
     DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonClientIdentity, DaemonRequest, DaemonRequestEnvelope,
     DaemonResponse, DragPointerRequest, FocusTextFieldRequest, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, MovePointerRequest,
-    ObserveRequest, Point, PointerButton, PortalScreenshotTarget, RemoteDesktopPersistMode,
-    RemoteDesktopSessionProbeRequest, ReplayTrace, SafetyClass, ScreenshotRequest,
-    ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
-    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
-    WaitForChangeRequest, default_approval_file_path, default_screenshot_output_path,
+    FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, LaunchWindowRequest,
+    MovePointerRequest, MoveWindowRequest, ObserveRequest, PageZoomOperation, PageZoomRequest,
+    Point, PointerButton, PortalScreenshotTarget, RemoteDesktopPersistMode,
+    RemoteDesktopSessionProbeRequest, ReplayTrace, ResizeWindowRequest, SafetyClass,
+    ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest,
+    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest,
+    ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest, WindowActivationMode,
+    WindowPlacementAnchor, default_approval_file_path, default_screenshot_output_path,
     default_socket_path,
 };
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
+use target::TargetGuardArgs;
 
 const CLIENT_TOOL_NAME: &str = "seatgeist-cli";
 
@@ -53,6 +60,10 @@ enum Command {
     Readiness,
     KwinBridgeStatus,
     CaptureBackends,
+    Capture {
+        #[command(subcommand)]
+        command: CaptureCommand,
+    },
     Monitors,
     Screenshot {
         #[arg(long)]
@@ -65,6 +76,8 @@ enum Command {
         portal_interactive: bool,
         #[arg(long, value_enum)]
         portal_target: Option<CliPortalScreenshotTarget>,
+        #[arg(long, value_name = "KWIN_WINDOW_ID")]
+        visible_window_crop: Option<String>,
     },
     ScreenshotTile {
         #[arg(long)]
@@ -93,6 +106,8 @@ enum Command {
         portal_interactive: bool,
         #[arg(long, value_enum)]
         portal_target: Option<CliPortalScreenshotTarget>,
+        #[arg(long, value_name = "KWIN_WINDOW_ID")]
+        visible_window_crop: Option<String>,
     },
     WaitForChange {
         #[arg(long)]
@@ -113,6 +128,70 @@ enum Command {
         window: String,
         #[arg(long)]
         expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
+    Resize {
+        #[arg(long)]
+        window: String,
+        #[arg(long)]
+        width: u32,
+        #[arg(long)]
+        height: u32,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
+    Move {
+        #[arg(long)]
+        window: String,
+        #[arg(long)]
+        x: i32,
+        #[arg(long)]
+        y: i32,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
+    Launch {
+        #[arg(long)]
+        desktop_entry: String,
+        #[arg(long, value_enum, default_value = "top-left")]
+        anchor: CliWindowAnchor,
+        #[arg(long)]
+        monitor: Option<String>,
+        #[arg(long)]
+        width: Option<u32>,
+        #[arg(long)]
+        height: Option<u32>,
+        #[arg(long, default_value_t = 0)]
+        margin: u32,
+        #[arg(long, value_enum, default_value = "preserve-focus")]
+        activation: CliWindowActivation,
+        #[arg(long, default_value_t = 10_000)]
+        timeout_ms: u64,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
+    PageZoom {
+        #[arg(long, value_enum)]
+        operation: CliPageZoomOperation,
+        #[arg(long, default_value_t = 1)]
+        steps: u8,
+        #[arg(long)]
+        expected_active_window: String,
         #[arg(long)]
         expected_active_app: Option<String>,
         #[arg(long)]
@@ -166,6 +245,59 @@ enum CliPortalScreenshotTarget {
     Window,
     Area,
     ActiveWindow,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliPageZoomOperation {
+    In,
+    Out,
+    Reset,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliWindowAnchor {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    Center,
+}
+
+impl From<CliWindowAnchor> for WindowPlacementAnchor {
+    fn from(value: CliWindowAnchor) -> Self {
+        match value {
+            CliWindowAnchor::TopLeft => Self::TopLeft,
+            CliWindowAnchor::TopRight => Self::TopRight,
+            CliWindowAnchor::BottomLeft => Self::BottomLeft,
+            CliWindowAnchor::BottomRight => Self::BottomRight,
+            CliWindowAnchor::Center => Self::Center,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliWindowActivation {
+    PreserveFocus,
+    Activate,
+}
+
+impl From<CliWindowActivation> for WindowActivationMode {
+    fn from(value: CliWindowActivation) -> Self {
+        match value {
+            CliWindowActivation::PreserveFocus => Self::PreserveFocus,
+            CliWindowActivation::Activate => Self::Activate,
+        }
+    }
+}
+
+impl From<CliPageZoomOperation> for PageZoomOperation {
+    fn from(value: CliPageZoomOperation) -> Self {
+        match value {
+            CliPageZoomOperation::In => Self::In,
+            CliPageZoomOperation::Out => Self::Out,
+            CliPageZoomOperation::Reset => Self::Reset,
+        }
+    }
 }
 
 impl From<CliPortalScreenshotTarget> for PortalScreenshotTarget {
@@ -269,6 +401,8 @@ enum InputCommand {
     RemoteDesktopEisStop,
     MovePointer {
         #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
         x: f64,
         #[arg(long)]
         y: f64,
@@ -282,6 +416,8 @@ enum InputCommand {
         active_title_contains: Option<String>,
     },
     ClickPointer {
+        #[arg(long)]
+        session_id: Option<String>,
         #[arg(long)]
         x: f64,
         #[arg(long)]
@@ -300,6 +436,8 @@ enum InputCommand {
         active_title_contains: Option<String>,
     },
     DragPointer {
+        #[arg(long)]
+        session_id: Option<String>,
         #[arg(long)]
         from_x: f64,
         #[arg(long)]
@@ -322,6 +460,8 @@ enum InputCommand {
         active_title_contains: Option<String>,
     },
     ScrollPointer {
+        #[arg(long)]
+        session_id: Option<String>,
         #[arg(long, default_value_t = 0)]
         vertical: i32,
         #[arg(long, default_value_t = 0)]
@@ -334,6 +474,8 @@ enum InputCommand {
         active_title_contains: Option<String>,
     },
     TypeText {
+        #[arg(long)]
+        session_id: Option<String>,
         #[arg(value_name = "TEXT")]
         text: String,
         #[arg(long)]
@@ -344,6 +486,8 @@ enum InputCommand {
         active_title_contains: Option<String>,
     },
     KeyCombo {
+        #[arg(long)]
+        session_id: Option<String>,
         #[arg(value_name = "COMBO")]
         combo: String,
         #[arg(long)]
@@ -533,6 +677,8 @@ enum SemanticCommand {
         expected_active_app: Option<String>,
         #[arg(long)]
         active_title_contains: Option<String>,
+        #[command(flatten)]
+        target: TargetGuardArgs,
     },
     SetTextField {
         #[arg(long)]
@@ -551,6 +697,8 @@ enum SemanticCommand {
         expected_active_app: Option<String>,
         #[arg(long)]
         active_title_contains: Option<String>,
+        #[command(flatten)]
+        target: TargetGuardArgs,
     },
     FocusTextField {
         #[arg(long)]
@@ -567,6 +715,8 @@ enum SemanticCommand {
         expected_active_app: Option<String>,
         #[arg(long)]
         active_title_contains: Option<String>,
+        #[command(flatten)]
+        target: TargetGuardArgs,
     },
     ActivateTab {
         #[arg(long)]
@@ -583,6 +733,8 @@ enum SemanticCommand {
         expected_active_app: Option<String>,
         #[arg(long)]
         active_title_contains: Option<String>,
+        #[command(flatten)]
+        target: TargetGuardArgs,
     },
     ActivateLink {
         #[arg(long)]
@@ -599,6 +751,8 @@ enum SemanticCommand {
         expected_active_app: Option<String>,
         #[arg(long)]
         active_title_contains: Option<String>,
+        #[command(flatten)]
+        target: TargetGuardArgs,
     },
     ToggleCheck {
         #[arg(long)]
@@ -617,6 +771,8 @@ enum SemanticCommand {
         expected_active_app: Option<String>,
         #[arg(long)]
         active_title_contains: Option<String>,
+        #[command(flatten)]
+        target: TargetGuardArgs,
     },
     SetValue {
         #[arg(long)]
@@ -635,6 +791,8 @@ enum SemanticCommand {
         expected_active_app: Option<String>,
         #[arg(long)]
         active_title_contains: Option<String>,
+        #[command(flatten)]
+        target: TargetGuardArgs,
     },
     SelectItem {
         #[arg(long)]
@@ -651,6 +809,8 @@ enum SemanticCommand {
         expected_active_app: Option<String>,
         #[arg(long)]
         active_title_contains: Option<String>,
+        #[command(flatten)]
+        target: TargetGuardArgs,
     },
     SelectMenu {
         #[arg(long)]
@@ -669,6 +829,8 @@ enum SemanticCommand {
         expected_active_app: Option<String>,
         #[arg(long)]
         active_title_contains: Option<String>,
+        #[command(flatten)]
+        target: TargetGuardArgs,
     },
 }
 
@@ -731,6 +893,9 @@ fn main() -> Result<()> {
         Command::CaptureBackends => {
             print_daemon_response(&socket, DaemonRequest::CaptureBackendStatus)?;
         }
+        Command::Capture { command } => {
+            print_daemon_response(&socket, command.into_request()?)?;
+        }
         Command::Monitors => print_daemon_response(&socket, DaemonRequest::ListMonitors)?,
         Command::Screenshot {
             output,
@@ -738,6 +903,7 @@ fn main() -> Result<()> {
             full_resolution,
             portal_interactive,
             portal_target,
+            visible_window_crop,
         } => {
             let output = screenshot_output_or_default(output, "screenshot")?;
             print_daemon_response(
@@ -748,6 +914,7 @@ fn main() -> Result<()> {
                     full_resolution,
                     portal_interactive,
                     portal_target: portal_target.map(Into::into),
+                    visible_window_crop_id: visible_window_crop,
                 }),
             )?;
         }
@@ -780,6 +947,7 @@ fn main() -> Result<()> {
             full_resolution,
             portal_interactive,
             portal_target,
+            visible_window_crop,
         } => print_daemon_response(
             &socket,
             DaemonRequest::Observe(ObserveRequest {
@@ -789,6 +957,7 @@ fn main() -> Result<()> {
                     full_resolution,
                     portal_interactive,
                     portal_target: portal_target.map(Into::into),
+                    visible_window_crop_id: visible_window_crop,
                 }),
             }),
         )?,
@@ -824,6 +993,95 @@ fn main() -> Result<()> {
                     expected_active_app,
                     active_title_contains,
                 ),
+            }),
+        )?,
+        Command::Resize {
+            window,
+            width,
+            height,
+            expected_active_window,
+            expected_active_app,
+            active_title_contains,
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::ResizeWindow(ResizeWindowRequest {
+                window_id: window,
+                width,
+                height,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
+        )?,
+        Command::Move {
+            window,
+            x,
+            y,
+            expected_active_window,
+            expected_active_app,
+            active_title_contains,
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::MoveWindow(MoveWindowRequest {
+                window_id: window,
+                x,
+                y,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
+        )?,
+        Command::Launch {
+            desktop_entry,
+            anchor,
+            monitor,
+            width,
+            height,
+            margin,
+            activation,
+            timeout_ms,
+            expected_active_window,
+            expected_active_app,
+            active_title_contains,
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::LaunchWindow(LaunchWindowRequest {
+                desktop_entry,
+                anchor: anchor.into(),
+                monitor_id: monitor,
+                width,
+                height,
+                margin,
+                activation: activation.into(),
+                timeout_ms,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
+        )?,
+        Command::PageZoom {
+            operation,
+            steps,
+            expected_active_window,
+            expected_active_app,
+            active_title_contains,
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::PageZoom(PageZoomRequest {
+                operation: operation.into(),
+                steps,
+                guard: active_window_guard(
+                    Some(expected_active_window),
+                    expected_active_app,
+                    active_title_contains,
+                )
+                .expect("required active-window id creates a guard"),
             }),
         )?,
         Command::Clipboard {
@@ -972,6 +1230,7 @@ fn main() -> Result<()> {
         Command::Input {
             command:
                 InputCommand::MovePointer {
+                    session_id,
                     x,
                     y,
                     coordinate_space,
@@ -992,11 +1251,13 @@ fn main() -> Result<()> {
                     expected_active_app,
                     active_title_contains,
                 ),
+                session_id,
             }),
         )?,
         Command::Input {
             command:
                 InputCommand::ClickPointer {
+                    session_id,
                     x,
                     y,
                     coordinate_space,
@@ -1021,11 +1282,13 @@ fn main() -> Result<()> {
                     expected_active_app,
                     active_title_contains,
                 ),
+                session_id,
             }),
         )?,
         Command::Input {
             command:
                 InputCommand::DragPointer {
+                    session_id,
                     from_x,
                     from_y,
                     to_x,
@@ -1057,11 +1320,13 @@ fn main() -> Result<()> {
                     expected_active_app,
                     active_title_contains,
                 ),
+                session_id,
             }),
         )?,
         Command::Input {
             command:
                 InputCommand::ScrollPointer {
+                    session_id,
                     vertical,
                     horizontal,
                     expected_active_window,
@@ -1078,11 +1343,13 @@ fn main() -> Result<()> {
                     expected_active_app,
                     active_title_contains,
                 ),
+                session_id,
             }),
         )?,
         Command::Input {
             command:
                 InputCommand::TypeText {
+                    session_id,
                     text,
                     expected_active_window,
                     expected_active_app,
@@ -1097,11 +1364,13 @@ fn main() -> Result<()> {
                     expected_active_app,
                     active_title_contains,
                 ),
+                session_id,
             }),
         )?,
         Command::Input {
             command:
                 InputCommand::KeyCombo {
+                    session_id,
                     combo,
                     expected_active_window,
                     expected_active_app,
@@ -1116,6 +1385,7 @@ fn main() -> Result<()> {
                     expected_active_app,
                     active_title_contains,
                 ),
+                session_id,
             }),
         )?,
         Command::Atspi {
@@ -1392,6 +1662,7 @@ fn main() -> Result<()> {
                     expected_active_window,
                     expected_active_app,
                     active_title_contains,
+                    target,
                 },
         } => print_daemon_response(
             &socket,
@@ -1406,6 +1677,7 @@ fn main() -> Result<()> {
                     expected_active_app,
                     active_title_contains,
                 ),
+                target_guard: target.into_guard()?,
             }),
         )?,
         Command::Semantic {
@@ -1419,6 +1691,7 @@ fn main() -> Result<()> {
                     expected_active_window,
                     expected_active_app,
                     active_title_contains,
+                    target,
                 },
         } => print_daemon_response(
             &socket,
@@ -1433,6 +1706,7 @@ fn main() -> Result<()> {
                     expected_active_app,
                     active_title_contains,
                 ),
+                target_guard: target.into_guard()?,
             }),
         )?,
         Command::Semantic {
@@ -1445,6 +1719,7 @@ fn main() -> Result<()> {
                     expected_active_window,
                     expected_active_app,
                     active_title_contains,
+                    target,
                 },
         } => print_daemon_response(
             &socket,
@@ -1458,6 +1733,7 @@ fn main() -> Result<()> {
                     expected_active_app,
                     active_title_contains,
                 ),
+                target_guard: target.into_guard()?,
             }),
         )?,
         Command::Semantic {
@@ -1470,6 +1746,7 @@ fn main() -> Result<()> {
                     expected_active_window,
                     expected_active_app,
                     active_title_contains,
+                    target,
                 },
         } => print_daemon_response(
             &socket,
@@ -1483,6 +1760,7 @@ fn main() -> Result<()> {
                     expected_active_app,
                     active_title_contains,
                 ),
+                target_guard: target.into_guard()?,
             }),
         )?,
         Command::Semantic {
@@ -1495,6 +1773,7 @@ fn main() -> Result<()> {
                     expected_active_window,
                     expected_active_app,
                     active_title_contains,
+                    target,
                 },
         } => print_daemon_response(
             &socket,
@@ -1508,6 +1787,7 @@ fn main() -> Result<()> {
                     expected_active_app,
                     active_title_contains,
                 ),
+                target_guard: target.into_guard()?,
             }),
         )?,
         Command::Semantic {
@@ -1521,6 +1801,7 @@ fn main() -> Result<()> {
                     expected_active_window,
                     expected_active_app,
                     active_title_contains,
+                    target,
                 },
         } => print_daemon_response(
             &socket,
@@ -1535,6 +1816,7 @@ fn main() -> Result<()> {
                     expected_active_app,
                     active_title_contains,
                 ),
+                target_guard: target.into_guard()?,
             }),
         )?,
         Command::Semantic {
@@ -1548,6 +1830,7 @@ fn main() -> Result<()> {
                     expected_active_window,
                     expected_active_app,
                     active_title_contains,
+                    target,
                 },
         } => print_daemon_response(
             &socket,
@@ -1562,6 +1845,7 @@ fn main() -> Result<()> {
                     expected_active_app,
                     active_title_contains,
                 ),
+                target_guard: target.into_guard()?,
             }),
         )?,
         Command::Semantic {
@@ -1574,6 +1858,7 @@ fn main() -> Result<()> {
                     expected_active_window,
                     expected_active_app,
                     active_title_contains,
+                    target,
                 },
         } => print_daemon_response(
             &socket,
@@ -1587,6 +1872,7 @@ fn main() -> Result<()> {
                     expected_active_app,
                     active_title_contains,
                 ),
+                target_guard: target.into_guard()?,
             }),
         )?,
         Command::Semantic {
@@ -1600,6 +1886,7 @@ fn main() -> Result<()> {
                     expected_active_window,
                     expected_active_app,
                     active_title_contains,
+                    target,
                 },
         } => print_daemon_response(
             &socket,
@@ -1614,6 +1901,7 @@ fn main() -> Result<()> {
                     expected_active_app,
                     active_title_contains,
                 ),
+                target_guard: target.into_guard()?,
             }),
         )?,
         Command::Journal {
@@ -1709,15 +1997,12 @@ fn write_approval_grant(
     writeln!(file, "{}", serde_json::to_string(&grant)?)
         .with_context(|| format!("write approval file {}", path.display()))?;
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "approval_file": path.display().to_string(),
-            "safety_class": safety_class,
-            "method": method.trim(),
-            "expires_unix_ms": expires_unix_ms,
-        }))?
-    );
+    write_stdout_line(&serde_json::to_string_pretty(&serde_json::json!({
+        "approval_file": path.display().to_string(),
+        "safety_class": safety_class,
+        "method": method.trim(),
+        "expires_unix_ms": expires_unix_ms,
+    }))?)?;
     Ok(())
 }
 
@@ -1756,6 +2041,7 @@ fn active_window_guard(
         return None;
     }
     Some(ActiveWindowGuard {
+        desktop_revision: None,
         expected_window_id,
         expected_app_id,
         title_contains,
@@ -1768,9 +2054,22 @@ fn print_daemon_response(socket: &PathBuf, request: DaemonRequest) -> Result<()>
         DaemonResponse::Error { kind, message } => {
             bail!("daemon returned {kind:?} error: {message}")
         }
-        response => println!("{}", serde_json::to_string_pretty(&response)?),
+        response => write_stdout_line(&serde_json::to_string_pretty(&response)?)?,
     }
     Ok(())
+}
+
+fn write_stdout_line(text: &str) -> Result<()> {
+    let stdout = io::stdout();
+    write_line_ignoring_broken_pipe(&mut stdout.lock(), text)
+}
+
+fn write_line_ignoring_broken_pipe(writer: &mut impl Write, text: &str) -> Result<()> {
+    match writeln!(writer, "{text}") {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(err) => Err(err).context("write command output"),
+    }
 }
 
 fn load_trace(file: &Path) -> Result<ReplayTrace> {
@@ -1900,16 +2199,13 @@ fn validate_trace_file(file: PathBuf) -> Result<()> {
     validate_trace(&trace)?;
     let (step_count, steps) = trace_validation_steps(&trace);
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "type": "trace_validation",
-            "trace_version": trace.version,
-            "description": trace.description,
-            "step_count": step_count,
-            "steps": steps,
-        }))?
-    );
+    write_stdout_line(&serde_json::to_string_pretty(&serde_json::json!({
+        "type": "trace_validation",
+        "trace_version": trace.version,
+        "description": trace.description,
+        "step_count": step_count,
+        "steps": steps,
+    }))?)?;
     Ok(())
 }
 
@@ -1932,16 +2228,13 @@ fn validate_trace_dir(dir: PathBuf) -> Result<()> {
         }));
     }
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "type": "trace_validation_set",
-            "dir": dir.display().to_string(),
-            "trace_count": traces.len(),
-            "step_count": total_steps,
-            "traces": traces,
-        }))?
-    );
+    write_stdout_line(&serde_json::to_string_pretty(&serde_json::json!({
+        "type": "trace_validation_set",
+        "dir": dir.display().to_string(),
+        "trace_count": traces.len(),
+        "step_count": total_steps,
+        "traces": traces,
+    }))?)?;
     Ok(())
 }
 
@@ -2000,15 +2293,12 @@ fn replay_trace_file(socket: &PathBuf, file: PathBuf) -> Result<()> {
     validate_trace(&trace)?;
     let results = replay_trace_steps(socket, &trace)?;
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "type": "trace_replay",
-            "trace_version": trace.version,
-            "description": trace.description,
-            "steps": results,
-        }))?
-    );
+    write_stdout_line(&serde_json::to_string_pretty(&serde_json::json!({
+        "type": "trace_replay",
+        "trace_version": trace.version,
+        "description": trace.description,
+        "steps": results,
+    }))?)?;
     Ok(())
 }
 
@@ -2031,16 +2321,13 @@ fn replay_trace_dir(socket: &PathBuf, dir: PathBuf) -> Result<()> {
         }));
     }
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "type": "trace_replay_set",
-            "dir": dir.display().to_string(),
-            "trace_count": traces.len(),
-            "step_count": total_steps,
-            "traces": traces,
-        }))?
-    );
+    write_stdout_line(&serde_json::to_string_pretty(&serde_json::json!({
+        "type": "trace_replay_set",
+        "dir": dir.display().to_string(),
+        "trace_count": traces.len(),
+        "step_count": total_steps,
+        "traces": traces,
+    }))?)?;
     Ok(())
 }
 
@@ -2197,6 +2484,9 @@ fn known_response_types() -> &'static [&'static str] {
         "remote_desktop_eis_probe",
         "remote_desktop_eis_session_status",
         "capture_backend_status",
+        "capture_session_status",
+        "capture_frame",
+        "capture_wait",
         "pointer_calibration",
         "monitors",
         "windows",
@@ -2250,6 +2540,7 @@ fn request_envelope(request: DaemonRequest) -> DaemonRequestEnvelope {
         client: Some(DaemonClientIdentity {
             tool: Some(CLIENT_TOOL_NAME.to_string()),
         }),
+        response_options: None,
     }
 }
 
@@ -2259,4 +2550,36 @@ fn screenshot_output_or_default(output: Option<PathBuf>, kind: &str) -> Result<P
     }
 
     default_screenshot_output_path(kind).context("resolve default screenshot output path")
+}
+
+#[cfg(test)]
+mod output_tests {
+    use std::io::{self, Write};
+
+    use super::write_line_ignoring_broken_pipe;
+
+    struct BrokenPipeWriter;
+
+    impl Write for BrokenPipeWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::BrokenPipe))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn command_output_appends_one_newline() {
+        let mut output = Vec::new();
+        write_line_ignoring_broken_pipe(&mut output, "{\"ok\":true}").expect("output is written");
+        assert_eq!(output, b"{\"ok\":true}\n");
+    }
+
+    #[test]
+    fn command_output_treats_closed_pipe_as_success() {
+        write_line_ignoring_broken_pipe(&mut BrokenPipeWriter, "ignored")
+            .expect("broken pipe is a normal pipeline termination");
+    }
 }

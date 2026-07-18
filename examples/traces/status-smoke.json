@@ -95,6 +95,18 @@
           "value_type": "boolean"
         },
         {
+          "pointer": "/data/target_event_settle_available",
+          "value_type": "boolean"
+        },
+        {
+          "pointer": "/data/event_backend",
+          "equals": "atspi_registry"
+        },
+        {
+          "pointer": "/data/target_event_classes",
+          "value_type": "array"
+        },
+        {
           "pointer": "/data/semantic_targeting_reliable",
           "value_type": "boolean"
         },
@@ -272,6 +284,28 @@
       "expect_json": [
         {
           "pointer": "/data/active",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "label": "capture-session-status-inactive",
+      "request": {
+        "method": "capture_session_status"
+      },
+      "expect_response_type": "capture_session_status",
+      "expect_ok": true,
+      "expect_json": [
+        {
+          "pointer": "/data/active",
+          "equals": false
+        },
+        {
+          "pointer": "/data/opening",
+          "equals": false
+        },
+        {
+          "pointer": "/data/sticky_target_bound",
           "equals": false
         }
       ]

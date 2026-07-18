@@ -1,8 +1,8 @@
 {
-  "mcp_servers": {
+  "mcpServers": {
     "seatgeist": {
       "command": "seatgeist-mcp",
-      "args": ["--stdio"]
+      "args": ["--stdio", "--tool-profile", "core"]
     }
   }
 }

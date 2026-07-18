@@ -3,12 +3,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 use libseatgeist::{
     AccessibilityAction, AccessibilityFindRequest, AccessibilityNode, AccessibilityTextAttributes,
-    CoordinateSpace, MonitorInfo, Point, PointerButton, ScreenshotTarget, SeatgeistError,
-    TextAttribute, WindowGeometry, WindowId, WindowInfo,
+    CoordinateSpace, MonitorInfo, Point, PointerButton, SeatgeistError, TextAttribute,
+    WindowGeometry, WindowId, WindowInfo,
 };
 use seatgeist_backend::{
-    AccessibilityBackend, ClipboardBackend, InputBackend, Result, ScreenBackend, Screenshot,
-    WindowBackend,
+    AccessibilityBackend, CaptureCapabilities, CaptureSession, CaptureSessionMetadata,
+    CaptureSessionRequest, CaptureSource, CaptureSourceType, CapturedFrame, ClipboardBackend,
+    FrameRequest, FrameWaitRequest, FrameWaitResult, InputBackend, Result, ScreenBackend,
+    Screenshot, WindowBackend,
 };
 
 pub fn sample_monitor() -> MonitorInfo {
@@ -78,27 +80,54 @@ pub fn sample_text_attributes() -> AccessibilityTextAttributes {
 #[derive(Debug, Clone)]
 pub struct MockScreenBackend {
     monitors: Vec<MonitorInfo>,
-    screenshot: Screenshot,
-    screenshots: Arc<Mutex<Vec<ScreenshotTarget>>>,
-    scaled_screenshots: Arc<Mutex<Vec<(ScreenshotTarget, u32)>>>,
+    frames: Vec<CapturedFrame>,
+    capture_requests: Arc<Mutex<Vec<CaptureSessionRequest>>>,
+    next_session: Arc<Mutex<u64>>,
+    snapshot_requests: Arc<Mutex<Vec<(String, FrameRequest)>>>,
+    wait_requests: Arc<Mutex<Vec<(String, FrameWaitRequest)>>>,
+    closed_sessions: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockScreenBackend {
     pub fn new(monitors: Vec<MonitorInfo>, screenshot: Screenshot) -> Self {
+        Self::with_frames(
+            monitors,
+            vec![CapturedFrame {
+                screenshot,
+                revision: "mock-frame-1".to_string(),
+                sequence: 1,
+                complete: true,
+                damage_present: false,
+            }],
+        )
+    }
+
+    pub fn with_frames(monitors: Vec<MonitorInfo>, frames: Vec<CapturedFrame>) -> Self {
         Self {
             monitors,
-            screenshot,
-            screenshots: Arc::new(Mutex::new(Vec::new())),
-            scaled_screenshots: Arc::new(Mutex::new(Vec::new())),
+            frames,
+            capture_requests: Arc::new(Mutex::new(Vec::new())),
+            next_session: Arc::new(Mutex::new(1)),
+            snapshot_requests: Arc::new(Mutex::new(Vec::new())),
+            wait_requests: Arc::new(Mutex::new(Vec::new())),
+            closed_sessions: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    pub fn screenshots(&self) -> Result<Vec<ScreenshotTarget>> {
-        Ok(lock(&self.screenshots)?.clone())
+    pub fn capture_requests(&self) -> Result<Vec<CaptureSessionRequest>> {
+        Ok(lock(&self.capture_requests)?.clone())
     }
 
-    pub fn scaled_screenshots(&self) -> Result<Vec<(ScreenshotTarget, u32)>> {
-        Ok(lock(&self.scaled_screenshots)?.clone())
+    pub fn snapshot_requests(&self) -> Result<Vec<(String, FrameRequest)>> {
+        Ok(lock(&self.snapshot_requests)?.clone())
+    }
+
+    pub fn wait_requests(&self) -> Result<Vec<(String, FrameWaitRequest)>> {
+        Ok(lock(&self.wait_requests)?.clone())
+    }
+
+    pub fn closed_sessions(&self) -> Result<Vec<String>> {
+        Ok(lock(&self.closed_sessions)?.clone())
     }
 }
 
@@ -108,6 +137,8 @@ impl Default for MockScreenBackend {
             vec![sample_monitor()],
             Screenshot {
                 path: "mock-screen.png".to_string(),
+                source_width: 1600,
+                source_height: 900,
                 width: 1600,
                 height: 900,
             },
@@ -117,43 +148,199 @@ impl Default for MockScreenBackend {
 
 #[async_trait]
 impl ScreenBackend for MockScreenBackend {
+    async fn capabilities(&self) -> Result<CaptureCapabilities> {
+        Ok(CaptureCapabilities {
+            backend: "mock_capture_session".to_string(),
+            source_types: vec![
+                CaptureSourceType::Window,
+                CaptureSourceType::Monitor,
+                CaptureSourceType::VirtualOutput,
+                CaptureSourceType::DesktopCompatibility,
+            ],
+            retained_sessions: true,
+            wait_for_frame: true,
+            restore_tokens: true,
+            damage_tracking: true,
+        })
+    }
+
     async fn list_monitors(&self) -> Result<Vec<MonitorInfo>> {
         Ok(self.monitors.clone())
     }
 
-    async fn screenshot(&self, target: ScreenshotTarget) -> Result<Screenshot> {
-        lock(&self.screenshots)?.push(target);
-        Ok(self.screenshot.clone())
+    async fn open_capture(
+        &self,
+        request: CaptureSessionRequest,
+    ) -> Result<Box<dyn CaptureSession>> {
+        if self.frames.is_empty() {
+            return Err(SeatgeistError::BackendUnavailable(
+                "mock capture has no frames".to_string(),
+            ));
+        }
+        lock(&self.capture_requests)?.push(request.clone());
+        let id = {
+            let mut next = lock(&self.next_session)?;
+            let id = format!("mock-capture-{}", *next);
+            *next = next.saturating_add(1);
+            id
+        };
+        let source_id = match &request.source {
+            CaptureSource::Window {
+                requested_window_id,
+            } => requested_window_id.clone(),
+            CaptureSource::Monitor {
+                requested_monitor_id,
+            } => requested_monitor_id.clone(),
+            CaptureSource::VirtualOutput => None,
+            CaptureSource::DesktopCompatibility {
+                requested_window_id,
+            } => requested_window_id.clone(),
+        };
+        Ok(Box::new(MockCaptureSession {
+            metadata: CaptureSessionMetadata {
+                id,
+                backend: "mock_capture_session".to_string(),
+                source_type: request.source.source_type(),
+                source_id,
+                restore_token_reference: request.restore_token_reference,
+                consent_required: false,
+                occlusion_possible: matches!(
+                    request.source,
+                    CaptureSource::DesktopCompatibility { .. }
+                ),
+            },
+            frames: self.frames.clone(),
+            cursor: Mutex::new(0),
+            closed: Mutex::new(false),
+            snapshot_requests: Arc::clone(&self.snapshot_requests),
+            wait_requests: Arc::clone(&self.wait_requests),
+            closed_sessions: Arc::clone(&self.closed_sessions),
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct MockCaptureSession {
+    metadata: CaptureSessionMetadata,
+    frames: Vec<CapturedFrame>,
+    cursor: Mutex<usize>,
+    closed: Mutex<bool>,
+    snapshot_requests: Arc<Mutex<Vec<(String, FrameRequest)>>>,
+    wait_requests: Arc<Mutex<Vec<(String, FrameWaitRequest)>>>,
+    closed_sessions: Arc<Mutex<Vec<String>>>,
+}
+
+impl MockCaptureSession {
+    fn ensure_open(&self) -> Result<()> {
+        if *lock(&self.closed)? {
+            return Err(SeatgeistError::BackendUnavailable(format!(
+                "capture session {} is closed",
+                self.metadata.id
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl CaptureSession for MockCaptureSession {
+    fn metadata(&self) -> CaptureSessionMetadata {
+        self.metadata.clone()
     }
 
-    async fn screenshot_scaled(
-        &self,
-        target: ScreenshotTarget,
-        max_edge: u32,
-    ) -> Result<Screenshot> {
-        lock(&self.scaled_screenshots)?.push((target, max_edge));
-        Ok(self.screenshot.clone())
+    async fn snapshot(&self, request: FrameRequest) -> Result<CapturedFrame> {
+        self.ensure_open()?;
+        lock(&self.snapshot_requests)?.push((self.metadata.id.clone(), request));
+        let cursor = *lock(&self.cursor)?;
+        Ok(self.frames[cursor].clone())
+    }
+
+    async fn wait_for_frame(&self, request: FrameWaitRequest) -> Result<FrameWaitResult> {
+        self.ensure_open()?;
+        lock(&self.wait_requests)?.push((self.metadata.id.clone(), request.clone()));
+        let mut cursor = lock(&self.cursor)?;
+        let current = self.frames[*cursor].clone();
+        let after_revision = request.after_revision.as_deref();
+        if after_revision
+            .map(|revision| current.revision != revision)
+            .unwrap_or(true)
+        {
+            return Ok(FrameWaitResult {
+                frame: current,
+                changed: true,
+                timed_out: false,
+                elapsed_ms: 0,
+            });
+        }
+        let next_index = (*cursor + 1..self.frames.len()).find(|index| {
+            after_revision
+                .map(|revision| self.frames[*index].revision != revision)
+                .unwrap_or(true)
+        });
+        match next_index {
+            Some(index) => {
+                *cursor = index;
+                Ok(FrameWaitResult {
+                    frame: self.frames[index].clone(),
+                    changed: true,
+                    timed_out: false,
+                    elapsed_ms: 0,
+                })
+            }
+            None => Ok(FrameWaitResult {
+                frame: current,
+                changed: false,
+                timed_out: true,
+                elapsed_ms: request.timeout_ms,
+            }),
+        }
+    }
+
+    async fn close(&self) -> Result<()> {
+        let mut closed = lock(&self.closed)?;
+        if !*closed {
+            *closed = true;
+            lock(&self.closed_sessions)?.push(self.metadata.id.clone());
+        }
+        Ok(())
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct MockWindowBackend {
     windows: Vec<WindowInfo>,
-    active_window: Option<WindowInfo>,
+    active_window: Arc<Mutex<Option<WindowInfo>>>,
+    active_window_reads: Arc<Mutex<u64>>,
     focused_windows: Arc<Mutex<Vec<WindowId>>>,
+    resized_windows: Arc<Mutex<Vec<(WindowId, u32, u32)>>>,
 }
 
 impl MockWindowBackend {
     pub fn new(windows: Vec<WindowInfo>, active_window: Option<WindowInfo>) -> Self {
         Self {
             windows,
-            active_window,
+            active_window: Arc::new(Mutex::new(active_window)),
+            active_window_reads: Arc::new(Mutex::new(0)),
             focused_windows: Arc::new(Mutex::new(Vec::new())),
+            resized_windows: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     pub fn focused_windows(&self) -> Result<Vec<WindowId>> {
         Ok(lock(&self.focused_windows)?.clone())
+    }
+
+    pub fn resized_windows(&self) -> Result<Vec<(WindowId, u32, u32)>> {
+        Ok(lock(&self.resized_windows)?.clone())
+    }
+
+    pub fn set_active_window(&self, window: Option<WindowInfo>) -> Result<()> {
+        *lock(&self.active_window)? = window;
+        Ok(())
+    }
+
+    pub fn active_window_reads(&self) -> Result<u64> {
+        Ok(*lock(&self.active_window_reads)?)
     }
 }
 
@@ -166,17 +353,47 @@ impl Default for MockWindowBackend {
 
 #[async_trait]
 impl WindowBackend for MockWindowBackend {
+    fn backend_name(&self) -> &'static str {
+        "mock-window"
+    }
+
     async fn list_windows(&self) -> Result<Vec<WindowInfo>> {
         Ok(self.windows.clone())
     }
 
     async fn active_window(&self) -> Result<Option<WindowInfo>> {
-        Ok(self.active_window.clone())
+        *lock(&self.active_window_reads)? += 1;
+        Ok(lock(&self.active_window)?.clone())
     }
 
     async fn focus_window(&self, id: WindowId) -> Result<()> {
         lock(&self.focused_windows)?.push(id);
         Ok(())
+    }
+
+    async fn move_window(&self, id: WindowId, x: i32, y: i32) -> Result<WindowGeometry> {
+        let mut geometry = self
+            .windows
+            .iter()
+            .find(|window| window.id == id)
+            .and_then(|window| window.geometry.clone())
+            .ok_or_else(|| SeatgeistError::BackendUnavailable("mock window not found".into()))?;
+        geometry.x = x;
+        geometry.y = y;
+        Ok(geometry)
+    }
+
+    async fn resize_window(&self, id: WindowId, width: u32, height: u32) -> Result<WindowGeometry> {
+        lock(&self.resized_windows)?.push((id.clone(), width, height));
+        let mut geometry = self
+            .windows
+            .iter()
+            .find(|window| window.id == id)
+            .and_then(|window| window.geometry.clone())
+            .ok_or_else(|| SeatgeistError::BackendUnavailable("mock window not found".into()))?;
+        geometry.width = width;
+        geometry.height = height;
+        Ok(geometry)
     }
 }
 
@@ -599,9 +816,7 @@ fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
 
 #[cfg(test)]
 mod tests {
-    use libseatgeist::{
-        AccessibilityAction, AccessibilityFindRequest, CoordinateSpace, Point, ScreenshotTarget,
-    };
+    use libseatgeist::{AccessibilityAction, AccessibilityFindRequest, CoordinateSpace, Point};
     use seatgeist_backend::{
         AccessibilityBackend, ClipboardBackend, InputBackend, ScreenBackend, WindowBackend,
     };
@@ -609,21 +824,118 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn mock_screen_returns_monitors_and_records_screenshot_targets() -> Result<()> {
-        let backend = MockScreenBackend::default();
+    async fn mock_screen_retains_capture_session_and_advances_frames() -> Result<()> {
+        let first = CapturedFrame {
+            screenshot: Screenshot {
+                path: "mock-frame-1.png".to_string(),
+                source_width: 1600,
+                source_height: 900,
+                width: 1600,
+                height: 900,
+            },
+            revision: "revision-1".to_string(),
+            sequence: 1,
+            complete: true,
+            damage_present: false,
+        };
+        let second = CapturedFrame {
+            screenshot: Screenshot {
+                path: "mock-frame-2.png".to_string(),
+                source_width: 1600,
+                source_height: 900,
+                width: 1600,
+                height: 900,
+            },
+            revision: "revision-2".to_string(),
+            sequence: 2,
+            complete: true,
+            damage_present: true,
+        };
+        let backend = MockScreenBackend::with_frames(
+            vec![sample_monitor()],
+            vec![first.clone(), second.clone()],
+        );
 
+        let capabilities = backend.capabilities().await?;
+        assert!(capabilities.retained_sessions);
+        assert!(capabilities.wait_for_frame);
         assert_eq!(backend.list_monitors().await?, vec![sample_monitor()]);
-        let screenshot = backend.screenshot(ScreenshotTarget::AllMonitors).await?;
-        assert_eq!(screenshot.width, 1600);
-        assert_eq!(backend.screenshots()?, vec![ScreenshotTarget::AllMonitors]);
 
-        let scaled = backend
-            .screenshot_scaled(ScreenshotTarget::ActiveWindow, 800)
-            .await?;
-        assert_eq!(scaled.height, 900);
+        let request = CaptureSessionRequest {
+            source: CaptureSource::Window {
+                requested_window_id: Some("window-1".to_string()),
+            },
+            restore_token_reference: Some("restore-ref-1".to_string()),
+            persist: true,
+            consent_parent_window: String::new(),
+            open_timeout_ms: 30_000,
+            default_max_edge: 1_600,
+        };
+        let session = backend.open_capture(request.clone()).await?;
+        assert_eq!(session.metadata().id, "mock-capture-1");
+        assert_eq!(session.metadata().source_type, CaptureSourceType::Window);
+        assert_eq!(session.metadata().source_id.as_deref(), Some("window-1"));
+        assert_eq!(backend.capture_requests()?, vec![request]);
+
+        let snapshot_request = FrameRequest {
+            output: "mock-snapshot.png".to_string(),
+            max_edge: Some(800),
+            timeout_ms: 1_500,
+        };
+        assert_eq!(session.snapshot(snapshot_request.clone()).await?, first);
         assert_eq!(
-            backend.scaled_screenshots()?,
-            vec![(ScreenshotTarget::ActiveWindow, 800)]
+            backend.snapshot_requests()?,
+            vec![("mock-capture-1".to_string(), snapshot_request)]
+        );
+
+        let wait_request = FrameWaitRequest {
+            after_revision: Some("revision-1".to_string()),
+            timeout_ms: 1_000,
+            frame: FrameRequest {
+                output: "mock-wait.png".to_string(),
+                max_edge: Some(800),
+                timeout_ms: 1_000,
+            },
+        };
+        let changed = session.wait_for_frame(wait_request.clone()).await?;
+        assert!(changed.changed);
+        assert!(!changed.timed_out);
+        assert_eq!(changed.frame, second);
+        assert_eq!(
+            backend.wait_requests()?,
+            vec![("mock-capture-1".to_string(), wait_request)]
+        );
+
+        let timed_out = session
+            .wait_for_frame(FrameWaitRequest {
+                after_revision: Some("revision-2".to_string()),
+                timeout_ms: 250,
+                frame: FrameRequest {
+                    output: "mock-timeout.png".to_string(),
+                    max_edge: Some(800),
+                    timeout_ms: 250,
+                },
+            })
+            .await?;
+        assert!(!timed_out.changed);
+        assert!(timed_out.timed_out);
+        assert_eq!(timed_out.elapsed_ms, 250);
+
+        session.close().await?;
+        session.close().await?;
+        assert_eq!(
+            backend.closed_sessions()?,
+            vec!["mock-capture-1".to_string()]
+        );
+        assert!(
+            session
+                .snapshot(FrameRequest {
+                    output: "closed.png".to_string(),
+                    max_edge: Some(800),
+                    timeout_ms: 100,
+                })
+                .await
+                .is_err()
         );
         Ok(())
     }

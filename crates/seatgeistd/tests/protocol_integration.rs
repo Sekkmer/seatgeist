@@ -11,14 +11,24 @@ use std::{
 use anyhow::{Context, Result, bail};
 use libseatgeist::{
     CapabilitySet, DaemonRequest, DaemonResponse, DesktopSessionStatus, HealthStatus, JournalEntry,
-    JournalTailRequest, PanicStopStatus, PolicyStatus, SafetyStatus, SetPanicStopRequest,
-    ToolApprovalLevel, UinputStatus,
+    JournalTailRequest, PanicStopStatus, PolicyStatus, SetPanicStopRequest, ToolApprovalLevel,
+    UinputStatus,
 };
 
 struct DaemonFixture {
     child: Child,
     socket: PathBuf,
     root: PathBuf,
+}
+
+fn assert_activity_status_consistent(status: &libseatgeist::SafetyStatus) {
+    match status.human_input_activity_backend.as_deref() {
+        Some(backend) => {
+            assert_eq!(backend, "kwin_input_spy_v1");
+            assert!(status.human_input_activity_trusted);
+        }
+        None => assert!(!status.human_input_activity_trusted),
+    }
 }
 
 impl DaemonFixture {
@@ -145,22 +155,17 @@ tile_max_edge = 2048
     );
 
     let safety = daemon.request(&DaemonRequest::SafetyStatus)?;
-    assert_eq!(
-        safety,
-        DaemonResponse::SafetyStatus(SafetyStatus {
-            require_focus_guard: false,
-            pause_on_human_input: false,
-            human_input_activity_file: None,
-            human_input_quiet_ms: 2500,
-            human_input_signal_fresh: false,
-            human_input_signal_age_ms: None,
-            control_rate_limit_per_minute: Some(42),
-            preview_max_edge: 1024,
-            tile_max_edge: 2048,
-            screenshot_redaction_count: 0,
-            journal_artifact_metadata_enabled: true,
-        })
-    );
+    let DaemonResponse::SafetyStatus(status) = safety else {
+        bail!("expected safety status response, got {safety:?}");
+    };
+    assert!(!status.require_focus_guard);
+    assert!(!status.pause_on_human_input);
+    assert_eq!(status.human_input_quiet_ms, 2500);
+    assert_eq!(status.control_rate_limit_per_minute, Some(42));
+    assert_eq!(status.preview_max_edge, 1024);
+    assert_eq!(status.tile_max_edge, 2048);
+    assert!(status.journal_artifact_metadata_enabled);
+    assert_activity_status_consistent(&status);
     Ok(())
 }
 
@@ -203,22 +208,17 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
     assert!(capabilities.contains(&libseatgeist::BackendCapability::DaemonComputerUseReadiness));
 
     let safety = daemon.request(&DaemonRequest::SafetyStatus)?;
-    assert_eq!(
-        safety,
-        DaemonResponse::SafetyStatus(SafetyStatus {
-            require_focus_guard: true,
-            pause_on_human_input: false,
-            human_input_activity_file: None,
-            human_input_quiet_ms: 1500,
-            human_input_signal_fresh: false,
-            human_input_signal_age_ms: None,
-            control_rate_limit_per_minute: Some(120),
-            preview_max_edge: 1600,
-            tile_max_edge: 1600,
-            screenshot_redaction_count: 0,
-            journal_artifact_metadata_enabled: false,
-        })
-    );
+    let DaemonResponse::SafetyStatus(status) = safety else {
+        bail!("expected safety status response, got {safety:?}");
+    };
+    assert!(status.require_focus_guard);
+    assert!(!status.pause_on_human_input);
+    assert_eq!(status.human_input_quiet_ms, 1500);
+    assert_eq!(status.control_rate_limit_per_minute, Some(120));
+    assert_eq!(status.preview_max_edge, 1600);
+    assert_eq!(status.tile_max_edge, 1600);
+    assert!(!status.journal_artifact_metadata_enabled);
+    assert_activity_status_consistent(&status);
 
     let desktop_session = daemon.request(&DaemonRequest::DesktopSessionStatus)?;
     let DaemonResponse::DesktopSessionStatus(DesktopSessionStatus { setup_hint, .. }) =
@@ -276,11 +276,13 @@ fn daemon_serves_core_protocol_and_journal() -> Result<()> {
     assert!(!status.screenshot_portal.setup_hint.is_empty());
     assert!(!status.kwin_metadata.setup_hint.is_empty());
     assert!(!status.spectacle.setup_hint.is_empty());
-    if status.implemented_available_backend.is_some() {
-        assert_eq!(
-            status.implemented_available_backend.as_deref(),
-            Some("spectacle")
-        );
+    match status.implemented_available_backend.as_deref() {
+        Some("portal_screenshot") => {
+            assert!(status.screenshot_portal.screenshot_interface_available);
+        }
+        Some("spectacle") => assert!(status.spectacle.command_available),
+        None => {}
+        Some(backend) => bail!("unexpected implemented capture backend {backend}"),
     }
     assert!(!status.setup_hint.is_empty());
 

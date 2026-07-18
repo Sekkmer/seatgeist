@@ -9,7 +9,13 @@
         "name": "OK",
         "app": null,
         "window_name_contains": null,
-        "max_nodes": 128
+        "max_nodes": 128,
+        "target_guard": {
+          "expected_window_id": "kwin-firefox-replay-1",
+          "expected_app_id": "org.mozilla.firefox",
+          "expected_pid": 4242,
+          "title_contains": "Replay window"
+        }
       },
       "expect_response_type": "error",
       "expect_ok": false,

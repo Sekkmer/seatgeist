@@ -104,7 +104,12 @@ if [[ "$case_name" == "all" || "$case_name" == "kwin-bridge-status" || "$case_na
 	flock "$kwin_bridge_lock_fd"
 fi
 
-cargo build -p seatgeistd -p seatgeist-cli
+if [[ "${SEATGEIST_GUI_EVAL_SKIP_BUILD:-0}" == "1" ]]; then
+	test -x target/debug/seatgeistd
+	test -x target/debug/seatgeist-cli
+else
+	cargo build -p seatgeistd -p seatgeist-cli
+fi
 if [[ "$case_name" == "all" || "$case_name" == "screenshot-config-bounds" || "$case_name" == "journal-artifacts" || "$case_name" == "remote-desktop-probe" || "$case_name" == "remote-desktop-eis-session" ]]; then
 	cat >"$config_file" <<CONFIG
 [daemon]
@@ -122,7 +127,13 @@ require_focus_guard = $([[ "$case_name" == "remote-desktop-probe" || "$case_name
 CONFIG
 	daemon_args=(--config "$config_file")
 else
-	daemon_args=(--socket "$socket" --journal "$journal" --panic-stop-file "$panic_stop_file")
+	cat >"$config_file" <<CONFIG
+[daemon]
+socket = "$socket"
+journal = "$journal"
+panic_stop_file = "$panic_stop_file"
+CONFIG
+	daemon_args=(--config "$config_file")
 fi
 if [[ "$case_name" == "control-safety" || "$case_name" == "remote-desktop-probe" || "$case_name" == "remote-desktop-eis-session" ]]; then
 	daemon_args+=(--approval-file "$approval_file")
@@ -390,7 +401,7 @@ eval_a11y_find() {
 	if ! cli atspi find --role application --max-results 3 --max-nodes 256 >"$run_dir/a11y-find.json" 2>"$run_dir/a11y-find.stderr"; then
 		cli journal tail --limit 20 --method accessibility_find --ok false >"$run_dir/a11y-find-unavailable-journal.json"
 		if grep -Eq 'AccessibilityUnavailable|backend unavailable' "$run_dir/a11y-find.stderr" \
-			&& jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .ok == false and (.summary | contains("AccessibilityUnavailable")))' "$run_dir/a11y-find-unavailable-journal.json" >/dev/null; then
+			&& jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .ok == false and .summary == "error kind=accessibility_unavailable")' "$run_dir/a11y-find-unavailable-journal.json" >/dev/null; then
 			skip_eval "a11y-find: AT-SPI find is unavailable"
 			return 0
 		fi
@@ -425,7 +436,7 @@ eval_a11y_text_attributes() {
 	if ! cli atspi find --role text --max-results 1 --max-nodes 512 >"$run_dir/a11y-text-attributes-find.json" 2>"$run_dir/a11y-text-attributes-find.stderr"; then
 		cli journal tail --limit 20 --method accessibility_find --ok false >"$run_dir/a11y-text-attributes-find-unavailable-journal.json"
 		if grep -Eq 'AccessibilityUnavailable|backend unavailable' "$run_dir/a11y-text-attributes-find.stderr" \
-			&& jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .ok == false and (.summary | contains("AccessibilityUnavailable")))' "$run_dir/a11y-text-attributes-find-unavailable-journal.json" >/dev/null; then
+			&& jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .ok == false and .summary == "error kind=accessibility_unavailable")' "$run_dir/a11y-text-attributes-find-unavailable-journal.json" >/dev/null; then
 			skip_eval "a11y-text-attributes: AT-SPI find is unavailable"
 			return 0
 		fi
@@ -442,7 +453,7 @@ eval_a11y_text_attributes() {
 	if ! cli atspi text-attributes --node "$node_id" --offset 0 >"$run_dir/a11y-text-attributes.json" 2>"$run_dir/a11y-text-attributes.stderr"; then
 		cli journal tail --limit 20 --method accessibility_text_attributes --ok false >"$run_dir/a11y-text-attributes-unavailable-journal.json"
 		if grep -Eq 'AccessibilityUnavailable|backend unavailable' "$run_dir/a11y-text-attributes.stderr" \
-			&& jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .ok == false and (.summary | contains("AccessibilityUnavailable")))' "$run_dir/a11y-text-attributes-unavailable-journal.json" >/dev/null; then
+			&& jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .ok == false and .summary == "error kind=accessibility_unavailable")' "$run_dir/a11y-text-attributes-unavailable-journal.json" >/dev/null; then
 			skip_eval "a11y-text-attributes: AT-SPI text attributes are unavailable"
 			return 0
 		fi
@@ -479,7 +490,7 @@ assert_a11y_control_denied() {
 		and any(.data[];
 			.safety_class == "control_semantic"
 			and .ok == false
-			and (.summary | contains("PolicyPromptRequired"))
+			and .summary == "error kind=policy_prompt_required"
 		)
 	' "$run_dir/a11y-control-denied-$label-journal.json" >/dev/null
 }
@@ -512,7 +523,7 @@ assert_semantic_denied() {
 		and any(.data[];
 			.safety_class == "control_semantic"
 			and .ok == false
-			and (.summary | contains("PolicyPromptRequired"))
+			and .summary == "error kind=policy_prompt_required"
 		)
 	' "$run_dir/semantic-denied-$label-journal.json" >/dev/null
 }
@@ -545,7 +556,7 @@ assert_input_denied() {
 		and any(.data[];
 			.safety_class == $safety_class
 			and .ok == false
-			and (.summary | contains("PolicyPromptRequired"))
+			and .summary == "error kind=policy_prompt_required"
 		)
 	' "$run_dir/input-denied-$label-journal.json" >/dev/null
 }
@@ -588,7 +599,7 @@ eval_clipboard_denied() {
 	fi
 	grep -qi "policy" "$run_dir/clipboard-denied.txt"
 	cli journal tail --limit 20 --method clipboard_get --ok false >"$run_dir/clipboard-denied-journal.json"
-	jq -e '.type == "journal" and any(.data[]; .summary | contains("ClipboardRead"))' "$run_dir/clipboard-denied-journal.json" >/dev/null
+	jq -e '.type == "journal" and any(.data[]; .summary == "error kind=policy_prompt_required")' "$run_dir/clipboard-denied-journal.json" >/dev/null
 }
 
 portal_screenshot_cancelled() {
@@ -1064,11 +1075,21 @@ eval_remote_desktop_eis_session() {
 		and .data.implemented_available_backend == "portal_remote_desktop"
 	' "$run_dir/remote-desktop-eis-backends-active.json" >/dev/null
 
+	if [[ "${SEATGEIST_REMOTE_DESKTOP_EIS_PAUSE_AFTER_START:-0}" == "1" ]]; then
+		echo "SEATGEIST_NESTED_EIS_READY: return to the operator terminal, then continue"
+		read -r _
+	fi
+
 	scroll_ok=0
-	if cli input scroll-pointer --vertical 1 "${guard_args[@]}" >"$run_dir/remote-desktop-eis-scroll.json" 2>"$run_dir/remote-desktop-eis-scroll.err"; then
+	scroll_attempted=0
+	if [[ "${SEATGEIST_REMOTE_DESKTOP_EIS_SKIP_SCROLL:-0}" == "1" ]]; then
+		:
+	elif cli input scroll-pointer --vertical 1 "${guard_args[@]}" >"$run_dir/remote-desktop-eis-scroll.json" 2>"$run_dir/remote-desktop-eis-scroll.err"; then
+		scroll_attempted=1
 		scroll_ok=1
 		jq -e '.type == "action" and (.data.message | contains("backend=portal_remote_desktop"))' "$run_dir/remote-desktop-eis-scroll.json" >/dev/null
 	else
+		scroll_attempted=1
 		if [[ "${SEATGEIST_REMOTE_DESKTOP_EIS_INPUT_STRICT:-0}" == "1" ]]; then
 			cat "$run_dir/remote-desktop-eis-scroll.err" >&2
 			cli input remote-desktop-eis-stop >"$run_dir/remote-desktop-eis-stop-after-scroll-failure.json" || true
@@ -1081,7 +1102,8 @@ eval_remote_desktop_eis_session() {
 		fi
 	fi
 	key_combo_ok=0
-	if cli input key-combo Shift "${guard_args[@]}" >"$run_dir/remote-desktop-eis-key-combo.json" 2>"$run_dir/remote-desktop-eis-key-combo.err"; then
+	eval_key_combo="${SEATGEIST_REMOTE_DESKTOP_EIS_KEY_COMBO:-Shift}"
+	if cli input key-combo "$eval_key_combo" "${guard_args[@]}" >"$run_dir/remote-desktop-eis-key-combo.json" 2>"$run_dir/remote-desktop-eis-key-combo.err"; then
 		key_combo_ok=1
 		jq -e '.type == "action" and (.data.message | contains("backend=portal_remote_desktop"))' "$run_dir/remote-desktop-eis-key-combo.json" >/dev/null
 	else
@@ -1106,7 +1128,7 @@ eval_remote_desktop_eis_session() {
 	if [[ "$scroll_ok" == "1" ]]; then
 		cli journal tail --limit 40 --method scroll_pointer --ok true >"$run_dir/remote-desktop-eis-scroll-journal.json"
 		jq -e '.type == "journal" and any(.data[]; .summary | contains("backend=portal_remote_desktop"))' "$run_dir/remote-desktop-eis-scroll-journal.json" >/dev/null
-	else
+	elif [[ "$scroll_attempted" == "1" ]]; then
 		cli journal tail --limit 40 --method scroll_pointer --ok false >"$run_dir/remote-desktop-eis-scroll-journal.json"
 		jq -e '.type == "journal" and (.data | length) >= 1' "$run_dir/remote-desktop-eis-scroll-journal.json" >/dev/null
 	fi
@@ -1130,7 +1152,7 @@ eval_full_resolution_denied() {
 		exit 1
 	fi
 	cli journal tail --limit 20 --method screenshot --ok false >"$run_dir/full-resolution-denied-journal.json"
-	jq -e '.type == "journal" and any(.data[]; .summary | contains("FullResolutionScreenshot"))' "$run_dir/full-resolution-denied-journal.json" >/dev/null
+	jq -e '.type == "journal" and any(.data[]; .summary == "error kind=policy_prompt_required")' "$run_dir/full-resolution-denied-journal.json" >/dev/null
 }
 
 eval_control_safety() {

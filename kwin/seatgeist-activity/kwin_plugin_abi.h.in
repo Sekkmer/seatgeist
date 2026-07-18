@@ -1,0 +1,6 @@
+// Generated from the installed KWin headers. Keep this direct include in
+// main.cpp so Qt AUTOMOC reruns when a package upgrade changes the plugin ABI
+// while preserving an older filesystem timestamp on config-kwin.h.
+#pragma once
+
+#define SEATGEIST_KWIN_PLUGIN_VERSION "@SEATGEIST_KWIN_PLUGIN_VERSION@"

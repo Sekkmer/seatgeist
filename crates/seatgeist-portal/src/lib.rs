@@ -8,17 +8,26 @@ use std::time::Duration;
 use zbus::export::futures_core::Stream;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
+mod screencast;
+
+pub use screencast::*;
+
 pub const DESKTOP_BUS_NAME: &str = "org.freedesktop.portal.Desktop";
 pub const DESKTOP_OBJECT_PATH: &str = "/org/freedesktop/portal/desktop";
 pub const SCREENSHOT_INTERFACE: &str = "org.freedesktop.portal.Screenshot";
+pub const SCREENCAST_INTERFACE: &str = "org.freedesktop.portal.ScreenCast";
 pub const REMOTE_DESKTOP_INTERFACE: &str = "org.freedesktop.portal.RemoteDesktop";
 pub const REQUEST_INTERFACE: &str = "org.freedesktop.portal.Request";
 pub const SESSION_INTERFACE: &str = "org.freedesktop.portal.Session";
 pub const SCREENSHOT_METHOD: &str = "Screenshot";
 pub const CREATE_SESSION_METHOD: &str = "CreateSession";
 pub const SELECT_DEVICES_METHOD: &str = "SelectDevices";
+pub const SELECT_SOURCES_METHOD: &str = "SelectSources";
 pub const START_METHOD: &str = "Start";
 pub const CONNECT_TO_EIS_METHOD: &str = "ConnectToEIS";
+pub const OPEN_PIPEWIRE_REMOTE_METHOD: &str = "OpenPipeWireRemote";
+pub const CLOSE_METHOD: &str = "Close";
+pub const CLOSED_SIGNAL: &str = "Closed";
 pub const RESPONSE_SIGNAL: &str = "Response";
 pub const REQUEST_PATH_PREFIX: &str = "/org/freedesktop/portal/desktop/request";
 pub const SESSION_PATH_PREFIX: &str = "/org/freedesktop/portal/desktop/session";
@@ -31,9 +40,12 @@ pub enum PortalContractError {
     UnknownRemoteDesktopDeviceTypes(u32),
     UnknownPersistMode(u32),
     UnknownScreenshotTarget(u32),
+    UnknownScreenCastSourceTypes(u32),
+    UnknownScreenCastCursorMode(u32),
     UnknownResponseCode(u32),
     MissingSessionHandle,
     MissingScreenshotUri,
+    MissingScreenCastStreams,
     InvalidFileDescriptor(RawFd),
     UnsupportedUri(String),
     InvalidPercentEncoding(String),
@@ -71,6 +83,18 @@ impl fmt::Display for PortalContractError {
                     "unknown portal screenshot target value: {target}"
                 )
             }
+            Self::UnknownScreenCastSourceTypes(types) => {
+                write!(
+                    formatter,
+                    "unknown portal ScreenCast source type bits: {types:#x}"
+                )
+            }
+            Self::UnknownScreenCastCursorMode(mode) => {
+                write!(
+                    formatter,
+                    "unknown portal ScreenCast cursor mode: {mode:#x}"
+                )
+            }
             Self::UnknownResponseCode(code) => {
                 write!(formatter, "unknown portal request response code: {code}")
             }
@@ -82,6 +106,9 @@ impl fmt::Display for PortalContractError {
             }
             Self::MissingScreenshotUri => {
                 write!(formatter, "portal screenshot response omitted uri")
+            }
+            Self::MissingScreenCastStreams => {
+                write!(formatter, "portal ScreenCast response omitted streams")
             }
             Self::InvalidFileDescriptor(fd) => {
                 write!(formatter, "portal returned invalid file descriptor: {fd}")
@@ -427,6 +454,7 @@ pub struct PortalRemoteDesktopOwnedEisConnection {
 pub struct PortalRemoteDesktopEisSession {
     pub session_start: PortalRemoteDesktopSessionStart,
     pub eis: PortalRemoteDesktopOwnedEisConnection,
+    pub session_connection: zbus::Connection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -818,7 +846,119 @@ pub async fn request_remote_desktop_eis_zbus(
     )
     .await?;
 
-    Ok(Some(PortalRemoteDesktopEisSession { session_start, eis }))
+    Ok(Some(PortalRemoteDesktopEisSession {
+        session_start,
+        eis,
+        session_connection: connection,
+    }))
+}
+
+pub async fn request_screen_cast_pipewire_zbus(
+    options: &PortalScreenCastOptions,
+    response_timeout: Duration,
+) -> Result<Option<PortalScreenCastOwnedSession>> {
+    options.validate()?;
+    let connection = zbus::Connection::session()
+        .await
+        .map_err(|err| PortalContractError::Transport(format!("connect session bus: {err}")))?;
+    let sender = connection
+        .unique_name()
+        .ok_or_else(|| {
+            PortalContractError::Transport(
+                "session bus did not assign a unique sender name".to_string(),
+            )
+        })?
+        .as_str()
+        .to_string();
+    let expected_session_path =
+        expected_session_path(&sender, &options.create_session.session_handle_token)?;
+
+    let expected_create = expected_request_path(&sender, &options.create_session.handle_token)?;
+    let mut create_stream =
+        subscribe_request_response(&connection, expected_create.clone()).await?;
+    let create_request_path = call_screen_cast_create_session_zbus(&connection, options).await?;
+    validate_request_path(&create_request_path)?;
+    if create_request_path != expected_create {
+        create_stream =
+            subscribe_request_response(&connection, create_request_path.clone()).await?;
+    }
+    let create_response =
+        wait_for_screen_cast_zbus_response(&mut create_stream, response_timeout).await?;
+    let Some(session) = parse_remote_desktop_session_handle(
+        create_response.response,
+        create_response.session_handle.as_deref(),
+        &expected_session_path,
+    )?
+    else {
+        return Ok(None);
+    };
+    let session_handle = session.actual_session_path.clone();
+    let mut closed_stream = subscribe_session_closed(&connection, session_handle.clone()).await?;
+
+    let lifecycle = async {
+        let expected_select = expected_request_path(&sender, &options.select_sources.handle_token)?;
+        let mut select_stream =
+            subscribe_request_response(&connection, expected_select.clone()).await?;
+        let select_request_path =
+            call_screen_cast_select_sources_zbus(&connection, &session_handle, options).await?;
+        validate_request_path(&select_request_path)?;
+        if select_request_path != expected_select {
+            select_stream =
+                subscribe_request_response(&connection, select_request_path.clone()).await?;
+        }
+        let select_response =
+            wait_for_screen_cast_zbus_response(&mut select_stream, response_timeout).await?;
+        if select_response.response != PortalResponseCode::Success {
+            return Ok(None);
+        }
+
+        let expected_start = expected_request_path(&sender, &options.start.handle_token)?;
+        let mut start_stream =
+            subscribe_request_response(&connection, expected_start.clone()).await?;
+        let start_request_path =
+            call_screen_cast_start_zbus(&connection, &session_handle, options).await?;
+        validate_request_path(&start_request_path)?;
+        if start_request_path != expected_start {
+            start_stream =
+                subscribe_request_response(&connection, start_request_path.clone()).await?;
+        }
+        let start_response =
+            wait_for_screen_cast_zbus_response(&mut start_stream, response_timeout).await?;
+        let Some((streams, restore_token)) = parse_screen_cast_start_response(start_response)?
+        else {
+            return Ok(None);
+        };
+        let pipewire_fd =
+            call_screen_cast_open_pipewire_remote_zbus(&connection, &session_handle).await?;
+        let session_start = PortalScreenCastSessionStart {
+            create_request_path,
+            select_request_path,
+            start_request_path,
+            session,
+            streams,
+            restore_token,
+        };
+        Ok(Some((session_start, pipewire_fd)))
+    }
+    .await;
+
+    match lifecycle {
+        Ok(Some((session_start, pipewire_fd))) => Ok(Some(PortalScreenCastOwnedSession {
+            session_start,
+            pipewire_fd: Some(pipewire_fd),
+            connection,
+            closed_stream,
+        })),
+        Ok(None) => {
+            let _ = close_screen_cast_session_on_connection(&connection, &session_handle).await;
+            let _ = wait_for_session_closed_signal(&mut closed_stream, response_timeout).await;
+            Ok(None)
+        }
+        Err(err) => {
+            let _ = close_screen_cast_session_on_connection(&connection, &session_handle).await;
+            Err(err)
+        }
+    }
 }
 
 async fn request_remote_desktop_session_on_connection(
@@ -990,6 +1130,159 @@ async fn remote_desktop_proxy(connection: &zbus::Connection) -> Result<zbus::Pro
     .map_err(|err| PortalContractError::Transport(format!("create RemoteDesktop proxy: {err}")))
 }
 
+async fn screen_cast_proxy(connection: &zbus::Connection) -> Result<zbus::Proxy<'_>> {
+    zbus::Proxy::new(
+        connection,
+        DESKTOP_BUS_NAME,
+        DESKTOP_OBJECT_PATH,
+        SCREENCAST_INTERFACE,
+    )
+    .await
+    .map_err(|err| PortalContractError::Transport(format!("create ScreenCast proxy: {err}")))
+}
+
+async fn call_screen_cast_create_session_zbus(
+    connection: &zbus::Connection,
+    options: &PortalScreenCastOptions,
+) -> Result<String> {
+    let proxy = screen_cast_proxy(connection).await?;
+    let mut vardict = HashMap::<&str, Value<'_>>::new();
+    vardict.insert(
+        "handle_token",
+        Value::new(options.create_session.handle_token.as_str()),
+    );
+    vardict.insert(
+        "session_handle_token",
+        Value::new(options.create_session.session_handle_token.as_str()),
+    );
+    let handle: OwnedObjectPath = proxy
+        .call(CREATE_SESSION_METHOD, &(vardict))
+        .await
+        .map_err(|err| {
+            PortalContractError::Transport(format!("call ScreenCast CreateSession: {err}"))
+        })?;
+    Ok(handle.to_string())
+}
+
+async fn call_screen_cast_select_sources_zbus(
+    connection: &zbus::Connection,
+    session_handle: &str,
+    options: &PortalScreenCastOptions,
+) -> Result<String> {
+    let proxy = screen_cast_proxy(connection).await?;
+    let session = OwnedObjectPath::try_from(session_handle.to_string())
+        .map_err(|err| PortalContractError::Transport(format!("invalid session handle: {err}")))?;
+    let select = &options.select_sources;
+    let mut vardict = HashMap::<&str, Value<'_>>::new();
+    vardict.insert("handle_token", Value::new(select.handle_token.as_str()));
+    vardict.insert("types", Value::new(select.types.bits()));
+    vardict.insert("multiple", Value::new(select.multiple));
+    vardict.insert("cursor_mode", Value::new(select.cursor_mode.value()));
+    vardict.insert("persist_mode", Value::new(select.persist_mode.value()));
+    if let Some(token) = &select.restore_token {
+        vardict.insert("restore_token", Value::new(token.as_str()));
+    }
+    let handle: OwnedObjectPath = proxy
+        .call(SELECT_SOURCES_METHOD, &(session, vardict))
+        .await
+        .map_err(|err| {
+            PortalContractError::Transport(format!("call ScreenCast SelectSources: {err}"))
+        })?;
+    Ok(handle.to_string())
+}
+
+async fn call_screen_cast_start_zbus(
+    connection: &zbus::Connection,
+    session_handle: &str,
+    options: &PortalScreenCastOptions,
+) -> Result<String> {
+    let proxy = screen_cast_proxy(connection).await?;
+    let session = OwnedObjectPath::try_from(session_handle.to_string())
+        .map_err(|err| PortalContractError::Transport(format!("invalid session handle: {err}")))?;
+    let mut vardict = HashMap::<&str, Value<'_>>::new();
+    vardict.insert(
+        "handle_token",
+        Value::new(options.start.handle_token.as_str()),
+    );
+    let handle: OwnedObjectPath = proxy
+        .call(
+            START_METHOD,
+            &(session, options.start.parent_window.as_str(), vardict),
+        )
+        .await
+        .map_err(|err| PortalContractError::Transport(format!("call ScreenCast Start: {err}")))?;
+    Ok(handle.to_string())
+}
+
+async fn call_screen_cast_open_pipewire_remote_zbus(
+    connection: &zbus::Connection,
+    session_handle: &str,
+) -> Result<OwnedFd> {
+    let proxy = screen_cast_proxy(connection).await?;
+    let session = OwnedObjectPath::try_from(session_handle.to_string())
+        .map_err(|err| PortalContractError::Transport(format!("invalid session handle: {err}")))?;
+    let vardict = HashMap::<&str, Value<'_>>::new();
+    let fd: zbus::zvariant::OwnedFd = proxy
+        .call(OPEN_PIPEWIRE_REMOTE_METHOD, &(session, vardict))
+        .await
+        .map_err(|err| {
+            PortalContractError::Transport(format!("call ScreenCast OpenPipeWireRemote: {err}"))
+        })?;
+    Ok(fd.into())
+}
+
+async fn close_screen_cast_session_on_connection(
+    connection: &zbus::Connection,
+    session_handle: &str,
+) -> Result<()> {
+    validate_session_path(session_handle)?;
+    let proxy = zbus::Proxy::new(
+        connection,
+        DESKTOP_BUS_NAME,
+        session_handle,
+        SESSION_INTERFACE,
+    )
+    .await
+    .map_err(|err| PortalContractError::Transport(format!("create Session proxy: {err}")))?;
+    proxy
+        .call::<_, _, ()>(CLOSE_METHOD, &())
+        .await
+        .map_err(|err| PortalContractError::Transport(format!("call Session.Close: {err}")))
+}
+
+async fn subscribe_session_closed(
+    connection: &zbus::Connection,
+    session_handle: String,
+) -> Result<zbus::proxy::SignalStream<'static>> {
+    zbus::Proxy::new_owned(
+        connection.clone(),
+        DESKTOP_BUS_NAME.to_string(),
+        session_handle,
+        SESSION_INTERFACE.to_string(),
+    )
+    .await
+    .map_err(|err| PortalContractError::Transport(format!("create Session proxy: {err}")))?
+    .receive_signal(CLOSED_SIGNAL)
+    .await
+    .map_err(|err| PortalContractError::Transport(format!("subscribe Session.Closed: {err}")))
+}
+
+async fn wait_for_session_closed_signal(
+    stream: &mut zbus::proxy::SignalStream<'_>,
+    timeout: Duration,
+) -> Result<bool> {
+    match tokio::time::timeout(
+        timeout,
+        poll_fn(|context| Pin::new(&mut *stream).poll_next(context)),
+    )
+    .await
+    {
+        Ok(Some(_)) => Ok(true),
+        Ok(None) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
 async fn call_remote_desktop_create_session_zbus(
     connection: &zbus::Connection,
     options: &PortalRemoteDesktopOptions,
@@ -1151,6 +1444,65 @@ async fn wait_for_remote_desktop_zbus_response(
     })
 }
 
+async fn wait_for_screen_cast_zbus_response(
+    response_stream: &mut zbus::proxy::SignalStream<'_>,
+    response_timeout: Duration,
+) -> Result<PortalScreenCastRequestResponse> {
+    let message = tokio::time::timeout(
+        response_timeout,
+        poll_fn(|context| Pin::new(&mut *response_stream).poll_next(context)),
+    )
+    .await
+    .map_err(|_| {
+        PortalContractError::Transport(format!(
+            "timed out waiting {}ms for portal Request response",
+            response_timeout.as_millis()
+        ))
+    })?
+    .ok_or_else(|| {
+        PortalContractError::Transport("portal Request response stream ended".to_string())
+    })?;
+    let (response, results): (u32, HashMap<String, OwnedValue>) =
+        message.body().deserialize().map_err(|err| {
+            PortalContractError::Transport(format!("decode Request response signal: {err}"))
+        })?;
+    let streams = results
+        .get("streams")
+        .map(decode_screen_cast_streams)
+        .transpose()?;
+    Ok(PortalScreenCastRequestResponse {
+        response: PortalResponseCode::try_from(response)?,
+        session_handle: owned_string_result(&results, "session_handle")?,
+        streams,
+        restore_token: owned_string_result(&results, "restore_token")?,
+    })
+}
+
+fn decode_screen_cast_streams(value: &OwnedValue) -> Result<Vec<PortalScreenCastStream>> {
+    let owned = value.try_clone().map_err(|err| {
+        PortalContractError::Transport(format!("clone ScreenCast streams result: {err}"))
+    })?;
+    let streams = Vec::<(u32, HashMap<String, OwnedValue>)>::try_from(owned).map_err(|err| {
+        PortalContractError::Transport(format!("decode ScreenCast streams result: {err}"))
+    })?;
+    streams
+        .into_iter()
+        .map(|(node_id, properties)| {
+            Ok(PortalScreenCastStream {
+                node_id,
+                id: owned_string_result(&properties, "id")?,
+                position: owned_i32_pair_result(&properties, "position")?,
+                size: owned_i32_pair_result(&properties, "size")?,
+                source_type: owned_u32_result(&properties, "source_type")?
+                    .map(ScreenCastSourceTypes::try_from)
+                    .transpose()?,
+                mapping_id: owned_string_result(&properties, "mapping_id")?,
+                pipewire_serial: owned_u64_result(&properties, "pipewire-serial")?,
+            })
+        })
+        .collect()
+}
+
 fn owned_string_result(results: &HashMap<String, OwnedValue>, key: &str) -> Result<Option<String>> {
     results
         .get(key)
@@ -1171,6 +1523,25 @@ fn owned_bool_result(results: &HashMap<String, OwnedValue>, key: &str) -> Result
     results
         .get(key)
         .map(|value| bool::try_from(&**value))
+        .transpose()
+        .map_err(|err| PortalContractError::Transport(format!("decode portal {key} result: {err}")))
+}
+
+fn owned_u64_result(results: &HashMap<String, OwnedValue>, key: &str) -> Result<Option<u64>> {
+    results
+        .get(key)
+        .map(|value| u64::try_from(&**value))
+        .transpose()
+        .map_err(|err| PortalContractError::Transport(format!("decode portal {key} result: {err}")))
+}
+
+fn owned_i32_pair_result(
+    results: &HashMap<String, OwnedValue>,
+    key: &str,
+) -> Result<Option<(i32, i32)>> {
+    results
+        .get(key)
+        .map(|value| <(i32, i32)>::try_from(&**value))
         .transpose()
         .map_err(|err| PortalContractError::Transport(format!("decode portal {key} result: {err}")))
 }
@@ -1539,6 +1910,120 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct MockScreenCastTransport {
+        sender: String,
+        create_handle: String,
+        select_handle: String,
+        start_handle: String,
+        responses: Vec<PortalScreenCastRequestResponse>,
+        calls: Vec<String>,
+        closed_sessions: Vec<String>,
+        pipewire_fd: RawFd,
+    }
+
+    impl MockScreenCastTransport {
+        fn success() -> Self {
+            Self {
+                sender: ":1.42".to_string(),
+                create_handle: "/org/freedesktop/portal/desktop/request/1_42/sc_create".to_string(),
+                select_handle: "/org/freedesktop/portal/desktop/request/1_42/sc_select".to_string(),
+                start_handle: "/org/freedesktop/portal/desktop/request/1_42/sc_start".to_string(),
+                responses: vec![
+                    PortalScreenCastRequestResponse {
+                        response: PortalResponseCode::Success,
+                        session_handle: Some(
+                            "/org/freedesktop/portal/desktop/session/1_42/sc_session".to_string(),
+                        ),
+                        streams: None,
+                        restore_token: None,
+                    },
+                    PortalScreenCastRequestResponse {
+                        response: PortalResponseCode::Success,
+                        session_handle: None,
+                        streams: None,
+                        restore_token: None,
+                    },
+                    PortalScreenCastRequestResponse {
+                        response: PortalResponseCode::Success,
+                        session_handle: None,
+                        streams: Some(vec![PortalScreenCastStream {
+                            node_id: 77,
+                            id: Some("window-stream".to_string()),
+                            position: None,
+                            size: Some((1280, 720)),
+                            source_type: Some(ScreenCastSourceTypes::WINDOW),
+                            mapping_id: Some("mapping-1".to_string()),
+                            pipewire_serial: Some(9001),
+                        }]),
+                        restore_token: Some("single-use-next-token".to_string()),
+                    },
+                ],
+                calls: Vec::new(),
+                closed_sessions: Vec::new(),
+                pipewire_fd: 43,
+            }
+        }
+    }
+
+    impl PortalScreenCastTransport for MockScreenCastTransport {
+        fn unique_sender_name(&mut self) -> Result<String> {
+            Ok(self.sender.clone())
+        }
+
+        fn call_create_session(&mut self, options: &PortalCreateSessionOptions) -> Result<String> {
+            self.calls.push(format!(
+                "create:{}:{}",
+                options.handle_token, options.session_handle_token
+            ));
+            Ok(self.create_handle.clone())
+        }
+
+        fn call_select_sources(
+            &mut self,
+            session_handle: &str,
+            options: &PortalSelectSourcesOptions,
+        ) -> Result<String> {
+            self.calls.push(format!(
+                "select:{session_handle}:{}:{}:{}:{}",
+                options.handle_token,
+                options.types.bits(),
+                options.multiple,
+                options.cursor_mode.value()
+            ));
+            Ok(self.select_handle.clone())
+        }
+
+        fn call_start(
+            &mut self,
+            session_handle: &str,
+            options: &PortalStartOptions,
+        ) -> Result<String> {
+            self.calls
+                .push(format!("start:{session_handle}:{}", options.handle_token));
+            Ok(self.start_handle.clone())
+        }
+
+        fn wait_for_response(
+            &mut self,
+            handle_path: &str,
+        ) -> Result<PortalScreenCastRequestResponse> {
+            self.calls.push(format!("wait:{handle_path}"));
+            Ok(self.responses.remove(0))
+        }
+
+        fn call_open_pipewire_remote(&mut self, session_handle: &str) -> Result<RawFd> {
+            self.calls.push(format!("open-pipewire:{session_handle}"));
+            Ok(self.pipewire_fd)
+        }
+
+        fn close_session(&mut self, session_handle: &str) -> Result<()> {
+            self.calls.push(format!("close:{session_handle}"));
+            self.closed_sessions.push(session_handle.to_string());
+            Ok(())
+        }
+    }
+
     #[test]
     fn validates_handle_tokens_as_object_path_elements() {
         assert!(validate_handle_token("seatgeist_123").is_ok());
@@ -1590,6 +2075,111 @@ mod tests {
             Err(PortalContractError::UnknownPersistMode(3))
         ));
         Ok(())
+    }
+
+    #[test]
+    fn models_screen_cast_source_and_cursor_values() -> Result<()> {
+        assert_eq!(ScreenCastSourceTypes::WINDOW.bits(), 2);
+        assert_eq!(
+            ScreenCastSourceTypes::try_from(7)?,
+            ScreenCastSourceTypes::ALL
+        );
+        assert!(matches!(
+            ScreenCastSourceTypes::try_from(0),
+            Err(PortalContractError::UnknownScreenCastSourceTypes(0))
+        ));
+        assert_eq!(ScreenCastCursorMode::Metadata.value(), 4);
+        assert!(matches!(
+            ScreenCastCursorMode::try_from(3),
+            Err(PortalContractError::UnknownScreenCastCursorMode(3))
+        ));
+        let monitor = PortalScreenCastOptions::new_for_source(
+            "monitor_create",
+            "monitor_session",
+            "monitor_select",
+            "monitor_start",
+            ScreenCastSourceTypes::MONITOR,
+        );
+        assert_eq!(monitor.select_sources.types, ScreenCastSourceTypes::MONITOR);
+        monitor.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn screen_cast_lifecycle_opens_one_window_pipewire_remote() -> Result<()> {
+        let mut transport = MockScreenCastTransport::success();
+        let mut options =
+            PortalScreenCastOptions::new_window("sc_create", "sc_session", "sc_select", "sc_start");
+        options.select_sources.cursor_mode = ScreenCastCursorMode::Embedded;
+        options.select_sources.persist_mode = RemoteDesktopPersistMode::ExplicitlyRevoked;
+
+        let connection = request_screen_cast_pipewire(&mut transport, &options)?
+            .expect("successful lifecycle returns a session");
+        assert_eq!(connection.pipewire.fd, 43);
+        assert_eq!(connection.session_start.streams.len(), 1);
+        let stream = &connection.session_start.streams[0];
+        assert_eq!(stream.node_id, 77);
+        assert_eq!(stream.source_type, Some(ScreenCastSourceTypes::WINDOW));
+        assert_eq!(stream.pipewire_serial, Some(9001));
+        assert_eq!(
+            connection.session_start.restore_token.as_deref(),
+            Some("single-use-next-token")
+        );
+        assert!(transport.closed_sessions.is_empty());
+        assert!(
+            transport
+                .calls
+                .iter()
+                .any(|call| call.contains("select:") && call.ends_with(":2:false:2"))
+        );
+        assert!(
+            transport
+                .calls
+                .iter()
+                .any(|call| call.starts_with("open-pipewire:"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn screen_cast_cancellation_closes_created_session() -> Result<()> {
+        let mut transport = MockScreenCastTransport::success();
+        transport.responses[1].response = PortalResponseCode::Cancelled;
+        let options =
+            PortalScreenCastOptions::new_window("sc_create", "sc_session", "sc_select", "sc_start");
+
+        assert!(request_screen_cast_pipewire(&mut transport, &options)?.is_none());
+        assert_eq!(
+            transport.closed_sessions,
+            vec!["/org/freedesktop/portal/desktop/session/1_42/sc_session".to_string()]
+        );
+        assert!(
+            !transport
+                .calls
+                .iter()
+                .any(|call| call.starts_with("start:"))
+        );
+        assert!(
+            !transport
+                .calls
+                .iter()
+                .any(|call| call.starts_with("open-pipewire:"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn screen_cast_pipewire_failure_closes_started_session() {
+        let mut transport = MockScreenCastTransport::success();
+        transport.pipewire_fd = -1;
+        let options =
+            PortalScreenCastOptions::new_window("sc_create", "sc_session", "sc_select", "sc_start");
+
+        assert!(matches!(
+            request_screen_cast_pipewire(&mut transport, &options),
+            Err(PortalContractError::InvalidFileDescriptor(-1))
+        ));
+        assert_eq!(transport.closed_sessions.len(), 1);
     }
 
     #[test]

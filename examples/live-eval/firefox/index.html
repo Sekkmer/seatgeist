@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Seatgeist Step 12 Firefox</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: system-ui, sans-serif;
+      background: #eef2ff;
+      color: #172554;
+    }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+    }
+    main {
+      width: min(900px, 80vw);
+      padding: 48px;
+      border: 3px solid #3730a3;
+      border-radius: 20px;
+      background: white;
+      box-shadow: 0 24px 60px rgb(30 41 59 / 20%);
+      text-align: center;
+    }
+    h1 { font-size: 48px; }
+    #clock, #result { font-size: 30px; margin: 20px; }
+    button {
+      min-width: 560px;
+      min-height: 150px;
+      border: 0;
+      border-radius: 16px;
+      background: #166534;
+      color: white;
+      font-size: 34px;
+      font-weight: 700;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Seatgeist Step 12 Firefox</h1>
+    <p id="clock" aria-live="off">frame 0</p>
+    <button id="test-button" type="button">Seatgeist Step 12 Button</button>
+    <p id="result" role="status">not clicked</p>
+  </main>
+  <script>
+    let frame = 0;
+    setInterval(() => {
+      frame += 1;
+      document.getElementById("clock").textContent = `frame ${frame}`;
+    }, 250);
+    document.getElementById("test-button").addEventListener("click", () => {
+      document.getElementById("result").textContent = `clicked at frame ${frame}`;
+    });
+  </script>
+</body>
+</html>

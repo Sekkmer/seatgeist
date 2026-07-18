@@ -1,13 +1,21 @@
 {
   "name": "seatgeist",
-  "version": "0.1.0",
+  "version": "0.1.0+codex.20260718000211",
   "description": "KDE Plasma desktop-control substrate for Codex CLI via MCP, skills, hooks, and a local daemon.",
   "author": {
     "name": "Sekkmer",
     "email": "sekkmer@gmail.com"
   },
   "license": "MIT OR Apache-2.0",
-  "keywords": ["codex", "mcp", "kde", "plasma", "wayland", "computer-use", "desktop-automation"],
+  "keywords": [
+    "codex",
+    "mcp",
+    "kde",
+    "plasma",
+    "wayland",
+    "computer-use",
+    "desktop-automation"
+  ],
   "skills": "./skills",
   "mcpServers": "./.mcp.json",
   "interface": {
@@ -16,6 +24,16 @@
     "longDescription": "Seatgeist exposes a local KDE Plasma desktop-control runtime to Codex. It provides screenshots, window state, input, clipboard, accessibility metadata, safety policy, and audit logging through MCP tools and reusable skills.",
     "developerName": "Sekkmer",
     "category": "Developer Tools",
-    "capabilities": ["MCP", "Skills", "Hooks", "Desktop Automation", "KDE", "Wayland"]
+    "capabilities": [
+      "MCP",
+      "Skills",
+      "Hooks",
+      "Desktop Automation",
+      "KDE",
+      "Wayland"
+    ],
+    "defaultPrompt": [
+      "Control KDE Plasma safely with retained window capture and policy-gated actions"
+    ]
   }
 }

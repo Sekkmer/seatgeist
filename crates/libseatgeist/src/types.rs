@@ -220,6 +220,9 @@ pub enum BackendCapability {
     MonitorMetadata,
     WindowList,
     WindowFocus,
+    WindowLaunch,
+    WindowMove,
+    WindowResize,
     PointerInput,
     KeyboardInput,
     ClipboardText,
@@ -236,10 +239,97 @@ pub struct PolicyDecision {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Observation {
     pub active_window: Option<WindowInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_window: Option<WindowInfo>,
     pub windows: Vec<WindowInfo>,
     pub monitors: Vec<MonitorInfo>,
     pub focused_accessibility: Option<AccessibilityNode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_accessibility: Option<AccessibilityNode>,
     pub screenshot_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle: Option<ActionSettleResult>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionSettleCondition {
+    None,
+    Auto,
+    Stable,
+    ActiveWindowChange,
+    AccessibilityChange,
+    AnyChange,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionSettleBackend {
+    #[default]
+    Polling,
+    AtspiEvent,
+    TargetRead,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionConfirmation {
+    Confirmed,
+    UnconfirmedTimeout,
+    #[default]
+    NotRequested,
+}
+
+impl ActionConfirmation {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::UnconfirmedTimeout => "unconfirmed_timeout",
+            Self::NotRequested => "not_requested",
+        }
+    }
+}
+
+impl FromStr for ActionSettleCondition {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "none" => Ok(Self::None),
+            "auto" => Ok(Self::Auto),
+            "stable" => Ok(Self::Stable),
+            "active_window_change" | "window_change" => Ok(Self::ActiveWindowChange),
+            "accessibility_change" | "a11y_change" => Ok(Self::AccessibilityChange),
+            "any_change" | "change" => Ok(Self::AnyChange),
+            other => Err(format!("unsupported action settle condition: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionSettleResult {
+    #[serde(default)]
+    pub confirmation: ActionConfirmation,
+    pub condition: ActionSettleCondition,
+    #[serde(default)]
+    pub backend: ActionSettleBackend,
+    #[serde(default)]
+    pub target_scoped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    pub settled: bool,
+    pub timed_out: bool,
+    pub timeout_ms: u64,
+    pub interval_ms: u64,
+    pub samples: u32,
+    pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_revision: Option<String>,
+    pub after_revision: String,
 }
 
 #[derive(Debug, Error)]
@@ -256,3 +346,20 @@ pub enum SeatgeistError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionId(pub Uuid);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_settle_results_default_to_polling_scope() {
+        let result: ActionSettleResult = serde_json::from_str(
+            r#"{"condition":"stable","settled":true,"timed_out":false,"timeout_ms":1500,"interval_ms":100,"samples":2,"elapsed_ms":100,"after_revision":"after"}"#,
+        )
+        .expect("legacy settle result parses");
+
+        assert_eq!(result.backend, ActionSettleBackend::Polling);
+        assert!(!result.target_scoped);
+        assert_eq!(result.event, None);
+    }
+}

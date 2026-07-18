@@ -1,15 +1,25 @@
-use std::process::Command;
+use std::{collections::HashMap, process::Command};
+
+mod cache;
+mod events;
+mod roles;
+
+pub use events::AtspiEventBackend;
 
 use libseatgeist::{
     AccessibilityAction, AccessibilityBounds, AccessibilityFindRequest, AccessibilityNode,
     AccessibilityTextAttributes, CoordinateSpace, SeatgeistError, TextAttribute,
 };
+use roles::{resolve_role_id, resolve_role_value};
 
 pub const BACKEND_NAME: &str = "atspi";
 
 const ATSPI_ROOT_SERVICE: &str = "org.a11y.atspi.Registry";
 const ATSPI_ROOT_PATH: &str = "/org/a11y/atspi/accessible/root";
 const ATSPI_ACCESSIBLE: &str = "org.a11y.atspi.Accessible";
+const ATSPI_APPLICATION: &str = "org.a11y.atspi.Application";
+const ATSPI_CACHE: &str = "org.a11y.atspi.Cache";
+const ATSPI_CACHE_PATH: &str = "/org/a11y/atspi/cache";
 const ATSPI_COMPONENT: &str = "org.a11y.atspi.Component";
 const ATSPI_ACTION: &str = "org.a11y.atspi.Action";
 const ATSPI_EDITABLE_TEXT: &str = "org.a11y.atspi.EditableText";
@@ -22,6 +32,29 @@ const DEFAULT_SET_TEXT_MAX_CHARS: usize = 8192;
 const BUSCTL_ACTION_TIMEOUT_ARG: &str = "--timeout=2s";
 
 pub type Result<T> = std::result::Result<T, SeatgeistError>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessibilityMatch {
+    pub node: AccessibilityNode,
+    pub application_name: String,
+    pub application_bus_name: String,
+    pub process_id: Option<u32>,
+    pub window_name: Option<String>,
+    pub window_node_id: Option<String>,
+}
+
+impl AccessibilityMatch {
+    pub fn event_target(&self) -> Result<seatgeist_backend::AccessibilityEventTarget> {
+        let window_node_id = self.window_node_id.clone().ok_or_else(|| {
+            SeatgeistError::Io("AT-SPI match does not include a containing window node".to_string())
+        })?;
+        Ok(seatgeist_backend::AccessibilityEventTarget {
+            application_bus_name: self.application_bus_name.clone(),
+            node_id: self.node.id.clone(),
+            window_node_id,
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AtspiRef {
@@ -73,6 +106,14 @@ pub fn focused_tree(depth: usize, max_nodes: usize) -> Result<Option<Accessibili
     })?;
     let mut search_budget = NodeBudget::new(max_nodes);
     for root in roots {
+        if let Ok(items) = bus.cache_items(&root)
+            && let Some(focused) = cached_focused_node(&items)
+        {
+            let mut build_budget = NodeBudget::new(max_nodes);
+            if let Ok(tree) = bus.node_tree(&focused, depth, &mut build_budget) {
+                return Ok(Some(tree));
+            }
+        }
         if let Some(focused) = bus.find_focused(&root, DEFAULT_SEARCH_DEPTH, &mut search_budget)? {
             let mut build_budget = NodeBudget::new(max_nodes);
             return bus.node_tree(&focused, depth, &mut build_budget).map(Some);
@@ -82,14 +123,35 @@ pub fn focused_tree(depth: usize, max_nodes: usize) -> Result<Option<Accessibili
     Ok(None)
 }
 
+pub fn node(node_id: &str, depth: usize, max_nodes: usize) -> Result<AccessibilityNode> {
+    if max_nodes == 0 {
+        return Err(SeatgeistError::InvalidRequest(
+            "max_nodes must be greater than zero".to_string(),
+        ));
+    }
+    let node = parse_node_id(node_id)?;
+    let bus = AtspiBus::connect()?;
+    let mut budget = NodeBudget::new(max_nodes);
+    bus.node_tree(&node, depth, &mut budget)
+}
+
 pub fn find(request: AccessibilityFindRequest) -> Result<Vec<AccessibilityNode>> {
+    find_with_context(request).map(|matches| {
+        matches
+            .into_iter()
+            .map(|candidate| candidate.node)
+            .collect()
+    })
+}
+
+pub fn find_with_context(request: AccessibilityFindRequest) -> Result<Vec<AccessibilityMatch>> {
     validate_find_request(&request)?;
     let bus = AtspiBus::connect()?;
     let roots = bus.children(&AtspiRef {
         service: ATSPI_ROOT_SERVICE.to_string(),
         path: ATSPI_ROOT_PATH.to_string(),
     })?;
-    let mut budget = NodeBudget::new(request.max_nodes);
+    let mut shared_budget = NodeBudget::new(request.max_nodes);
     let mut matches = Vec::new();
 
     for root in roots {
@@ -97,18 +159,42 @@ pub fn find(request: AccessibilityFindRequest) -> Result<Vec<AccessibilityNode>>
             break;
         }
         let app_name = bus.name(&root).unwrap_or_default();
+        let process_id = bus.connection_process_id(&root.service).ok();
         if let Some(app) = request.app.as_deref()
             && !contains_case_insensitive(&app_name, app)
         {
+            continue;
+        }
+        let mut app_budget = NodeBudget::new(request.max_nodes);
+        let budget = if request.app.is_some() {
+            &mut app_budget
+        } else {
+            &mut shared_budget
+        };
+        if cached_find_supported(&request)
+            && let Ok(items) = bus.cache_items(&root)
+        {
+            bus.find_cached_matches(
+                &items,
+                &request,
+                &app_name,
+                &root.service,
+                process_id,
+                budget,
+                &mut matches,
+            );
             continue;
         }
         bus.find_matches(
             &root,
             &request,
             &app_name,
+            &root.service,
+            process_id,
+            None,
             None,
             DEFAULT_SEARCH_DEPTH,
-            &mut budget,
+            budget,
             &mut matches,
         )?;
     }
@@ -315,7 +401,7 @@ impl AtspiBus {
             states,
             bounds,
             available_actions: available_actions.clone(),
-            actions: normalize_actions(&available_actions),
+            actions: normalize_actions_for_role(&role, &available_actions),
             children,
         })
     }
@@ -326,10 +412,13 @@ impl AtspiBus {
         node: &AtspiRef,
         request: &AccessibilityFindRequest,
         app_name: &str,
+        application_bus_name: &str,
+        process_id: Option<u32>,
         window_name: Option<&str>,
+        window_node: Option<&AtspiRef>,
         remaining_depth: usize,
         budget: &mut NodeBudget,
-        matches: &mut Vec<AccessibilityNode>,
+        matches: &mut Vec<AccessibilityMatch>,
     ) -> Result<()> {
         if matches.len() >= request.max_results || !budget.take() {
             return Ok(());
@@ -344,11 +433,24 @@ impl AtspiBus {
         } else {
             window_name
         };
+        let effective_window_node = if is_window_role(&role) {
+            Some(node)
+        } else {
+            window_node
+        };
 
         if self.node_matches(&role, &name, app_name, effective_window, request) {
             let mut build_budget = NodeBudget::new(request.max_nodes);
             if let Ok(node) = self.node_tree(node, request.depth, &mut build_budget) {
-                matches.push(node);
+                matches.push(AccessibilityMatch {
+                    node,
+                    application_name: app_name.to_string(),
+                    application_bus_name: application_bus_name.to_string(),
+                    process_id,
+                    window_name: effective_window.map(ToOwned::to_owned),
+                    window_node_id: effective_window_node
+                        .map(|window| format!("atspi://{}{}", window.service, window.path)),
+                });
             }
         }
 
@@ -364,13 +466,155 @@ impl AtspiBus {
                 &child,
                 request,
                 app_name,
+                application_bus_name,
+                process_id,
                 effective_window,
+                effective_window_node,
                 remaining_depth - 1,
                 budget,
                 matches,
             )?;
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn find_cached_matches(
+        &self,
+        items: &[cache::CacheItem],
+        request: &AccessibilityFindRequest,
+        app_name: &str,
+        application_bus_name: &str,
+        process_id: Option<u32>,
+        budget: &mut NodeBudget,
+        matches: &mut Vec<AccessibilityMatch>,
+    ) {
+        let by_node = items
+            .iter()
+            .map(|item| ((item.node.service.as_str(), item.node.path.as_str()), item))
+            .collect::<HashMap<_, _>>();
+        let name_query = request.name_contains.as_deref().unwrap_or_default();
+        for item in items {
+            if matches.len() >= request.max_results {
+                break;
+            }
+            if !contains_case_insensitive(&item.name, name_query) {
+                continue;
+            }
+            if !budget.take() {
+                break;
+            }
+            let role = self.role_name_from_id(&item.node, item.role);
+            if !self.node_matches(&role, &item.name, app_name, None, request) {
+                continue;
+            }
+            let (window_name, window_node) = self.cached_window_context(item, &by_node);
+            if let Ok(node) = self.cached_node(item, role) {
+                matches.push(AccessibilityMatch {
+                    node,
+                    application_name: app_name.to_string(),
+                    application_bus_name: application_bus_name.to_string(),
+                    process_id,
+                    window_name,
+                    window_node_id: window_node
+                        .map(|window| format!("atspi://{}{}", window.service, window.path)),
+                });
+            }
+        }
+    }
+
+    fn cached_window_context(
+        &self,
+        item: &cache::CacheItem,
+        by_node: &HashMap<(&str, &str), &cache::CacheItem>,
+    ) -> (Option<String>, Option<AtspiRef>) {
+        let mut parent = item.parent.clone();
+        for _ in 0..DEFAULT_SEARCH_DEPTH {
+            let Some(candidate) = by_node.get(&(parent.service.as_str(), parent.path.as_str()))
+            else {
+                break;
+            };
+            let role = self.role_name_from_id(&candidate.node, candidate.role);
+            if is_window_role(&role) {
+                return (
+                    non_empty(candidate.name.clone()),
+                    Some(candidate.node.clone()),
+                );
+            }
+            parent = candidate.parent.clone();
+        }
+        (None, None)
+    }
+
+    fn cached_node(&self, item: &cache::CacheItem, role: String) -> Result<AccessibilityNode> {
+        let sensitive = is_sensitive_role(&role);
+        let available_actions = if item
+            .interfaces
+            .iter()
+            .any(|interface| interface == ATSPI_ACTION)
+        {
+            self.actions(&item.node).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let bounds = if item
+            .interfaces
+            .iter()
+            .any(|interface| interface == ATSPI_COMPONENT)
+        {
+            self.extents(&item.node).ok()
+        } else {
+            None
+        };
+        let (value, value_truncated) = if sensitive {
+            (None, false)
+        } else {
+            self.node_value(&item.node, &item.interfaces)
+                .unwrap_or((None, false))
+        };
+        let actions = normalize_actions_for_role(&role, &available_actions);
+        Ok(AccessibilityNode {
+            id: format!("atspi://{}{}", item.node.service, item.node.path),
+            role,
+            name: non_empty(item.name.clone()),
+            value,
+            value_truncated,
+            sensitive,
+            states: state_names(&item.states),
+            bounds,
+            available_actions: available_actions.clone(),
+            actions,
+            children: Vec::new(),
+        })
+    }
+
+    fn cache_items(&self, root: &AtspiRef) -> Result<Vec<cache::CacheItem>> {
+        let app_address = parse_single_string(&self.call(
+            &root.service,
+            &root.path,
+            ATSPI_APPLICATION,
+            "GetApplicationBusAddress",
+        )?)?;
+        if app_address.trim().is_empty() {
+            return Err(SeatgeistError::BackendUnavailable(
+                "AT-SPI application returned an empty direct bus address".to_string(),
+            ));
+        }
+        let output = Command::new("busctl")
+            .args([
+                "--address",
+                &app_address,
+                "call",
+                ATSPI_CACHE,
+                ATSPI_CACHE_PATH,
+                ATSPI_CACHE,
+                "GetItems",
+            ])
+            .output()
+            .map_err(|err| {
+                SeatgeistError::BackendUnavailable(format!("run busctl AT-SPI cache: {err}"))
+            })?;
+        cache::parse_items(&command_output(output, "busctl AT-SPI cache GetItems")?)
     }
 
     fn node_matches(
@@ -382,7 +626,7 @@ impl AtspiBus {
         request: &AccessibilityFindRequest,
     ) -> bool {
         if let Some(query) = request.role.as_deref()
-            && !role.eq_ignore_ascii_case(query)
+            && !role_name_matches(role, query)
         {
             return false;
         }
@@ -420,6 +664,21 @@ impl AtspiBus {
             .output()
             .map_err(|err| SeatgeistError::BackendUnavailable(format!("run busctl: {err}")))?;
         command_output(output, "busctl AT-SPI call")
+    }
+
+    fn connection_process_id(&self, service: &str) -> Result<u32> {
+        let output = self.call_with_args(
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "GetConnectionUnixProcessID",
+            &["s", service],
+        )?;
+        parse_connection_process_id(&output).ok_or_else(|| {
+            SeatgeistError::Io(format!(
+                "AT-SPI bus did not return a process id for {service}"
+            ))
+        })
     }
 
     fn call_with_args(
@@ -500,16 +759,29 @@ impl AtspiBus {
     }
 
     fn role_name(&self, node: &AtspiRef) -> Result<String> {
-        let output = self.call(&node.service, &node.path, ATSPI_ACCESSIBLE, "GetRoleName")?;
-        resolve_role_name(&output, || {
-            let localized = self.call(
-                &node.service,
-                &node.path,
-                ATSPI_ACCESSIBLE,
-                "GetLocalizedRoleName",
-            )?;
-            parse_single_string(&localized)
-        })
+        match self.call(&node.service, &node.path, ATSPI_ACCESSIBLE, "GetRole") {
+            Ok(output) => resolve_role_id(&output, || self.localized_role_name(node)),
+            Err(_) => {
+                let output =
+                    self.call(&node.service, &node.path, ATSPI_ACCESSIBLE, "GetRoleName")?;
+                resolve_role_name(&output, || self.localized_role_name(node))
+            }
+        }
+    }
+
+    fn role_name_from_id(&self, node: &AtspiRef, role_id: u32) -> String {
+        resolve_role_value(role_id, || self.localized_role_name(node))
+            .unwrap_or_else(|_| "unknown".to_string())
+    }
+
+    fn localized_role_name(&self, node: &AtspiRef) -> Result<String> {
+        let localized = self.call(
+            &node.service,
+            &node.path,
+            ATSPI_ACCESSIBLE,
+            "GetLocalizedRoleName",
+        )?;
+        parse_single_string(&localized)
     }
 
     fn name(&self, node: &AtspiRef) -> Result<String> {
@@ -594,11 +866,11 @@ impl AtspiBus {
     }
 
     fn invoke(&self, node: &AtspiRef, action: AccessibilityAction) -> Result<()> {
+        let role = self
+            .role_name(node)
+            .unwrap_or_else(|_| "unknown".to_string());
         let actions = self.actions(node)?;
-        let Some(index) = actions
-            .iter()
-            .position(|candidate| action_name_matches(candidate, &action))
-        else {
+        let Some(index) = action_index_for_role(&role, &actions, &action) else {
             return Err(SeatgeistError::InvalidRequest(format!(
                 "node does not expose {} action",
                 action.as_str()
@@ -944,6 +1216,20 @@ fn validate_find_request(request: &AccessibilityFindRequest) -> Result<()> {
     Ok(())
 }
 
+fn cached_find_supported(request: &AccessibilityFindRequest) -> bool {
+    request.app.is_some()
+        && request.name_contains.is_some()
+        && request.window_name_contains.is_none()
+        && request.depth == 0
+}
+
+fn cached_focused_node(items: &[cache::CacheItem]) -> Option<AtspiRef> {
+    items
+        .iter()
+        .find(|item| state_has_focused(&item.states))
+        .map(|item| item.node.clone())
+}
+
 fn validate_set_text(text: &str) -> Result<()> {
     let char_count = text.chars().count();
     if char_count > DEFAULT_SET_TEXT_MAX_CHARS {
@@ -1108,6 +1394,12 @@ fn parse_uint_array(output: &str) -> Vec<u32> {
         .collect()
 }
 
+fn parse_connection_process_id(output: &str) -> Option<u32> {
+    output
+        .split_whitespace()
+        .find_map(|part| part.parse::<u32>().ok())
+}
+
 fn parse_extents(output: &str) -> Result<(i32, i32, u32, u32)> {
     let values = output
         .trim()
@@ -1254,6 +1546,37 @@ fn normalize_actions(actions: &[String]) -> Vec<AccessibilityAction> {
     normalized
 }
 
+fn normalize_actions_for_role(role: &str, actions: &[String]) -> Vec<AccessibilityAction> {
+    let mut normalized = normalize_actions(actions);
+    if normalized.is_empty()
+        && action_index_for_role(role, actions, &AccessibilityAction::Press).is_some()
+    {
+        normalized.push(AccessibilityAction::Press);
+    }
+    normalized
+}
+
+fn action_index_for_role(
+    role: &str,
+    actions: &[String],
+    action: &AccessibilityAction,
+) -> Option<usize> {
+    actions
+        .iter()
+        .position(|candidate| action_name_matches(candidate, action))
+        .or_else(|| {
+            (*action == AccessibilityAction::Press
+                && matches!(role.to_ascii_lowercase().as_str(), "button" | "push button")
+                && actions.len() == 1
+                && action_label_is_empty(&actions[0]))
+            .then_some(0)
+        })
+}
+
+fn action_label_is_empty(label: &str) -> bool {
+    label.trim().trim_matches(';').trim().is_empty()
+}
+
 fn action_name_matches(action_name: &str, action: &AccessibilityAction) -> bool {
     let lower = action_name.to_ascii_lowercase();
     match action {
@@ -1267,6 +1590,11 @@ fn action_name_matches(action_name: &str, action: &AccessibilityAction) -> bool 
         AccessibilityAction::Focus => lower.contains("focus"),
         AccessibilityAction::Select => lower.contains("select"),
     }
+}
+
+fn role_name_matches(candidate: &str, query: &str) -> bool {
+    candidate.eq_ignore_ascii_case(query)
+        || (query.eq_ignore_ascii_case("button") && candidate.eq_ignore_ascii_case("push button"))
 }
 
 fn is_sensitive_role(role: &str) -> bool {
@@ -1374,6 +1702,12 @@ mod tests {
     }
 
     #[test]
+    fn parses_accessibility_bus_connection_process_id() {
+        assert_eq!(parse_connection_process_id("u 4242\n"), Some(4242));
+        assert_eq!(parse_connection_process_id("u invalid\n"), None);
+    }
+
+    #[test]
     fn decodes_busctl_octal_escaped_strings() {
         let value =
             parse_single_string(r#"s "outfit.txt  \342\200\224 Kate""#).expect("string parses");
@@ -1394,7 +1728,9 @@ mod tests {
         assert_eq!(role, "push button");
 
         let role = resolve_role_name("s \"entry\"\n", || {
-            panic!("localized fallback must not run for a standard role")
+            Err(SeatgeistError::InvalidRequest(
+                "localized fallback must not run for a standard role".to_string(),
+            ))
         })
         .expect("standard role resolves");
         assert_eq!(role, "entry");
@@ -1515,6 +1851,33 @@ mod tests {
     }
 
     #[test]
+    fn maps_one_unlabeled_firefox_button_action_to_press_only() {
+        let unlabeled = vec![";;".to_string()];
+        assert_eq!(
+            normalize_actions_for_role("button", &unlabeled),
+            vec![AccessibilityAction::Press]
+        );
+        assert_eq!(
+            action_index_for_role("button", &unlabeled, &AccessibilityAction::Press),
+            Some(0)
+        );
+        assert!(normalize_actions_for_role("text", &unlabeled).is_empty());
+        assert_eq!(
+            action_index_for_role("button", &unlabeled, &AccessibilityAction::Focus),
+            None
+        );
+        assert!(normalize_actions_for_role("button", &[";;".into(), ";;".into()]).is_empty());
+    }
+
+    #[test]
+    fn generic_button_query_matches_qt_push_button_role() {
+        assert!(role_name_matches("button", "button"));
+        assert!(role_name_matches("push button", "button"));
+        assert!(!role_name_matches("toggle button", "button"));
+        assert!(!role_name_matches("button", "push button"));
+    }
+
+    #[test]
     fn validates_set_text_limit() {
         validate_set_text("").expect("empty text can clear a field");
         let long = "x".repeat(DEFAULT_SET_TEXT_MAX_CHARS + 1);
@@ -1544,6 +1907,93 @@ mod tests {
         })
         .expect_err("empty query is invalid");
         assert!(err.to_string().contains("at least one"));
+    }
+
+    #[test]
+    fn cache_fast_path_requires_narrow_depth_zero_query() {
+        let mut request = AccessibilityFindRequest {
+            role: Some("button".to_string()),
+            name_contains: Some("Save".to_string()),
+            app: Some("Firefox".to_string()),
+            window_name_contains: None,
+            depth: 0,
+            max_results: 5,
+            max_nodes: 512,
+        };
+        assert!(cached_find_supported(&request));
+
+        request.depth = 1;
+        assert!(!cached_find_supported(&request));
+        request.depth = 0;
+        request.window_name_contains = Some("Document".to_string());
+        assert!(!cached_find_supported(&request));
+        request.window_name_contains = None;
+        request.name_contains = None;
+        assert!(!cached_find_supported(&request));
+    }
+
+    #[test]
+    fn cached_name_prefilter_does_not_starve_later_same_app_roots() {
+        let bus = AtspiBus {
+            address: "unused-for-nonmatches".to_string(),
+        };
+        let items = (0..600)
+            .map(|index| cache::CacheItem {
+                node: AtspiRef {
+                    service: ":1.42".to_string(),
+                    path: format!("/node/{index}"),
+                },
+                parent: AtspiRef {
+                    service: ":1.42".to_string(),
+                    path: "/root".to_string(),
+                },
+                interfaces: Vec::new(),
+                name: format!("Unrelated {index}"),
+                role: 0,
+                states: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let request = AccessibilityFindRequest {
+            role: Some("button".to_string()),
+            name_contains: Some("Wanted".to_string()),
+            app: Some("Firefox".to_string()),
+            window_name_contains: None,
+            depth: 0,
+            max_results: 5,
+            max_nodes: 1,
+        };
+        let mut budget = NodeBudget::new(1);
+        let mut matches = Vec::new();
+
+        bus.find_cached_matches(
+            &items,
+            &request,
+            "Firefox",
+            ":1.42",
+            Some(42),
+            &mut budget,
+            &mut matches,
+        );
+
+        assert_eq!(budget.remaining, 1);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn finds_focused_node_from_bulk_cache_states() {
+        let focused_word = 1_u32 << STATE_FOCUSED;
+        let output = format!(
+            "a((so)(so)(so)iiassusau) 1 \":1.42\" \
+             \"/org/a11y/atspi/accessible/7\" \":1.42\" \
+             \"/org/a11y/atspi/accessible/root\" \":1.42\" \
+             \"/org/a11y/atspi/accessible/2\" 0 0 1 \
+             \"org.a11y.atspi.Accessible\" \"Editor\" 60 \"\" 1 {focused_word}"
+        );
+        let items = cache::parse_items(&output).expect("cache fixture parses");
+
+        let focused = cached_focused_node(&items).expect("focused cache item found");
+        assert_eq!(focused.service, ":1.42");
+        assert_eq!(focused.path, "/org/a11y/atspi/accessible/7");
     }
 
     #[test]

@@ -93,10 +93,20 @@ impl DaemonFixture {
     }
 
     fn run_mcp(&self, requests: &[Value]) -> Result<Vec<Value>> {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_seatgeist-mcp"))
-            .arg("--stdio")
-            .arg("--socket")
-            .arg(&self.socket)
+        self.run_mcp_with_profile(None, requests)
+    }
+
+    fn run_mcp_with_profile(
+        &self,
+        profile: Option<&str>,
+        requests: &[Value],
+    ) -> Result<Vec<Value>> {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_seatgeist-mcp"));
+        command.arg("--stdio").arg("--socket").arg(&self.socket);
+        if let Some(profile) = profile {
+            command.arg("--tool-profile").arg(profile);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -125,6 +135,56 @@ impl Drop for DaemonFixture {
         let _ = self.child.wait();
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+fn mcp_core_caches_readiness_until_another_tool_call() -> Result<()> {
+    let daemon = DaemonFixture::start()?;
+    let responses = daemon.run_mcp_with_profile(
+        Some("core"),
+        &[
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "seatgeist.computer_status", "arguments": {}}
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "seatgeist.computer_status", "arguments": {}}
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "seatgeist.panic_stop", "arguments": {}}
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "seatgeist.computer_status", "arguments": {}}
+            }),
+        ],
+    )?;
+    assert_eq!(responses.len(), 4);
+    assert_eq!(responses[0]["result"], responses[1]["result"]);
+    assert_eq!(
+        responses[2]["result"]["structuredContent"]["type"],
+        "panic_stop"
+    );
+
+    let journal = fs::read_to_string(daemon.root.join("journal.jsonl"))
+        .context("read readiness cache journal")?;
+    let readiness_calls = journal
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|entry| entry["method"] == "computer_use_readiness")
+        .count();
+    assert_eq!(readiness_calls, 2, "second consecutive status is cached");
+    Ok(())
 }
 
 #[test]
@@ -200,6 +260,7 @@ fn mcp_stdio_talks_to_real_daemon_and_reports_tool_errors() -> Result<()> {
     assert_tool_present(tools, "seatgeist.remote_desktop_session_probe");
     assert_tool_present(tools, "seatgeist.remote_desktop_eis_probe");
     assert_tool_present(tools, "seatgeist.computer_use_readiness");
+    assert_tool_present(tools, "seatgeist.capture_open");
     assert_tool_present(tools, "seatgeist.a11y_text_attributes");
     assert_tool_present(tools, "seatgeist.journal_tail");
 
@@ -257,6 +318,210 @@ fn mcp_stdio_talks_to_real_daemon_and_reports_tool_errors() -> Result<()> {
 }
 
 #[test]
+fn mcp_post_action_options_are_validated_before_control_side_effects() -> Result<()> {
+    let daemon = DaemonFixture::start_with_config(
+        r#"
+[daemon]
+socket = "__SOCKET__"
+journal = "__JOURNAL__"
+panic_stop_file = "__PANIC_STOP__"
+
+[policy]
+default_control = "allow"
+
+[safety]
+require_focus_guard = false
+"#,
+    )?;
+    let responses = daemon.run_mcp(&[
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "seatgeist.type_text",
+                "arguments": {
+                    "text": "must-not-be-typed-or-journaled",
+                    "settle_timeout_ms": 0
+                }
+            }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "seatgeist.type_text",
+                "arguments": {
+                    "text": "must-also-not-be-typed",
+                    "include_image": true
+                }
+            }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "seatgeist.journal_tail",
+                "arguments": {
+                    "limit": 10,
+                    "method": "type_text"
+                }
+            }
+        }),
+    ])?;
+
+    let validation = &responses[0]["result"];
+    assert_eq!(validation["isError"], true);
+    assert_eq!(
+        validation["structuredContent"]["data"]["kind"],
+        "validation"
+    );
+    assert!(
+        validation["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("settle_timeout_ms")
+    );
+
+    let image_validation = &responses[1]["error"];
+    assert_eq!(image_validation["code"], -32602);
+    assert!(
+        image_validation["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("requires capture_session_id")
+    );
+
+    let entries = responses[2]["result"]["structuredContent"]["data"]
+        .as_array()
+        .context("journal data is an array")?;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["method"], "type_text");
+    assert_eq!(entries[0]["ok"], false);
+    assert_eq!(entries[0]["client"]["tool"], "seatgeist-mcp");
+    let journal_json = serde_json::to_string(entries).context("serialize journal assertion")?;
+    assert!(!journal_json.contains("must-not-be-typed-or-journaled"));
+    assert!(!journal_json.contains("must-also-not-be-typed"));
+    Ok(())
+}
+
+#[test]
+fn mcp_core_profile_exposes_only_the_bounded_facade() -> Result<()> {
+    let daemon = DaemonFixture::start()?;
+    let responses = daemon.run_mcp_with_profile(
+        Some("core"),
+        &[
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list",
+                "params": {}
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "seatgeist.computer_status",
+                    "arguments": {}
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "seatgeist.type_text",
+                    "arguments": {"text": "must-not-run"}
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "seatgeist.window_session",
+                    "arguments": {"operation": "status"}
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {
+                    "name": "seatgeist.snapshot",
+                    "arguments": {}
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {
+                    "name": "seatgeist.wait",
+                    "arguments": {}
+                }
+            }),
+        ],
+    )?;
+
+    let tools = responses[0]["result"]["tools"]
+        .as_array()
+        .context("core tools/list is an array")?;
+    assert!(tools.len() <= 8);
+    assert_tool_present(tools, "seatgeist.computer_status");
+    assert_tool_present(tools, "seatgeist.window_session");
+    assert_tool_present(tools, "seatgeist.snapshot");
+    assert_tool_present(tools, "seatgeist.act");
+    assert_tool_present(tools, "seatgeist.wait");
+    assert_tool_present(tools, "seatgeist.panic_stop");
+    for name in ["seatgeist.snapshot", "seatgeist.wait"] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .context("core retained capture tool exists")?;
+        assert_eq!(tool["inputSchema"]["required"], json!(["session_id"]));
+    }
+    assert!(
+        !tools
+            .iter()
+            .any(|tool| tool["name"] == "seatgeist.type_text")
+    );
+
+    assert_eq!(
+        responses[1]["result"]["structuredContent"]["type"],
+        "computer_use_readiness"
+    );
+    assert_eq!(responses[2]["error"]["code"], -32602);
+    assert!(
+        responses[2]["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not available in the Core tool profile")
+    );
+    assert_eq!(
+        responses[3]["result"]["structuredContent"]["type"],
+        "capture_session_status"
+    );
+    assert_eq!(
+        responses[3]["result"]["structuredContent"]["data"]["active"],
+        false
+    );
+    for response in &responses[4..=5] {
+        assert_eq!(response["error"]["code"], -32602);
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("argument 'session_id' is required")
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn mcp_stdio_reports_configured_denial_kinds() -> Result<()> {
     let focus_guard = DaemonFixture::start_with_config(
         r#"
@@ -308,7 +573,7 @@ human_input_quiet_ms = 60000
             "text": "blocked-before-input"
         }),
         "human_input_pause",
-        "human input activity signal is fresh",
+        "human input activity is fresh",
     )?;
 
     let app_policy = DaemonFixture::start_with_config(
@@ -444,7 +709,7 @@ fn mcp_stdio_raw_input_fails_closed_and_is_journaled() -> Result<()> {
         entry["summary"]
             .as_str()
             .unwrap_or_default()
-            .contains("PolicyPromptRequired")
+            .contains("policy_prompt_required")
     );
 
     let journal_json = serde_json::to_string(journal).context("serialize journal response")?;

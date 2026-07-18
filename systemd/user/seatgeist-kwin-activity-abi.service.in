@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Seatgeist KWin activity plugin ABI
+After=plasma-plasmashell.service
+PartOf=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=@WATCHER@
+
+[Install]
+WantedBy=plasma-core.target

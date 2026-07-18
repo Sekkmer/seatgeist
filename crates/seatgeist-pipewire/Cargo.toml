@@ -1,0 +1,25 @@
+[package]
+name = "seatgeist-pipewire"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Bounded PipeWire ScreenCast frame consumer for Seatgeist."
+
+[dependencies]
+async-trait.workspace = true
+image.workspace = true
+libseatgeist.workspace = true
+libc.workspace = true
+pipewire.workspace = true
+seatgeist-backend.workspace = true
+seatgeist-portal.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import tomllib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ID = "seatgeist@seatgeist-local"
 MARKETPLACE = "seatgeist-local"
 BINARIES = ("seatgeist-mcp", "seatgeist-cli", "seatgeistd")
+PLUGIN_VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?")
 
 
 @dataclass(frozen=True)
@@ -124,16 +127,95 @@ def check_trusted_project(config: dict[str, Any] | None) -> Check:
     return Check("trusted_project", "advisory", True, "this checkout is trusted by Codex", [str(ROOT)])
 
 
-def check_installed_plugin(home: Path) -> Check:
-    path = home / "plugins" / "cache" / MARKETPLACE / "seatgeist" / "0.1.0"
+def source_plugin_version(plugin_root: Path) -> str | None:
+    manifest_path = plugin_root / ".codex-plugin" / "plugin.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    version = manifest.get("version") if isinstance(manifest, dict) else None
+    if not isinstance(version, str) or PLUGIN_VERSION_RE.fullmatch(version) is None:
+        return None
+    return version
+
+
+def plugin_tree_digest(plugin_root: Path) -> str | None:
+    if not plugin_root.is_dir():
+        return None
+    digest = hashlib.sha256()
+    files = sorted(
+        path
+        for path in plugin_root.rglob("*")
+        if path.is_file()
+        and "__pycache__" not in path.parts
+        and path.suffix not in {".pyc", ".pyo"}
+    )
+    try:
+        for path in files:
+            if path.is_symlink():
+                return None
+            relative = path.relative_to(plugin_root).as_posix().encode("utf-8")
+            content = path.read_bytes()
+            digest.update(len(relative).to_bytes(8, "big"))
+            digest.update(relative)
+            digest.update(len(content).to_bytes(8, "big"))
+            digest.update(content)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def check_installed_plugin(
+    home: Path,
+    plugin_root: Path = ROOT / "plugin",
+    validator: Path = ROOT / "scripts" / "validate-plugin.py",
+) -> Check:
+    version = source_plugin_version(plugin_root)
+    if version is None:
+        return Check(
+            "installed_plugin_cache",
+            "blocker",
+            False,
+            "source Seatgeist plugin version is missing or invalid",
+            [str(plugin_root / ".codex-plugin" / "plugin.json")],
+        )
+    path = home / "plugins" / "cache" / MARKETPLACE / "seatgeist" / version
     if not path.is_dir():
         return Check("installed_plugin_cache", "blocker", False, "installed Seatgeist plugin cache is missing", [str(path)])
-    result = run(["scripts/validate-plugin.py", str(path)])
-    evidence = [str(path)]
+    result = run([str(validator), str(path)])
+    source_digest = plugin_tree_digest(plugin_root)
+    installed_digest = plugin_tree_digest(path)
+    evidence = [
+        str(path),
+        f"source_sha256={source_digest}",
+        f"installed_sha256={installed_digest}",
+    ]
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
         return Check("installed_plugin_cache", "blocker", False, "installed Seatgeist plugin cache does not validate", evidence + [detail])
-    return Check("installed_plugin_cache", "required", True, "installed Seatgeist plugin cache validates", evidence)
+    if source_digest is None or installed_digest is None:
+        return Check(
+            "installed_plugin_cache",
+            "blocker",
+            False,
+            "Seatgeist plugin source or installed cache could not be hashed safely",
+            evidence,
+        )
+    if source_digest != installed_digest:
+        return Check(
+            "installed_plugin_cache",
+            "blocker",
+            False,
+            "installed Seatgeist plugin cache is stale relative to this checkout",
+            evidence + ["run make refresh-local-codex-plugin"],
+        )
+    return Check(
+        "installed_plugin_cache",
+        "required",
+        True,
+        "installed Seatgeist plugin cache validates and matches this checkout",
+        evidence,
+    )
 
 
 def check_binary(name: str) -> Check:

@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch KWin ABI for Seatgeist plugin rebuilds
+PartOf=graphical-session.target
+
+[Path]
+PathChanged=/usr/include/kwin/config-kwin.h
+Unit=seatgeist-kwin-activity-abi.service
+
+[Install]
+WantedBy=plasma-core.target

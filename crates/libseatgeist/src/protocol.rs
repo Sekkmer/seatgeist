@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::types::{
-    AccessibilityAction, AccessibilityNode, BackendCapability, CoordinateSpace, MonitorInfo,
-    Observation, Point, PointerButton, SafetyClass, ToolApprovalLevel, WindowInfo,
+    AccessibilityAction, AccessibilityNode, ActionSettleCondition, ActionSettleResult,
+    BackendCapability, CoordinateSpace, MonitorInfo, Observation, Point, PointerButton,
+    SafetyClass, ToolApprovalLevel, WindowInfo,
 };
 
 pub const DEFAULT_CLIPBOARD_MAX_BYTES: usize = 64 * 1024;
@@ -13,6 +14,8 @@ pub const DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS: u64 = 5_000;
 pub const DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS: u64 = 250;
 pub const DEFAULT_WAIT_FOR_CHANGE_THRESHOLD: f64 = 0.01;
 pub const DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS: u64 = 120_000;
+pub const DEFAULT_POST_ACTION_SETTLE_TIMEOUT_MS: u64 = 1_500;
+pub const DEFAULT_POST_ACTION_SETTLE_INTERVAL_MS: u64 = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthStatus {
@@ -45,6 +48,14 @@ pub struct SafetyStatus {
     pub human_input_quiet_ms: u64,
     pub human_input_signal_fresh: bool,
     pub human_input_signal_age_ms: Option<u64>,
+    #[serde(default)]
+    pub human_input_activity_backend: Option<String>,
+    #[serde(default)]
+    pub human_input_activity_trusted: bool,
+    #[serde(default)]
+    pub human_input_last_class: Option<String>,
+    #[serde(default)]
+    pub human_input_last_provenance: Option<String>,
     pub control_rate_limit_per_minute: Option<u32>,
     pub preview_max_edge: u32,
     pub tile_max_edge: u32,
@@ -68,6 +79,28 @@ pub struct DesktopSessionStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionReadiness {
+    Ready,
+    NeedsGuard,
+    NeedsApproval,
+    Blocked,
+    Unavailable,
+}
+
+impl ActionReadiness {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::NeedsGuard => "needs_guard",
+            Self::NeedsApproval => "needs_approval",
+            Self::Blocked => "blocked",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComputerUseReadinessStatus {
     pub ready_for_observe: bool,
     pub ready_for_screenshot: bool,
@@ -77,6 +110,16 @@ pub struct ComputerUseReadinessStatus {
     pub ready_for_semantic_actions: bool,
     pub ready_for_clipboard_read: bool,
     pub ready_for_clipboard_write: bool,
+    pub observe_state: ActionReadiness,
+    pub screenshot_state: ActionReadiness,
+    pub window_control_state: ActionReadiness,
+    pub keyboard_input_state: ActionReadiness,
+    pub pointer_input_state: ActionReadiness,
+    pub semantic_action_state: ActionReadiness,
+    pub clipboard_read_state: ActionReadiness,
+    pub clipboard_write_state: ActionReadiness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_revision: Option<String>,
     pub focus_guard_required: bool,
     pub panic_stop_enabled: bool,
     pub human_input_pause_enabled: bool,
@@ -102,6 +145,12 @@ pub struct PanicStopStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KwinBridgeStatus {
     pub dbus_service_registered: bool,
+    #[serde(default)]
+    pub window_resize_supported: bool,
+    #[serde(default)]
+    pub window_move_supported: bool,
+    #[serde(default)]
+    pub window_launch_supported: bool,
     pub active_window_update_seen: bool,
     pub window_list_update_seen: bool,
     pub window_count: usize,
@@ -417,6 +466,48 @@ pub struct DaemonRequestEnvelope {
     pub request: DaemonRequest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<DaemonClientIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_options: Option<DaemonResponseOptions>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonResponseOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_action: Option<PostActionOptions>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostActionOptions {
+    #[serde(default)]
+    pub observe_after: bool,
+    #[serde(default = "default_post_action_settle_condition")]
+    pub settle_condition: ActionSettleCondition,
+    #[serde(default = "default_post_action_settle_timeout_ms")]
+    pub settle_timeout_ms: u64,
+    #[serde(default = "default_post_action_settle_interval_ms")]
+    pub settle_interval_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<PostActionImageOptions>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostActionImageOptions {
+    pub session_id: String,
+    pub output: PathBuf,
+    pub max_edge: Option<u32>,
+    pub timeout_ms: u64,
+}
+
+fn default_post_action_settle_condition() -> ActionSettleCondition {
+    ActionSettleCondition::Auto
+}
+
+fn default_post_action_settle_timeout_ms() -> u64 {
+    DEFAULT_POST_ACTION_SETTLE_TIMEOUT_MS
+}
+
+fn default_post_action_settle_interval_ms() -> u64 {
+    DEFAULT_POST_ACTION_SETTLE_INTERVAL_MS
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,6 +574,8 @@ pub struct TraceJsonExpectation {
 pub struct ScreenshotInfo {
     pub path: PathBuf,
     pub backend: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub occlusion_possible: bool,
     pub source_width: u32,
     pub source_height: u32,
     pub output_width: u32,
@@ -524,6 +617,8 @@ pub struct ScreenshotRequest {
     pub portal_interactive: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub portal_target: Option<PortalScreenshotTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_window_crop_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -618,6 +713,155 @@ pub struct WaitForChangeResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowCaptureOpenRequest {
+    pub requested_window_id: Option<String>,
+    pub parent_window: String,
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureSourceKind {
+    Window,
+    Monitor,
+    VirtualOutput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureOpenRequest {
+    pub source: CaptureSourceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_source_id: Option<String>,
+    pub parent_window: String,
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureSessionRequest {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureSnapshotRequest {
+    pub session_id: String,
+    pub output: PathBuf,
+    pub max_edge: Option<u32>,
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureWaitRequest {
+    pub session_id: String,
+    pub after_revision: Option<String>,
+    pub output: PathBuf,
+    pub max_edge: Option<u32>,
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureSessionStatus {
+    pub active: bool,
+    pub opening: bool,
+    pub session_id: Option<String>,
+    pub backend: Option<String>,
+    pub source_type: Option<String>,
+    pub source_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_token_reference: Option<String>,
+    pub requested_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_source_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_source_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_scope: Option<String>,
+    pub latest_revision: Option<String>,
+    pub consent_required: bool,
+    pub occlusion_possible: bool,
+    #[serde(default)]
+    pub sticky_target_bound: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_app_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_expires_in_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_end_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<Box<SessionExecutionStatus>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionFocusLeaseStatus {
+    pub lease_id: Uuid,
+    pub focus_reacquired: bool,
+    pub focus_restored: bool,
+    pub restoration: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionExecutionStatus {
+    pub capture_backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_input_backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_action_backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_action_method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_action_safety_class: Option<SafetyClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_action_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_action_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_policy_result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_policy_result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooperative_focus_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_backend: Option<String>,
+    pub activity_trusted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_provenance: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_lease: Option<SessionFocusLeaseStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle: Option<ActionSettleResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaptureFrameResult {
+    pub session_id: String,
+    pub screenshot: ScreenshotInfo,
+    pub revision: String,
+    pub sequence: u64,
+    pub complete: bool,
+    pub damage_present: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaptureWaitResult {
+    pub frame: CaptureFrameResult,
+    pub changed: bool,
+    pub timed_out: bool,
+    pub timeout_ms: u64,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClipboardText {
     pub text: String,
     pub truncated: bool,
@@ -648,6 +892,12 @@ pub struct ClipboardSetRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessibilityQualityStatus {
     pub atspi_available: bool,
+    #[serde(default)]
+    pub target_event_settle_available: bool,
+    #[serde(default)]
+    pub event_backend: String,
+    #[serde(default)]
+    pub target_event_classes: Vec<String>,
     pub focused_node_present: bool,
     pub sample_depth: usize,
     pub sample_max_nodes: usize,
@@ -786,9 +1036,22 @@ pub struct AccessibilitySetSelectionRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActiveWindowGuard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_window_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_app_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_contains: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetWindowGuard {
+    pub expected_window_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_app_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_contains: Option<String>,
 }
@@ -798,6 +1061,8 @@ pub struct TypeTextRequest {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -805,6 +1070,8 @@ pub struct KeyComboRequest {
     pub combo: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -812,6 +1079,8 @@ pub struct MovePointerRequest {
     pub point: Point,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -821,6 +1090,8 @@ pub struct ClickPointerRequest {
     pub clicks: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -831,6 +1102,8 @@ pub struct DragPointerRequest {
     pub duration_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -839,6 +1112,8 @@ pub struct ScrollPointerRequest {
     pub horizontal: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -851,6 +1126,8 @@ pub struct ClickButtonRequest {
     pub max_nodes: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_guard: Option<TargetWindowGuard>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -862,6 +1139,8 @@ pub struct SetTextFieldRequest {
     pub max_nodes: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_guard: Option<TargetWindowGuard>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -872,6 +1151,8 @@ pub struct FocusTextFieldRequest {
     pub max_nodes: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_guard: Option<TargetWindowGuard>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -882,6 +1163,8 @@ pub struct ActivateTabRequest {
     pub max_nodes: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_guard: Option<TargetWindowGuard>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -892,6 +1175,8 @@ pub struct ActivateLinkRequest {
     pub max_nodes: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_guard: Option<TargetWindowGuard>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -904,6 +1189,8 @@ pub struct ToggleCheckRequest {
     pub max_nodes: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_guard: Option<TargetWindowGuard>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -915,6 +1202,8 @@ pub struct SetValueRequest {
     pub max_nodes: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_guard: Option<TargetWindowGuard>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -925,6 +1214,8 @@ pub struct SelectItemRequest {
     pub max_nodes: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_guard: Option<TargetWindowGuard>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -937,6 +1228,8 @@ pub struct SelectMenuRequest {
     pub max_nodes: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_guard: Option<TargetWindowGuard>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -953,10 +1246,47 @@ fn default_remote_desktop_session_timeout_ms() -> u64 {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DesktopObservation {
+    pub desktop_revision: String,
     pub active_window: Option<WindowInfo>,
     pub windows: Vec<WindowInfo>,
     pub monitors: Vec<MonitorInfo>,
     pub screenshot: Option<ScreenshotInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WindowInventory {
+    pub revision: String,
+    pub active_window: Option<WindowInfo>,
+    pub windows: Vec<WindowInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub semantic_handles: Vec<SemanticWindowHandle>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticWindowHandle {
+    pub handle: String,
+    pub window_id: String,
+    pub expires_in_ms: u64,
+    pub one_shot: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowInventoryWaitRequest {
+    pub after_revision: String,
+    #[serde(default = "default_wait_for_change_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_wait_for_change_timeout_ms() -> u64 {
+    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WindowInventoryWaitResult {
+    pub changed: bool,
+    pub timed_out: bool,
+    pub elapsed_ms: u64,
+    pub inventory: WindowInventory,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -964,6 +1294,89 @@ pub struct FocusWindowRequest {
     pub window_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResizeWindowRequest {
+    pub window_id: String,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveWindowRequest {
+    pub window_id: String,
+    pub x: i32,
+    pub y: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowPlacementAnchor {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    Center,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowActivationMode {
+    PreserveFocus,
+    Activate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchWindowRequest {
+    pub desktop_entry: String,
+    pub anchor: WindowPlacementAnchor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub margin: u32,
+    #[serde(default = "default_window_activation_mode")]
+    pub activation: WindowActivationMode,
+    #[serde(default = "default_launch_window_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
+fn default_window_activation_mode() -> WindowActivationMode {
+    WindowActivationMode::PreserveFocus
+}
+
+fn default_launch_window_timeout_ms() -> u64 {
+    10_000
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageZoomOperation {
+    In,
+    Out,
+    Reset,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageZoomRequest {
+    pub operation: PageZoomOperation,
+    #[serde(default = "default_page_zoom_steps")]
+    pub steps: u8,
+    pub guard: ActiveWindowGuard,
+}
+
+fn default_page_zoom_steps() -> u8 {
+    1
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -986,10 +1399,19 @@ pub enum DaemonRequest {
     RemoteDesktopEisSessionStatus,
     RemoteDesktopEisStop,
     CaptureBackendStatus,
+    CaptureOpen(CaptureOpenRequest),
+    WindowCaptureOpen(WindowCaptureOpenRequest),
+    CaptureSessionStatus,
+    CaptureSessionRenew(CaptureSessionRequest),
+    CaptureSnapshot(CaptureSnapshotRequest),
+    CaptureWait(CaptureWaitRequest),
+    CaptureSessionClose(CaptureSessionRequest),
     PointerCalibration,
     ListMonitors,
     ListWindows,
     ActiveWindow,
+    WindowInventory,
+    WindowInventoryWait(WindowInventoryWaitRequest),
     Observe(ObserveRequest),
     Screenshot(ScreenshotRequest),
     ScreenshotTile(ScreenshotTileRequest),
@@ -1027,6 +1449,10 @@ pub enum DaemonRequest {
     SelectMenu(SelectMenuRequest),
     JournalTail(JournalTailRequest),
     FocusWindow(FocusWindowRequest),
+    MoveWindow(MoveWindowRequest),
+    LaunchWindow(LaunchWindowRequest),
+    ResizeWindow(ResizeWindowRequest),
+    PageZoom(PageZoomRequest),
 }
 
 impl DaemonRequest {
@@ -1049,10 +1475,19 @@ impl DaemonRequest {
             Self::RemoteDesktopEisSessionStatus => "remote_desktop_eis_session_status",
             Self::RemoteDesktopEisStop => "remote_desktop_eis_stop",
             Self::CaptureBackendStatus => "capture_backend_status",
+            Self::CaptureOpen(_) => "capture_open",
+            Self::WindowCaptureOpen(_) => "window_capture_open",
+            Self::CaptureSessionStatus => "capture_session_status",
+            Self::CaptureSessionRenew(_) => "capture_session_renew",
+            Self::CaptureSnapshot(_) => "capture_snapshot",
+            Self::CaptureWait(_) => "capture_wait",
+            Self::CaptureSessionClose(_) => "capture_session_close",
             Self::PointerCalibration => "pointer_calibration",
             Self::ListMonitors => "list_monitors",
             Self::ListWindows => "list_windows",
             Self::ActiveWindow => "active_window",
+            Self::WindowInventory => "window_inventory",
+            Self::WindowInventoryWait(_) => "window_inventory_wait",
             Self::Observe(_) => "observe",
             Self::Screenshot(_) => "screenshot",
             Self::ScreenshotTile(_) => "screenshot_tile",
@@ -1090,7 +1525,47 @@ impl DaemonRequest {
             Self::SelectMenu(_) => "select_menu",
             Self::JournalTail(_) => "journal_tail",
             Self::FocusWindow(_) => "focus_window",
+            Self::MoveWindow(_) => "move_window",
+            Self::LaunchWindow(_) => "launch_window",
+            Self::ResizeWindow(_) => "resize_window",
+            Self::PageZoom(_) => "page_zoom",
         }
+    }
+
+    pub fn returns_action(&self) -> bool {
+        matches!(
+            self,
+            Self::ClipboardSet(_)
+                | Self::AccessibilityInvoke(_)
+                | Self::AccessibilitySetText(_)
+                | Self::AccessibilityInsertText(_)
+                | Self::AccessibilityDeleteText(_)
+                | Self::AccessibilityCopyText(_)
+                | Self::AccessibilityCutText(_)
+                | Self::AccessibilityPasteText(_)
+                | Self::AccessibilitySetCaret(_)
+                | Self::AccessibilitySetSelection(_)
+                | Self::TypeText(_)
+                | Self::KeyCombo(_)
+                | Self::MovePointer(_)
+                | Self::ClickPointer(_)
+                | Self::DragPointer(_)
+                | Self::ScrollPointer(_)
+                | Self::ClickButton(_)
+                | Self::SetTextField(_)
+                | Self::FocusTextField(_)
+                | Self::ActivateTab(_)
+                | Self::ActivateLink(_)
+                | Self::ToggleCheck(_)
+                | Self::SetValue(_)
+                | Self::SelectItem(_)
+                | Self::SelectMenu(_)
+                | Self::FocusWindow(_)
+                | Self::MoveWindow(_)
+                | Self::LaunchWindow(_)
+                | Self::ResizeWindow(_)
+                | Self::PageZoom(_)
+        )
     }
 }
 
@@ -1111,10 +1586,15 @@ pub enum DaemonResponse {
     RemoteDesktopEisProbe(RemoteDesktopEisProbe),
     RemoteDesktopEisSessionStatus(RemoteDesktopEisSessionStatus),
     CaptureBackendStatus(CaptureBackendStatus),
+    CaptureSessionStatus(CaptureSessionStatus),
+    CaptureFrame(CaptureFrameResult),
+    CaptureWait(Box<CaptureWaitResult>),
     PointerCalibration(PointerCalibrationStatus),
     Monitors(Vec<MonitorInfo>),
     Windows(Vec<WindowInfo>),
     ActiveWindow(Option<WindowInfo>),
+    WindowInventory(WindowInventory),
+    WindowInventoryWait(WindowInventoryWaitResult),
     Observation(Box<DesktopObservation>),
     Screenshot(ScreenshotInfo),
     WaitForChange(Box<WaitForChangeResult>),
@@ -1146,10 +1626,15 @@ impl DaemonResponse {
             Self::RemoteDesktopEisProbe(_) => "remote_desktop_eis_probe",
             Self::RemoteDesktopEisSessionStatus(_) => "remote_desktop_eis_session_status",
             Self::CaptureBackendStatus(_) => "capture_backend_status",
+            Self::CaptureSessionStatus(_) => "capture_session_status",
+            Self::CaptureFrame(_) => "capture_frame",
+            Self::CaptureWait(_) => "capture_wait",
             Self::PointerCalibration(_) => "pointer_calibration",
             Self::Monitors(_) => "monitors",
             Self::Windows(_) => "windows",
             Self::ActiveWindow(_) => "active_window",
+            Self::WindowInventory(_) => "window_inventory",
+            Self::WindowInventoryWait(_) => "window_inventory_wait",
             Self::Observation(_) => "observation",
             Self::Screenshot(_) => "screenshot",
             Self::WaitForChange(_) => "wait_for_change",
@@ -1180,13 +1665,44 @@ pub enum ErrorKind {
     HumanInputPause,
     PanicStop,
     RateLimited,
+    ConsentCancelled,
     PortalUnavailable,
     BackendUnavailable,
     BackendFailed,
     AccessibilityUnavailable,
     AccessibilityWeakTree,
+    TargetMismatch,
+    TargetLost,
+    SessionOwnerMismatch,
+    FocusLeaseConflict,
     Validation,
     Unknown,
+}
+
+impl ErrorKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PolicyPromptRequired => "policy_prompt_required",
+            Self::PolicyDenied => "policy_denied",
+            Self::AppDenied => "app_denied",
+            Self::FocusGuard => "focus_guard",
+            Self::HumanInputPause => "human_input_pause",
+            Self::PanicStop => "panic_stop",
+            Self::RateLimited => "rate_limited",
+            Self::ConsentCancelled => "consent_cancelled",
+            Self::PortalUnavailable => "portal_unavailable",
+            Self::BackendUnavailable => "backend_unavailable",
+            Self::BackendFailed => "backend_failed",
+            Self::AccessibilityUnavailable => "accessibility_unavailable",
+            Self::AccessibilityWeakTree => "accessibility_weak_tree",
+            Self::TargetMismatch => "target_mismatch",
+            Self::TargetLost => "target_lost",
+            Self::SessionOwnerMismatch => "session_owner_mismatch",
+            Self::FocusLeaseConflict => "focus_lease_conflict",
+            Self::Validation => "validation",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1202,6 +1718,8 @@ pub struct ActionResult {
     pub id: Uuid,
     pub ok: bool,
     pub observation: Option<Observation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot: Option<ScreenshotInfo>,
     pub message: Option<String>,
 }
 
@@ -1237,6 +1755,7 @@ mod tests {
             full_resolution: false,
             portal_interactive: true,
             portal_target: Some(PortalScreenshotTarget::ActiveWindow),
+            visible_window_crop_id: None,
         });
         let encoded = serde_json::to_string(&request).expect("screenshot request serializes");
         assert!(encoded.contains(r#""method":"screenshot""#));
@@ -1244,6 +1763,17 @@ mod tests {
         assert!(encoded.contains(r#""max_edge":1600"#));
         assert!(encoded.contains(r#""portal_interactive":true"#));
         assert!(encoded.contains(r#""portal_target":"active_window""#));
+
+        let crop = DaemonRequest::Screenshot(ScreenshotRequest {
+            output: PathBuf::from("/tmp/visible-window.png"),
+            max_edge: Some(1200),
+            full_resolution: false,
+            portal_interactive: false,
+            portal_target: None,
+            visible_window_crop_id: Some("kwin-window-7".to_string()),
+        });
+        let encoded = serde_json::to_string(&crop).expect("visible crop request serializes");
+        assert!(encoded.contains(r#""visible_window_crop_id":"kwin-window-7""#));
     }
 
     #[test]
@@ -1295,6 +1825,192 @@ mod tests {
     }
 
     #[test]
+    fn serializes_retained_window_capture_lifecycle_requests() {
+        let open = DaemonRequest::WindowCaptureOpen(WindowCaptureOpenRequest {
+            requested_window_id: Some("kwin-window-7".to_string()),
+            parent_window: "wayland:parent".to_string(),
+            timeout_ms: 30_000,
+        });
+        let encoded = serde_json::to_string(&open).expect("capture open serializes");
+        assert!(encoded.contains(r#""method":"window_capture_open""#));
+        assert!(encoded.contains(r#""requested_window_id":"kwin-window-7""#));
+
+        let monitor = DaemonRequest::CaptureOpen(CaptureOpenRequest {
+            source: CaptureSourceKind::Monitor,
+            requested_source_id: Some("DP-1".to_string()),
+            parent_window: String::new(),
+            timeout_ms: 30_000,
+        });
+        let encoded = serde_json::to_string(&monitor).expect("monitor capture open serializes");
+        assert_eq!(monitor.method_name(), "capture_open");
+        assert!(encoded.contains(r#""method":"capture_open""#));
+        assert!(encoded.contains(r#""source":"monitor""#));
+        assert!(encoded.contains(r#""requested_source_id":"DP-1""#));
+
+        let snapshot = DaemonRequest::CaptureSnapshot(CaptureSnapshotRequest {
+            session_id: "capture-1".to_string(),
+            output: PathBuf::from("/tmp/window.png"),
+            max_edge: Some(1200),
+            timeout_ms: 1_500,
+        });
+        let encoded = serde_json::to_string(&snapshot).expect("capture snapshot serializes");
+        assert!(encoded.contains(r#""method":"capture_snapshot""#));
+        assert!(encoded.contains(r#""session_id":"capture-1""#));
+        assert!(encoded.contains(r#""max_edge":1200"#));
+
+        let wait = DaemonRequest::CaptureWait(CaptureWaitRequest {
+            session_id: "capture-1".to_string(),
+            after_revision: Some("revision-4".to_string()),
+            output: PathBuf::from("/tmp/window-wait.png"),
+            max_edge: None,
+            timeout_ms: 5_000,
+        });
+        let encoded = serde_json::to_string(&wait).expect("capture wait serializes");
+        assert!(encoded.contains(r#""method":"capture_wait""#));
+        assert!(encoded.contains(r#""after_revision":"revision-4""#));
+
+        let renew = DaemonRequest::CaptureSessionRenew(CaptureSessionRequest {
+            session_id: "capture-1".to_string(),
+        });
+        let encoded = serde_json::to_string(&renew).expect("capture renew serializes");
+        assert_eq!(
+            encoded,
+            r#"{"method":"capture_session_renew","session_id":"capture-1"}"#
+        );
+        assert_eq!(renew.method_name(), "capture_session_renew");
+
+        let close = DaemonRequest::CaptureSessionClose(CaptureSessionRequest {
+            session_id: "capture-1".to_string(),
+        });
+        let encoded = serde_json::to_string(&close).expect("capture close serializes");
+        assert_eq!(
+            encoded,
+            r#"{"method":"capture_session_close","session_id":"capture-1"}"#
+        );
+    }
+
+    #[test]
+    fn serializes_retained_capture_response_types() {
+        let status = DaemonResponse::CaptureSessionStatus(CaptureSessionStatus {
+            active: true,
+            opening: false,
+            session_id: Some("capture-1".to_string()),
+            backend: Some("portal_screencast_pipewire".to_string()),
+            source_type: Some("window".to_string()),
+            source_id: Some("opaque-source".to_string()),
+            restore_token_reference: Some("screencast-a1b2c3d4".to_string()),
+            requested_window_id: Some("kwin-window-7".to_string()),
+            requested_source_type: Some("window".to_string()),
+            requested_source_id: Some("kwin-window-7".to_string()),
+            owner_tool: Some("seatgeist-mcp".to_string()),
+            owner_pid: Some(4242),
+            owner_scope: Some("process".to_string()),
+            latest_revision: Some("revision-4".to_string()),
+            consent_required: true,
+            occlusion_possible: false,
+            sticky_target_bound: true,
+            target_window_id: Some("kwin-window-7".to_string()),
+            target_app_id: Some("org.mozilla.firefox".to_string()),
+            target_pid: Some(4242),
+            target_expires_in_ms: Some(60_000),
+            last_end_reason: None,
+            execution: Some(Box::new(SessionExecutionStatus {
+                capture_backend: "portal_screencast_pipewire".to_string(),
+                semantic_backend: Some("atspi".to_string()),
+                raw_input_backend: Some("uinput".to_string()),
+                last_action_backend: Some("atspi".to_string()),
+                last_action_method: Some("set_text_field".to_string()),
+                last_action_safety_class: Some(SafetyClass::ControlKeyboard),
+                last_action_id: Some(Uuid::nil()),
+                last_action_unix_ms: Some(1_725_000_000_000),
+                target_policy_result: Some("allow".to_string()),
+                last_policy_result: Some("allow".to_string()),
+                cooperative_focus_policy: Some(
+                    "reacquire_verify_inject_restore_if_safe".to_string(),
+                ),
+                activity_backend: Some("kwin_input_spy_v1".to_string()),
+                activity_trusted: true,
+                last_activity_class: Some("keyboard".to_string()),
+                last_activity_provenance: Some("seatgeist_injected".to_string()),
+                focus_lease: Some(SessionFocusLeaseStatus {
+                    lease_id: Uuid::nil(),
+                    focus_reacquired: true,
+                    focus_restored: true,
+                    restoration: "restored".to_string(),
+                }),
+                settle: Some(ActionSettleResult {
+                    confirmation: crate::types::ActionConfirmation::Confirmed,
+                    condition: ActionSettleCondition::AccessibilityChange,
+                    backend: crate::types::ActionSettleBackend::AtspiEvent,
+                    target_scoped: true,
+                    event: Some("object:text-changed".to_string()),
+                    settled: true,
+                    timed_out: false,
+                    timeout_ms: 1_000,
+                    interval_ms: 100,
+                    samples: 1,
+                    elapsed_ms: 12,
+                    before_revision: Some("before".to_string()),
+                    after_revision: "after".to_string(),
+                }),
+            })),
+        });
+        let encoded = serde_json::to_string(&status).expect("capture status serializes");
+        assert!(encoded.contains(r#""type":"capture_session_status""#));
+        assert!(encoded.contains(r#""restore_token_reference":"screencast-a1b2c3d4""#));
+        assert!(encoded.contains(r#""owner_tool":"seatgeist-mcp""#));
+        assert!(encoded.contains(r#""owner_scope":"process""#));
+        assert!(encoded.contains(r#""owner_pid":4242"#));
+        assert!(encoded.contains(r#""capture_backend":"portal_screencast_pipewire""#));
+        assert!(encoded.contains(r#""semantic_backend":"atspi""#));
+        assert!(encoded.contains(r#""raw_input_backend":"uinput""#));
+        assert!(encoded.contains(r#""last_policy_result":"allow""#));
+        assert!(encoded.contains(r#""backend":"atspi_event""#));
+        assert!(!encoded.contains("last_end_reason"));
+        assert!(!encoded.contains("private-restore-token"));
+        assert!(!encoded.contains("window_title"));
+        assert!(!encoded.contains("input_text"));
+        assert_eq!(status.response_type(), "capture_session_status");
+
+        let frame = CaptureFrameResult {
+            session_id: "capture-1".to_string(),
+            screenshot: ScreenshotInfo {
+                path: PathBuf::from("/tmp/window.png"),
+                backend: "portal_screencast_pipewire".to_string(),
+                occlusion_possible: false,
+                source_width: 1280,
+                source_height: 720,
+                output_width: 640,
+                output_height: 360,
+                transform: ScreenshotTransform {
+                    source_coordinate_space: CoordinateSpace::PhysicalPixel,
+                    output_coordinate_space: CoordinateSpace::PhysicalPixel,
+                    source_origin_x: 0,
+                    source_origin_y: 0,
+                    scale_x: 0.5,
+                    scale_y: 0.5,
+                },
+                coordinate_space: CoordinateSpace::PhysicalPixel,
+                monitors: Vec::new(),
+            },
+            revision: "revision-5".to_string(),
+            sequence: 5,
+            complete: true,
+            damage_present: true,
+        };
+        let response = DaemonResponse::CaptureFrame(frame.clone());
+        assert_eq!(response.response_type(), "capture_frame");
+        let wait = DaemonResponse::CaptureWait(Box::new(CaptureWaitResult {
+            frame,
+            changed: true,
+            timed_out: false,
+            timeout_ms: 5_000,
+            elapsed_ms: 20,
+        }));
+        assert_eq!(wait.response_type(), "capture_wait");
+    }
+
+    #[test]
     fn serializes_wait_for_change_response_with_type_tag() {
         let response = DaemonResponse::WaitForChange(Box::new(WaitForChangeResult {
             changed: true,
@@ -1308,6 +2024,7 @@ mod tests {
             screenshot: ScreenshotInfo {
                 path: PathBuf::from("/tmp/seatgeist-wait.png"),
                 backend: "spectacle".to_string(),
+                occlusion_possible: false,
                 source_width: 7680,
                 source_height: 4320,
                 output_width: 1600,
@@ -1496,17 +2213,37 @@ mod tests {
             client: Some(DaemonClientIdentity {
                 tool: Some("seatgeist-mcp".to_string()),
             }),
+            response_options: Some(DaemonResponseOptions {
+                post_action: Some(PostActionOptions {
+                    observe_after: true,
+                    settle_condition: ActionSettleCondition::Stable,
+                    settle_timeout_ms: 1_000,
+                    settle_interval_ms: 100,
+                    image: None,
+                }),
+            }),
         };
         let encoded = serde_json::to_string(&envelope).expect("envelope serializes");
         assert!(encoded.contains(r#""request":{"method":"health"}"#));
         assert!(encoded.contains(r#""client":{"tool":"seatgeist-mcp"}"#));
+        assert!(encoded.contains(r#""settle_condition":"stable""#));
 
         let decoded: DaemonRequestEnvelope =
             serde_json::from_str(&encoded).expect("envelope deserializes");
         assert_eq!(decoded.request, DaemonRequest::Health);
         assert_eq!(
-            decoded.client.and_then(|client| client.tool),
+            decoded
+                .client
+                .as_ref()
+                .and_then(|client| client.tool.clone()),
             Some("seatgeist-mcp".to_string())
+        );
+        assert_eq!(
+            decoded
+                .response_options
+                .and_then(|options| options.post_action)
+                .map(|options| options.settle_timeout_ms),
+            Some(1_000)
         );
     }
 
@@ -1525,6 +2262,10 @@ mod tests {
             human_input_quiet_ms: 1500,
             human_input_signal_fresh: false,
             human_input_signal_age_ms: Some(3000),
+            human_input_activity_backend: Some("kwin_input_spy_v1".to_string()),
+            human_input_activity_trusted: true,
+            human_input_last_class: Some("keyboard".to_string()),
+            human_input_last_provenance: Some("trusted_physical".to_string()),
             control_rate_limit_per_minute: Some(120),
             preview_max_edge: 1600,
             tile_max_edge: 1600,
@@ -1534,6 +2275,9 @@ mod tests {
         let encoded = serde_json::to_string(&response).expect("safety response serializes");
         assert!(encoded.contains(r#""type":"safety_status""#));
         assert!(encoded.contains(r#""require_focus_guard":true"#));
+        assert!(encoded.contains(r#""human_input_activity_backend":"kwin_input_spy_v1""#));
+        assert!(encoded.contains(r#""human_input_activity_trusted":true"#));
+        assert!(encoded.contains(r#""human_input_last_provenance":"trusted_physical""#));
         assert!(encoded.contains(r#""control_rate_limit_per_minute":120"#));
         assert!(encoded.contains(r#""preview_max_edge":1600"#));
         assert!(encoded.contains(r#""tile_max_edge":1600"#));
@@ -1562,6 +2306,7 @@ mod tests {
                 space: CoordinateSpace::PhysicalPixel,
             },
             guard: None,
+            session_id: None,
         });
         let encoded =
             serde_json::to_string(&move_pointer).expect("move pointer request serializes");
@@ -1577,10 +2322,12 @@ mod tests {
             button: PointerButton::Left,
             clicks: 2,
             guard: Some(ActiveWindowGuard {
+                desktop_revision: None,
                 expected_window_id: Some("current-window".to_string()),
                 expected_app_id: None,
                 title_contains: None,
             }),
+            session_id: None,
         });
         let encoded =
             serde_json::to_string(&click_pointer).expect("click pointer request serializes");
@@ -1603,6 +2350,7 @@ mod tests {
             button: PointerButton::Left,
             duration_ms: 250,
             guard: None,
+            session_id: None,
         });
         let encoded =
             serde_json::to_string(&drag_pointer).expect("drag pointer request serializes");
@@ -1615,6 +2363,7 @@ mod tests {
             vertical: -3,
             horizontal: 1,
             guard: None,
+            session_id: None,
         });
         assert_eq!(
             serde_json::to_string(&scroll_pointer).expect("scroll pointer request serializes"),
@@ -1632,6 +2381,9 @@ mod tests {
 
         let response = DaemonResponse::KwinBridgeStatus(KwinBridgeStatus {
             dbus_service_registered: true,
+            window_resize_supported: true,
+            window_move_supported: true,
+            window_launch_supported: true,
             active_window_update_seen: false,
             window_list_update_seen: false,
             window_count: 0,
@@ -1733,6 +2485,7 @@ mod tests {
             parent_window: Some("wayland:app-window".to_string()),
             timeout_ms: 30_000,
             guard: Some(ActiveWindowGuard {
+                desktop_revision: None,
                 expected_window_id: Some("current-window".to_string()),
                 expected_app_id: None,
                 title_contains: None,
@@ -1775,6 +2528,7 @@ mod tests {
             parent_window: None,
             timeout_ms: 30_000,
             guard: Some(ActiveWindowGuard {
+                desktop_revision: None,
                 expected_window_id: None,
                 expected_app_id: Some("org.kde.kwrite".to_string()),
                 title_contains: Some("scratch".to_string()),
@@ -1916,6 +2670,15 @@ mod tests {
             ready_for_semantic_actions: true,
             ready_for_clipboard_read: false,
             ready_for_clipboard_write: true,
+            observe_state: ActionReadiness::Ready,
+            screenshot_state: ActionReadiness::Ready,
+            window_control_state: ActionReadiness::NeedsGuard,
+            keyboard_input_state: ActionReadiness::Unavailable,
+            pointer_input_state: ActionReadiness::Unavailable,
+            semantic_action_state: ActionReadiness::Ready,
+            clipboard_read_state: ActionReadiness::Unavailable,
+            clipboard_write_state: ActionReadiness::Ready,
+            desktop_revision: Some("aw1:test".to_string()),
             focus_guard_required: true,
             panic_stop_enabled: false,
             human_input_pause_enabled: true,
@@ -2106,6 +2869,62 @@ mod tests {
     }
 
     #[test]
+    fn serializes_window_resize_and_page_zoom_requests() {
+        let launch = DaemonRequest::LaunchWindow(LaunchWindowRequest {
+            desktop_entry: "org.kde.kcalc".to_string(),
+            anchor: WindowPlacementAnchor::TopRight,
+            monitor_id: Some("DP-1".to_string()),
+            width: Some(400),
+            height: Some(300),
+            margin: 20,
+            activation: WindowActivationMode::PreserveFocus,
+            timeout_ms: 10_000,
+            guard: None,
+        });
+        let encoded = serde_json::to_string(&launch).expect("launch request serializes");
+        assert!(encoded.contains(r#""method":"launch_window""#));
+        assert!(encoded.contains(r#""anchor":"top_right""#));
+        assert!(encoded.contains(r#""activation":"preserve_focus""#));
+        assert_eq!(
+            serde_json::from_str::<DaemonRequest>(&encoded).expect("launch request deserializes"),
+            launch
+        );
+
+        let resize = DaemonRequest::ResizeWindow(ResizeWindowRequest {
+            window_id: "window-1".to_string(),
+            width: 1280,
+            height: 720,
+            guard: None,
+        });
+        let encoded = serde_json::to_string(&resize).expect("resize request serializes");
+        assert!(encoded.contains(r#""method":"resize_window""#));
+        assert!(encoded.contains(r#""width":1280"#));
+        assert_eq!(
+            serde_json::from_str::<DaemonRequest>(&encoded).expect("resize request deserializes"),
+            resize
+        );
+
+        let zoom = DaemonRequest::PageZoom(PageZoomRequest {
+            operation: PageZoomOperation::Out,
+            steps: 2,
+            guard: ActiveWindowGuard {
+                desktop_revision: None,
+                expected_window_id: Some("window-1".to_string()),
+                expected_app_id: Some("org.mozilla.firefox".to_string()),
+                title_contains: None,
+            },
+        });
+        let encoded = serde_json::to_string(&zoom).expect("page zoom request serializes");
+        assert!(encoded.contains(r#""method":"page_zoom""#));
+        assert!(encoded.contains(r#""operation":"out""#));
+        assert_eq!(
+            serde_json::from_str::<DaemonRequest>(&encoded)
+                .expect("page zoom request deserializes"),
+            zoom
+        );
+    }
+
+    #[test]
     fn serializes_observe_request_with_optional_screenshot() {
         let request = DaemonRequest::Observe(ObserveRequest {
             screenshot: Some(ScreenshotRequest {
@@ -2114,6 +2933,7 @@ mod tests {
                 full_resolution: false,
                 portal_interactive: false,
                 portal_target: None,
+                visible_window_crop_id: None,
             }),
         });
         let encoded = serde_json::to_string(&request).expect("observe request serializes");
@@ -2188,6 +3008,13 @@ mod tests {
 
         let response = DaemonResponse::AccessibilityQualityStatus(AccessibilityQualityStatus {
             atspi_available: true,
+            target_event_settle_available: true,
+            event_backend: "atspi_registry".to_string(),
+            target_event_classes: vec![
+                "object".to_string(),
+                "window".to_string(),
+                "focus".to_string(),
+            ],
             focused_node_present: true,
             sample_depth: 4,
             sample_max_nodes: 512,
@@ -2206,6 +3033,7 @@ mod tests {
         let encoded = serde_json::to_string(&response).expect("a11y quality response serializes");
         assert!(encoded.contains(r#""type":"accessibility_quality_status""#));
         assert!(encoded.contains(r#""semantic_targeting_reliable":true"#));
+        assert!(encoded.contains(r#""event_backend":"atspi_registry""#));
         assert_eq!(response.response_type(), "accessibility_quality_status");
     }
 
@@ -2385,12 +3213,38 @@ mod tests {
             window_name_contains: Some("settings".to_string()),
             max_nodes: 512,
             guard: None,
+            target_guard: None,
         });
         let encoded = serde_json::to_string(&request).expect("click button request serializes");
         assert!(encoded.contains(r#""method":"click_button""#));
         assert!(encoded.contains(r#""name":"OK""#));
         assert!(encoded.contains(r#""app":"kate""#));
         assert!(encoded.contains(r#""window_name_contains":"settings""#));
+    }
+
+    #[test]
+    fn serializes_semantic_target_window_guard_separately_from_active_guard() {
+        let request = DaemonRequest::ClickButton(ClickButtonRequest {
+            name: "Continue".to_string(),
+            destructive: false,
+            app: Some("Firefox".to_string()),
+            window_name_contains: Some("Example".to_string()),
+            max_nodes: 512,
+            guard: None,
+            target_guard: Some(TargetWindowGuard {
+                expected_window_id: "kwin-firefox-1".to_string(),
+                expected_app_id: Some("org.mozilla.firefox".to_string()),
+                expected_pid: Some(4242),
+                title_contains: Some("Example".to_string()),
+            }),
+        });
+        let encoded = serde_json::to_string(&request).expect("target guard serializes");
+        assert!(encoded.contains(r#""target_guard""#));
+        assert!(encoded.contains(r#""expected_window_id":"kwin-firefox-1""#));
+        assert!(encoded.contains(r#""expected_pid":4242"#));
+        assert!(!encoded.contains(r#""guard""#));
+        let decoded: DaemonRequest = serde_json::from_str(&encoded).expect("target guard parses");
+        assert_eq!(decoded, request);
     }
 
     #[test]
@@ -2402,6 +3256,7 @@ mod tests {
             window_name_contains: Some("settings".to_string()),
             max_nodes: 512,
             guard: None,
+            target_guard: None,
         });
         let encoded = serde_json::to_string(&request).expect("set text field request serializes");
         assert!(encoded.contains(r#""method":"set_text_field""#));
@@ -2418,6 +3273,7 @@ mod tests {
             window_name_contains: Some("settings".to_string()),
             max_nodes: 512,
             guard: None,
+            target_guard: None,
         });
         let encoded = serde_json::to_string(&request).expect("focus text field request serializes");
         assert!(encoded.contains(r#""method":"focus_text_field""#));
@@ -2433,6 +3289,7 @@ mod tests {
             window_name_contains: Some("preferences".to_string()),
             max_nodes: 512,
             guard: None,
+            target_guard: None,
         });
         let encoded = serde_json::to_string(&request).expect("activate tab request serializes");
         assert!(encoded.contains(r#""method":"activate_tab""#));
@@ -2450,6 +3307,7 @@ mod tests {
             window_name_contains: Some("preferences".to_string()),
             max_nodes: 512,
             guard: None,
+            target_guard: None,
         });
         let encoded = serde_json::to_string(&request).expect("toggle check request serializes");
         assert!(encoded.contains(r#""method":"toggle_check""#));
@@ -2467,6 +3325,7 @@ mod tests {
             window_name_contains: Some("sound".to_string()),
             max_nodes: 512,
             guard: None,
+            target_guard: None,
         });
         let encoded = serde_json::to_string(&request).expect("set value request serializes");
         assert!(encoded.contains(r#""method":"set_value""#));
@@ -2483,6 +3342,7 @@ mod tests {
             window_name_contains: Some("devices".to_string()),
             max_nodes: 512,
             guard: None,
+            target_guard: None,
         });
         let encoded = serde_json::to_string(&request).expect("select item request serializes");
         assert!(encoded.contains(r#""method":"select_item""#));
@@ -2499,6 +3359,7 @@ mod tests {
             window_name_contains: Some("docs".to_string()),
             max_nodes: 512,
             guard: None,
+            target_guard: None,
         });
         let encoded = serde_json::to_string(&request).expect("activate link request serializes");
         assert!(encoded.contains(r#""method":"activate_link""#));
@@ -2515,6 +3376,7 @@ mod tests {
             window_name_contains: Some("editor".to_string()),
             max_nodes: 512,
             guard: None,
+            target_guard: None,
         });
         let encoded = serde_json::to_string(&request).expect("select menu request serializes");
         assert!(encoded.contains(r#""method":"select_menu""#));
@@ -2527,6 +3389,7 @@ mod tests {
         let request = DaemonRequest::FocusWindow(FocusWindowRequest {
             window_id: "target-window".to_string(),
             guard: Some(ActiveWindowGuard {
+                desktop_revision: None,
                 expected_window_id: Some("current-window".to_string()),
                 expected_app_id: Some("org.kde.kate".to_string()),
                 title_contains: Some("main.rs".to_string()),
@@ -2544,6 +3407,7 @@ mod tests {
         let type_text = DaemonRequest::TypeText(TypeTextRequest {
             text: "hello".to_string(),
             guard: None,
+            session_id: None,
         });
         let encoded = serde_json::to_string(&type_text).expect("type text request serializes");
         assert_eq!(encoded, r#"{"method":"type_text","text":"hello"}"#);
@@ -2551,9 +3415,13 @@ mod tests {
         let key_combo = DaemonRequest::KeyCombo(KeyComboRequest {
             combo: "Ctrl+L".to_string(),
             guard: None,
+            session_id: Some("capture-1".to_string()),
         });
         let encoded = serde_json::to_string(&key_combo).expect("key combo request serializes");
-        assert_eq!(encoded, r#"{"method":"key_combo","combo":"Ctrl+L"}"#);
+        assert_eq!(
+            encoded,
+            r#"{"method":"key_combo","combo":"Ctrl+L","session_id":"capture-1"}"#
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@
 Description=Seatgeist desktop-control daemon
 
 [Service]
-ExecStart=%h/.cargo/bin/seatgeistd --socket %t/seatgeist/seatgeistd.sock
+ExecStart=%h/.local/bin/seatgeistd --socket %t/seatgeist/seatgeistd.sock
 Restart=on-failure
 NoNewPrivileges=true
 

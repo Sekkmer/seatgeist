@@ -50,6 +50,10 @@ pub fn default_journal_path() -> io::Result<PathBuf> {
     Ok(state_dir.join("seatgeist").join("journal.jsonl"))
 }
 
+pub fn default_capture_restore_path() -> io::Result<PathBuf> {
+    Ok(default_journal_path()?.with_file_name("capture-restore.json"))
+}
+
 pub fn default_panic_stop_path() -> io::Result<PathBuf> {
     let runtime_dir = match env::var_os("XDG_RUNTIME_DIR") {
         Some(value) => PathBuf::from(value),
@@ -136,6 +140,17 @@ mod tests {
                 42,
             ),
             PathBuf::from("/run/user/1000/seatgeist/screenshots/42-tile.png")
+        );
+    }
+
+    #[test]
+    fn capture_restore_tokens_use_the_private_state_directory() {
+        let journal = default_journal_path().expect("journal path resolves");
+        let restore = default_capture_restore_path().expect("restore-token path resolves");
+        assert_eq!(restore.parent(), journal.parent());
+        assert_eq!(
+            restore.file_name().and_then(|name| name.to_str()),
+            Some("capture-restore.json")
         );
     }
 }

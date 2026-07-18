@@ -1,0 +1,8 @@
+{
+  "KPlugin": {
+    "Description": "Reports redacted input-activity provenance to Seatgeist.",
+    "EnabledByDefault": true,
+    "License": "MIT OR Apache-2.0",
+    "Name": "Seatgeist Input Activity"
+  }
+}

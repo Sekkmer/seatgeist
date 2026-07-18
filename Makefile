@@ -1,7 +1,9 @@
 SHELL := /usr/bin/bash
 .ONESHELL:
 
-.PHONY: fmt check test clippy validate-plugin validate-install-assets validate-release package-release verify-release-artifacts verify-release-install sign-release-artifacts verify-release-signatures write-release-evidence verify-release-evidence check-public-name check-local-codex-install release-readiness release-external-preflight release-live-evals portal-screenshot-v3-status validate-traces verify smoke smoke-codex-plugin-install smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-human-input-pause smoke-trace-replay smoke-gui-input smoke-mcp gui-eval gui-eval-status gui-eval-session-preflight gui-eval-observe gui-eval-a11y-quality-status gui-eval-a11y-focused-tree gui-eval-a11y-find gui-eval-a11y-text-attributes gui-eval-a11y-control-denied gui-eval-semantic-denied gui-eval-input-denied gui-eval-clipboard-status gui-eval-clipboard-denied gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-screenshot-preview gui-eval-screenshot-coordinate-map gui-eval-screenshot-config-bounds gui-eval-journal-artifacts gui-eval-full-resolution-denied gui-eval-control-safety gui-eval-text-editor-input gui-eval-kcalc-visual gui-eval-firefox-localhost-button gui-eval-portal-screenshot gui-eval-remote-desktop-probe gui-eval-remote-desktop-eis-session install-kwin-script
+.PHONY: fmt check test clippy check-kwin-activity-plugin validate-kwin-bridge validate-plugin validate-install-assets validate-release validate-computer-use-baseline verify-cooperative-use-acceptance package-release verify-release-artifacts verify-release-install sign-release-artifacts verify-release-signatures write-release-evidence verify-release-evidence check-public-name check-local-codex-install release-readiness release-external-preflight release-live-evals portal-screenshot-v3-status deploy-user-daemon validate-traces verify smoke smoke-codex-plugin-install smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-human-input-pause smoke-trace-replay smoke-gui-input smoke-mcp gui-eval gui-eval-status gui-eval-session-preflight gui-eval-observe gui-eval-a11y-quality-status gui-eval-a11y-focused-tree gui-eval-a11y-find gui-eval-a11y-text-attributes gui-eval-a11y-control-denied gui-eval-semantic-denied gui-eval-input-denied gui-eval-clipboard-status gui-eval-clipboard-denied gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-screenshot-preview gui-eval-screenshot-coordinate-map gui-eval-screenshot-config-bounds gui-eval-journal-artifacts gui-eval-full-resolution-denied gui-eval-control-safety gui-eval-text-editor-input gui-eval-kcalc-visual gui-eval-firefox-localhost-button gui-eval-portal-screenshot gui-eval-remote-desktop-probe gui-eval-remote-desktop-eis-session install-kwin-script
+.PHONY: kwin-activity-preflight install-kwin-activity-user uninstall-kwin-activity-user probe-nested-kde-multi-output probe-nested-seatgeist probe-nested-remote-desktop probe-nested-retained-apps gui-eval-nested-retained-capture gui-eval-nested-eis-isolation gui-eval-cooperative-sticky gui-eval-retained-capture gui-eval-capture-restore-prepare gui-eval-capture-restore-resume gui-eval-capture-revocation gui-eval-target-reopen gui-eval-background-semantic
+.PHONY: refresh-local-codex-plugin
 
 fmt:
 	cargo fmt --all
@@ -15,6 +17,16 @@ test:
 clippy:
 	cargo clippy --workspace --all-targets -- -D warnings
 
+check-kwin-activity-plugin:
+	set -euo pipefail
+	cmake -S kwin/seatgeist-activity -B target/kwin-seatgeist-activity -DCMAKE_BUILD_TYPE=RelWithDebInfo
+	cmake --build target/kwin-seatgeist-activity --parallel
+
+validate-kwin-bridge:
+	set -euo pipefail
+	scripts/test-kwin-bridge.js
+	scripts/test-install-kwin-bridge.py
+
 validate-plugin:
 	scripts/validate-plugin.py plugin
 
@@ -23,6 +35,157 @@ validate-install-assets:
 
 validate-release:
 	scripts/validate-release.py
+
+validate-computer-use-baseline: validate-kwin-bridge
+	set -euo pipefail
+	scripts/test-computer-use-eval.py
+	scripts/test-computer-use-baseline.py
+	scripts/test-check-local-codex-install.py
+	scripts/test-deploy-seatgeistd-user.py
+	scripts/test-install-kwin-screenshot-authorization.py
+	scripts/test-plugin-hook-resolution.py
+	scripts/test-kwin-activity-preflight.py
+	scripts/test-kwin-activity-abi-watch.py
+	scripts/test-install-kwin-activity-user.py
+	scripts/test-cooperative-sticky-eval.py
+	scripts/test-retained-capture-eval.py
+	scripts/test-capture-restore-eval.py
+	scripts/test-capture-lifecycle-eval.py
+	scripts/test-target-reopen-eval.py
+	scripts/test-background-semantic-eval.py
+	scripts/test-cooperative-use-acceptance.py
+	scripts/test-nested-kde-fixture.py
+	scripts/test-nested-seatgeist-probe.py
+	scripts/test-nested-remote-desktop-probe.py
+	scripts/test-nested-retained-capture-eval.py
+
+verify-cooperative-use-acceptance:
+	set -euo pipefail
+	required=(
+		RETAINED_CAPTURE_EVIDENCE
+		MULTI_OUTPUT_EVIDENCE
+		CAPTURE_RESTORE_EVIDENCE
+		CAPTURE_REVOCATION_EVIDENCE
+		TARGET_REOPEN_EVIDENCE
+		BACKGROUND_FIREFOX_EVIDENCE
+		BACKGROUND_KDE_EVIDENCE
+		COOPERATIVE_STICKY_EVIDENCE
+	)
+	for name in "$${required[@]}"; do
+		if [[ -z "$${!name:-}" ]]; then
+			echo "set $$name to its private Step 12 evidence JSON file" >&2
+			exit 2
+		fi
+	done
+	args=(
+		"--retained-capture" "$$RETAINED_CAPTURE_EVIDENCE"
+		"--retained-capture-multi-output" "$$MULTI_OUTPUT_EVIDENCE"
+		"--capture-restore-restart" "$$CAPTURE_RESTORE_EVIDENCE"
+		"--capture-revocation" "$$CAPTURE_REVOCATION_EVIDENCE"
+		"--target-reopen" "$$TARGET_REOPEN_EVIDENCE"
+		"--background-semantic-firefox" "$$BACKGROUND_FIREFOX_EVIDENCE"
+		"--background-semantic-kde" "$$BACKGROUND_KDE_EVIDENCE"
+		"--cooperative-sticky" "$$COOPERATIVE_STICKY_EVIDENCE"
+		"--max-age-hours" "$${ACCEPTANCE_MAX_AGE_HOURS:-24}"
+		"--max-span-hours" "$${ACCEPTANCE_MAX_SPAN_HOURS:-24}"
+	)
+	if [[ -n "$${ACCEPTANCE_OUTPUT:-}" ]]; then
+		args+=(--output "$$ACCEPTANCE_OUTPUT")
+	fi
+	scripts/cooperative-use-acceptance.py "$${args[@]}"
+
+kwin-activity-preflight: check-kwin-activity-plugin
+	scripts/kwin-activity-preflight.py
+
+install-kwin-activity-user: check-kwin-activity-plugin
+	scripts/install-kwin-activity-user.py
+
+uninstall-kwin-activity-user:
+	scripts/install-kwin-activity-user.py --remove
+
+probe-nested-kde-multi-output:
+	scripts/nested-kde-fixture.py
+
+probe-nested-seatgeist:
+	set -euo pipefail
+	cargo build -p seatgeistd -p seatgeist-cli
+	scripts/nested-kde-fixture.py -- scripts/nested-seatgeist-probe.py
+
+probe-nested-remote-desktop:
+	scripts/nested-kde-fixture.py -- scripts/nested-remote-desktop-probe.py
+
+probe-nested-retained-apps:
+	set -euo pipefail
+	cargo build -p seatgeistd -p seatgeist-cli
+	scripts/nested-kde-fixture.py -- scripts/nested-retained-capture-eval.py --probe-only
+
+gui-eval-nested-retained-capture:
+	set -euo pipefail
+	test "$${I_AM_PRESENT:-0}" = "1" || { echo "set I_AM_PRESENT=1 with the operator at the desktop" >&2; exit 2; }
+	cargo build -p seatgeistd -p seatgeist-cli
+	scenario_args=()
+	if [[ -n "$${SCENARIO:-}" ]]; then scenario_args+=(--scenario "$$SCENARIO"); fi
+	scripts/nested-kde-fixture.py --visible --operator-present -- scripts/nested-retained-capture-eval.py "$${scenario_args[@]}"
+
+gui-eval-nested-eis-isolation:
+	set -euo pipefail
+	test "$${I_AM_PRESENT:-0}" = "1" || { echo "set I_AM_PRESENT=1 with the operator at the desktop" >&2; exit 2; }
+	cargo build -p seatgeistd -p seatgeist-cli
+	scripts/nested-kde-fixture.py --visible --operator-present -- scripts/nested-eis-isolation-fixture.sh
+
+gui-eval-cooperative-sticky: check-kwin-activity-plugin
+	set -euo pipefail
+	test -n "$${WINDOW_ID:-}" || { echo "set WINDOW_ID to the exact Firefox KWin window id" >&2; exit 2; }
+	scripts/cooperative-sticky-eval.py --window-id "$$WINDOW_ID"
+
+gui-eval-retained-capture:
+	set -euo pipefail
+	test -n "$${WINDOW_ID:-}" || { echo "set WINDOW_ID to the exact approved KWin window id" >&2; exit 2; }
+	cargo build -p seatgeist-cli
+	extra_args=()
+	if [[ "$${REQUIRE_MULTI_OUTPUT_NONZERO_ORIGIN:-0}" == "1" ]]; then extra_args+=(--require-multi-output-nonzero-origin); fi
+	scripts/retained-capture-eval.py --window-id "$$WINDOW_ID" "$${extra_args[@]}"
+
+gui-eval-capture-restore-prepare:
+	set -euo pipefail
+	test -n "$${WINDOW_ID:-}" || { echo "set WINDOW_ID to the exact approved KWin window id" >&2; exit 2; }
+	cargo build -p seatgeist-cli
+	restore_args=()
+	if [[ -n "$${RESTORE_FILE:-}" ]]; then restore_args+=(--restore-file "$$RESTORE_FILE"); fi
+	scripts/capture-restore-eval.py prepare --window-id "$$WINDOW_ID" "$${restore_args[@]}"
+
+gui-eval-capture-restore-resume:
+	set -euo pipefail
+	test -n "$${WINDOW_ID:-}" || { echo "set WINDOW_ID to the same approved KWin window id" >&2; exit 2; }
+	test -n "$${EVIDENCE_DIR:-}" || { echo "set EVIDENCE_DIR to the prepare-phase artifact directory" >&2; exit 2; }
+	cargo build -p seatgeist-cli
+	restore_args=()
+	if [[ -n "$${RESTORE_FILE:-}" ]]; then restore_args+=(--restore-file "$$RESTORE_FILE"); fi
+	scripts/capture-restore-eval.py resume --window-id "$$WINDOW_ID" --output-dir "$$EVIDENCE_DIR" "$${restore_args[@]}"
+
+gui-eval-capture-revocation:
+	set -euo pipefail
+	test -n "$${WINDOW_ID:-}" || { echo "set WINDOW_ID to the exact approved KWin window id" >&2; exit 2; }
+	cargo build -p seatgeist-cli
+	scripts/capture-lifecycle-eval.py --window-id "$$WINDOW_ID"
+
+gui-eval-target-reopen:
+	set -euo pipefail
+	test -n "$${WINDOW_ID:-}" || { echo "set WINDOW_ID to the exact original KWin window id" >&2; exit 2; }
+	cargo build -p seatgeist-cli
+	scripts/target-reopen-eval.py --window-id "$$WINDOW_ID"
+
+gui-eval-background-semantic:
+	set -euo pipefail
+	test -n "$${SCENARIO:-}" || { echo "set SCENARIO to firefox or kde" >&2; exit 2; }
+	test -n "$${TARGET_WINDOW_ID:-}" || { echo "set TARGET_WINDOW_ID to the background target" >&2; exit 2; }
+	test -n "$${USER_WINDOW_ID:-}" || { echo "set USER_WINDOW_ID to the work window that must stay active" >&2; exit 2; }
+	test -n "$${BUTTON_NAME:-}" || { echo "set BUTTON_NAME to one safe accessible button" >&2; exit 2; }
+	cargo build -p seatgeist-cli
+	extra_args=()
+	if [[ -n "$${APP_FILTER:-}" ]]; then extra_args+=(--app-filter "$$APP_FILTER"); fi
+	if [[ -n "$${APPROVAL_FILE:-}" ]]; then extra_args+=(--approval-file "$$APPROVAL_FILE"); fi
+	scripts/background-semantic-eval.py --scenario "$$SCENARIO" --target-window-id "$$TARGET_WINDOW_ID" --user-window-id "$$USER_WINDOW_ID" --button-name "$$BUTTON_NAME" "$${extra_args[@]}"
 
 package-release:
 	scripts/package-release.sh
@@ -51,6 +214,13 @@ check-public-name:
 check-local-codex-install:
 	scripts/check-local-codex-install.py --strict
 
+refresh-local-codex-plugin:
+	set -euo pipefail
+	skill_root="$${SEATGEIST_PLUGIN_CREATOR_SKILL_ROOT:-$$HOME/.codex/skills/.system/plugin-creator}"
+	python3 "$$skill_root/scripts/update_plugin_cachebuster.py" plugin
+	codex plugin add seatgeist@seatgeist-local --json
+	scripts/check-local-codex-install.py --strict
+
 release-readiness:
 	scripts/release-readiness.py
 
@@ -63,11 +233,17 @@ release-live-evals:
 portal-screenshot-v3-status:
 	scripts/portal-screenshot-v3-status.py
 
+deploy-user-daemon:
+	set -euo pipefail
+	scripts/install-kwin-screenshot-authorization.py
+	scripts/deploy-seatgeistd-user.py
+
 validate-traces:
+	set -euo pipefail
 	cargo build -p seatgeist-cli
 	target/debug/seatgeist-cli trace validate --dir examples/traces >/dev/null
 
-verify: fmt check test clippy validate-plugin validate-install-assets validate-release validate-traces smoke smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-human-input-pause smoke-trace-replay smoke-mcp gui-eval-status gui-eval-session-preflight gui-eval-observe gui-eval-a11y-quality-status gui-eval-a11y-focused-tree gui-eval-a11y-find gui-eval-a11y-text-attributes gui-eval-a11y-control-denied gui-eval-semantic-denied gui-eval-input-denied gui-eval-clipboard-status gui-eval-clipboard-denied gui-eval-full-resolution-denied gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-control-safety
+verify: fmt check test clippy check-kwin-activity-plugin validate-plugin validate-install-assets validate-release validate-computer-use-baseline validate-traces smoke smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-human-input-pause smoke-trace-replay smoke-mcp gui-eval-status gui-eval-session-preflight gui-eval-observe gui-eval-a11y-quality-status gui-eval-a11y-focused-tree gui-eval-a11y-find gui-eval-a11y-text-attributes gui-eval-a11y-control-denied gui-eval-semantic-denied gui-eval-input-denied gui-eval-clipboard-status gui-eval-clipboard-denied gui-eval-full-resolution-denied gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-control-safety
 	git diff --check -- . ':(exclude)target'
 
 smoke:
@@ -77,7 +253,8 @@ smoke:
 	journal="target/seatgeist-smoke-journal.jsonl"
 	rm -rf target/seatgeist-smoke "$$log" "$$journal"
 	mkdir -p target
-	cargo run -p seatgeistd -- --socket "$$socket" --journal "$$journal" >"$$log" 2>&1 &
+	cargo build -p seatgeistd -p seatgeist-cli
+	target/debug/seatgeistd --socket "$$socket" --journal "$$journal" >"$$log" 2>&1 &
 	pid=$$!
 	cleanup() {
 		kill "$$pid" 2>/dev/null || true
@@ -94,12 +271,12 @@ smoke:
 		cat "$$log"
 		exit 1
 	fi
-	cargo run -p seatgeist-cli -- --socket "$$socket" doctor
-	cargo run -p seatgeist-cli -- --socket "$$socket" capabilities
-	cargo run -p seatgeist-cli -- --socket "$$socket" policy-status
-	cargo run -p seatgeist-cli -- --socket "$$socket" desktop-session-status
-	cargo run -p seatgeist-cli -- --socket "$$socket" readiness
-	cargo run -p seatgeist-cli -- --socket "$$socket" journal tail --limit 10
+	target/debug/seatgeist-cli --socket "$$socket" doctor
+	target/debug/seatgeist-cli --socket "$$socket" capabilities
+	target/debug/seatgeist-cli --socket "$$socket" policy-status
+	target/debug/seatgeist-cli --socket "$$socket" desktop-session-status
+	target/debug/seatgeist-cli --socket "$$socket" readiness
+	target/debug/seatgeist-cli --socket "$$socket" journal tail --limit 10
 	test "$$(stat -c '%a' target/seatgeist-smoke)" = "700"
 	test "$$(stat -c '%a' "$$socket")" = "600"
 	test "$$(stat -c '%a' "$$journal")" = "600"
@@ -477,22 +654,24 @@ smoke-human-input-pause:
 		cat "$$denied_out"
 		exit 1
 	fi
-	grep -q "human input activity signal is fresh" "$$denied_out"
-	target/debug/seatgeist-cli --socket "$$socket" journal tail --limit 10 --method focus_window --ok false | jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .summary | contains("human input activity signal is fresh"))' >/dev/null
+	grep -q "human input activity is fresh" "$$denied_out"
+	target/debug/seatgeist-cli --socket "$$socket" journal tail --limit 10 --method focus_window --ok false | jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .summary == "error kind=human_input_pause")' >/dev/null
 
 smoke-trace-replay:
 	set -euo pipefail
 	socket="/tmp/seatgeist-trace-smoke/seatgeistd.sock"
 	log="target/seatgeist-trace-smoke-daemon.log"
 	journal="target/seatgeist-trace-smoke-journal.jsonl"
+	config="target/seatgeist-trace-smoke-config.toml"
 	validate_out="target/seatgeist-trace-validate-smoke.json"
 	replay_out="target/seatgeist-trace-replay-smoke.json"
 	denied_capture="/tmp/seatgeist-denied-full-resolution.png"
-	rm -rf /tmp/seatgeist-trace-smoke "$$log" "$$journal" "$$validate_out" "$$replay_out" "$$denied_capture"
+	rm -rf /tmp/seatgeist-trace-smoke "$$log" "$$journal" "$$config" "$$validate_out" "$$replay_out" "$$denied_capture"
 	cargo build -p seatgeistd -p seatgeist-cli
 	target/debug/seatgeist-cli trace validate --dir examples/traces >"$$validate_out"
-	jq -e '.type == "trace_validation_set" and .trace_count >= 6 and .step_count >= 45 and any(.traces[]; (.file | endswith("status-smoke.json")) and .step_count == 14 and any(.steps[]; .method == "safety_status" and .expect_json_count == 1) and any(.steps[]; .method == "computer_use_readiness" and .expect_json_count == 6) and any(.steps[]; .method == "accessibility_quality_status" and .expect_json_count == 4) and any(.steps[]; .method == "kwin_bridge_status") and any(.steps[]; .method == "uinput_status") and any(.steps[]; .method == "capture_backend_status") and any(.steps[]; .method == "clipboard_backend_status" and .expect_json_count == 6) and any(.steps[]; .method == "input_backend_status") and any(.steps[]; .method == "remote_desktop_eis_session_status") and any(.steps[]; .method == "remote_desktop_eis_stop")) and any(.traces[]; (.file | endswith("journal-tail-smoke.json")) and .step_count == 3 and any(.steps[]; .method == "journal_tail" and .expect_json_count == 8)) and any(.traces[]; (.file | endswith("policy-denials-smoke.json")) and .step_count == 5 and all(.steps[]; .expect_response_type == "error" and .expect_ok == false and (.expect_error_contains | type == "string") and .expect_json_count == 1) and any(.steps[]; .method == "accessibility_set_caret") and any(.steps[]; .method == "accessibility_set_selection")) and any(.traces[]; (.file | endswith("semantic-denials-smoke.json")) and .step_count == 9 and all(.steps[]; .expect_response_type == "error" and .expect_ok == false and .expect_error_contains == "policy prompt required for ControlSemantic" and .expect_json_count == 1) and any(.steps[]; .method == "click_button") and any(.steps[]; .method == "set_text_field") and any(.steps[]; .method == "select_menu")) and any(.traces[]; (.file | endswith("input-denials-smoke.json")) and .step_count == 9 and all(.steps[]; .expect_response_type == "error" and .expect_ok == false and (.expect_error_contains | test("Control(Keyboard|Pointer)")) and .expect_json_count == 1) and any(.steps[]; .method == "remote_desktop_session_probe") and any(.steps[]; .method == "remote_desktop_eis_probe") and any(.steps[]; .method == "remote_desktop_eis_start")) and any(.traces[]; (.file | endswith("panic-stop-smoke.json")) and .step_count == 5 and all(.steps[]; .expect_json_count == 1))' "$$validate_out" >/dev/null
-	target/debug/seatgeistd --socket "$$socket" --journal "$$journal" >"$$log" 2>&1 &
+	jq -e '.type == "trace_validation_set" and .trace_count >= 6 and .step_count >= 45 and any(.traces[]; (.file | endswith("status-smoke.json")) and .step_count == 15 and any(.steps[]; .method == "safety_status" and .expect_json_count == 1) and any(.steps[]; .method == "computer_use_readiness" and .expect_json_count == 6) and any(.steps[]; .method == "accessibility_quality_status" and .expect_json_count == 7) and any(.steps[]; .method == "kwin_bridge_status") and any(.steps[]; .method == "uinput_status") and any(.steps[]; .method == "capture_backend_status") and any(.steps[]; .method == "capture_session_status" and .expect_json_count == 3) and any(.steps[]; .method == "clipboard_backend_status" and .expect_json_count == 6) and any(.steps[]; .method == "input_backend_status") and any(.steps[]; .method == "remote_desktop_eis_session_status") and any(.steps[]; .method == "remote_desktop_eis_stop")) and any(.traces[]; (.file | endswith("journal-tail-smoke.json")) and .step_count == 3 and any(.steps[]; .method == "journal_tail" and .expect_json_count == 8)) and any(.traces[]; (.file | endswith("policy-denials-smoke.json")) and .step_count == 5 and all(.steps[]; .expect_response_type == "error" and .expect_ok == false and (.expect_error_contains | type == "string") and .expect_json_count == 1) and any(.steps[]; .method == "accessibility_set_caret") and any(.steps[]; .method == "accessibility_set_selection")) and any(.traces[]; (.file | endswith("semantic-denials-smoke.json")) and .step_count == 9 and all(.steps[]; .expect_response_type == "error" and .expect_ok == false and .expect_error_contains == "policy prompt required for ControlSemantic" and .expect_json_count == 1) and any(.steps[]; .method == "click_button") and any(.steps[]; .method == "set_text_field") and any(.steps[]; .method == "select_menu")) and any(.traces[]; (.file | endswith("input-denials-smoke.json")) and .step_count == 9 and all(.steps[]; .expect_response_type == "error" and .expect_ok == false and (.expect_error_contains | test("Control(Keyboard|Pointer)")) and .expect_json_count == 1) and any(.steps[]; .method == "remote_desktop_session_probe") and any(.steps[]; .method == "remote_desktop_eis_probe") and any(.steps[]; .method == "remote_desktop_eis_start")) and any(.traces[]; (.file | endswith("panic-stop-smoke.json")) and .step_count == 5 and all(.steps[]; .expect_json_count == 1))' "$$validate_out" >/dev/null
+	printf '[safety]\nrequire_focus_guard = false\n' >"$$config"
+	target/debug/seatgeistd --socket "$$socket" --journal "$$journal" --config "$$config" >"$$log" 2>&1 &
 	pid=$$!
 	cleanup() {
 		kill "$$pid" 2>/dev/null || true
@@ -511,7 +690,7 @@ smoke-trace-replay:
 		exit 1
 	fi
 	target/debug/seatgeist-cli --socket "$$socket" trace replay --dir examples/traces >"$$replay_out"
-	jq -e '.type == "trace_replay_set" and .trace_count >= 6 and .step_count >= 45 and any(.traces[]; (.file | endswith("status-smoke.json")) and (.steps | length) == 14 and all(.steps[]; .ok == true) and any(.steps[]; .method == "safety_status") and any(.steps[]; .method == "computer_use_readiness" and .response_type == "computer_use_readiness") and any(.steps[]; .method == "accessibility_quality_status" and .response_type == "accessibility_quality_status") and any(.steps[]; .method == "kwin_bridge_status") and any(.steps[]; .method == "uinput_status") and any(.steps[]; .method == "capture_backend_status") and any(.steps[]; .method == "clipboard_backend_status" and .response_type == "clipboard_backend_status") and any(.steps[]; .method == "input_backend_status") and any(.steps[]; .method == "remote_desktop_eis_session_status") and any(.steps[]; .method == "remote_desktop_eis_stop")) and any(.traces[]; (.file | endswith("journal-tail-smoke.json")) and (.steps | length) == 3 and all(.steps[]; .ok == true) and any(.steps[]; .method == "journal_tail" and .response_type == "journal")) and any(.traces[]; (.file | endswith("policy-denials-smoke.json")) and (.steps | length) == 5 and all(.steps[]; .response_type == "error" and .ok == false and .error_kind == "policy_prompt_required") and any(.steps[]; .method == "focus_window") and any(.steps[]; .method == "accessibility_set_caret") and any(.steps[]; .method == "accessibility_set_selection")) and any(.traces[]; (.file | endswith("semantic-denials-smoke.json")) and (.steps | length) == 9 and all(.steps[]; .response_type == "error" and .ok == false and .error_kind == "policy_prompt_required") and any(.steps[]; .method == "click_button") and any(.steps[]; .method == "set_text_field") and any(.steps[]; .method == "select_menu")) and any(.traces[]; (.file | endswith("input-denials-smoke.json")) and (.steps | length) == 9 and all(.steps[]; .response_type == "error" and .ok == false and .error_kind == "policy_prompt_required") and any(.steps[]; .method == "type_text") and any(.steps[]; .method == "click_pointer") and any(.steps[]; .method == "remote_desktop_session_probe") and any(.steps[]; .method == "remote_desktop_eis_probe") and any(.steps[]; .method == "remote_desktop_eis_start")) and any(.traces[]; (.file | endswith("panic-stop-smoke.json")) and (.steps | length) == 5 and all(.steps[]; .response_type == "panic_stop" and .ok == true) and any(.steps[]; .method == "set_panic_stop"))' "$$replay_out" >/dev/null
+	jq -e '.type == "trace_replay_set" and .trace_count >= 6 and .step_count >= 45 and any(.traces[]; (.file | endswith("status-smoke.json")) and (.steps | length) == 15 and all(.steps[]; .ok == true) and any(.steps[]; .method == "safety_status") and any(.steps[]; .method == "computer_use_readiness" and .response_type == "computer_use_readiness") and any(.steps[]; .method == "accessibility_quality_status" and .response_type == "accessibility_quality_status") and any(.steps[]; .method == "kwin_bridge_status") and any(.steps[]; .method == "uinput_status") and any(.steps[]; .method == "capture_backend_status") and any(.steps[]; .method == "capture_session_status" and .response_type == "capture_session_status") and any(.steps[]; .method == "clipboard_backend_status" and .response_type == "clipboard_backend_status") and any(.steps[]; .method == "input_backend_status") and any(.steps[]; .method == "remote_desktop_eis_session_status") and any(.steps[]; .method == "remote_desktop_eis_stop")) and any(.traces[]; (.file | endswith("journal-tail-smoke.json")) and (.steps | length) == 3 and all(.steps[]; .ok == true) and any(.steps[]; .method == "journal_tail" and .response_type == "journal")) and any(.traces[]; (.file | endswith("policy-denials-smoke.json")) and (.steps | length) == 5 and all(.steps[]; .response_type == "error" and .ok == false and .error_kind == "policy_prompt_required") and any(.steps[]; .method == "focus_window") and any(.steps[]; .method == "accessibility_set_caret") and any(.steps[]; .method == "accessibility_set_selection")) and any(.traces[]; (.file | endswith("semantic-denials-smoke.json")) and (.steps | length) == 9 and all(.steps[]; .response_type == "error" and .ok == false and .error_kind == "policy_prompt_required") and any(.steps[]; .method == "click_button") and any(.steps[]; .method == "set_text_field") and any(.steps[]; .method == "select_menu")) and any(.traces[]; (.file | endswith("input-denials-smoke.json")) and (.steps | length) == 9 and all(.steps[]; .response_type == "error" and .ok == false and .error_kind == "policy_prompt_required") and any(.steps[]; .method == "type_text") and any(.steps[]; .method == "click_pointer") and any(.steps[]; .method == "remote_desktop_session_probe") and any(.steps[]; .method == "remote_desktop_eis_probe") and any(.steps[]; .method == "remote_desktop_eis_start")) and any(.traces[]; (.file | endswith("panic-stop-smoke.json")) and (.steps | length) == 5 and all(.steps[]; .response_type == "panic_stop" and .ok == true) and any(.steps[]; .method == "set_panic_stop"))' "$$replay_out" >/dev/null
 	test ! -e "$$denied_capture"
 	target/debug/seatgeist-cli --socket "$$socket" journal tail --limit 10 --method safety_status --ok true | jq -e '.type == "journal" and (.data | length) >= 1' >/dev/null
 	target/debug/seatgeist-cli --socket "$$socket" journal tail --limit 10 --ok false | jq -e '.type == "journal" and (.data | length) >= 3' >/dev/null
@@ -570,6 +749,7 @@ smoke-mcp:
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "seatgeist.remote_desktop_session_probe")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "seatgeist.remote_desktop_eis_probe")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "seatgeist.capture_backend_status")' "$$out" >/dev/null
+	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "seatgeist.capture_open")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "seatgeist.pointer_calibration")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "seatgeist.type_text")' "$$out" >/dev/null
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "seatgeist.key_combo")' "$$out" >/dev/null
@@ -682,11 +862,4 @@ gui-eval-remote-desktop-eis-session:
 	scripts/gui-eval.sh remote-desktop-eis-session
 
 install-kwin-script:
-	set -euo pipefail
-	if kpackagetool6 --type=KWin/Script --list | grep -q "seatgeist-bridge"; then
-		kpackagetool6 --type=KWin/Script -u kwin/seatgeist-bridge
-	else
-		kpackagetool6 --type=KWin/Script -i kwin/seatgeist-bridge
-	fi
-	kwriteconfig6 --file kwinrc --group Plugins --key seatgeist-bridgeEnabled true
-	qdbus6 org.kde.KWin /KWin reconfigure
+	scripts/install-kwin-bridge.py

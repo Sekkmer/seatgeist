@@ -932,6 +932,8 @@ fn key_name_to_code(name: &str) -> Result<u16> {
         "7" => KEY_7,
         "8" => KEY_8,
         "9" => KEY_9,
+        "minus" => KEY_MINUS,
+        "equal" | "equals" => KEY_EQUAL,
         _ => bail!("unsupported key name in combo: {name}"),
     };
     Ok(code)
@@ -970,6 +972,14 @@ mod tests {
         assert_eq!(
             parse_key_combo("Super+Space").expect("combo parses"),
             vec![KEY_LEFTMETA, KEY_SPACE]
+        );
+        assert_eq!(
+            parse_key_combo("Ctrl+Minus").expect("zoom out combo parses"),
+            vec![KEY_LEFTCTRL, KEY_MINUS]
+        );
+        assert_eq!(
+            parse_key_combo("Ctrl+Equal").expect("zoom in combo parses"),
+            vec![KEY_LEFTCTRL, KEY_EQUAL]
         );
     }
 
