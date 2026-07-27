@@ -737,6 +737,12 @@ pub struct XkbKeymap {
     context: NonNull<XkbContext>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct XkbKeyStroke {
+    pub evdev_keycode: u16,
+    pub shift: bool,
+}
+
 impl XkbKeymap {
     pub fn new_from_names(names: XkbKeymapNames<'_>) -> Result<Self> {
         let rules = optional_cstring("rules", names.rules)?;
@@ -783,12 +789,36 @@ impl XkbKeymap {
         None
     }
 
+    pub fn keystroke_for_keysym(&self, keysym: u32) -> Option<XkbKeyStroke> {
+        // Level 0 is unshifted and level 1 is the conventional Shift level for
+        // the simple keyboard symbols supported by the agent-seat slice.
+        for (level, shift) in [(0, false), (1, true)] {
+            let min = unsafe { xkb_keymap_min_keycode(self.keymap.as_ptr()) };
+            let max = unsafe { xkb_keymap_max_keycode(self.keymap.as_ptr()) };
+            for xkb_keycode in min..=max {
+                if self.keycode_level_contains_keysym(xkb_keycode, level, keysym)
+                    && let Some(evdev_keycode) = xkb_keycode_to_evdev(xkb_keycode)
+                {
+                    return Some(XkbKeyStroke {
+                        evdev_keycode,
+                        shift,
+                    });
+                }
+            }
+        }
+        None
+    }
+
     fn keycode_level0_contains_keysym(&self, keycode: u32, keysym: u32) -> bool {
+        self.keycode_level_contains_keysym(keycode, 0, keysym)
+    }
+
+    fn keycode_level_contains_keysym(&self, keycode: u32, level: u32, keysym: u32) -> bool {
         let mut syms = ptr::null();
         // SAFETY: `self.keymap` is valid; `syms` is an out-pointer owned by xkbcommon for this
         // keymap, and we only read `count` elements before the next xkbcommon call.
         let count = unsafe {
-            xkb_keymap_key_get_syms_by_level(self.keymap.as_ptr(), keycode, 0, 0, &mut syms)
+            xkb_keymap_key_get_syms_by_level(self.keymap.as_ptr(), keycode, 0, level, &mut syms)
         };
         if count <= 0 || syms.is_null() {
             return false;
@@ -2356,6 +2386,21 @@ mod tests {
         assert_eq!(keymap.evdev_keycode_for_keysym_level0(0x6c), Some(38));
         assert_eq!(keymap.evdev_keycode_for_keysym_level0(0x20), Some(57));
         assert_eq!(keymap.evdev_keycode_for_keysym_level0(u32::MAX), None);
+        assert_eq!(
+            keymap.keystroke_for_keysym(0x61),
+            Some(XkbKeyStroke {
+                evdev_keycode: 30,
+                shift: false,
+            })
+        );
+        assert_eq!(
+            keymap.keystroke_for_keysym(0x41),
+            Some(XkbKeyStroke {
+                evdev_keycode: 30,
+                shift: true,
+            })
+        );
+        assert_eq!(keymap.keystroke_for_keysym(u32::MAX), None);
     }
 
     #[test]

@@ -1,0 +1,10 @@
+[Unit]
+Description=Recover KDE Connect after KWin starts
+After=plasma-kwin_wayland.service plasma-xdg-desktop-portal-kde.service
+Wants=plasma-xdg-desktop-portal-kde.service
+
+[Service]
+Type=oneshot
+ExecCondition=/usr/bin/systemctl --user --quiet is-active app-org.kde.kdeconnect.daemon@autostart.service
+ExecStart=/usr/bin/systemctl --user restart app-org.kde.kdeconnect.daemon@autostart.service
+ExecStart=-/usr/bin/kdeconnect-cli --refresh

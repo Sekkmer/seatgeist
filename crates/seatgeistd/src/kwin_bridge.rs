@@ -22,6 +22,7 @@ use uuid::Uuid;
 use crate::{activity, xdg};
 
 const SERVICE: &str = "org.seatgeist.KWinBridge";
+const KWIN_SERVICE: &str = "org.kde.KWin";
 const PATH: &str = "/org/seatgeist/KWinBridge1";
 const INTERFACE: &str = "org.seatgeist.KWinBridge1";
 const WINDOW_ACTION_TIMEOUT: Duration = Duration::from_secs(3);
@@ -533,6 +534,7 @@ struct Bridge {
     window_list_state: WindowListState,
     activity_tracker: activity::ActivityTracker,
     window_action_queue: WindowActionQueue,
+    agent_seat_backend: crate::agent_seat::KwinAgentSeatBackend,
 }
 
 #[zbus::interface(name = "org.seatgeist.KWinBridge1")]
@@ -586,6 +588,67 @@ impl Bridge {
             .register_script_capabilities(capabilities);
         Ok(())
     }
+
+    async fn register_agent_seat_backend(
+        &self,
+        backend: &str,
+        #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        let caller = verified_kwin_caller(connection, &header).await?;
+        self.agent_seat_backend
+            .register(backend, &caller)
+            .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
+    }
+
+    async fn take_pending_agent_seat_action(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<String> {
+        let caller = message_sender(&header)?;
+        self.agent_seat_backend
+            .take(&caller)
+            .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
+    }
+
+    async fn complete_agent_seat_action(
+        &self,
+        payload: &str,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        let caller = message_sender(&header)?;
+        self.agent_seat_backend
+            .complete(&caller, payload)
+            .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
+    }
+}
+
+fn message_sender(header: &zbus::message::Header<'_>) -> zbus::fdo::Result<String> {
+    header.sender().map(ToString::to_string).ok_or_else(|| {
+        zbus::fdo::Error::AccessDenied("D-Bus caller has no unique name".to_string())
+    })
+}
+
+async fn verified_kwin_caller(
+    connection: &zbus::Connection,
+    header: &zbus::message::Header<'_>,
+) -> zbus::fdo::Result<String> {
+    let caller = message_sender(header)?;
+    let proxy = zbus::fdo::DBusProxy::new(connection)
+        .await
+        .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))?;
+    let service = zbus::names::BusName::try_from(KWIN_SERVICE)
+        .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))?;
+    let owner = proxy
+        .get_name_owner(service)
+        .await
+        .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))?;
+    if owner.as_str() != caller {
+        return Err(zbus::fdo::Error::AccessDenied(
+            "agent-seat backend registration requires the active KWin D-Bus owner".to_string(),
+        ));
+    }
+    Ok(caller)
 }
 
 #[derive(Debug, Deserialize)]
@@ -773,6 +836,7 @@ pub(super) async fn start_kwin_bridge(
     window_list_state: WindowListState,
     activity_tracker: activity::ActivityTracker,
     window_action_queue: WindowActionQueue,
+    agent_seat_backend: crate::agent_seat::KwinAgentSeatBackend,
 ) -> Result<zbus::Connection> {
     let connection = zbus::connection::Builder::session()
         .context("connect to session bus for KWin bridge")?
@@ -785,6 +849,7 @@ pub(super) async fn start_kwin_bridge(
                 window_list_state,
                 activity_tracker,
                 window_action_queue,
+                agent_seat_backend,
             },
         )
         .context("serve KWin bridge DBus object")?

@@ -12,6 +12,7 @@ description = "Backend traits for Seatgeist screen, input, window, clipboard, an
 [dependencies]
 async-trait.workspace = true
 libseatgeist.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

@@ -401,7 +401,7 @@ eval_a11y_find() {
 	if ! cli atspi find --role application --max-results 3 --max-nodes 256 >"$run_dir/a11y-find.json" 2>"$run_dir/a11y-find.stderr"; then
 		cli journal tail --limit 20 --method accessibility_find --ok false >"$run_dir/a11y-find-unavailable-journal.json"
 		if grep -Eq 'AccessibilityUnavailable|backend unavailable' "$run_dir/a11y-find.stderr" \
-			&& jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .ok == false and .summary == "error kind=accessibility_unavailable")' "$run_dir/a11y-find-unavailable-journal.json" >/dev/null; then
+			&& jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .ok == false and (.summary | startswith("error kind=accessibility_unavailable")))' "$run_dir/a11y-find-unavailable-journal.json" >/dev/null; then
 			skip_eval "a11y-find: AT-SPI find is unavailable"
 			return 0
 		fi
@@ -436,7 +436,7 @@ eval_a11y_text_attributes() {
 	if ! cli atspi find --role text --max-results 1 --max-nodes 512 >"$run_dir/a11y-text-attributes-find.json" 2>"$run_dir/a11y-text-attributes-find.stderr"; then
 		cli journal tail --limit 20 --method accessibility_find --ok false >"$run_dir/a11y-text-attributes-find-unavailable-journal.json"
 		if grep -Eq 'AccessibilityUnavailable|backend unavailable' "$run_dir/a11y-text-attributes-find.stderr" \
-			&& jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .ok == false and .summary == "error kind=accessibility_unavailable")' "$run_dir/a11y-text-attributes-find-unavailable-journal.json" >/dev/null; then
+			&& jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .ok == false and (.summary | startswith("error kind=accessibility_unavailable")))' "$run_dir/a11y-text-attributes-find-unavailable-journal.json" >/dev/null; then
 			skip_eval "a11y-text-attributes: AT-SPI find is unavailable"
 			return 0
 		fi
@@ -453,7 +453,7 @@ eval_a11y_text_attributes() {
 	if ! cli atspi text-attributes --node "$node_id" --offset 0 >"$run_dir/a11y-text-attributes.json" 2>"$run_dir/a11y-text-attributes.stderr"; then
 		cli journal tail --limit 20 --method accessibility_text_attributes --ok false >"$run_dir/a11y-text-attributes-unavailable-journal.json"
 		if grep -Eq 'AccessibilityUnavailable|backend unavailable' "$run_dir/a11y-text-attributes.stderr" \
-			&& jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .ok == false and .summary == "error kind=accessibility_unavailable")' "$run_dir/a11y-text-attributes-unavailable-journal.json" >/dev/null; then
+			&& jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .ok == false and (.summary | startswith("error kind=accessibility_unavailable")))' "$run_dir/a11y-text-attributes-unavailable-journal.json" >/dev/null; then
 			skip_eval "a11y-text-attributes: AT-SPI text attributes are unavailable"
 			return 0
 		fi
@@ -490,7 +490,7 @@ assert_a11y_control_denied() {
 		and any(.data[];
 			.safety_class == "control_semantic"
 			and .ok == false
-			and .summary == "error kind=policy_prompt_required"
+			and (.summary | startswith("error kind=policy_prompt_required"))
 		)
 	' "$run_dir/a11y-control-denied-$label-journal.json" >/dev/null
 }
@@ -523,7 +523,7 @@ assert_semantic_denied() {
 		and any(.data[];
 			.safety_class == "control_semantic"
 			and .ok == false
-			and .summary == "error kind=policy_prompt_required"
+			and (.summary | startswith("error kind=policy_prompt_required"))
 		)
 	' "$run_dir/semantic-denied-$label-journal.json" >/dev/null
 }
@@ -556,7 +556,7 @@ assert_input_denied() {
 		and any(.data[];
 			.safety_class == $safety_class
 			and .ok == false
-			and .summary == "error kind=policy_prompt_required"
+			and (.summary | startswith("error kind=policy_prompt_required"))
 		)
 	' "$run_dir/input-denied-$label-journal.json" >/dev/null
 }
@@ -599,7 +599,7 @@ eval_clipboard_denied() {
 	fi
 	grep -qi "policy" "$run_dir/clipboard-denied.txt"
 	cli journal tail --limit 20 --method clipboard_get --ok false >"$run_dir/clipboard-denied-journal.json"
-	jq -e '.type == "journal" and any(.data[]; .summary == "error kind=policy_prompt_required")' "$run_dir/clipboard-denied-journal.json" >/dev/null
+	jq -e '.type == "journal" and any(.data[]; .summary | startswith("error kind=policy_prompt_required"))' "$run_dir/clipboard-denied-journal.json" >/dev/null
 }
 
 portal_screenshot_cancelled() {
@@ -1152,7 +1152,7 @@ eval_full_resolution_denied() {
 		exit 1
 	fi
 	cli journal tail --limit 20 --method screenshot --ok false >"$run_dir/full-resolution-denied-journal.json"
-	jq -e '.type == "journal" and any(.data[]; .summary == "error kind=policy_prompt_required")' "$run_dir/full-resolution-denied-journal.json" >/dev/null
+	jq -e '.type == "journal" and any(.data[]; .summary | startswith("error kind=policy_prompt_required"))' "$run_dir/full-resolution-denied-journal.json" >/dev/null
 }
 
 eval_control_safety() {

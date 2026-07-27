@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import tempfile
@@ -103,7 +104,8 @@ elif command == ["doctor"]:
     if call < 3:
         print("not ready", file=sys.stderr)
         raise SystemExit(1)
-    print(json.dumps({"type":"health","data":{"healthy":True}}))
+    digest = (state / "health.sha256").read_text().strip()
+    print(json.dumps({"type":"health","data":{"status":"ok","protocol_version":"1","run_id":"00000000-0000-0000-0000-000000000001","binary_sha256":digest,"config_fingerprint":"test-config"}}))
 elif command == ["kwin-bridge-status"]:
     call = count("bridge.count")
     ready = call >= 3 and not (state / "bridge.never").exists()
@@ -137,12 +139,17 @@ else:
             "1",
         ]
 
+        (state / "health.sha256").write_text(
+            hashlib.sha256(release.read_bytes()).hexdigest(),
+            encoding="ascii",
+        )
         completed = invoke(common, state)
         report = json.loads(completed.stdout)
         assert report["ok"] is True
         assert report["daemon_readiness_attempts"] == 3
         assert report["bridge_readiness_attempts"] == 3
         assert report["window_count"] == 7
+        assert report["run_id"] == "00000000-0000-0000-0000-000000000001"
         assert installed.read_bytes() == release.read_bytes()
         assert installed.stat().st_mode & 0o777 == 0o755
         cargo_calls = (state / "cargo.log").read_text(encoding="utf-8").splitlines()
@@ -184,6 +191,10 @@ else:
         running_link.symlink_to(bad_running)
         for counter in ("capture.count", "doctor.count", "bridge.count"):
             (state / counter).write_text("0", encoding="ascii")
+        (state / "health.sha256").write_text(
+            hashlib.sha256(release.read_bytes()).hexdigest(),
+            encoding="ascii",
+        )
         mismatch = invoke([*common, "--skip-build"], state, check=False)
         assert mismatch.returncode != 0
         assert "daemon hash mismatch" in mismatch.stderr

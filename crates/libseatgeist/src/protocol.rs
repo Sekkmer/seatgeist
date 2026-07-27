@@ -22,6 +22,18 @@ pub struct HealthStatus {
     pub service: String,
     pub version: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -417,6 +429,10 @@ pub struct JournalEntry {
     pub sequence: u64,
     pub unix_time_ms: u64,
     pub method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<JournalClientContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1606,7 +1622,12 @@ pub enum DaemonResponse {
     AccessibilityTextAttributes(AccessibilityTextAttributes),
     Journal(Vec<JournalEntry>),
     Action(Box<ActionResult>),
-    Error { kind: ErrorKind, message: String },
+    Error {
+        kind: ErrorKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason_code: Option<String>,
+        message: String,
+    },
 }
 
 impl DaemonResponse {
@@ -1651,7 +1672,11 @@ impl DaemonResponse {
     }
 
     pub fn ok(&self) -> bool {
-        !matches!(self, Self::Error { .. })
+        match self {
+            Self::Error { .. } => false,
+            Self::Action(action) => action.ok,
+            _ => true,
+        }
     }
 }
 
@@ -2148,6 +2173,8 @@ mod tests {
             sequence: 2,
             unix_time_ms: 1001,
             method: "focus_window".to_string(),
+            run_id: None,
+            build_id: None,
             client: Some(JournalClientContext {
                 tool: Some("seatgeist-mcp".to_string()),
                 pid: Some(4242),
@@ -2840,12 +2867,29 @@ mod tests {
             service: "seatgeistd".to_string(),
             version: "0.1.0".to_string(),
             status: "ok".to_string(),
+            protocol_version: None,
+            run_id: None,
+            git_sha: None,
+            build_unix_ms: None,
+            binary_sha256: None,
+            config_fingerprint: None,
         });
         assert_eq!(health.response_type(), "health");
         assert!(health.ok());
 
+        let unconfirmed_action = DaemonResponse::Action(Box::new(ActionResult {
+            id: Uuid::nil(),
+            ok: false,
+            observation: None,
+            screenshot: None,
+            message: Some("dispatch accepted but postcondition failed".to_string()),
+        }));
+        assert_eq!(unconfirmed_action.response_type(), "action");
+        assert!(!unconfirmed_action.ok());
+
         let error = DaemonResponse::Error {
             kind: ErrorKind::PolicyDenied,
+            reason_code: Some("policy_denied".to_string()),
             message: "denied".to_string(),
         };
         assert_eq!(error.response_type(), "error");
@@ -2853,6 +2897,7 @@ mod tests {
         let encoded = serde_json::to_string(&error).expect("error response serializes");
         assert!(encoded.contains(r#""type":"error""#));
         assert!(encoded.contains(r#""kind":"policy_denied""#));
+        assert!(encoded.contains(r#""reason_code":"policy_denied""#));
         assert!(encoded.contains(r#""message":"denied""#));
     }
 

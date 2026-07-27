@@ -1,4 +1,7 @@
-use std::{env, process::Command};
+use std::{
+    env,
+    process::{Command, Stdio},
+};
 
 use anyhow::{Context, Result, bail};
 
@@ -12,6 +15,9 @@ pub(crate) fn exists(command: &str) -> bool {
 pub(crate) fn succeeds(command: &str, args: &[&str]) -> bool {
     Command::new(command)
         .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -35,6 +41,10 @@ mod tests {
     fn probes_path_success_and_stdout_through_one_boundary() {
         assert!(exists("sh"));
         assert!(succeeds("sh", &["-c", "exit 0"]));
+        assert!(succeeds(
+            "sh",
+            &["-c", "printf noisy-stdout; printf noisy-stderr >&2"]
+        ));
         assert!(!succeeds("sh", &["-c", "exit 7"]));
         assert_eq!(
             stdout("sh", &["-c", "printf seatgeist"]).expect("stdout is captured"),

@@ -29,7 +29,7 @@ const STATE_FOCUSED: usize = 12;
 const DEFAULT_SEARCH_DEPTH: usize = 12;
 const DEFAULT_VALUE_MAX_CHARS: i32 = 512;
 const DEFAULT_SET_TEXT_MAX_CHARS: usize = 8192;
-const BUSCTL_ACTION_TIMEOUT_ARG: &str = "--timeout=2s";
+const BUSCTL_TIMEOUT_ARG: &str = "--timeout=2s";
 
 pub type Result<T> = std::result::Result<T, SeatgeistError>;
 
@@ -89,7 +89,16 @@ impl NodeBudget {
 }
 
 pub fn available() -> bool {
-    accessibility_bus_address().is_ok()
+    availability().is_ok()
+}
+
+pub fn availability() -> Result<()> {
+    let bus = AtspiBus::connect()?;
+    bus.children(&AtspiRef {
+        service: ATSPI_ROOT_SERVICE.to_string(),
+        path: ATSPI_ROOT_PATH.to_string(),
+    })
+    .map(|_| ())
 }
 
 pub fn focused_tree(depth: usize, max_nodes: usize) -> Result<Option<AccessibilityNode>> {
@@ -602,6 +611,7 @@ impl AtspiBus {
         }
         let output = Command::new("busctl")
             .args([
+                BUSCTL_TIMEOUT_ARG,
                 "--address",
                 &app_address,
                 "call",
@@ -653,6 +663,7 @@ impl AtspiBus {
     fn call(&self, service: &str, path: &str, interface: &str, method: &str) -> Result<String> {
         let output = Command::new("busctl")
             .args([
+                BUSCTL_TIMEOUT_ARG,
                 "--address",
                 &self.address,
                 "call",
@@ -691,6 +702,7 @@ impl AtspiBus {
     ) -> Result<String> {
         let output = Command::new("busctl")
             .args([
+                BUSCTL_TIMEOUT_ARG,
                 "--address",
                 &self.address,
                 "call",
@@ -714,6 +726,7 @@ impl AtspiBus {
     ) -> Result<String> {
         let output = Command::new("busctl")
             .args([
+                BUSCTL_TIMEOUT_ARG,
                 "--address",
                 &self.address,
                 "get-property",
@@ -738,6 +751,7 @@ impl AtspiBus {
     ) -> Result<String> {
         let output = Command::new("busctl")
             .args([
+                BUSCTL_TIMEOUT_ARG,
                 "--address",
                 &self.address,
                 "set-property",
@@ -1181,6 +1195,7 @@ impl AtspiBus {
 fn accessibility_bus_address() -> Result<String> {
     let output = Command::new("busctl")
         .args([
+            BUSCTL_TIMEOUT_ARG,
             "--user",
             "call",
             "org.a11y.Bus",
@@ -1318,7 +1333,7 @@ where
 fn action_query_command(address: &str, node: &AtspiRef) -> Command {
     let mut command = Command::new("busctl");
     command.args([
-        BUSCTL_ACTION_TIMEOUT_ARG,
+        BUSCTL_TIMEOUT_ARG,
         "--address",
         address,
         "call",
@@ -1747,10 +1762,7 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert_eq!(
-            args.first().map(String::as_str),
-            Some(BUSCTL_ACTION_TIMEOUT_ARG)
-        );
+        assert_eq!(args.first().map(String::as_str), Some(BUSCTL_TIMEOUT_ARG));
         assert!(args.iter().any(|arg| arg == "GetActions"));
     }
 

@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use libseatgeist::{
-    CapabilitySet, DaemonRequest, DaemonResponse, DesktopSessionStatus, HealthStatus, JournalEntry,
+    CapabilitySet, DaemonRequest, DaemonResponse, DesktopSessionStatus, JournalEntry,
     JournalTailRequest, PanicStopStatus, PolicyStatus, SetPanicStopRequest, ToolApprovalLevel,
     UinputStatus,
 };
@@ -173,15 +173,16 @@ tile_max_edge = 2048
 fn daemon_serves_core_protocol_and_journal() -> Result<()> {
     let daemon = DaemonFixture::start()?;
 
-    let health = daemon.request(&DaemonRequest::Health)?;
-    assert_eq!(
-        health,
-        DaemonResponse::Health(HealthStatus {
-            service: "seatgeistd".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            status: "ok".to_string(),
-        })
-    );
+    let DaemonResponse::Health(health) = daemon.request(&DaemonRequest::Health)? else {
+        bail!("health request did not return health");
+    };
+    assert_eq!(health.service, "seatgeistd");
+    assert_eq!(health.version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(health.status, "ok");
+    assert_eq!(health.protocol_version.as_deref(), Some("1"));
+    assert!(health.run_id.is_some());
+    assert!(health.binary_sha256.is_some());
+    assert!(health.config_fingerprint.is_some());
 
     let policy = daemon.request(&DaemonRequest::PolicyStatus)?;
     assert_eq!(

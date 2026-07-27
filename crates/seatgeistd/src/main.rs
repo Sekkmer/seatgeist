@@ -12,6 +12,7 @@ use std::{
 };
 
 mod activity;
+mod agent_seat;
 mod capture;
 mod capture_backend;
 mod capture_diagnostics;
@@ -57,7 +58,9 @@ use config::*;
 #[cfg(test)]
 use eis_key_combo::codes_with_keymap as eis_key_combo_codes_with_keymap;
 use input_actions::{
-    click_pointer, drag_pointer, key_combo, move_pointer, page_zoom, scroll_pointer, type_text,
+    agent_click_pointer, agent_drag_pointer, agent_key_combo, agent_move_pointer,
+    agent_scroll_pointer, agent_type_text, click_pointer, drag_pointer, key_combo, move_pointer,
+    page_zoom, scroll_pointer, type_text,
 };
 use input_diagnostics::uinput_status;
 #[cfg(test)]
@@ -118,7 +121,7 @@ use portal_eis_session::{
 };
 use safety_runtime::{ApprovalStore, ControlRateLimiter, PanicStopState};
 use screenshot::{capture_screenshot, capture_screenshot_tile, wait_for_change};
-use seatgeist_backend::{ScreenBackend, WindowBackend};
+use seatgeist_backend::{ScreenBackend, TargetedInputBackend, WindowBackend};
 use seatgeist_policy::{PolicyConfig, PolicyEngine};
 use session_owner::SessionOwner;
 use sha2::{Digest, Sha256};
@@ -136,21 +139,49 @@ use window_safety::{enforce_active_window_guard, enforce_app_policy, enforce_app
 const SEMANTIC_CHOICE_LIMIT: usize = 5;
 const ACCESSIBILITY_QUALITY_SAMPLE_DEPTH: usize = 4;
 const ACCESSIBILITY_QUALITY_SAMPLE_MAX_NODES: usize = 512;
+const DAEMON_PROTOCOL_VERSION: &str = "1";
 
 #[derive(Debug, Clone)]
 struct ActionJournal {
     path: PathBuf,
     settings: JournalSettings,
+    run_id: Uuid,
+    build_id: String,
     sequence: Arc<Mutex<u64>>,
 }
 
 impl ActionJournal {
-    fn new(path: PathBuf, settings: JournalSettings) -> Self {
+    fn new(path: PathBuf, settings: JournalSettings, binary_sha256: Option<&str>) -> Self {
+        let build_id = binary_sha256
+            .map(|digest| digest.chars().take(16).collect())
+            .unwrap_or_else(|| format!("v{}", env!("CARGO_PKG_VERSION")));
         Self {
             path,
             settings,
+            run_id: Uuid::new_v4(),
+            build_id,
             sequence: Arc::new(Mutex::new(0)),
         }
+    }
+
+    fn record_lifecycle(&self, method: &str, summary: &str) -> Result<()> {
+        let entry = JournalEntry {
+            sequence: self.next_sequence()?,
+            unix_time_ms: unix_time_ms()?,
+            method: method.to_string(),
+            run_id: Some(self.run_id),
+            build_id: Some(self.build_id.clone()),
+            client: None,
+            safety_class: Some(SafetyClass::Policy),
+            guard_present: false,
+            active_window_before: None,
+            active_window_after: None,
+            control: None,
+            artifacts: Vec::new(),
+            ok: true,
+            summary: summary.to_string(),
+        };
+        append_journal_entry(&self.path, &entry)
     }
 
     fn record(
@@ -165,6 +196,8 @@ impl ActionJournal {
             sequence: self.next_sequence()?,
             unix_time_ms: unix_time_ms()?,
             method: method.to_string(),
+            run_id: Some(self.run_id),
+            build_id: Some(self.build_id.clone()),
             client: context.client,
             safety_class: Some(context.safety_class),
             guard_present: context.guard_present,
@@ -172,7 +205,7 @@ impl ActionJournal {
             active_window_after: context.active_window_after,
             control,
             artifacts,
-            ok: !matches!(response, DaemonResponse::Error { .. }),
+            ok: response.ok(),
             summary: journal_response_summary(response, &self.settings),
         };
         append_journal_entry(&self.path, &entry)
@@ -209,6 +242,8 @@ impl ActionJournal {
             sequence: self.next_sequence()?,
             unix_time_ms: unix_time_ms()?,
             method: method.to_string(),
+            run_id: Some(self.run_id),
+            build_id: Some(self.build_id.clone()),
             client: None,
             safety_class: Some(SafetyClass::ControlSemantic),
             guard_present: true,
@@ -225,6 +260,50 @@ impl ActionJournal {
             summary: format!(
                 "sticky focus lease session={} lease={} window={} ok={}",
                 session_id, lease_id, window.id, ok
+            ),
+        };
+        append_journal_entry(&self.path, &entry)
+    }
+
+    fn record_agent_seat_delivery(
+        &self,
+        session_id: &str,
+        action_id: Uuid,
+        window: &WindowInfo,
+        backend: &str,
+        safety_class: SafetyClass,
+    ) -> Result<()> {
+        let mut target = journal_target("independent_agent_seat");
+        target.add("session_id", session_id);
+        target.add("window_id", &window.id);
+        if let Some(app_id) = window.app_id.as_deref() {
+            target.add("app_id", app_id);
+        }
+        if let Some(pid) = window.pid {
+            target.add("pid", pid.to_string());
+        }
+        let entry = JournalEntry {
+            sequence: self.next_sequence()?,
+            unix_time_ms: unix_time_ms()?,
+            method: "agent_seat_delivery".to_string(),
+            run_id: Some(self.run_id),
+            build_id: Some(self.build_id.clone()),
+            client: None,
+            safety_class: Some(safety_class),
+            guard_present: true,
+            active_window_before: None,
+            active_window_after: None,
+            control: Some(JournalControlContext {
+                action_id: Some(action_id),
+                policy: Some("allow".to_string()),
+                backend: Some(backend.to_string()),
+                requested_target: Some(target),
+            }),
+            artifacts: Vec::new(),
+            ok: true,
+            summary: format!(
+                "independent agent seat session={} action={} window={} backend={} ok=true",
+                session_id, action_id, window.id, backend
             ),
         };
         append_journal_entry(&self.path, &entry)
@@ -247,6 +326,8 @@ impl ActionJournal {
             sequence: self.next_sequence()?,
             unix_time_ms: unix_time_ms()?,
             method: method.to_string(),
+            run_id: Some(self.run_id),
+            build_id: Some(self.build_id.clone()),
             client: None,
             safety_class: Some(SafetyClass::Observe),
             guard_present: true,
@@ -356,6 +437,7 @@ async fn main() -> Result<()> {
                 false,
                 false,
                 false,
+                false,
             ))?
         );
         return Ok(());
@@ -417,6 +499,7 @@ async fn main() -> Result<()> {
     .await
 }
 
+#[derive(Debug)]
 struct RunSettings {
     socket: PathBuf,
     journal_path: PathBuf,
@@ -432,6 +515,7 @@ struct RunSettings {
 }
 
 async fn run(settings: RunSettings) -> Result<()> {
+    let config_fingerprint = config_fingerprint(&settings);
     let RunSettings {
         socket,
         journal_path,
@@ -445,7 +529,12 @@ async fn run(settings: RunSettings) -> Result<()> {
         input_backend_preference,
         xkb_keymap_config,
     } = settings;
-    let journal = ActionJournal::new(journal_path, journal_settings);
+    // Hash the executable once per daemon run and reuse it for health and
+    // journal provenance. Debug binaries are large enough that reading them
+    // repeatedly can materially delay parallel private-daemon tests.
+    let binary_sha256 = executable_sha256();
+    let journal = ActionJournal::new(journal_path, journal_settings, binary_sha256.as_deref());
+    let health_status = health(&journal, config_fingerprint, binary_sha256);
     let panic_stop = PanicStopState::new(panic_stop_path);
     let approval_store = ApprovalStore::new(approval_file_path);
     let policy = PolicyEngine::new(policy_config);
@@ -463,12 +552,14 @@ async fn run(settings: RunSettings) -> Result<()> {
     let interaction_session_store = interaction::InteractionSessionStore::default();
     let activity_tracker = activity::ActivityTracker::default();
     let window_action_queue = WindowActionQueue::default();
+    let agent_seat_backend = agent_seat::KwinAgentSeatBackend::default();
     let focus_backend: Arc<dyn interaction::FocusBackend> = Arc::new(interaction::KwinFocusBackend);
     let _kwin_bridge_connection = match start_kwin_bridge(
         active_window_state.clone(),
         window_list_state.clone(),
         activity_tracker.clone(),
         window_action_queue.clone(),
+        agent_seat_backend.clone(),
     )
     .await
     {
@@ -487,6 +578,7 @@ async fn run(settings: RunSettings) -> Result<()> {
         window_action_queue.clone(),
     ));
     let runtime = DaemonRuntime {
+        health_status,
         active_window_state,
         window_list_state,
         kwin_bridge_registered,
@@ -509,6 +601,7 @@ async fn run(settings: RunSettings) -> Result<()> {
         interaction_session_store,
         activity_tracker,
         window_action_queue: window_action_queue.clone(),
+        agent_seat_backend,
         window_backend,
     };
 
@@ -519,21 +612,57 @@ async fn run(settings: RunSettings) -> Result<()> {
         .with_context(|| format!("set socket permissions on {}", socket.display()))?;
     validate_socket_permissions(&socket)?;
 
+    runtime.journal.record_lifecycle(
+        "daemon_start",
+        &format!(
+            "daemon started run={} build={}",
+            runtime.journal.run_id, runtime.journal.build_id
+        ),
+    )?;
     info!(socket = %socket.display(), "seatgeistd listening");
 
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
     loop {
-        let (stream, _addr) = listener.accept().await.context("accept client")?;
-        let runtime = runtime.clone();
-        tokio::spawn(async move {
-            if let Err(err) = handle_client(stream, runtime).await {
-                warn!(error = %err, "client request failed");
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _addr) = accepted.context("accept client")?;
+                let runtime = runtime.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = handle_client(stream, runtime).await {
+                        warn!(error = %err, "client request failed");
+                    }
+                });
             }
-        });
+            signal = &mut shutdown => {
+                signal?;
+                break;
+            }
+        }
+    }
+    runtime.journal.record_lifecycle(
+        "daemon_stop",
+        &format!(
+            "daemon stopped run={} build={}",
+            runtime.journal.run_id, runtime.journal.build_id
+        ),
+    )?;
+    info!("seatgeistd stopped");
+    Ok(())
+}
+
+async fn shutdown_signal() -> Result<()> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("install SIGTERM handler")?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result.context("wait for SIGINT"),
+        _ = terminate.recv() => Ok(()),
     }
 }
 
 #[derive(Debug, Clone)]
 struct DaemonRuntime {
+    health_status: HealthStatus,
     active_window_state: ActiveWindowState,
     window_list_state: WindowListState,
     kwin_bridge_registered: bool,
@@ -554,6 +683,7 @@ struct DaemonRuntime {
     interaction_session_store: interaction::InteractionSessionStore,
     activity_tracker: activity::ActivityTracker,
     window_action_queue: WindowActionQueue,
+    agent_seat_backend: agent_seat::KwinAgentSeatBackend,
     window_backend: Arc<dyn WindowBackend>,
 }
 
@@ -622,6 +752,7 @@ fn parse_daemon_request_line(
 struct PreparedPostAction {
     options: PostActionOptions,
     condition: ActionSettleCondition,
+    expected_active_window: Option<String>,
     before: Option<Observation>,
 }
 
@@ -639,12 +770,7 @@ async fn prepare_post_action(
     if !options.observe_after {
         return Ok(None);
     }
-    if options.settle_timeout_ms == 0 || options.settle_timeout_ms > 10_000 {
-        bail!("post-action settle_timeout_ms must be between 1 and 10000");
-    }
-    if options.settle_interval_ms < 10 || options.settle_interval_ms > 1_000 {
-        bail!("post-action settle_interval_ms must be between 10 and 1000");
-    }
+    validate_post_action_response_options(request, response_options)?;
     let mut options = options.clone();
     if let Some(image) = options.image.as_mut() {
         normalize_capture_frame_request(
@@ -671,6 +797,10 @@ async fn prepare_post_action(
         ActionSettleCondition::Auto => ActionSettleCondition::Stable,
         condition => condition,
     };
+    let expected_active_window = match request {
+        DaemonRequest::FocusWindow(request) => Some(request.window_id.clone()),
+        _ => None,
+    };
     let before = if condition != ActionSettleCondition::None && !target_event_settle {
         Some(observation::post_action(runtime).await)
     } else {
@@ -679,8 +809,31 @@ async fn prepare_post_action(
     Ok(Some(PreparedPostAction {
         options,
         condition,
+        expected_active_window,
         before,
     }))
+}
+
+fn validate_post_action_response_options(
+    request: &DaemonRequest,
+    response_options: Option<&DaemonResponseOptions>,
+) -> Result<()> {
+    if !daemon_request_returns_action(request) {
+        return Ok(());
+    }
+    let Some(options) = response_options.and_then(|options| options.post_action.as_ref()) else {
+        return Ok(());
+    };
+    if !options.observe_after {
+        return Ok(());
+    }
+    if options.settle_timeout_ms == 0 || options.settle_timeout_ms > 10_000 {
+        bail!("post-action settle_timeout_ms must be between 1 and 10000");
+    }
+    if options.settle_interval_ms < 10 || options.settle_interval_ms > 1_000 {
+        bail!("post-action settle_interval_ms must be between 10 and 1000");
+    }
+    Ok(())
 }
 
 fn daemon_request_returns_action(request: &DaemonRequest) -> bool {
@@ -714,6 +867,7 @@ async fn finish_post_action(
     let mut samples = 1_u32;
     let mut settled = post_action_condition_met(
         prepared.condition,
+        prepared.expected_active_window.as_deref(),
         prepared.before.as_ref(),
         previous.as_ref(),
         &current,
@@ -727,6 +881,7 @@ async fn finish_post_action(
         samples = samples.saturating_add(1);
         settled = post_action_condition_met(
             prepared.condition,
+            prepared.expected_active_window.as_deref(),
             prepared.before.as_ref(),
             previous.as_ref(),
             &current,
@@ -753,6 +908,12 @@ async fn finish_post_action(
         before_revision: prepared.before.and_then(|observation| observation.revision),
         after_revision: current.revision.clone().unwrap_or_default(),
     });
+    if !settled && let Some(target) = prepared.expected_active_window.as_deref() {
+        action.ok = false;
+        action.message = Some(format!(
+            "focus dispatch accepted, but target window {target} was not confirmed active"
+        ));
+    }
     action.observation = Some(current);
     if let Some(image) = prepared.options.image.as_ref() {
         post_action_capture::attach(image, &mut action, runtime).await;
@@ -762,6 +923,7 @@ async fn finish_post_action(
 
 fn post_action_condition_met(
     condition: ActionSettleCondition,
+    expected_active_window: Option<&str>,
     before: Option<&Observation>,
     previous: Option<&Observation>,
     current: &Observation,
@@ -771,10 +933,20 @@ fn post_action_condition_met(
         ActionSettleCondition::Stable | ActionSettleCondition::Auto => {
             previous.is_some_and(|previous| observation_state_equal(previous, current))
         }
-        ActionSettleCondition::ActiveWindowChange => before.is_some_and(|before| {
-            before.active_window.as_ref().map(|window| &window.id)
-                != current.active_window.as_ref().map(|window| &window.id)
-        }),
+        ActionSettleCondition::ActiveWindowChange => expected_active_window.map_or_else(
+            || {
+                before.is_some_and(|before| {
+                    before.active_window.as_ref().map(|window| &window.id)
+                        != current.active_window.as_ref().map(|window| &window.id)
+                })
+            },
+            |target| {
+                current
+                    .active_window
+                    .as_ref()
+                    .is_some_and(|window| window.id == target)
+            },
+        ),
         ActionSettleCondition::AccessibilityChange => before
             .is_some_and(|before| before.focused_accessibility != current.focused_accessibility),
         ActionSettleCondition::AnyChange => {
@@ -1506,6 +1678,9 @@ async fn handle_request(
     client: Option<&JournalClientContext>,
     runtime: &DaemonRuntime,
 ) -> DaemonResponse {
+    if let Err(err) = validate_post_action_response_options(&request, response_options) {
+        return daemon_error_with_kind(err, ErrorKind::Validation);
+    }
     if let Err(err) =
         enforce_policy_with_approvals(&runtime.policy, &runtime.approval_store, &request)
     {
@@ -1515,11 +1690,13 @@ async fn handle_request(
     if let Err(err) = enforce_panic_stop(&runtime.panic_stop, &request) {
         return daemon_error_with_kind(err, ErrorKind::PanicStop);
     }
-    if let Err(err) = enforce_human_input_pause(
-        &runtime.safety_settings,
-        &runtime.activity_tracker,
-        &request,
-    ) {
+    if !uses_independent_agent_seat(&request, runtime.input_backend_preference)
+        && let Err(err) = enforce_human_input_pause(
+            &runtime.safety_settings,
+            &runtime.activity_tracker,
+            &request,
+        )
+    {
         return daemon_error_with_kind(err, ErrorKind::HumanInputPause);
     }
     if let Err(err) = enforce_capture_session_owner(
@@ -1598,10 +1775,11 @@ async fn execute_request(
 ) -> DaemonResponse {
     let post_action = response_options.and_then(|options| options.post_action.as_ref());
     match request {
-        DaemonRequest::Health => DaemonResponse::Health(health()),
+        DaemonRequest::Health => DaemonResponse::Health(runtime.health_status.clone()),
         DaemonRequest::Capabilities => DaemonResponse::Capabilities(capabilities(
             runtime.input_backend_preference,
             &runtime.portal_eis_session_store,
+            runtime.agent_seat_backend.ready(),
             runtime.window_action_queue.resize_ready(),
             runtime.window_action_queue.move_ready(),
             runtime.window_action_queue.launch_ready(),
@@ -1651,6 +1829,7 @@ async fn execute_request(
             match input_backend_status(
                 runtime.input_backend_preference,
                 &runtime.portal_eis_session_store,
+                runtime.agent_seat_backend.ready(),
                 &runtime.xkb_keymap_config,
             ) {
                 Ok(status) => DaemonResponse::InputBackendStatus(status),
@@ -1976,102 +2155,188 @@ async fn execute_request(
         }
         DaemonRequest::TypeText(request) => {
             let session_id = request.session_id.clone();
-            match interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
-                type_text(
-                    request,
-                    runtime.input_backend_preference,
-                    &runtime.portal_eis_session_store,
-                )
-            })
-            .await
+            let result = if runtime.input_backend_preference
+                == InputBackendPreference::KwinAgentSeat
             {
+                interaction::execute_agent_seat_action(
+                    runtime,
+                    session_id.as_deref(),
+                    SafetyClass::ControlKeyboard,
+                    |target| async move {
+                        agent_type_text(request, &target.window, &runtime.agent_seat_backend).await
+                    },
+                )
+                .await
+            } else {
+                interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
+                    type_text(
+                        request,
+                        runtime.input_backend_preference,
+                        &runtime.portal_eis_session_store,
+                    )
+                })
+                .await
+            };
+            match result {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::KeyCombo(request) => {
             let session_id = request.session_id.clone();
-            match interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
-                key_combo(
-                    request,
-                    runtime.input_backend_preference,
-                    &runtime.xkb_keymap_config,
-                    &runtime.portal_eis_session_store,
-                )
-            })
-            .await
+            let result = if runtime.input_backend_preference
+                == InputBackendPreference::KwinAgentSeat
             {
+                interaction::execute_agent_seat_action(
+                    runtime,
+                    session_id.as_deref(),
+                    SafetyClass::ControlKeyboard,
+                    |target| async move {
+                        agent_key_combo(request, &target.window, &runtime.agent_seat_backend).await
+                    },
+                )
+                .await
+            } else {
+                interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
+                    key_combo(
+                        request,
+                        runtime.input_backend_preference,
+                        &runtime.xkb_keymap_config,
+                        &runtime.portal_eis_session_store,
+                    )
+                })
+                .await
+            };
+            match result {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::MovePointer(request) => {
             let session_id = request.session_id.clone();
-            match interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
-                move_pointer(
-                    request,
-                    runtime.window_backend.as_ref(),
-                    runtime.screen_backend.as_ref(),
-                    runtime.input_backend_preference,
-                    &runtime.portal_eis_session_store,
-                )
-                .await
-            })
-            .await
-            {
+            let result =
+                if runtime.input_backend_preference == InputBackendPreference::KwinAgentSeat {
+                    interaction::execute_agent_seat_action(
+                        runtime,
+                        session_id.as_deref(),
+                        SafetyClass::ControlPointer,
+                        |target| async move {
+                            agent_move_pointer(request, &target.window, &runtime.agent_seat_backend)
+                                .await
+                        },
+                    )
+                    .await
+                } else {
+                    interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
+                        move_pointer(
+                            request,
+                            runtime.window_backend.as_ref(),
+                            runtime.screen_backend.as_ref(),
+                            runtime.input_backend_preference,
+                            &runtime.portal_eis_session_store,
+                        )
+                        .await
+                    })
+                    .await
+                };
+            match result {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::ClickPointer(request) => {
             let session_id = request.session_id.clone();
-            match interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
-                click_pointer(
-                    request,
-                    runtime.window_backend.as_ref(),
-                    runtime.screen_backend.as_ref(),
-                    runtime.input_backend_preference,
-                    &runtime.portal_eis_session_store,
+            let result = if runtime.input_backend_preference
+                == InputBackendPreference::KwinAgentSeat
+            {
+                interaction::execute_agent_seat_action(
+                    runtime,
+                    session_id.as_deref(),
+                    SafetyClass::ControlPointer,
+                    |target| async move {
+                        agent_click_pointer(request, &target.window, &runtime.agent_seat_backend)
+                            .await
+                    },
                 )
                 .await
-            })
-            .await
-            {
+            } else {
+                interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
+                    click_pointer(
+                        request,
+                        runtime.window_backend.as_ref(),
+                        runtime.screen_backend.as_ref(),
+                        runtime.input_backend_preference,
+                        &runtime.portal_eis_session_store,
+                    )
+                    .await
+                })
+                .await
+            };
+            match result {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::DragPointer(request) => {
             let session_id = request.session_id.clone();
-            match interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
-                drag_pointer(
-                    request,
-                    runtime.window_backend.as_ref(),
-                    runtime.screen_backend.as_ref(),
-                    runtime.input_backend_preference,
-                    &runtime.portal_eis_session_store,
-                )
-                .await
-            })
-            .await
-            {
+            let result =
+                if runtime.input_backend_preference == InputBackendPreference::KwinAgentSeat {
+                    interaction::execute_agent_seat_action(
+                        runtime,
+                        session_id.as_deref(),
+                        SafetyClass::ControlPointer,
+                        |target| async move {
+                            agent_drag_pointer(request, &target.window, &runtime.agent_seat_backend)
+                                .await
+                        },
+                    )
+                    .await
+                } else {
+                    interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
+                        drag_pointer(
+                            request,
+                            runtime.window_backend.as_ref(),
+                            runtime.screen_backend.as_ref(),
+                            runtime.input_backend_preference,
+                            &runtime.portal_eis_session_store,
+                        )
+                        .await
+                    })
+                    .await
+                };
+            match result {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::ScrollPointer(request) => {
             let session_id = request.session_id.clone();
-            match interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
-                scroll_pointer(
-                    request,
-                    runtime.screen_backend.as_ref(),
-                    runtime.input_backend_preference,
-                    &runtime.portal_eis_session_store,
+            let result = if runtime.input_backend_preference
+                == InputBackendPreference::KwinAgentSeat
+            {
+                interaction::execute_agent_seat_action(
+                    runtime,
+                    session_id.as_deref(),
+                    SafetyClass::ControlPointer,
+                    |target| async move {
+                        agent_scroll_pointer(request, &target.window, &runtime.agent_seat_backend)
+                            .await
+                    },
                 )
                 .await
-            })
-            .await
-            {
+            } else {
+                interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
+                    scroll_pointer(
+                        request,
+                        runtime.screen_backend.as_ref(),
+                        runtime.input_backend_preference,
+                        &runtime.portal_eis_session_store,
+                    )
+                    .await
+                })
+                .await
+            };
+            match result {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => daemon_error(err),
             }
@@ -2242,17 +2507,55 @@ async fn execute_request(
     }
 }
 
-fn health() -> HealthStatus {
+fn health(
+    journal: &ActionJournal,
+    config_fingerprint: String,
+    binary_sha256: Option<String>,
+) -> HealthStatus {
     HealthStatus {
         service: "seatgeistd".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         status: "ok".to_string(),
+        protocol_version: Some(DAEMON_PROTOCOL_VERSION.to_string()),
+        run_id: Some(journal.run_id),
+        git_sha: option_env!("SEATGEIST_GIT_SHA").map(str::to_string),
+        build_unix_ms: option_env!("SEATGEIST_BUILD_UNIX_MS")
+            .and_then(|value| value.parse().ok())
+            .or_else(executable_modified_unix_ms),
+        binary_sha256,
+        config_fingerprint: Some(config_fingerprint),
     }
+}
+
+fn executable_sha256() -> Option<String> {
+    env::current_exe()
+        .ok()
+        .and_then(|path| sha256_file(&path).ok())
+}
+
+fn executable_modified_unix_ms() -> Option<u64> {
+    env::current_exe()
+        .ok()
+        .and_then(|path| fs::metadata(path).ok())
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+}
+
+fn config_fingerprint(settings: &RunSettings) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(format!("{settings:?}").as_bytes());
+    digest[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn capabilities(
     input_backend_preference: InputBackendPreference,
     portal_eis_session_store: &PortalEisSessionStore,
+    agent_seat_ready: bool,
     window_resize_ready: bool,
     window_move_ready: bool,
     window_launch_ready: bool,
@@ -2262,6 +2565,7 @@ fn capabilities(
         capabilities: current_capabilities(
             input_backend_preference,
             stored_session_active,
+            agent_seat_ready,
             window_resize_ready,
             window_move_ready,
             window_launch_ready,
@@ -2356,6 +2660,7 @@ async fn computer_use_readiness_status(runtime: &DaemonRuntime) -> ComputerUseRe
     let input = match input_backend_status(
         runtime.input_backend_preference,
         &runtime.portal_eis_session_store,
+        runtime.agent_seat_backend.ready(),
         &runtime.xkb_keymap_config,
     ) {
         Ok(status) => Some(status),
@@ -2592,11 +2897,17 @@ fn desktop_session_setup_hint(status: &DesktopSessionStatus) -> String {
 fn input_backend_status(
     preference: InputBackendPreference,
     portal_eis_session_store: &PortalEisSessionStore,
+    agent_seat_ready: bool,
     xkb_keymap_config: &XkbKeymapConfig,
 ) -> Result<InputBackendStatus> {
     let xkb_keymap = effective_xkb_keymap_resolution(xkb_keymap_config).status;
     let stored_session_active = portal_eis_session_store.active()?;
-    input_diagnostics::status(preference, stored_session_active, xkb_keymap)
+    input_diagnostics::status(
+        preference,
+        stored_session_active,
+        agent_seat_ready,
+        xkb_keymap,
+    )
 }
 
 #[cfg(test)]
@@ -2927,6 +3238,23 @@ fn interaction_session_id_for_request(request: &DaemonRequest) -> Option<&str> {
     }
 }
 
+fn uses_independent_agent_seat(
+    request: &DaemonRequest,
+    preference: InputBackendPreference,
+) -> bool {
+    preference == InputBackendPreference::KwinAgentSeat
+        && interaction_session_id_for_request(request).is_some()
+        && matches!(
+            request,
+            DaemonRequest::TypeText(_)
+                | DaemonRequest::KeyCombo(_)
+                | DaemonRequest::MovePointer(_)
+                | DaemonRequest::ClickPointer(_)
+                | DaemonRequest::DragPointer(_)
+                | DaemonRequest::ScrollPointer(_)
+        )
+}
+
 fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWindowGuard> {
     match request {
         DaemonRequest::FocusWindow(request) => request.guard.as_ref(),
@@ -3212,6 +3540,7 @@ fn set_panic_stop(
 fn current_capabilities(
     input_backend_preference: InputBackendPreference,
     stored_session_active: bool,
+    agent_seat_ready: bool,
     window_resize_ready: bool,
     window_move_ready: bool,
     window_launch_ready: bool,
@@ -3243,7 +3572,11 @@ fn current_capabilities(
     if clipboard::available() {
         capabilities.push(BackendCapability::ClipboardText);
     }
-    if raw_input_capability_available(input_backend_preference, stored_session_active) {
+    if raw_input_capability_available(
+        input_backend_preference,
+        stored_session_active,
+        agent_seat_ready,
+    ) {
         capabilities.push(BackendCapability::KeyboardInput);
         capabilities.push(BackendCapability::PointerInput);
     }
@@ -3257,6 +3590,7 @@ fn current_capabilities(
 fn raw_input_capability_available(
     input_backend_preference: InputBackendPreference,
     stored_session_active: bool,
+    agent_seat_ready: bool,
 ) -> bool {
     match input_backend_preference {
         InputBackendPreference::Auto | InputBackendPreference::Uinput => {
@@ -3265,6 +3599,7 @@ fn raw_input_capability_available(
         InputBackendPreference::PortalRemoteDesktop | InputBackendPreference::Libei => {
             stored_session_active
         }
+        InputBackendPreference::KwinAgentSeat => agent_seat_ready,
     }
 }
 
@@ -3327,7 +3662,7 @@ async fn execute_capture_open(
             .await
             {
                 Ok(window) => Some(window),
-                Err(err) => return daemon_error_with_kind(err, ErrorKind::TargetLost),
+                Err(err) => return daemon_error(err),
             },
             None => None,
         }
@@ -3670,8 +4005,12 @@ struct AccessibilityQualityCounts {
 fn accessibility_quality_status() -> AccessibilityQualityStatus {
     let sample_depth = ACCESSIBILITY_QUALITY_SAMPLE_DEPTH;
     let sample_max_nodes = ACCESSIBILITY_QUALITY_SAMPLE_MAX_NODES;
-    if !seatgeist_atspi::available() {
-        return accessibility_quality_unavailable_status(sample_depth, sample_max_nodes);
+    if let Err(err) = seatgeist_atspi::availability() {
+        return accessibility_quality_unavailable_status(
+            sample_depth,
+            sample_max_nodes,
+            Some(&err.to_string()),
+        );
     }
 
     accessibility_quality_status_from_sample(
@@ -3687,7 +4026,14 @@ fn accessibility_quality_status() -> AccessibilityQualityStatus {
 fn accessibility_quality_unavailable_status(
     sample_depth: usize,
     sample_max_nodes: usize,
+    reason: Option<&str>,
 ) -> AccessibilityQualityStatus {
+    let setup_hint = match reason {
+        Some(reason) => format!(
+            "AT-SPI Registry is unreachable ({reason}); check or restart the user accessibility bus before semantic UI control"
+        ),
+        None => "AT-SPI Registry is unreachable; check or restart the user accessibility bus before semantic UI control".to_string(),
+    };
     AccessibilityQualityStatus {
         atspi_available: false,
         target_event_settle_available: false,
@@ -3706,7 +4052,7 @@ fn accessibility_quality_unavailable_status(
         tree_flat: false,
         semantic_targeting_reliable: false,
         recommended_fallback: "desktop_session_status".to_string(),
-        setup_hint: "AT-SPI bus is not available; check DBus/session accessibility setup before semantic UI control".to_string(),
+        setup_hint,
     }
 }
 
@@ -5321,16 +5667,58 @@ fn format_error_chain(err: &Error) -> String {
 
 fn daemon_error(err: Error) -> DaemonResponse {
     let message = format_error_chain(&err);
+    let kind = classify_error_message(&message);
     DaemonResponse::Error {
-        kind: classify_error_message(&message),
+        kind,
+        reason_code: Some(classify_error_reason(&message, kind).to_string()),
         message,
     }
 }
 
 fn daemon_error_with_kind(err: Error, kind: ErrorKind) -> DaemonResponse {
+    let message = format_error_chain(&err);
     DaemonResponse::Error {
         kind,
-        message: format_error_chain(&err),
+        reason_code: Some(classify_error_reason(&message, kind).to_string()),
+        message,
+    }
+}
+
+fn classify_error_reason(message: &str, kind: ErrorKind) -> &'static str {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("protected application") {
+        "protected_application"
+    } else if lower.contains("did not allow control of application") {
+        "application_not_allowlisted"
+    } else if lower.contains("no active capture session with that id")
+        || lower.contains("capture session ended or is not active")
+    {
+        "capture_session_inactive"
+    } else if lower.contains("capture open reservation was lost") {
+        "capture_open_reservation_lost"
+    } else if lower.contains("already has an opening or active capture session")
+        || lower.contains("capture session is already opening or active")
+    {
+        "capture_session_already_active"
+    } else if lower.contains("requested window does not exist")
+        || lower.contains("pinned window closed")
+    {
+        "window_not_found"
+    } else if lower.contains("pinned window identity changed") {
+        "window_identity_changed"
+    } else if lower.contains("kwin script bridge dbus receiver is unavailable") {
+        "kwin_bridge_unavailable"
+    } else if lower.contains("channel closed") {
+        "backend_channel_closed"
+    } else if lower.contains("without geometry metadata")
+        || lower.contains("without a window id")
+        || lower.contains("omitted window geometry")
+    {
+        "backend_confirmation_incomplete"
+    } else if lower.contains("at-spi") || lower.contains("accessibility bus") {
+        "atspi_registry_unreachable"
+    } else {
+        kind.as_str()
     }
 }
 
@@ -5360,7 +5748,10 @@ fn classify_error_message(message: &str) -> ErrorKind {
         || lower.contains("active capture session has no owner")
     {
         ErrorKind::SessionOwnerMismatch
-    } else if lower.contains("interaction target lost") {
+    } else if lower.contains("interaction target lost")
+        || lower.contains("no active capture session with that id")
+        || lower.contains("capture open reservation was lost")
+    {
         ErrorKind::TargetLost
     } else if lower.contains("focus lease conflict") {
         ErrorKind::FocusLeaseConflict
@@ -5399,19 +5790,29 @@ fn classify_error_message(message: &str) -> ErrorKind {
             ErrorKind::AccessibilityUnavailable
         }
     } else if lower.contains("not available")
+        || lower.contains("dbus receiver is unavailable")
         || lower.contains("no executable")
         || lower.contains("requires a stored remotedesktop eis session")
         || lower.contains("/dev/uinput")
     {
         ErrorKind::BackendUnavailable
-    } else if lower.starts_with("invalid ")
+    } else if lower.contains("already has an opening or active capture session")
+        || lower.contains("capture session is already opening or active")
+        || lower.starts_with("invalid ")
         || lower.starts_with("unsupported ")
         || lower.starts_with("expected ")
         || lower.contains(" must ")
         || lower.contains(" out of bounds")
     {
         ErrorKind::Validation
-    } else if lower.contains("failed") || lower.contains("timed out") || lower.contains("could not")
+    } else if lower.contains("failed")
+        || lower.contains("timed out")
+        || lower.contains("could not")
+        || lower.contains("channel closed")
+        || lower.contains("without geometry metadata")
+        || lower.contains("without a window id")
+        || lower.contains("omitted window geometry")
+        || lower.contains("rejected desktop entry")
     {
         ErrorKind::BackendFailed
     } else {
@@ -5839,16 +6240,27 @@ fn summarize_response(response: &DaemonResponse) -> String {
                 None => message,
             }
         }
-        DaemonResponse::Error { kind, message } => {
-            format!("error kind={kind:?}: {message}")
-        }
+        DaemonResponse::Error {
+            kind,
+            reason_code,
+            message,
+        } => format!(
+            "error kind={kind:?} reason={}: {message}",
+            reason_code.as_deref().unwrap_or("unspecified")
+        ),
     }
 }
 
 fn journal_response_summary(response: &DaemonResponse, settings: &JournalSettings) -> String {
     match response {
-        DaemonResponse::Error { kind, .. } if !settings.include_error_details => {
-            format!("error kind={}", kind.as_str())
+        DaemonResponse::Error {
+            kind, reason_code, ..
+        } if !settings.include_error_details => {
+            format!(
+                "error kind={} reason={}",
+                kind.as_str(),
+                reason_code.as_deref().unwrap_or("unspecified")
+            )
         }
         _ => summarize_response(response),
     }
@@ -6292,7 +6704,7 @@ mod tests {
     #[test]
     fn journal_appends_and_tails_entries() {
         let path = temp_test_path("journal-test").with_extension("jsonl");
-        let journal = ActionJournal::new(path.clone(), JournalSettings::default());
+        let journal = ActionJournal::new(path.clone(), JournalSettings::default(), None);
 
         journal
             .record(
@@ -6313,6 +6725,12 @@ mod tests {
                     service: "seatgeistd".to_string(),
                     version: "0.1.0".to_string(),
                     status: "ok".to_string(),
+                    protocol_version: None,
+                    run_id: None,
+                    git_sha: None,
+                    build_unix_ms: None,
+                    binary_sha256: None,
+                    config_fingerprint: None,
                 }),
             )
             .expect("health record appends");
@@ -6433,6 +6851,7 @@ mod tests {
     fn journal_redacts_error_details_unless_privately_enabled() {
         let response = DaemonResponse::Error {
             kind: ErrorKind::TargetMismatch,
+            reason_code: Some("window_identity_changed".to_string()),
             message: "target Secret Project window uuid-123 disappeared".to_string(),
         };
         let context = || JournalContext {
@@ -6445,14 +6864,17 @@ mod tests {
         };
 
         let private_default = temp_test_path("journal-redacted").with_extension("jsonl");
-        ActionJournal::new(private_default.clone(), JournalSettings::default())
+        ActionJournal::new(private_default.clone(), JournalSettings::default(), None)
             .record("click_button", context(), &response)
             .expect("redacted error journals");
         let entry = tail_journal_entries(&private_default, 1, None, None)
             .expect("redacted journal reads")
             .pop()
             .expect("redacted entry exists");
-        assert_eq!(entry.summary, "error kind=target_mismatch");
+        assert_eq!(
+            entry.summary,
+            "error kind=target_mismatch reason=window_identity_changed"
+        );
         assert!(!entry.summary.contains("Secret Project"));
 
         let diagnostic = temp_test_path("journal-diagnostic").with_extension("jsonl");
@@ -6462,6 +6884,7 @@ mod tests {
                 include_artifact_metadata: false,
                 include_error_details: true,
             },
+            None,
         )
         .record("click_button", context(), &response)
         .expect("diagnostic error journals");
@@ -6498,7 +6921,7 @@ mod tests {
         let mut screenshot = sample_screenshot_info("test");
         screenshot.path = artifact_path.clone();
 
-        let disabled = ActionJournal::new(path.clone(), JournalSettings::default());
+        let disabled = ActionJournal::new(path.clone(), JournalSettings::default(), None);
         disabled
             .record(
                 "screenshot",
@@ -6524,6 +6947,7 @@ mod tests {
                 include_artifact_metadata: true,
                 include_error_details: false,
             },
+            None,
         );
         enabled
             .record(
@@ -6650,30 +7074,49 @@ mod tests {
 
         assert!(post_action_condition_met(
             ActionSettleCondition::None,
+            None,
             Some(&before),
             None,
             &same
         ));
         assert!(post_action_condition_met(
             ActionSettleCondition::Stable,
+            None,
             Some(&before),
             Some(&before),
             &same
         ));
         assert!(post_action_condition_met(
             ActionSettleCondition::ActiveWindowChange,
+            None,
+            Some(&before),
+            None,
+            &changed
+        ));
+        assert!(post_action_condition_met(
+            ActionSettleCondition::ActiveWindowChange,
+            Some("window-a"),
+            Some(&before),
+            None,
+            &same
+        ));
+        assert!(!post_action_condition_met(
+            ActionSettleCondition::ActiveWindowChange,
+            Some("window-c"),
             Some(&before),
             None,
             &changed
         ));
         assert!(post_action_condition_met(
             ActionSettleCondition::AnyChange,
+            None,
             Some(&before),
             None,
             &changed
         ));
         assert!(!post_action_condition_met(
             ActionSettleCondition::AnyChange,
+            None,
             Some(&before),
             None,
             &same
@@ -6744,6 +7187,7 @@ mod tests {
                 include_artifact_metadata: false,
                 include_error_details: false,
             },
+            None,
         );
         let lease_id = Uuid::new_v4();
         let window = WindowInfo {
@@ -6783,9 +7227,49 @@ mod tests {
     }
 
     #[test]
+    fn independent_agent_seat_deliveries_are_correlated_and_title_free() {
+        let path = temp_test_path("agent-seat-journal");
+        let journal = ActionJournal::new(path.clone(), JournalSettings::default(), None);
+        let action_id = Uuid::new_v4();
+        let window = WindowInfo {
+            id: "45837f40-43a8-4be5-b9d7-50d2ff8f79b3".to_string(),
+            app_id: Some("org.kde.kate".to_string()),
+            title: "Sensitive document title".to_string(),
+            pid: Some(4242),
+            monitor_id: None,
+            geometry: None,
+        };
+        journal
+            .record_agent_seat_delivery(
+                "capture-1",
+                action_id,
+                &window,
+                agent_seat::KWIN_AGENT_SEAT_BACKEND,
+                SafetyClass::ControlKeyboard,
+            )
+            .expect("agent-seat delivery journals");
+        let entries = journal
+            .tail_filtered(4, Some("agent_seat_delivery"), Some(true))
+            .expect("agent-seat entry reads");
+
+        assert_eq!(entries.len(), 1);
+        let control = entries[0].control.as_ref().expect("control metadata");
+        assert_eq!(control.action_id, Some(action_id));
+        assert_eq!(
+            control.backend.as_deref(),
+            Some(agent_seat::KWIN_AGENT_SEAT_BACKEND)
+        );
+        let encoded = serde_json::to_string(&entries).expect("journal serializes");
+        assert!(encoded.contains("capture-1"));
+        assert!(encoded.contains(&window.id));
+        assert!(!encoded.contains("Sensitive document title"));
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn internal_post_action_capture_steps_share_the_parent_action_id() {
         let path = temp_test_path("post-action-capture-journal");
-        let journal = ActionJournal::new(path.clone(), JournalSettings::default());
+        let journal = ActionJournal::new(path.clone(), JournalSettings::default(), None);
         let action_id = Uuid::new_v4();
         journal
             .record_post_action_capture_step(
@@ -7288,6 +7772,17 @@ mod tests {
             config.backends.and_then(|backends| backends.input),
             Some(InputBackendPreference::PortalRemoteDesktop)
         );
+        let config: DaemonConfigFile = toml::from_str(
+            r#"
+            [backends]
+            input = "kwin_agent_seat"
+            "#,
+        )
+        .expect("agent-seat backend config parses");
+        assert_eq!(
+            config.backends.and_then(|backends| backends.input),
+            Some(InputBackendPreference::KwinAgentSeat)
+        );
     }
 
     #[test]
@@ -7308,6 +7803,14 @@ mod tests {
     }
 
     #[test]
+    fn app_policy_without_config_protects_keepassxc() {
+        let policy = app_policy(None);
+
+        assert!(policy.allow.is_empty());
+        assert_eq!(policy.deny, vec!["org.keepassxc.KeePassXC"]);
+    }
+
+    #[test]
     fn app_policy_denies_matching_app() {
         let policy = AppPolicy {
             allow: Vec::new(),
@@ -7318,7 +7821,11 @@ mod tests {
             enforce_app_policy_for_app(&policy, Some("org.keepassxc.KeePassXC"), "active window")
                 .expect_err("deny list blocks matching app");
 
-        assert!(err.to_string().contains("app policy denied active window"));
+        assert!(
+            err.to_string()
+                .contains("denied control of protected application")
+        );
+        assert!(err.to_string().contains("do not retry"));
     }
 
     #[test]
@@ -7332,7 +7839,10 @@ mod tests {
             enforce_app_policy_for_app(&policy, Some("org.keepassxc.KeePassXC"), "active window")
                 .expect_err("deny list wins over allow list");
 
-        assert!(err.to_string().contains("app policy denied active window"));
+        assert!(
+            err.to_string()
+                .contains("denied control of protected application")
+        );
     }
 
     #[test]
@@ -7347,7 +7857,7 @@ mod tests {
 
         assert!(
             err.to_string()
-                .contains("app policy did not allow active window")
+                .contains("did not allow control of application")
         );
     }
 
@@ -7642,6 +8152,32 @@ mod tests {
         assert_eq!(session_backend_role_for_request(&snapshot), None);
     }
 
+    #[test]
+    fn only_session_bound_raw_actions_use_the_independent_agent_lane() {
+        let bound = DaemonRequest::KeyCombo(libseatgeist::KeyComboRequest {
+            combo: "Ctrl+L".to_string(),
+            guard: None,
+            session_id: Some("capture-1".to_string()),
+        });
+        let unbound = DaemonRequest::KeyCombo(libseatgeist::KeyComboRequest {
+            combo: "Ctrl+L".to_string(),
+            guard: None,
+            session_id: None,
+        });
+        assert!(uses_independent_agent_seat(
+            &bound,
+            InputBackendPreference::KwinAgentSeat
+        ));
+        assert!(!uses_independent_agent_seat(
+            &unbound,
+            InputBackendPreference::KwinAgentSeat
+        ));
+        assert!(!uses_independent_agent_seat(
+            &bound,
+            InputBackendPreference::Uinput
+        ));
+    }
+
     fn test_client(tool: &str, pid: u32, process_name: &str) -> JournalClientContext {
         JournalClientContext {
             tool: Some(tool.to_string()),
@@ -7934,7 +8470,7 @@ mod tests {
                 ErrorKind::PolicyDenied,
             ),
             (
-                "app policy denied active window app org.kde.konsole",
+                "app policy denied control of protected application org.keepassxc.KeePassXC for active window; do not retry through another backend",
                 ErrorKind::AppDenied,
             ),
             (
@@ -7978,12 +8514,80 @@ mod tests {
                 "invalid AT-SPI node id: bad",
                 ErrorKind::AccessibilityUnavailable,
             ),
+            (
+                "no active capture session with that id",
+                ErrorKind::TargetLost,
+            ),
+            (
+                "this client already has an opening or active capture session",
+                ErrorKind::Validation,
+            ),
+            (
+                "KWin script bridge DBus receiver is unavailable",
+                ErrorKind::BackendUnavailable,
+            ),
+            (
+                "launch succeeded without geometry metadata",
+                ErrorKind::BackendFailed,
+            ),
             ("unsupported key name: Hyper", ErrorKind::Validation),
         ];
 
         for (message, kind) in cases {
             assert_eq!(classify_error_message(message), kind, "{message}");
         }
+    }
+
+    #[test]
+    fn error_reason_codes_preserve_actionable_backend_causes() {
+        assert_eq!(
+            classify_error_reason(
+                "no active capture session with that id",
+                ErrorKind::TargetLost
+            ),
+            "capture_session_inactive"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "KWin script bridge DBus receiver is unavailable",
+                ErrorKind::BackendUnavailable
+            ),
+            "kwin_bridge_unavailable"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "app policy denied control of protected application org.keepassxc.KeePassXC",
+                ErrorKind::AppDenied
+            ),
+            "protected_application"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "app policy did not allow control of application org.example.Editor",
+                ErrorKind::AppDenied
+            ),
+            "application_not_allowlisted"
+        );
+        assert_eq!(
+            classify_error_reason("unsupported key name: Hyper", ErrorKind::Validation),
+            "validation"
+        );
+    }
+
+    #[test]
+    fn app_policy_errors_keep_their_kind_for_capture_targets() {
+        let response = daemon_error(anyhow::anyhow!(
+            "app policy denied control of protected application org.keepassxc.KeePassXC for pinned interaction target; do not retry through another backend"
+        ));
+
+        assert!(matches!(
+            response,
+            DaemonResponse::Error {
+                kind: ErrorKind::AppDenied,
+                reason_code: Some(ref reason),
+                ..
+            } if reason == "protected_application"
+        ));
     }
 
     #[test]
@@ -8457,7 +9061,10 @@ height = 40
         .await
         .expect_err("denied active app blocks keyboard control");
 
-        assert!(err.to_string().contains("app policy denied active window"));
+        assert!(
+            err.to_string()
+                .contains("denied control of protected application")
+        );
     }
 
     #[tokio::test]
@@ -8487,7 +9094,10 @@ height = 40
         .await
         .expect_err("denied focus target is checked through injected window list");
 
-        assert!(err.to_string().contains("app policy denied focus target"));
+        assert!(
+            err.to_string()
+                .contains("protected application org.keepassxc.KeePassXC for focus target")
+        );
     }
 
     #[tokio::test]
@@ -8551,7 +9161,7 @@ height = 40
         .expect_err("resolved target app policy runs before the caller invokes AT-SPI");
         assert!(
             err.to_string()
-                .contains("app policy denied resolved semantic target")
+                .contains("denied control of protected application")
         );
 
         let allowed = target::authorize_semantic_target(
@@ -9289,6 +9899,7 @@ height = 40
             false,
             false,
             false,
+            false,
         );
 
         assert!(
@@ -9311,6 +9922,7 @@ height = 40
             false,
             false,
             false,
+            false,
         );
 
         assert!(
@@ -9323,6 +9935,30 @@ height = 40
                 .iter()
                 .any(|capability| capability == &BackendCapability::PointerInput)
         );
+    }
+
+    #[test]
+    fn agent_seat_capabilities_require_plugin_registration() {
+        let unavailable = current_capabilities(
+            InputBackendPreference::KwinAgentSeat,
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
+        assert!(!unavailable.contains(&BackendCapability::KeyboardInput));
+
+        let available = current_capabilities(
+            InputBackendPreference::KwinAgentSeat,
+            false,
+            true,
+            false,
+            false,
+            false,
+        );
+        assert!(available.contains(&BackendCapability::KeyboardInput));
+        assert!(available.contains(&BackendCapability::PointerInput));
     }
 
     #[test]

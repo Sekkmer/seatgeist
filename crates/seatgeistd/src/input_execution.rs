@@ -244,6 +244,9 @@ where
         InputBackendPreference::Auto | InputBackendPreference::Uinput => {
             Ok(Box::new(UinputInputExecutionBackend))
         }
+        InputBackendPreference::KwinAgentSeat => {
+            anyhow::bail!("kwin_agent_seat requires a pinned interaction session")
+        }
         InputBackendPreference::PortalRemoteDesktop => Ok(Box::new(EisInputExecutionBackend {
             executor: StoredEisPlanExecutor {
                 backend_name: "portal_remote_desktop",

@@ -108,7 +108,21 @@ Explicit local approval flags such as `--allow-control`, `--allow-clipboard-read
 
 `[policy].secret_fields` applies to high-level text-field requests whose target name looks secret-related, such as password, passcode, token, API key, private key, seed phrase, card number, or CVV. The default is `deny`. AT-SPI nodes already marked sensitive remain non-viable for semantic actions regardless of text-field name matching.
 
-`[apps].deny` blocks control-class actions when the relevant app id matches. Deny rules win over allow rules. If `[apps].allow` is non-empty, control-class actions are allowed only for matching app ids. For focus requests, the daemon checks the target window app id; for keyboard, pointer, and semantic control, it checks the active window app id and fails closed if app policy is configured but the app id is unavailable.
+`org.keepassxc.KeePassXC` is a built-in protected application and is denied
+even when `[apps]` is absent. `[apps].deny` extends the protected list; it does
+not replace the built-in entry. Deny rules win over allow rules. If
+`[apps].allow` is non-empty, control-class actions are allowed only for
+matching app ids. For focus, resize, move, launch, and exact-window capture
+requests, the daemon checks the target app id; for keyboard, pointer, and
+semantic control, it checks the active or resolved target app id and fails
+closed if an applicable app id cannot be determined. App-policy failures
+return `kind=app_denied` with a stable reason such as
+`protected_application` or `application_not_allowlisted`. They cannot be
+overridden by an approval grant and must not be retried through a different
+input, accessibility, focus, or capture backend. RemoteDesktop/EIS consent and
+transport setup probes are not application-directed and therefore do not
+consult app policy; every later keyboard or pointer action through the retained
+transport still does.
 
 When `[safety].require_focus_guard = true`, every control-class request must include an active-window guard before the daemon will run backend control. This is the built-in default; set it to `false` only for a tightly scoped local development daemon. Observe, status, policy, and journal requests are unaffected. The guard is still checked against the active window after this presence check.
 

@@ -51,6 +51,7 @@ pub(crate) fn uinput_status() -> Result<UinputStatus> {
 pub(crate) fn status(
     preference: InputBackendPreference,
     stored_session_active: bool,
+    agent_seat_ready: bool,
     xkb_keymap: XkbKeymapStatus,
 ) -> Result<InputBackendStatus> {
     let uinput = uinput_status()?;
@@ -58,8 +59,12 @@ pub(crate) fn status(
     let libei = libei_status();
     let preferred_available_backend =
         preferred_input_backend(&remote_desktop_portal, &libei, uinput.available);
-    let implemented_available_backend =
-        implemented_input_backend(preference, uinput.available, stored_session_active);
+    let implemented_available_backend = implemented_input_backend(
+        preference,
+        uinput.available,
+        stored_session_active,
+        agent_seat_ready,
+    );
     let setup_hint = input_backend_setup_hint(
         preference,
         preferred_available_backend.as_deref(),
@@ -179,6 +184,7 @@ fn implemented_input_backend(
     preference: InputBackendPreference,
     uinput_available: bool,
     stored_session_active: bool,
+    agent_seat_ready: bool,
 ) -> Option<String> {
     match preference {
         InputBackendPreference::Auto | InputBackendPreference::Uinput => {
@@ -188,6 +194,9 @@ fn implemented_input_backend(
             stored_session_active.then(|| "portal_remote_desktop".to_string())
         }
         InputBackendPreference::Libei => stored_session_active.then(|| "libei".to_string()),
+        InputBackendPreference::KwinAgentSeat => {
+            agent_seat_ready.then(|| "kwin_agent_seat".to_string())
+        }
     }
 }
 
@@ -201,6 +210,12 @@ fn input_backend_setup_hint(
     stored_session_active: bool,
 ) -> String {
     match preference {
+        InputBackendPreference::KwinAgentSeat if implemented == Some("kwin_agent_seat") => {
+            return "configured input backend kwin_agent_seat is registered; raw input requires an exact retained interaction session, remains policy-gated and journaled, and does not activate or raise the target window".to_string();
+        }
+        InputBackendPreference::KwinAgentSeat => {
+            return "configured input backend kwin_agent_seat is unavailable; build, install, and enable the version-matched seatgeistagentseat KWin plugin, or select the nested portal/libei lane".to_string();
+        }
         InputBackendPreference::PortalRemoteDesktop => {
             if stored_session_active {
                 return "configured input backend portal_remote_desktop will use the stored RemoteDesktop EIS session after policy, panic-stop, active-window guard, and per-plan readiness checks".to_string();
@@ -359,33 +374,49 @@ mod tests {
             None
         );
         assert_eq!(
-            implemented_input_backend(InputBackendPreference::Auto, true, false).as_deref(),
+            implemented_input_backend(InputBackendPreference::Auto, true, false, false).as_deref(),
             Some("uinput")
         );
         assert_eq!(
-            implemented_input_backend(InputBackendPreference::Uinput, true, false).as_deref(),
-            Some("uinput")
-        );
-        assert_eq!(
-            implemented_input_backend(InputBackendPreference::PortalRemoteDesktop, true, false),
-            None
-        );
-        assert_eq!(
-            implemented_input_backend(InputBackendPreference::Libei, true, false),
-            None
-        );
-        assert_eq!(
-            implemented_input_backend(InputBackendPreference::PortalRemoteDesktop, true, true)
+            implemented_input_backend(InputBackendPreference::Uinput, true, false, false)
                 .as_deref(),
+            Some("uinput")
+        );
+        assert_eq!(
+            implemented_input_backend(
+                InputBackendPreference::PortalRemoteDesktop,
+                true,
+                false,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            implemented_input_backend(InputBackendPreference::Libei, true, false, false),
+            None
+        );
+        assert_eq!(
+            implemented_input_backend(
+                InputBackendPreference::PortalRemoteDesktop,
+                true,
+                true,
+                false,
+            )
+            .as_deref(),
             Some("portal_remote_desktop")
         );
         assert_eq!(
-            implemented_input_backend(InputBackendPreference::Libei, true, true).as_deref(),
+            implemented_input_backend(InputBackendPreference::Libei, true, true, false).as_deref(),
             Some("libei")
         );
         assert_eq!(
-            implemented_input_backend(InputBackendPreference::Auto, false, true),
+            implemented_input_backend(InputBackendPreference::Auto, false, true, false),
             None
+        );
+        assert_eq!(
+            implemented_input_backend(InputBackendPreference::KwinAgentSeat, false, false, true,)
+                .as_deref(),
+            Some("kwin_agent_seat")
         );
     }
 

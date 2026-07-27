@@ -1,9 +1,12 @@
 use anyhow::{Result, bail};
 use libseatgeist::{
-    ActionResult, ClickPointerRequest, DragPointerRequest, KeyComboRequest, MovePointerRequest,
-    PageZoomOperation, PageZoomRequest, ScrollPointerRequest, TypeTextRequest,
+    ActionResult, ClickPointerRequest, CoordinateSpace, DragPointerRequest, KeyComboRequest,
+    MovePointerRequest, PageZoomOperation, PageZoomRequest, Point, ScrollPointerRequest,
+    TypeTextRequest, WindowInfo,
 };
-use seatgeist_backend::{ScreenBackend, WindowBackend};
+use seatgeist_backend::{
+    ScreenBackend, TargetedInputBackend, TargetedInputDelivery, WindowBackend,
+};
 use uuid::Uuid;
 
 use crate::{
@@ -35,6 +38,201 @@ pub(crate) fn type_text(
     })
 }
 
+pub(crate) async fn agent_type_text(
+    request: TypeTextRequest,
+    target: &WindowInfo,
+    backend: &dyn TargetedInputBackend,
+) -> Result<ActionResult> {
+    validate_text(&request.text)?;
+    let chords = {
+        let keymap =
+            seatgeist_eis::XkbKeymap::new_from_names(seatgeist_eis::XkbKeymapNames::us_pc105())
+                .map_err(|error| anyhow::anyhow!(error))?;
+        request
+            .text
+            .chars()
+            .map(|character| {
+                let keysym = seatgeist_eis::unicode_char_to_keysym(character)
+                    .map_err(|error| anyhow::anyhow!(error))?;
+                let stroke = keymap.keystroke_for_keysym(keysym).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "character {character:?} is not available on the agent-seat US keymap"
+                    )
+                })?;
+                Ok(if stroke.shift {
+                    vec![42, stroke.evdev_keycode]
+                } else {
+                    vec![stroke.evdev_keycode]
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+    let char_count = chords.len();
+    let delivery = backend
+        .key_sequence(target, &chords)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    Ok(agent_result(
+        delivery,
+        format!(
+            "typed text length={char_count} target_window={} lane=independent keymap=us",
+            target.id
+        ),
+    ))
+}
+
+pub(crate) async fn agent_key_combo(
+    request: KeyComboRequest,
+    target: &WindowInfo,
+    backend: &dyn TargetedInputBackend,
+) -> Result<ActionResult> {
+    validate_combo(&request.combo)?;
+    let settings = XkbKeymapSettings {
+        model: Some("pc105".to_string()),
+        layout: Some("us".to_string()),
+        options: Some(String::new()),
+        ..XkbKeymapSettings::default()
+    };
+    let codes = crate::eis_key_combo::codes(&request.combo, &settings)?;
+    let key_count = codes.len();
+    let delivery = backend
+        .key_combo(target, &codes)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    Ok(agent_result(
+        delivery,
+        format!(
+            "sent key combo keys={key_count} target_window={} lane=independent",
+            target.id
+        ),
+    ))
+}
+
+pub(crate) async fn agent_move_pointer(
+    request: MovePointerRequest,
+    target: &WindowInfo,
+    backend: &dyn TargetedInputBackend,
+) -> Result<ActionResult> {
+    validate_agent_point(target, request.point)?;
+    let point = request.point;
+    let delivery = backend
+        .move_pointer(target, point)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    Ok(agent_result(
+        delivery,
+        format!(
+            "moved pointer x={:.0} y={:.0} space=WindowLocal target_window={} lane=independent",
+            point.x, point.y, target.id
+        ),
+    ))
+}
+
+pub(crate) async fn agent_click_pointer(
+    request: ClickPointerRequest,
+    target: &WindowInfo,
+    backend: &dyn TargetedInputBackend,
+) -> Result<ActionResult> {
+    validate_clicks(request.clicks)?;
+    validate_agent_point(target, request.point)?;
+    let point = request.point;
+    let delivery = backend
+        .click(target, point, request.button, request.clicks)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    Ok(agent_result(
+        delivery,
+        format!(
+            "clicked pointer button={:?} clicks={} x={:.0} y={:.0} space=WindowLocal target_window={} lane=independent",
+            request.button, request.clicks, point.x, point.y, target.id
+        ),
+    ))
+}
+
+pub(crate) async fn agent_drag_pointer(
+    request: DragPointerRequest,
+    target: &WindowInfo,
+    backend: &dyn TargetedInputBackend,
+) -> Result<ActionResult> {
+    validate_drag(request.duration_ms, request.from.space, request.to.space)?;
+    validate_agent_point(target, request.from)?;
+    validate_agent_point(target, request.to)?;
+    let delivery = backend
+        .drag(target, request.from, request.to, request.button)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    Ok(agent_result(
+        delivery,
+        format!(
+            "dragged pointer button={:?} from={:.0},{:.0} to={:.0},{:.0} duration_ms={} space=WindowLocal target_window={} lane=independent",
+            request.button,
+            request.from.x,
+            request.from.y,
+            request.to.x,
+            request.to.y,
+            request.duration_ms,
+            target.id
+        ),
+    ))
+}
+
+pub(crate) async fn agent_scroll_pointer(
+    request: ScrollPointerRequest,
+    target: &WindowInfo,
+    backend: &dyn TargetedInputBackend,
+) -> Result<ActionResult> {
+    validate_scroll(request.vertical, request.horizontal)?;
+    let delivery = backend
+        .scroll(target, request.vertical, request.horizontal)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    Ok(agent_result(
+        delivery,
+        format!(
+            "scrolled pointer vertical={} horizontal={} target_window={} lane=independent",
+            request.vertical, request.horizontal, target.id
+        ),
+    ))
+}
+
+fn agent_result(delivery: TargetedInputDelivery, message: String) -> ActionResult {
+    ActionResult {
+        id: delivery.action_id,
+        ok: true,
+        observation: None,
+        screenshot: None,
+        message: Some(format!("{message} backend={}", delivery.backend)),
+    }
+}
+
+fn validate_agent_point(target: &WindowInfo, point: Point) -> Result<()> {
+    if point.space != CoordinateSpace::WindowLocal {
+        bail!("kwin_agent_seat requires window_local pointer coordinates");
+    }
+    if !point.x.is_finite() || !point.y.is_finite() {
+        bail!("agent-seat pointer coordinates must be finite");
+    }
+    let geometry = target
+        .geometry
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("agent-seat target has no window geometry"))?;
+    if point.x < 0.0
+        || point.y < 0.0
+        || point.x >= f64::from(geometry.width)
+        || point.y >= f64::from(geometry.height)
+    {
+        bail!(
+            "window_local pointer coordinate {},{} is outside target window {} {}x{}",
+            point.x,
+            point.y,
+            target.id,
+            geometry.width,
+            geometry.height
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn key_combo(
     request: KeyComboRequest,
     input_backend_preference: InputBackendPreference,
@@ -46,9 +244,9 @@ pub(crate) fn key_combo(
         InputBackendPreference::PortalRemoteDesktop | InputBackendPreference::Libei => {
             crate::keymap::resolve(xkb_keymap_config).settings
         }
-        InputBackendPreference::Auto | InputBackendPreference::Uinput => {
-            XkbKeymapSettings::default()
-        }
+        InputBackendPreference::Auto
+        | InputBackendPreference::KwinAgentSeat
+        | InputBackendPreference::Uinput => XkbKeymapSettings::default(),
     };
     let mut backend = input_execution::backend_with_store(
         input_backend_preference,
@@ -95,9 +293,9 @@ pub(crate) async fn page_zoom(
         InputBackendPreference::PortalRemoteDesktop | InputBackendPreference::Libei => {
             crate::keymap::resolve(xkb_keymap_config).settings
         }
-        InputBackendPreference::Auto | InputBackendPreference::Uinput => {
-            XkbKeymapSettings::default()
-        }
+        InputBackendPreference::Auto
+        | InputBackendPreference::KwinAgentSeat
+        | InputBackendPreference::Uinput => XkbKeymapSettings::default(),
     };
     let mut backend = input_execution::backend_with_store(
         input_backend_preference,

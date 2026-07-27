@@ -9,9 +9,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 use libseatgeist::{
     AccessibilityTextAttributesRequest, BackendCapability, CapabilitySet, ClipboardGetRequest,
-    DaemonRequest, DaemonResponse, DesktopSessionStatus, HealthStatus, JournalEntry,
-    PanicStopStatus, PolicyStatus, RemoteDesktopEisSessionStatus, RemoteDesktopSessionProbeRequest,
-    ReplayTrace, SafetyStatus, ToolApprovalLevel, TraceJsonExpectation, TraceStep, TypeTextRequest,
+    DaemonRequest, DaemonResponse, DesktopSessionStatus, JournalEntry, PanicStopStatus,
+    PolicyStatus, RemoteDesktopEisSessionStatus, RemoteDesktopSessionProbeRequest, ReplayTrace,
+    SafetyStatus, ToolApprovalLevel, TraceJsonExpectation, TraceStep, TypeTextRequest,
     UinputStatus,
 };
 use std::os::unix::fs::PermissionsExt;
@@ -153,15 +153,16 @@ impl Drop for DaemonFixture {
 fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
     let daemon = DaemonFixture::start()?;
 
-    let health = daemon.cli_json(&["doctor"])?;
-    assert_eq!(
-        health,
-        DaemonResponse::Health(HealthStatus {
-            service: "seatgeistd".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            status: "ok".to_string(),
-        })
-    );
+    let DaemonResponse::Health(health) = daemon.cli_json(&["doctor"])? else {
+        bail!("doctor did not return health");
+    };
+    assert_eq!(health.service, "seatgeistd");
+    assert_eq!(health.version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(health.status, "ok");
+    assert_eq!(health.protocol_version.as_deref(), Some("1"));
+    assert!(health.run_id.is_some());
+    assert!(health.binary_sha256.is_some());
+    assert!(health.config_fingerprint.is_some());
 
     let capabilities = daemon.cli_json(&["capabilities"])?;
     let DaemonResponse::Capabilities(CapabilitySet { capabilities }) = capabilities else {
@@ -326,12 +327,20 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
         ],
     );
     assert!(entries.iter().all(|entry| entry.ok));
-    assert!(entries.iter().all(|entry| {
-        entry
-            .client
-            .as_ref()
-            .and_then(|client| client.tool.as_deref())
-            == Some("seatgeist-cli")
+    assert!(
+        entries
+            .iter()
+            .filter(|entry| entry.method != "daemon_start")
+            .all(|entry| {
+                entry
+                    .client
+                    .as_ref()
+                    .and_then(|client| client.tool.as_deref())
+                    == Some("seatgeist-cli")
+            })
+    );
+    assert!(entries.iter().any(|entry| {
+        entry.method == "daemon_start" && entry.run_id.is_some() && entry.build_id.is_some()
     }));
     Ok(())
 }

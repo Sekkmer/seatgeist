@@ -133,6 +133,12 @@ not silently open a chooser. A caller can still explicitly request portal
 ScreenCast by omitting the exact window id, or request monitor/virtual-output
 capture. Those portal sources remain chooser-authoritative.
 
+Exact-window resolution preserves app-policy failures as
+`kind=app_denied` with a stable reason such as `protected_application`; it does
+not relabel the denial as `target_lost`. Callers must stop rather than retry the
+same protected application through a portal chooser or another capture/control
+backend.
+
 Backend fallback rules:
 
 1. Prefer KWin ScreenShot2 for an exact policy-checked window UUID.

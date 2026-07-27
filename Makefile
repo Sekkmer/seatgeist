@@ -1,8 +1,8 @@
 SHELL := /usr/bin/bash
 .ONESHELL:
 
-.PHONY: fmt check test clippy check-kwin-activity-plugin validate-kwin-bridge validate-plugin validate-install-assets validate-release validate-computer-use-baseline verify-cooperative-use-acceptance package-release verify-release-artifacts verify-release-install sign-release-artifacts verify-release-signatures write-release-evidence verify-release-evidence check-public-name check-local-codex-install release-readiness release-external-preflight release-live-evals portal-screenshot-v3-status deploy-user-daemon validate-traces verify smoke smoke-codex-plugin-install smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-human-input-pause smoke-trace-replay smoke-gui-input smoke-mcp gui-eval gui-eval-status gui-eval-session-preflight gui-eval-observe gui-eval-a11y-quality-status gui-eval-a11y-focused-tree gui-eval-a11y-find gui-eval-a11y-text-attributes gui-eval-a11y-control-denied gui-eval-semantic-denied gui-eval-input-denied gui-eval-clipboard-status gui-eval-clipboard-denied gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-screenshot-preview gui-eval-screenshot-coordinate-map gui-eval-screenshot-config-bounds gui-eval-journal-artifacts gui-eval-full-resolution-denied gui-eval-control-safety gui-eval-text-editor-input gui-eval-kcalc-visual gui-eval-firefox-localhost-button gui-eval-portal-screenshot gui-eval-remote-desktop-probe gui-eval-remote-desktop-eis-session install-kwin-script
-.PHONY: kwin-activity-preflight install-kwin-activity-user uninstall-kwin-activity-user probe-nested-kde-multi-output probe-nested-seatgeist probe-nested-remote-desktop probe-nested-retained-apps gui-eval-nested-retained-capture gui-eval-nested-eis-isolation gui-eval-cooperative-sticky gui-eval-retained-capture gui-eval-capture-restore-prepare gui-eval-capture-restore-resume gui-eval-capture-revocation gui-eval-target-reopen gui-eval-background-semantic
+.PHONY: fmt check test clippy check-kwin-activity-plugin check-kwin-agent-seat-plugin validate-kwin-bridge validate-plugin validate-install-assets validate-release validate-computer-use-baseline verify-cooperative-use-acceptance package-release verify-release-artifacts verify-release-install sign-release-artifacts verify-release-signatures write-release-evidence verify-release-evidence check-public-name check-local-codex-install release-readiness release-external-preflight release-live-evals portal-screenshot-v3-status deploy-user-daemon validate-traces verify smoke smoke-codex-plugin-install smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-human-input-pause smoke-trace-replay smoke-gui-input smoke-mcp gui-eval gui-eval-status gui-eval-session-preflight gui-eval-observe gui-eval-a11y-quality-status gui-eval-a11y-focused-tree gui-eval-a11y-find gui-eval-a11y-text-attributes gui-eval-a11y-control-denied gui-eval-semantic-denied gui-eval-input-denied gui-eval-clipboard-status gui-eval-clipboard-denied gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-screenshot-preview gui-eval-screenshot-coordinate-map gui-eval-screenshot-config-bounds gui-eval-journal-artifacts gui-eval-full-resolution-denied gui-eval-control-safety gui-eval-text-editor-input gui-eval-kcalc-visual gui-eval-firefox-localhost-button gui-eval-portal-screenshot gui-eval-remote-desktop-probe gui-eval-remote-desktop-eis-session install-kwin-script
+.PHONY: kwin-activity-preflight install-kwin-activity-user uninstall-kwin-activity-user install-kwin-agent-seat-user uninstall-kwin-agent-seat-user install-kdeconnect-kwin-recovery-user uninstall-kdeconnect-kwin-recovery-user probe-nested-kde-multi-output probe-nested-seatgeist probe-nested-remote-desktop probe-nested-retained-apps gui-eval-nested-retained-capture gui-eval-nested-eis-isolation gui-eval-cooperative-sticky gui-eval-retained-capture gui-eval-capture-restore-prepare gui-eval-capture-restore-resume gui-eval-capture-revocation gui-eval-target-reopen gui-eval-background-semantic
 .PHONY: refresh-local-codex-plugin
 
 fmt:
@@ -12,7 +12,7 @@ check:
 	cargo check --workspace --all-targets
 
 test:
-	cargo test --workspace
+	cargo test --workspace -- --test-threads=1
 
 clippy:
 	cargo clippy --workspace --all-targets -- -D warnings
@@ -21,6 +21,11 @@ check-kwin-activity-plugin:
 	set -euo pipefail
 	cmake -S kwin/seatgeist-activity -B target/kwin-seatgeist-activity -DCMAKE_BUILD_TYPE=RelWithDebInfo
 	cmake --build target/kwin-seatgeist-activity --parallel
+
+check-kwin-agent-seat-plugin:
+	set -euo pipefail
+	cmake -S kwin/seatgeist-agent-seat -B target/kwin-seatgeist-agent-seat -DCMAKE_BUILD_TYPE=RelWithDebInfo
+	cmake --build target/kwin-seatgeist-agent-seat --parallel
 
 validate-kwin-bridge:
 	set -euo pipefail
@@ -47,6 +52,7 @@ validate-computer-use-baseline: validate-kwin-bridge
 	scripts/test-kwin-activity-preflight.py
 	scripts/test-kwin-activity-abi-watch.py
 	scripts/test-install-kwin-activity-user.py
+	scripts/test-install-kdeconnect-kwin-recovery.py
 	scripts/test-cooperative-sticky-eval.py
 	scripts/test-retained-capture-eval.py
 	scripts/test-capture-restore-eval.py
@@ -102,6 +108,18 @@ install-kwin-activity-user: check-kwin-activity-plugin
 
 uninstall-kwin-activity-user:
 	scripts/install-kwin-activity-user.py --remove
+
+install-kwin-agent-seat-user: check-kwin-agent-seat-plugin
+	scripts/install-kwin-agent-seat-user.py
+
+uninstall-kwin-agent-seat-user:
+	scripts/install-kwin-agent-seat-user.py --remove
+
+install-kdeconnect-kwin-recovery-user:
+	scripts/install-kdeconnect-kwin-recovery.py
+
+uninstall-kdeconnect-kwin-recovery-user:
+	scripts/install-kdeconnect-kwin-recovery.py --remove
 
 probe-nested-kde-multi-output:
 	scripts/nested-kde-fixture.py
@@ -243,7 +261,7 @@ validate-traces:
 	cargo build -p seatgeist-cli
 	target/debug/seatgeist-cli trace validate --dir examples/traces >/dev/null
 
-verify: fmt check test clippy check-kwin-activity-plugin validate-plugin validate-install-assets validate-release validate-computer-use-baseline validate-traces smoke smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-human-input-pause smoke-trace-replay smoke-mcp gui-eval-status gui-eval-session-preflight gui-eval-observe gui-eval-a11y-quality-status gui-eval-a11y-focused-tree gui-eval-a11y-find gui-eval-a11y-text-attributes gui-eval-a11y-control-denied gui-eval-semantic-denied gui-eval-input-denied gui-eval-clipboard-status gui-eval-clipboard-denied gui-eval-full-resolution-denied gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-control-safety
+verify: fmt check test clippy check-kwin-activity-plugin check-kwin-agent-seat-plugin validate-plugin validate-install-assets validate-release validate-computer-use-baseline validate-traces smoke smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-human-input-pause smoke-trace-replay smoke-mcp gui-eval-status gui-eval-session-preflight gui-eval-observe gui-eval-a11y-quality-status gui-eval-a11y-focused-tree gui-eval-a11y-find gui-eval-a11y-text-attributes gui-eval-a11y-control-denied gui-eval-semantic-denied gui-eval-input-denied gui-eval-clipboard-status gui-eval-clipboard-denied gui-eval-full-resolution-denied gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-control-safety
 	git diff --check -- . ':(exclude)target'
 
 smoke:
@@ -550,7 +568,7 @@ smoke-uinput-status:
 	target/debug/seatgeist-cli --socket "$$socket" input status >"$$out"
 	jq -e '.type == "uinput_status" and (.data.available | type == "boolean") and (.data.setup_hint | type == "string")' "$$out" >/dev/null
 	target/debug/seatgeist-cli --socket "$$socket" input backends >"$$out"
-	jq -e '.type == "input_backend_status" and (.data.uinput_available | type == "boolean") and ((.data.implemented_available_backend == null) or (.data.implemented_available_backend == "uinput")) and (.data.remote_desktop_portal.setup_hint | type == "string") and (.data.libei.setup_hint | type == "string") and (.data.eis_keymap.source | type == "string") and (.data.eis_keymap.setup_hint | type == "string")' "$$out" >/dev/null
+	jq -e '.type == "input_backend_status" and (.data.uinput_available | type == "boolean") and ((.data.implemented_available_backend == null) or (.data.implemented_available_backend == "uinput") or (.data.implemented_available_backend == "kwin_agent_seat")) and (.data.remote_desktop_portal.setup_hint | type == "string") and (.data.libei.setup_hint | type == "string") and (.data.eis_keymap.source | type == "string") and (.data.eis_keymap.setup_hint | type == "string")' "$$out" >/dev/null
 	target/debug/seatgeist-cli --socket "$$socket" journal tail --limit 10 | grep -q "uinput_status"
 	target/debug/seatgeist-cli --socket "$$socket" journal tail --limit 10 | grep -q "input_backend_status"
 
@@ -655,7 +673,7 @@ smoke-human-input-pause:
 		exit 1
 	fi
 	grep -q "human input activity is fresh" "$$denied_out"
-	target/debug/seatgeist-cli --socket "$$socket" journal tail --limit 10 --method focus_window --ok false | jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .summary == "error kind=human_input_pause")' >/dev/null
+	target/debug/seatgeist-cli --socket "$$socket" journal tail --limit 10 --method focus_window --ok false | jq -e '.type == "journal" and (.data | length) >= 1 and all(.data[]; .summary | startswith("error kind=human_input_pause"))' >/dev/null
 
 smoke-trace-replay:
 	set -euo pipefail

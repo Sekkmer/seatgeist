@@ -16,6 +16,7 @@ pub(crate) const DEFAULT_HUMAN_INPUT_QUIET_MS: u64 = 1500;
 pub(crate) const DEFAULT_CONTROL_RATE_LIMIT_PER_MINUTE: u32 = 120;
 pub(crate) const DEFAULT_PREVIEW_MAX_EDGE: u32 = 1600;
 pub(crate) const DEFAULT_TILE_MAX_EDGE: u32 = 1600;
+pub(crate) const DEFAULT_PROTECTED_APP_IDS: &[&str] = &["org.keepassxc.KeePassXC"];
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct JournalSettings {
@@ -60,6 +61,7 @@ pub(crate) struct BackendFileConfig {
 pub(crate) enum InputBackendPreference {
     #[default]
     Auto,
+    KwinAgentSeat,
     PortalRemoteDesktop,
     Libei,
     Uinput,
@@ -69,6 +71,7 @@ impl InputBackendPreference {
     pub(crate) fn status_name(self) -> &'static str {
         match self {
             Self::Auto => "auto",
+            Self::KwinAgentSeat => "kwin_agent_seat",
             Self::PortalRemoteDesktop => "portal_remote_desktop",
             Self::Libei => "libei",
             Self::Uinput => "uinput",
@@ -253,12 +256,22 @@ pub(crate) fn policy_config(
 }
 
 pub(crate) fn app_policy(file_apps: Option<&AppsFileConfig>) -> AppPolicy {
-    let Some(file_apps) = file_apps else {
-        return AppPolicy::default();
-    };
+    let configured_deny = file_apps
+        .and_then(|apps| apps.deny.as_deref())
+        .unwrap_or(&[]);
+    let mut deny = DEFAULT_PROTECTED_APP_IDS
+        .iter()
+        .map(|app_id| (*app_id).to_string())
+        .collect::<Vec<_>>();
+    deny.extend(configured_deny.iter().cloned());
+
     AppPolicy {
-        allow: normalize_app_policy_list(file_apps.allow.as_deref().unwrap_or(&[])),
-        deny: normalize_app_policy_list(file_apps.deny.as_deref().unwrap_or(&[])),
+        allow: normalize_app_policy_list(
+            file_apps
+                .and_then(|apps| apps.allow.as_deref())
+                .unwrap_or(&[]),
+        ),
+        deny: normalize_app_policy_list(&deny),
     }
 }
 

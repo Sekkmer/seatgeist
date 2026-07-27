@@ -2051,8 +2051,15 @@ fn active_window_guard(
 fn print_daemon_response(socket: &PathBuf, request: DaemonRequest) -> Result<()> {
     let response = send_request(socket, request)?;
     match response {
-        DaemonResponse::Error { kind, message } => {
-            bail!("daemon returned {kind:?} error: {message}")
+        DaemonResponse::Error {
+            kind,
+            reason_code,
+            message,
+        } => {
+            bail!(
+                "daemon returned {kind:?} error reason={}: {message}",
+                reason_code.as_deref().unwrap_or("unspecified")
+            )
         }
         response => write_stdout_line(&serde_json::to_string_pretty(&response)?)?,
     }

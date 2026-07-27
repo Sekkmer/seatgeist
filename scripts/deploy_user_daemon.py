@@ -42,6 +42,7 @@ def run(
     *,
     cwd: Path,
     check: bool = True,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(
         args,
@@ -49,6 +50,7 @@ def run(
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=env,
         check=False,
     )
     if check and completed.returncode != 0:
@@ -100,9 +102,19 @@ def build_artifacts(config: Config) -> None:
     if config.skip_build:
         return
     run([config.cargo, "build", "-p", "seatgeist-cli"], cwd=config.root)
+    build_env = os.environ.copy()
+    build_env["SEATGEIST_BUILD_UNIX_MS"] = str(time.time_ns() // 1_000_000)
+    git = run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=config.root,
+        check=False,
+    )
+    if git.returncode == 0 and git.stdout.strip():
+        build_env["SEATGEIST_GIT_SHA"] = git.stdout.strip()
     run(
         [config.cargo, "build", "--release", "-p", "seatgeistd"],
         cwd=config.root,
+        env=build_env,
     )
 
 
@@ -147,13 +159,12 @@ def wait_until(config: Config, probe, description: str) -> tuple[Any, int]:
         time.sleep(config.poll_ms / 1000)
 
 
-def wait_for_daemon(config: Config) -> int:
+def wait_for_daemon(config: Config) -> tuple[dict[str, Any], int]:
     def probe() -> dict[str, Any] | None:
         response = cli_json(config, ["doctor"])
         return response if response.get("type") == "health" else None
 
-    _, attempts = wait_until(config, probe, "daemon request readiness")
-    return attempts
+    return wait_until(config, probe, "daemon request readiness")
 
 
 def bridge_ready(response: dict[str, Any]) -> bool:
@@ -227,6 +238,25 @@ def verify_hashes(config: Config, pid: int) -> str:
     return hashes["release"]
 
 
+def verify_health_provenance(health: dict[str, Any], digest: str) -> dict[str, Any]:
+    data = health.get("data")
+    if not isinstance(data, dict):
+        raise DeploymentError("health response is missing provenance data")
+    if data.get("binary_sha256") != digest:
+        raise DeploymentError(
+            "health binary fingerprint does not match deployed daemon: "
+            f"reported={data.get('binary_sha256')!r}, expected={digest}"
+        )
+    if data.get("protocol_version") != "1":
+        raise DeploymentError(
+            f"health reported unsupported protocol version {data.get('protocol_version')!r}"
+        )
+    for field in ("run_id", "config_fingerprint"):
+        if not isinstance(data.get(field), str) or not data[field]:
+            raise DeploymentError(f"health response is missing {field}")
+    return data
+
+
 def deploy(config: Config) -> dict[str, Any]:
     build_artifacts(config)
     if not config.cli.is_file():
@@ -235,10 +265,11 @@ def deploy(config: Config) -> dict[str, Any]:
     atomic_install(config.release_binary, config.install_path)
     ensure_retained_sessions_idle(config, "daemon restart")
     restart_service(config)
-    daemon_attempts = wait_for_daemon(config)
+    health, daemon_attempts = wait_for_daemon(config)
     bridge, bridge_attempts = wait_for_bridge(config)
     pid = service_pid(config)
     digest = verify_hashes(config, pid)
+    health_data = verify_health_provenance(health, digest)
     ensure_retained_sessions_idle(config, "post-deployment verification")
     return {
         "type": "seatgeist_user_daemon_deployment",
@@ -247,6 +278,9 @@ def deploy(config: Config) -> dict[str, Any]:
         "service": config.service,
         "pid": pid,
         "sha256": digest,
+        "run_id": health_data["run_id"],
+        "git_sha": health_data.get("git_sha"),
+        "config_fingerprint": health_data["config_fingerprint"],
         "daemon_readiness_attempts": daemon_attempts,
         "bridge_readiness_attempts": bridge_attempts,
         "window_count": bridge["data"]["window_count"],

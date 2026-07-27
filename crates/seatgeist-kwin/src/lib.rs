@@ -246,7 +246,9 @@ pub fn parse_get_window_info(literal: &str) -> KwinWindowInfo {
 fn parse_variant_string(literal: &str, key: &str) -> Option<String> {
     let needle = format!("\"{key}\" = [Variant(QString): ");
     let start = literal.find(&needle)?;
-    parse_quoted(&literal[start + needle.len()..]).map(|(value, _)| value)
+    parse_quoted(&literal[start + needle.len()..])
+        .map(|(value, _)| value)
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn parse_variant_f64(literal: &str, key: &str) -> Option<f64> {
@@ -497,6 +499,19 @@ Compositing
         assert_eq!(geometry.width, 2087);
         assert_eq!(geometry.height, 2173);
         assert_eq!(geometry.space, CoordinateSpace::LogicalPixel);
+    }
+
+    #[test]
+    fn ignores_blank_desktop_file_so_resource_class_can_identify_xwayland_window() {
+        let literal = r#"[Argument: a{sv} {"caption" = [Variant(QString): "Firestorm - Sekkmer"], "desktopFile" = [Variant(QString): ""], "pid" = [Variant(int): 2968721], "resourceClass" = [Variant(QString): "do-not-directly-run-firestorm-bin"]}]"#;
+
+        let info = parse_get_window_info(literal);
+        assert_eq!(info.desktop_file, None);
+        assert_eq!(
+            info.resource_class.as_deref(),
+            Some("do-not-directly-run-firestorm-bin")
+        );
+        assert_eq!(info.pid, Some(2968721));
     }
 
     #[test]

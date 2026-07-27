@@ -109,6 +109,9 @@ seatgeist-cli policy-status
 ```
 
 The socket unit uses mode `0600` and directory mode `0700`. Keep the daemon running as the desktop user. Do not run it as root for ordinary operation.
+The service limits starts to five per five minutes and uses stepped restart
+backoff from 2 to 30 seconds, so a persistent startup fault cannot create an
+unbounded one-second failure loop.
 
 ### Safe daemon update
 
@@ -118,6 +121,12 @@ copying and restarting the daemon by hand:
 ```bash
 make deploy-user-daemon
 ```
+
+The deployment build embeds source/build provenance, atomically replaces the
+user binary, restarts only `seatgeistd.service`, and verifies that health
+reports protocol version `1`, a fresh run id, a config fingerprint, and the
+same executable SHA-256 as the deployed file. It does not restart KWin or the
+Plasma session.
 
 The deployment helper builds the current CLI and release daemon, refuses to
 restart while a retained capture or RemoteDesktop EIS session is active,
@@ -163,6 +172,32 @@ it reports that loading was deferred, log into the target KDE session and run
 the target again, or let the enabled script load at the next session start.
 
 Before the script publishes its first active-window update, active-window reads can report the documented bridge-not-yet-reporting state. The script republishes its current snapshot every two seconds, so a daemon-only restart should recover without focusing a window. If it remains empty, update/reload the installed script with `make install-kwin-script`, then re-check status.
+
+### KDE Connect recovery after KWin restarts
+
+KDE Connect receives remote mouse and keyboard packets through a
+portal-mediated RemoteDesktop/EIS session owned by KWin. A `kdeconnectd`
+process that survives a compositor restart can retain a dead session and stop
+processing device traffic. Install the user-scoped recovery integration with:
+
+```bash
+make install-kdeconnect-kwin-recovery-user
+```
+
+The installer routes KDE Connect D-Bus activation into its generated,
+systemd-managed autostart unit, orders that unit after KWin and the KDE portal,
+and installs an asynchronous KWin `ExecStartPost` hook. After a future KWin
+start, the hook restarts only an already-active KDE Connect service and asks it
+to refresh network links. Initial login does not start KDE Connect early, and
+the installer never restarts KWin.
+
+Installation restarts the existing `kdeconnectd` once so it moves out of an
+unmanaged transient D-Bus scope. Existing pairing and the KDE portal's stored
+remote-desktop permission are preserved. Remove the integration with:
+
+```bash
+make uninstall-kdeconnect-kwin-recovery-user
+```
 
 ## Backend Diagnostics
 
@@ -256,5 +291,10 @@ Use journal filters to distinguish policy denials from backend failures:
 seatgeist-cli journal tail --limit 20
 seatgeist-cli journal tail --method focus_window --ok false
 ```
+
+Health and journal output include run/build correlation. Structured errors
+also include `reason_code`; for example, a KeePassXC target is
+`kind=app_denied reason=protected_application`, which is a terminal policy
+decision rather than a signal to try another backend.
 
 If capture fails, check `seatgeist-cli capture-backends` first. If input fails, check `seatgeist-cli input backends` and `seatgeist-cli input status` before changing udev, groups, or services.

@@ -8,6 +8,29 @@ Unsupported paths: `docs/unsupported-paths.md` records what the current KDE-firs
 
 Naming: the public project name is `Seatgeist`. Binaries, crates, service names, plugin config, runtime paths, and MCP tools now use the `seatgeist-*` / `seatgeist.*` identity.
 
+## 2026-07-27 operational hardening
+
+- Focus dispatch is no longer reported as success unless the requested window is
+  observed as active. A timed-out default focus settlement returns a failed
+  action to CLI/MCP callers and is journaled as failed.
+- AT-SPI readiness now connects to the advertised accessibility bus and probes
+  the Registry root instead of treating a published but stale socket address as
+  available. External diagnostic commands have all standard streams detached,
+  preventing expected probe failures from polluting daemon logs.
+- Health responses expose protocol version, daemon run id, build timestamp and
+  source/hash provenance, plus an effective-config fingerprint. Deployment
+  verifies the running executable hash after restart. Journal entries carry the
+  run/build ids and include daemon start/stop lifecycle records.
+- Errors include a stable `reason_code` in addition to their broad `kind`.
+  KeePassXC is a built-in protected application, configured deny entries extend
+  that list, and app-policy failures remain `app_denied` across focus,
+  keyboard, pointer, accessibility, and exact capture targeting. MCP renders
+  these as explicit non-retryable policy denials.
+- MCP removes timestamped runtime screenshots after successfully embedding
+  their image bytes. Explicit output paths and metadata-only requests remain
+  persistent. The user service uses bounded restart bursts and stepped backoff
+  instead of an unbounded one-second restart loop.
+
 ## 2026-07-18 agentic hardening
 
 - The installed Codex plugin defaults to the six-tool core MCP profile. The local-install checker hashes the full source and installed trees, and the refresh target uses the plugin cachebuster helper before reinstalling, so a stale cached skill or tool contract fails explicitly.
@@ -43,6 +66,7 @@ Phase 1 first slice is implemented:
 - `seatgeist-cli active-window` reads the daemon's latest KWin script bridge update. Before the script reports its first update, the command still fails with the documented bridge requirement because KWin's interactive `queryWindowInfo` is not suitable for unattended active-window checks.
 - `make smoke-windows` validates window listing in a host KDE session and accepts either a real active-window bridge response or the documented bridge-not-yet-reporting failure.
 - `make install-kwin-script` is available as an explicit, opt-in KWin configuration mutation for installing/enabling the script. Its modular installer now performs a targeted unload/load/run of only `seatgeist-bridge` when live KWin scripting is available, ensuring package updates replace the running JavaScript; outside KDE it defers loading to the next session. Fake-command tests cover both paths.
+- `make install-kdeconnect-kwin-recovery-user` installs a user-scoped lifecycle bridge for KDE Connect remote input. It routes D-Bus activation into the generated managed autostart unit, orders it after KWin and the KDE portal, and asynchronously restarts only an already-active KDE Connect daemon after future KWin starts so stale RemoteDesktop/EIS sessions cannot survive a compositor generation change. The installer test validates install/remove assets without touching the live desktop.
 - The KWin script was installed on this workstation and a host smoke observed a real active window with app id, pid when published by the bridge, logical geometry, and derived monitor association through the daemon bridge.
 - The daemon writes compact JSONL journal entries for every handled request. Entries include method, success, optional explicit client tool identity from current CLI/MCP request envelopes, optional best-effort client pid/process-name metadata from Unix peer credentials, safety class, guard presence, summary, best-effort active-window before/after context for control-class requests, and optional structured control metadata with action id, policy result, backend provenance, and redacted requested-target fields. The journal records lengths, coordinates, offsets, node ids, and backend hints where useful, but not typed text, replacement text, clipboard contents, screenshots, or semantic target names. Screenshot-bearing entries can include opt-in artifact path, byte-count, and SHA-256 metadata when `[journal].include_artifact_metadata = true`; this is off by default and never stores image payloads in the journal. `seatgeist-cli journal tail --limit N` reads recent entries through the daemon, and smoke tests verify restrictive journal file permissions.
 - Daemon requests now pass through the policy engine before execution. Current observe/status requests are allowed by default; prompt-level requests fail closed unless a configured approval file contains a matching unexpired method/safety-class grant.

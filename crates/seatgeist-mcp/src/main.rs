@@ -1,5 +1,5 @@
 use std::{
-    fs::OpenOptions,
+    fs::{self, OpenOptions},
     io::{self, BufRead, BufReader, Read, Write},
     os::unix::fs::OpenOptionsExt,
     os::unix::net::UnixStream,
@@ -32,7 +32,8 @@ use libseatgeist::{
     ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
     SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, TargetWindowGuard,
     ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest, WindowActivationMode,
-    WindowPlacementAnchor, default_screenshot_output_path, default_socket_path,
+    WindowPlacementAnchor, default_screenshot_dir_path, default_screenshot_output_path,
+    default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -850,14 +851,19 @@ fn tool_result_from_daemon(
             }
         })
     });
-    let is_error = matches!(response, DaemonResponse::Error { .. });
+    let is_error = !response.ok();
     let mut content = vec![json!({
         "type": "text",
         "text": compact_tool_text(tool_name, response)
     })];
     if attach_image && !is_error {
         match screenshot_info_from_response(response).and_then(mcp_png_image_content) {
-            Ok(image) => content.push(image),
+            Ok(image) => {
+                content.push(image);
+                if let Ok(info) = screenshot_info_from_response(response) {
+                    remove_ephemeral_mcp_attachment(info);
+                }
+            }
             Err(err) => content.push(json!({
                 "type": "text",
                 "text": format!("image attachment omitted: {err}")
@@ -1053,10 +1059,65 @@ fn mcp_png_image_content(info: &ScreenshotInfo) -> Result<Value> {
     }))
 }
 
+fn remove_ephemeral_mcp_attachment(info: &ScreenshotInfo) {
+    let Ok(default_dir) = default_screenshot_dir_path() else {
+        return;
+    };
+    let _ = remove_ephemeral_mcp_attachment_from(info, &default_dir);
+}
+
+fn remove_ephemeral_mcp_attachment_from(
+    info: &ScreenshotInfo,
+    default_dir: &std::path::Path,
+) -> io::Result<bool> {
+    if !is_auto_runtime_screenshot(&info.path, default_dir) {
+        return Ok(false);
+    }
+    fs::remove_file(&info.path)?;
+    Ok(true)
+}
+
+fn is_auto_runtime_screenshot(path: &std::path::Path, default_dir: &std::path::Path) -> bool {
+    if path.parent() != Some(default_dir) {
+        return false;
+    }
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some((timestamp, kind)) = file_name.split_once('-') else {
+        return false;
+    };
+    !timestamp.is_empty()
+        && timestamp.bytes().all(|byte| byte.is_ascii_digit())
+        && kind.ends_with(".png")
+        && kind.len() > ".png".len()
+}
+
 fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
     match response {
         DaemonResponse::Health(status) => {
-            format!("{} {} ({})", status.service, status.status, status.version)
+            let build = status
+                .git_sha
+                .clone()
+                .or_else(|| {
+                    status
+                        .binary_sha256
+                        .as_deref()
+                        .map(|digest| digest.chars().take(12).collect())
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+            format!(
+                "{} {} ({}) protocol={} run={} build={}",
+                status.service,
+                status.status,
+                status.version,
+                status.protocol_version.as_deref().unwrap_or("unknown"),
+                status
+                    .run_id
+                    .map(|run_id| run_id.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                build
+            )
         }
         DaemonResponse::Capabilities(capabilities) => {
             format!("{} capabilities", capabilities.capabilities.len())
@@ -1425,7 +1486,22 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
                 None => format!("{message} dispatch=accepted confirmation=not_requested"),
             }
         }
-        DaemonResponse::Error { kind, message } => format!("error kind={kind:?}: {message}"),
+        DaemonResponse::Error {
+            kind,
+            reason_code,
+            message,
+        } => {
+            let reason = reason_code.as_deref().unwrap_or("unspecified");
+            if *kind == libseatgeist::ErrorKind::AppDenied {
+                format!(
+                    "POLICY DENIED kind={kind:?} reason={reason}. Stop; do not retry this \
+                     application through focus, keyboard, pointer, accessibility, capture \
+                     targeting, or another backend. {message}"
+                )
+            } else {
+                format!("error kind={kind:?} reason={reason}: {message}")
+            }
+        }
     }
 }
 
@@ -3562,6 +3638,31 @@ mod tests {
         assert_eq!(result["content"][1]["mimeType"], "image/png");
         assert_eq!(result["content"][1]["data"], ONE_PIXEL_PNG);
         fs::remove_file(path).expect("fixture PNG removes");
+    }
+
+    #[test]
+    fn attachment_cleanup_only_removes_auto_named_files_from_runtime_directory() {
+        let root = temporary_test_path("attachment-cleanup");
+        fs::create_dir_all(&root).expect("fixture directory creates");
+        let automatic = root.join("123456789-post-action.png");
+        fs::write(&automatic, b"png").expect("automatic fixture writes");
+        let mut screenshot = sample_screenshot_info("mock");
+        screenshot.path = automatic.clone();
+        assert!(
+            remove_ephemeral_mcp_attachment_from(&screenshot, &root)
+                .expect("automatic attachment removes")
+        );
+        assert!(!automatic.exists());
+
+        let explicit = root.join("keep-this.png");
+        fs::write(&explicit, b"png").expect("explicit fixture writes");
+        screenshot.path = explicit.clone();
+        assert!(
+            !remove_ephemeral_mcp_attachment_from(&screenshot, &root)
+                .expect("explicit attachment is retained")
+        );
+        assert!(explicit.exists());
+        fs::remove_dir_all(root).expect("fixture directory removes");
     }
 
     #[test]
@@ -5982,15 +6083,56 @@ mod tests {
     fn daemon_errors_become_tool_errors() {
         let response = DaemonResponse::Error {
             kind: libseatgeist::ErrorKind::PolicyDenied,
+            reason_code: Some("policy_denied".to_string()),
             message: "policy denied".to_string(),
         };
         let result = tool_result_from_daemon("seatgeist.focus_window", &response, false);
         assert_eq!(result["isError"], true);
         assert_eq!(
             result["content"][0]["text"],
-            "error kind=PolicyDenied: policy denied"
+            "error kind=PolicyDenied reason=policy_denied: policy denied"
         );
         assert_eq!(result["structuredContent"]["data"]["kind"], "policy_denied");
+    }
+
+    #[test]
+    fn protected_application_denial_is_explicit_and_non_retryable() {
+        let response = DaemonResponse::Error {
+            kind: libseatgeist::ErrorKind::AppDenied,
+            reason_code: Some("protected_application".to_string()),
+            message: "app policy denied control of protected application \
+                      org.keepassxc.KeePassXC for focus target"
+                .to_string(),
+        };
+
+        let result = tool_result_from_daemon("seatgeist.focus_window", &response, false);
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("tool text is a string");
+        assert_eq!(result["isError"], true);
+        assert!(text.starts_with("POLICY DENIED kind=AppDenied reason=protected_application."));
+        assert!(text.contains("Stop; do not retry"));
+        assert!(text.contains("another backend"));
+    }
+
+    #[test]
+    fn unconfirmed_actions_become_tool_errors_without_losing_action_metadata() {
+        let response = DaemonResponse::Action(Box::new(libseatgeist::ActionResult {
+            id: "00000000-0000-0000-0000-000000000000"
+                .parse()
+                .expect("nil action id parses"),
+            ok: false,
+            observation: None,
+            screenshot: None,
+            message: Some("focus dispatch accepted but not confirmed".to_string()),
+        }));
+        let result = tool_result_from_daemon("seatgeist.focus_window", &response, false);
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["structuredContent"]["data"]["ok"], false);
+        assert_eq!(
+            result["content"][0]["text"],
+            "focus dispatch accepted but not confirmed dispatch=accepted confirmation=not_requested"
+        );
     }
 
     fn assert_default_screenshot_path(path: &Path, kind: &str) {

@@ -1034,9 +1034,12 @@ this option. Reuse an existing KDE/RDP or portal boundary where possible.
 
 ### Option E: Native KWin agent seats or per-window input routing
 
-Prototype a KWin plugin or upstream patch that can create policy-scoped virtual
-agent seats, bind windows to an agent lane, expose compositor-rendered window
-frames, and route virtual input only to that lane.
+The first experimental vertical slice is implemented in
+`kwin/seatgeist-agent-seat`. It creates a second `wl_seat` in KWin and routes
+daemon-approved keyboard and window-local pointer actions to the native
+Wayland surface pinned by a retained capture session. The daemon owns the pull
+queue, policy, app/session identity checks, and journal correlation; the plugin
+never activates or raises the target. See `docs/agent-seat.md`.
 
 Potential capability:
 
@@ -1053,7 +1056,10 @@ Risks:
 - clipboard, drag-and-drop, popups, activation, shortcuts, and accessibility
   semantics need explicit design
 
-This is justified only after Options B and C demonstrate a measured gap.
+The initial slice deliberately excludes XWayland, input methods, clipboard,
+drag-and-drop, and popup/grab routing. Live Firefox/Chromium/KDE compatibility
+and dynamic second-seat binding remain acceptance gates; the nested compositor
+lane remains the supported fallback.
 
 ### Option F: Kernel/input changes
 
@@ -1080,13 +1086,12 @@ Select the long-term architecture using measured evidence for:
 - policy and journal attribution per agent/session/seat
 - install, upgrade, rollback, and upstream maintenance burden
 
-The likely progression is cooperative sticky sessions, then a virtual-output
-experiment, then a nested compositor/session if focus remains shared. Native
-KWin agent-seat work should follow only if the nested/session boundary cannot
-provide acceptable integration or performance. Kernel changes remain the final
-fallback.
+The nested compositor/session and native KWin agent-seat slices can now be
+measured side by side. The native lane is the lower-overhead integration
+candidate; the nested lane remains the stronger compatibility and isolation
+fallback. Kernel changes remain the final fallback.
 
-### Measured matrix (2026-07-11)
+### Measured matrix (2026-07-27)
 
 | Design | Focus/input isolation | Capture | Current evidence | Decision |
 | --- | --- | --- | --- | --- |
@@ -1094,7 +1099,7 @@ fallback.
 | B. Portal virtual output | Unknown | Protocol support exists | No independent keyboard-focus proof yet | Defer until the nested lane proves the reusable portal/EIS path |
 | C. Nested KWin session | Separate namespaces and live input routing proven | Retained ScreenCast works | Private D-Bus and Wayland namespaces, two outputs, ScreenCast v4, RemoteDesktop v2, keyboard/pointer/touch device mask `7`, `ConnectToEIS`, and one nested-only F12 with unchanged host focus are live-proven | Selected for the first persistent multi-use lane |
 | D. Separate login/RDP | Strong by design | Expected through RDP | Not locally measured | Reserve for stronger credential/process isolation |
-| E. Native KWin agent seats | Intended separate compositor focus | Compositor-authoritative | Not implemented | Consider only if C misses integration or performance targets |
+| E. Native KWin agent seats | Separate `wl_seat`; no activation/stacking calls | Existing exact KWin window capture is compositor-authoritative | Experimental native-Wayland keyboard/pointer slice builds with policy-owned pull queue and journal tests; live client compatibility is not yet proven | Run operator-approved Firefox and KDE acceptance tests; retain C as fallback |
 | F. Kernel/input changes | Insufficient alone | Not applicable | Standard EIS/uinput already exists | Do not pursue without a specific missing kernel primitive |
 
 The capability probe is `make probe-nested-remote-desktop`. It runs headless,

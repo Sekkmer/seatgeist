@@ -362,6 +362,82 @@ where
     Ok(result)
 }
 
+pub(crate) async fn execute_agent_seat_action<F, Fut>(
+    runtime: &super::DaemonRuntime,
+    session_id: Option<&str>,
+    safety_class: libseatgeist::SafetyClass,
+    action: F,
+) -> Result<ActionResult>
+where
+    F: FnOnce(PinnedTarget) -> Fut,
+    Fut: Future<Output = Result<ActionResult>>,
+{
+    let session_id = session_id.ok_or_else(|| {
+        anyhow::anyhow!("kwin_agent_seat requires session_id for an exact pinned target")
+    })?;
+    require_live_capture_session(runtime, session_id).await?;
+    let windows = read_windows(runtime).await?;
+    let target = runtime
+        .interaction_session_store
+        .resolve(session_id, &windows)
+        .await?;
+    super::enforce_app_policy_for_app(
+        &runtime.app_policy,
+        target.window.app_id.as_deref(),
+        "pinned agent-seat target",
+    )?;
+    require_live_capture_session(runtime, session_id).await?;
+
+    let mut result = action(target.clone()).await?;
+    runtime.interaction_session_store.renew(session_id).await?;
+    let backend = result
+        .message
+        .as_deref()
+        .and_then(|message| {
+            message
+                .split_whitespace()
+                .find_map(|part| part.strip_prefix("backend="))
+        })
+        .unwrap_or(crate::agent_seat::KWIN_AGENT_SEAT_BACKEND);
+    runtime.journal.record_agent_seat_delivery(
+        session_id,
+        result.id,
+        &target.window,
+        backend,
+        safety_class,
+    )?;
+    if let Err(error) = runtime
+        .session_execution_store
+        .record_focus_lease(
+            session_id,
+            super::session_execution::FocusLeaseExecution {
+                lease_id: result.id,
+                focus_reacquired: false,
+                focus_restored: false,
+                restoration: "independent_agent_seat".to_string(),
+                activity_backend: None,
+                activity_trusted: false,
+                last_activity_class: None,
+                last_activity_provenance: None,
+            },
+        )
+        .await
+    {
+        tracing::warn!(
+            %error,
+            %session_id,
+            action_id = %result.id,
+            "could not update independent agent-seat metadata"
+        );
+    }
+    let message = result.message.take().unwrap_or_default();
+    result.message = Some(format!(
+        "{message} session={} focus_reacquired=false focus_restored=false restoration=independent_agent_seat",
+        target.session_id
+    ));
+    Ok(result)
+}
+
 fn require_injection_activity_safe(safe: bool) -> Result<()> {
     if safe {
         return Ok(());

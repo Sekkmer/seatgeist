@@ -4,6 +4,7 @@ use libseatgeist::{
     MonitorInfo, Point, PointerButton, SeatgeistError, WindowGeometry, WindowId, WindowInfo,
 };
 use std::time::Duration;
+use uuid::Uuid;
 
 pub type Result<T> = std::result::Result<T, SeatgeistError>;
 
@@ -173,6 +174,53 @@ pub trait InputBackend: Send + Sync {
     async fn scroll(&self, vertical: i32, horizontal: i32) -> Result<()>;
     async fn type_text(&self, text: &str) -> Result<()>;
     async fn key_combo(&self, combo: &str) -> Result<()>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetedInputDelivery {
+    pub action_id: Uuid,
+    pub backend: String,
+}
+
+#[async_trait]
+pub trait TargetedInputBackend: std::fmt::Debug + Send + Sync {
+    fn backend_name(&self) -> &'static str;
+    fn ready(&self) -> bool;
+    async fn key_combo(
+        &self,
+        target: &WindowInfo,
+        keycodes: &[u16],
+    ) -> Result<TargetedInputDelivery>;
+    async fn key_sequence(
+        &self,
+        target: &WindowInfo,
+        chords: &[Vec<u16>],
+    ) -> Result<TargetedInputDelivery>;
+    async fn move_pointer(
+        &self,
+        target: &WindowInfo,
+        point: Point,
+    ) -> Result<TargetedInputDelivery>;
+    async fn click(
+        &self,
+        target: &WindowInfo,
+        point: Point,
+        button: PointerButton,
+        clicks: u8,
+    ) -> Result<TargetedInputDelivery>;
+    async fn drag(
+        &self,
+        target: &WindowInfo,
+        from: Point,
+        to: Point,
+        button: PointerButton,
+    ) -> Result<TargetedInputDelivery>;
+    async fn scroll(
+        &self,
+        target: &WindowInfo,
+        vertical: i32,
+        horizontal: i32,
+    ) -> Result<TargetedInputDelivery>;
 }
 
 #[async_trait]

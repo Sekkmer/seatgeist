@@ -19,6 +19,17 @@ pub(crate) async fn enforce_app_policy(
     if !is_control_safety_class(&safety_class_for_request(request)) {
         return Ok(());
     }
+    if matches!(
+        request,
+        DaemonRequest::RemoteDesktopSessionProbe(_)
+            | DaemonRequest::RemoteDesktopEisProbe(_)
+            | DaemonRequest::RemoteDesktopEisStart(_)
+    ) {
+        // These requests may show a portal consent dialog or retain an input
+        // transport, but they never direct an action at an application. Every
+        // later keyboard/pointer action still passes this app-policy gate.
+        return Ok(());
+    }
     if target_window_guard_for_request(request).is_some() {
         // High-level semantic operations authorize the resolved destination
         // after AT-SPI resolution and before the side effect.
@@ -110,7 +121,11 @@ pub(crate) fn enforce_app_policy_for_app(
         .iter()
         .any(|denied| app_id_matches(denied, app_id))
     {
-        bail!("app policy denied {context} app {}", app_id);
+        bail!(
+            "app policy denied control of protected application {app_id} for {context}; \
+             do not retry with focus, keyboard, pointer, accessibility, capture targeting, \
+             or another backend"
+        );
     }
     if !app_policy.allow.is_empty()
         && !app_policy
@@ -118,7 +133,10 @@ pub(crate) fn enforce_app_policy_for_app(
             .iter()
             .any(|allowed| app_id_matches(allowed, app_id))
     {
-        bail!("app policy did not allow {context} app {}", app_id);
+        bail!(
+            "app policy did not allow control of application {app_id} for {context}; \
+             do not retry through another backend"
+        );
     }
     Ok(())
 }

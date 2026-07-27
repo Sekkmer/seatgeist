@@ -1,9 +1,15 @@
 [Unit]
 Description=Seatgeist desktop-control daemon
+StartLimitIntervalSec=5min
+StartLimitBurst=5
 
 [Service]
 ExecStart=%h/.local/bin/seatgeistd --socket %t/seatgeist/seatgeistd.sock
 Restart=on-failure
+RestartSec=2s
+RestartSteps=4
+RestartMaxDelaySec=30s
+TimeoutStopSec=5s
 NoNewPrivileges=true
 
 [Install]
