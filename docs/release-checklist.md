@@ -7,7 +7,7 @@ Run `make release-readiness` to summarize current blockers from local repo metad
 ## Release Blocking Evidence
 
 - [x] Safe workspace verification exists as `make verify`.
-- [x] External CI runs the safe verification gate on push and pull requests.
+- [ ] Enable external CI only when the repository moves from private development to public release preparation.
 - [x] Policy-denied raw input, semantic control, clipboard read, full-resolution screenshot, and panic-stop paths are covered by tests, replay traces, or safe GUI evals.
 - [x] Arch Linux/KDE Plasma 6 operator installation docs exist.
 - [x] Plugin manifest, MCP config, skills, hook assets, and repo-local Codex marketplace entry validate locally.
@@ -15,7 +15,7 @@ Run `make release-readiness` to summarize current blockers from local repo metad
 - [~] Manual KDE Plasma 6 Wayland evals exist, but broader repeated passes are still required before a public v0.1 release.
 - [~] Versioned local release artifact packaging, standalone plugin bundle packaging, verification, clean-install validation, optional GPG signing, retained JSON release-evidence snapshots, and evidence-snapshot verification exist through `make verify-release-artifacts`, `make verify-release-install`, `make sign-release-artifacts`, `make verify-release-signatures`, `make write-release-evidence`, and `make verify-release-evidence`; public uploads and signed release tags are not done yet.
 - [x] Retained release-evidence snapshots are shape-checked by `make verify-release-evidence`.
-- [ ] Add real public repository metadata before publishing, replacing placeholder `example.invalid` Cargo package URLs.
+- [x] Canonical repository metadata points to `https://github.com/Sekkmer/seatgeist`; the repository remains private until public release preparation begins.
 - [x] Final license files match the workspace `MIT OR Apache-2.0` declaration.
 - [x] Public project name and package/binary prefixes are `Seatgeist` / `seatgeist-*`.
 - [~] Exact-name web search on 2026-07-05 did not show an obvious existing Seatgeist software/project collision; `make check-public-name` now writes repeatable crates.io, npm, PyPI, and GitHub exact-name evidence, but formal trademark and domain checks remain before publishing.
@@ -25,11 +25,17 @@ Run `make release-readiness` to summarize current blockers from local repo metad
 
 ## CI Scope
 
-The CI workflow runs only safe, non-opt-in gates. It does not send real desktop input, start portal consent flows, install the KWin script, mutate system policy, or require a graphical KDE session. The live GUI and portal evals remain local operator release evidence until a reliable desktop-integration runner exists.
+The private-development repository intentionally contains no `.github`
+directory, and GitHub Actions is disabled at the repository level. Before
+making the repository public, add a reviewed workflow that runs only safe,
+non-opt-in gates. It must not send real desktop input, start portal consent
+flows, install KWin assets, mutate system policy, or require a graphical KDE
+session. Live GUI and portal evals remain local operator release evidence until
+a reliable desktop-integration runner exists.
 
 ## Release Cut Procedure
 
-1. Update `Cargo.toml` workspace metadata and package URLs for the target public repository.
+1. Confirm `Cargo.toml` workspace metadata still points to the canonical repository URL and deliberately enable the reviewed public CI workflow.
 2. Update this checklist and `docs/tracker.md` with current release evidence.
 3. Run `make check-public-name` and review the generated exact-name collision report.
 4. Run `make release-readiness` to capture the current blocker list before release work.

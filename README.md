@@ -6,9 +6,11 @@ plugin, and KDE integration so an agent can observe and operate desktop apps
 without turning ordinary automation into an unbounded input channel.
 
 The project is usable for local development on its supported KDE baseline, but
-it is not yet a public v0.1 release. Public repository URLs, signed release
-artifacts, and final live-evaluation evidence remain release blockers; see the
-[release checklist](docs/release-checklist.md) for the authoritative state.
+the repository is private and it is not yet a public v0.1 release. GitHub
+Actions intentionally remains disabled until the repository is made public.
+Signed release artifacts and final live-evaluation evidence also remain release
+blockers; see the [release checklist](docs/release-checklist.md) for the
+authoritative state.
 
 ## What it provides
 

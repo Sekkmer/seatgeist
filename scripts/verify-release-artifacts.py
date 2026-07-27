@@ -206,7 +206,6 @@ def verify_source(source: Path, manifest: dict[str, Any]) -> None:
         source,
         names,
         [
-            f"{prefix}.github/workflows/ci.yml",
             f"{prefix}.agents/plugins/marketplace.json",
             f"{prefix}Cargo.lock",
             f"{prefix}Cargo.toml",
@@ -240,6 +239,9 @@ def verify_source(source: Path, manifest: dict[str, Any]) -> None:
     forbidden = [name for name in names if "/target/" in name or "/.git/" in name]
     if forbidden:
         fail(f"{source} contains generated or VCS paths: {forbidden[:3]}")
+    github_automation = [name for name in names if "/.github/" in name]
+    if github_automation:
+        fail(f"{source} contains private-state GitHub automation: {github_automation[:3]}")
 
 
 def main() -> None:

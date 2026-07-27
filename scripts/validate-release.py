@@ -50,6 +50,16 @@ def main() -> None:
 
     cargo = read("Cargo.toml")
     require_contains("Cargo.toml", cargo, 'license = "MIT OR Apache-2.0"')
+    require_contains(
+        "Cargo.toml",
+        cargo,
+        'repository = "https://github.com/Sekkmer/seatgeist"',
+    )
+    require_contains(
+        "Cargo.toml",
+        cargo,
+        'homepage = "https://github.com/Sekkmer/seatgeist"',
+    )
 
     mit = read("LICENSE-MIT")
     require_contains("LICENSE-MIT", mit, "MIT License")
@@ -408,7 +418,7 @@ def main() -> None:
     require_contains(
         "docs/release-checklist.md",
         checklist,
-        "- [ ] Add real public repository metadata before publishing",
+        "- [x] Canonical repository metadata points to `https://github.com/Sekkmer/seatgeist`",
     )
     require_contains(
         "docs/release-checklist.md",
@@ -427,10 +437,13 @@ def main() -> None:
     ]:
         require_contains("docs/unsupported-paths.md", unsupported, label)
 
-    ci = read(".github/workflows/ci.yml")
-    require_contains(".github/workflows/ci.yml", ci, "make verify")
-    require_contains(".github/workflows/ci.yml", ci, "libei-dev")
-    require_contains(".github/workflows/ci.yml", ci, "libxkbcommon-dev")
+    if (ROOT / ".github").exists():
+        fail(".github must remain absent while the repository is private")
+    require_contains(
+        "docs/release-checklist.md",
+        checklist,
+        "Enable external CI only when the repository moves from private development to public release preparation.",
+    )
 
     arch_install = read("docs/arch-kde-install.md")
     require_contains("docs/arch-kde-install.md", arch_install, "make portal-screenshot-v3-status")

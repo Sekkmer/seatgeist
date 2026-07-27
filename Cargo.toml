@@ -8,8 +8,8 @@ edition = "2024"
 rust-version = "1.96"
 authors = ["Sekkmer"]
 license = "MIT OR Apache-2.0"
-repository = "https://example.invalid/seatgeist"
-homepage = "https://example.invalid/seatgeist"
+repository = "https://github.com/Sekkmer/seatgeist"
+homepage = "https://github.com/Sekkmer/seatgeist"
 description = "Seatgeist KDE Plasma desktop-control substrate for Codex."
 
 [workspace.dependencies]

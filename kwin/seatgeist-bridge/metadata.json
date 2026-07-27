@@ -12,7 +12,7 @@
     "License": "MIT OR Apache-2.0",
     "Name": "Seatgeist Bridge",
     "Version": "0.1.0",
-    "Website": "https://example.invalid/seatgeist"
+    "Website": "https://github.com/Sekkmer/seatgeist"
   },
   "KPackageStructure": "KWin/Script",
   "X-Plasma-API": "javascript",
