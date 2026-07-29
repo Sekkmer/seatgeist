@@ -165,7 +165,6 @@ Useful longer references:
 - [Agent seat](docs/agent-seat.md)
 - [Human-input activity](docs/human-input-activity.md)
 - [Codex plugin](docs/plugin.md)
-- [Project status](docs/status.md)
 
 ## License
 

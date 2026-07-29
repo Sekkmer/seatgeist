@@ -62,7 +62,7 @@ Current full-project estimate: `[~]` about one third complete. This estimate use
 - [x] EIS/libei action planning and readiness gates.
 - [x] Explicit portal/libei raw input routes through retained ready EIS sessions only after policy and safety gates.
 - [~] Live portal/libei input execution is implemented but depends on consent/session/device readiness and remains opt-in for real input evals.
-- [ ] Kernel or custom KDE module work has not started and is intentionally deferred until supported paths show a concrete gap.
+- [~] KWin activity and agent-seat plugins exist; kernel-level input work remains deferred until supported paths show a concrete gap.
 
 ## Clipboard
 
@@ -102,14 +102,14 @@ Current full-project estimate: `[~]` about one third complete. This estimate use
 ## Evals And Regression Gates
 
 - [x] `make verify` runs formatting, check, tests, clippy, plugin/install validation, trace validation, smoke tests, MCP smoke, and safe GUI evals.
-- [ ] Enable a reviewed safe GitHub Actions workflow only when moving the repository to public release preparation.
+- [x] A reviewed GitHub Actions workflow runs only headless formatting, workspace, and validation checks.
 - [x] Checked-in replay traces cover status, journal filters, protected policy denials, semantic denials, raw input denials, and panic-stop transitions.
 - [x] `make smoke-trace-replay` explicitly validates and replays the checked-in trace categories, including semantic denials.
 - [x] Safe GUI evals cover status, session preflight, observe, AT-SPI diagnostics, denial paths, clipboard status/denial, KWin bridge status, keymap status, full-resolution denial, and control safety.
 - [~] Opt-in GUI evals exist for KWrite/Kate, KCalc, Firefox localhost button, portal Screenshot, RemoteDesktop probe, and retained RemoteDesktop EIS session.
 - [x] `make release-live-evals` provides an explicit, env-gated runner for the release-blocking live eval evidence set.
 - [~] Manual KDE Plasma 6 Wayland eval suite is useful and now writes explicit pass evidence records, but broader repeated passes are still required before v0.1 is complete.
-- [~] Public release checklist, private-state CI guardrails, dual license files, local Seatgeist binary, standalone plugin, and source release packaging, artifact verification, clean-install validation, optional GPG signing targets, repeatable public-name collision evidence, retained JSON release-evidence snapshots with snapshot-shape verification, release-readiness blocker audit, and read-only external prerequisite preflight exist; the reviewed public CI workflow, public uploads, and signed release tags are not done.
+- [~] Public release checklist, headless CI, dual license files, local Seatgeist binary, standalone plugin and source release packaging, artifact verification, clean-install validation, optional GPG signing targets, repeatable public-name collision evidence, retained JSON release-evidence snapshots, release-readiness audit, and read-only external prerequisite preflight exist; public uploads and signed release tags are not done.
 
 ## v0.1 Definition Of Done
 

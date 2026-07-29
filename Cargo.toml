@@ -10,7 +10,7 @@ authors = ["Sekkmer"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Sekkmer/seatgeist"
 homepage = "https://github.com/Sekkmer/seatgeist"
-description = "Seatgeist KDE Plasma desktop-control substrate for Codex."
+description = "Experimental KDE Plasma 6 desktop tools for Codex."
 
 [workspace.dependencies]
 anyhow = "1.0.100"

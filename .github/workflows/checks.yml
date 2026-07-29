@@ -1,0 +1,46 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workspace:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libpipewire-0.3-dev
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.96 --profile minimal --component rustfmt
+          rustup override set 1.96
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Test workspace
+        run: cargo test --workspace
+
+      - name: Check workspace
+        run: cargo check --workspace
+
+      - name: Validate public assets
+        run: |
+          scripts/validate-plugin.py plugin
+          scripts/validate-install-assets.py
+          scripts/validate-release.py

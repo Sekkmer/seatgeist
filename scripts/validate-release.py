@@ -434,12 +434,34 @@ def main() -> None:
     ]:
         require_contains("docs/unsupported-paths.md", unsupported, label)
 
-    if (ROOT / ".github").exists():
-        fail(".github must remain absent while the repository is private")
+    workflow = read(".github/workflows/checks.yml")
+    for label in [
+        "permissions:\n  contents: read",
+        "cargo fmt --all -- --check",
+        "cargo test --workspace",
+        "cargo check --workspace",
+        "scripts/validate-plugin.py plugin",
+        "scripts/validate-install-assets.py",
+        "scripts/validate-release.py",
+    ]:
+        require_contains(".github/workflows/checks.yml", workflow, label)
+    for unsafe_ci_command in [
+        "make verify",
+        "make smoke",
+        "gui-eval",
+        "release-live-evals",
+        "deploy-user-daemon",
+        "install-kwin",
+    ]:
+        if unsafe_ci_command in workflow:
+            fail(
+                ".github/workflows/checks.yml must not run live or mutating "
+                f"command: {unsafe_ci_command}"
+            )
     require_contains(
         "docs/release-checklist.md",
         checklist,
-        "Enable external CI only when the repository moves from private development to public release preparation.",
+        "Safe external CI runs only headless checks and does not exercise live desktop control.",
     )
 
     arch_install = read("docs/arch-kde-install.md")
