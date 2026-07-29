@@ -1,91 +1,174 @@
 # Seatgeist
 
-Seatgeist is a local, policy-gated desktop-control substrate for Codex on KDE
-Plasma 6 Wayland. It combines a user-scoped daemon, CLI, MCP server, Codex
-plugin, and KDE integration so an agent can observe and operate desktop apps
-without turning ordinary automation into an unbounded input channel.
+Seatgeist lets Codex look at and use applications in a local KDE Plasma 6
+Wayland session. It provides screenshots, window information, clipboard and
+accessibility tools, plus several ways to send keyboard and pointer input.
 
-The project is usable for local development on its supported KDE baseline, but
-the repository is private and it is not yet a public v0.1 release. GitHub
-Actions intentionally remains disabled until the repository is made public.
-Signed release artifacts and final live-evaluation evidence also remain release
-blockers; see the [release checklist](docs/release-checklist.md) for the
-authoritative state.
+This is an experimental KDE project and development checkout, not a
+plug-and-play desktop package. You can use it locally, but expect to build the
+Rust binaries, run a user service, and install the KDE integrations needed for
+the features you want.
 
-## What it provides
+## What is included
 
-- Window inventory, active-window state, monitor metadata, and bounded
-  high-DPI screenshots.
-- Exact KWin window capture, retained capture sessions, visual change waits,
-  and target-bound post-action images.
-- Policy-gated keyboard, pointer, clipboard, AT-SPI semantic control, window
-  move/resize, desktop-entry launch, and guarded browser page zoom.
-- Active-window guards, app allow/deny rules, panic-stop, human-input pause,
-  control rate limits, and compact action journaling.
-- A bounded core MCP profile for normal agent use and an expert profile for
-  diagnostics and compatibility tools.
-- A local Codex plugin with computer-use, GUI-testing, browser-debugging, and
-  desktop-triage skills.
+- `seatgeistd`: the user-session daemon.
+- `seatgeist-cli`: local setup, status, and troubleshooting commands.
+- `seatgeist-mcp`: the MCP server used by Codex.
+- `plugin/`: the Codex plugin, skills, and MCP configuration.
+- `kwin/seatgeist-bridge`: a KWin script for window state and basic window
+  actions.
+- `kwin/seatgeist-activity`: a KWin binary plugin that distinguishes physical
+  activity from Seatgeist activity.
+- `kwin/seatgeist-agent-seat`: an experimental second Wayland seat that can
+  work in one native Wayland window while you use another.
 
-All input and semantic-control actions go through daemon policy checks and are
-journaled. Secret fields fail closed by default, control defaults to prompt,
-and screenshots default to bounded previews instead of full-resolution 8K
-payloads. See [Safety](docs/safety.md) and the
-[threat model](docs/threat-model.md) before enabling control.
+Actions still pass through the daemon's policy checks and are recorded in its
+compact journal. The defaults are deliberately cautious, but this is useful
+local tooling rather than a security boundary for running untrusted agents.
 
-## Architecture
+## KDE pieces
 
-The main components are:
+The integrations are separate so you can install only the parts you need:
 
-- `seatgeistd`: owns policy, journaling, sessions, and desktop backends.
-- `seatgeist-cli`: operator diagnostics and explicit local control.
-- `seatgeist-mcp`: compact model-facing tools over the daemon protocol.
-- `plugin/`: Codex manifest, MCP configuration, skills, and audit hook.
-- `kwin/`: KWin script and optional activity helper integration.
-- `crates/seatgeist-*`: backend traits and KDE/Wayland implementations.
+| Piece | What it is for | When you need it |
+| --- | --- | --- |
+| KWin script bridge | Window list, active-window updates, move, resize, and launch coordination | Baseline for the intended KDE experience |
+| KWin screenshot authorization | Lets the user daemon use KWin's exact-window screenshot interface | Needed for direct capture of covered or background windows |
+| Codex plugin | Seatgeist MCP tools and desktop-use skills inside Codex | When using Seatgeist from Codex |
+| Activity plugin | Trusted physical keyboard/pointer activity reporting | When using pause-on-human-input or cooperative focus handling |
+| Agent-seat plugin | Input routed to a pinned native Wayland window without taking your normal focus | Optional and experimental |
+| KDE portal services | Screenshots and portal/libei input sessions | Used by the portal backends |
+| uinput setup | Virtual keyboard and pointer fallback | Optional; requires local system setup |
 
-KDE Plasma 6 Wayland is the supported baseline. The protocol and backend traits
-are intentionally desktop-neutral, but GNOME, wlroots/Sway, and X11 are not
-supported yet. The exact boundaries are documented in
-[Unsupported paths](docs/unsupported-paths.md).
+The two KWin binary plugins are built against the installed KWin version.
+Rebuild them after KWin upgrades. Installing them does not restart the
+compositor; load them at the next normal Plasma login.
 
-## Build and verify
+The agent-seat path currently targets native Wayland windows. It is not an
+XWayland input backend, and applications vary in how well they handle a second
+Wayland seat.
 
-The workspace targets Rust 1.96 with the 2024 edition. From the repository
-root:
+## Try it from a checkout
+
+The current setup guide is written for Arch Linux with Plasma 6 Wayland:
 
 ```bash
-cargo build --workspace
+sudo pacman -S --needed base-devel cmake rust cargo jq plasma-meta plasma-workspace \
+  kde-cli-tools spectacle xdg-desktop-portal xdg-desktop-portal-kde wl-clipboard
+
+cargo build --workspace --release
+mkdir -p ~/.local/bin
+ln -sfn "$PWD/target/release/seatgeistd" ~/.local/bin/seatgeistd
+ln -sfn "$PWD/target/release/seatgeist-cli" ~/.local/bin/seatgeist-cli
+ln -sfn "$PWD/target/release/seatgeist-mcp" ~/.local/bin/seatgeist-mcp
+```
+
+Install the socket-activated user service and the baseline KWin bridge:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp systemd/seatgeistd.service systemd/seatgeistd.socket ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now seatgeistd.socket
+
+make install-kwin-script
+scripts/install-kwin-screenshot-authorization.py
+seatgeist-cli doctor
+seatgeist-cli kwin-bridge-status
+```
+
+Install the local Codex plugin:
+
+```bash
+codex plugin marketplace add .
+make refresh-local-codex-plugin
+```
+
+Start a new Codex session after installing or refreshing the plugin.
+
+For physical-activity tracking:
+
+```bash
+make install-kwin-activity-user
+```
+
+For the experimental independent input lane:
+
+```bash
+make install-kwin-agent-seat-user
+```
+
+Then select it in `~/.config/seatgeist/config.toml`:
+
+```toml
+[backends]
+input = "kwin_agent_seat"
+```
+
+Log out and back in normally after installing either KWin binary plugin. Do
+not restart `plasma-kwin_wayland.service` in place: on a normal DRM-backed
+Plasma session it may be unable to reacquire the display and SDDM will need to
+create a new login session.
+
+The complete walkthrough, including configuration, daemon deployment, portal
+diagnostics, optional uinput, and rollback commands, is in the
+[Arch KDE install guide](docs/arch-kde-install.md).
+
+## Current rough edges
+
+- KDE Plasma 6 Wayland is the environment being developed and tested.
+- There is no polished distro package or one-command installer yet.
+- KWin private binary interfaces can change between Plasma updates.
+- Native Wayland, XWayland, accessibility, and portal paths do not all offer
+  the same features.
+- The agent-seat work is still experimental, especially with applications that
+  do not expect multiple seats.
+- Some GUI checks require an active desktop session and deliberate operator
+  interaction.
+
+If something does not work, these commands usually show which piece is
+missing:
+
+```bash
+seatgeist-cli doctor
+seatgeist-cli readiness
+seatgeist-cli kwin-bridge-status
+seatgeist-cli capture-backends
+seatgeist-cli input backends
+seatgeist-cli journal tail --limit 20
+```
+
+## Development
+
+Run the normal workspace checks with:
+
+```bash
+cargo fmt --all
 cargo test --workspace
 cargo check --workspace
 ```
 
-The complete safe repository gate is:
+The larger repository validation is:
 
 ```bash
 make verify
 ```
 
-It does not send live desktop input, open consent dialogs, install KDE assets,
-or mutate system policy. Live GUI evaluations and installation steps are
-separate opt-in targets.
+`make verify` does not install KDE assets or send live desktop input. Live GUI
+evaluations and install targets are separate.
 
-For the full Arch Linux/KDE setup, user service, KWin bridge, diagnostics, and
-local Codex plugin install, follow the
-[Arch KDE install guide](docs/arch-kde-install.md). Plugin-only development and
-validation are covered in [Codex plugin](docs/plugin.md).
-
-## Documentation
+Useful longer references:
 
 - [Architecture](docs/architecture.md)
-- [MCP tool contracts](docs/mcp-tools.md)
 - [Configuration](docs/config.md)
-- [Capture backends](docs/capture-backends.md)
+- [Backends](docs/backends.md)
+- [Agent seat](docs/agent-seat.md)
+- [Human-input activity](docs/human-input-activity.md)
+- [Codex plugin](docs/plugin.md)
 - [Project status](docs/status.md)
-- [Release checklist](docs/release-checklist.md)
 
 ## License
 
-Seatgeist is dual-licensed under the Apache License 2.0 or the MIT License, at
-your option. See [LICENSE-APACHE](LICENSE-APACHE) and
+Seatgeist is available under the Apache License 2.0 or the MIT License, at your
+option. See [LICENSE-APACHE](LICENSE-APACHE) and
 [LICENSE-MIT](LICENSE-MIT).

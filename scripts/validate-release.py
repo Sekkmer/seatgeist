@@ -41,12 +41,9 @@ def main() -> None:
     readme = read("README.md")
     require_contains("README.md", readme, "# Seatgeist")
     require_contains("README.md", readme, "KDE Plasma 6 Wayland")
+    require_contains("README.md", readme, "KWin script bridge")
+    require_contains("README.md", readme, "install-kwin-agent-seat-user")
     require_contains("README.md", readme, "make verify")
-
-    security = read("SECURITY.md")
-    require_contains("SECURITY.md", security, "# Security Policy")
-    require_contains("SECURITY.md", security, "sekkmer@gmail.com")
-    require_contains("SECURITY.md", security, "desktop-control")
 
     cargo = read("Cargo.toml")
     require_contains("Cargo.toml", cargo, 'license = "MIT OR Apache-2.0"')
@@ -126,7 +123,7 @@ def main() -> None:
         "\"source\": \"$(basename \"$source_archive\")\"",
         "cp -a scripts/. \"$stage/scripts/\"",
         "cp -a desktop/. \"$stage/desktop/\"",
-        "README.md SECURITY.md",
+        "README.md Cargo.toml",
         "seatgeist-panic-stop-hotkey",
         "MANIFEST.json",
         "git ls-files -z",

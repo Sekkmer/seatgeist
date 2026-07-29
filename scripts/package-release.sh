@@ -60,7 +60,7 @@ cp -a polkit/. "$stage/polkit/"
 cp -a scripts/. "$stage/scripts/"
 cp -a systemd/. "$stage/systemd/"
 cp -a udev/. "$stage/udev/"
-cp README.md SECURITY.md Cargo.toml Cargo.lock Makefile LICENSE-MIT LICENSE-APACHE "$stage/"
+cp README.md Cargo.toml Cargo.lock Makefile LICENSE-MIT LICENSE-APACHE "$stage/"
 
 mkdir -p "$plugin_stage"
 cp -a plugin/. "$plugin_stage/"

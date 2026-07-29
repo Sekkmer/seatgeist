@@ -9,7 +9,7 @@ Package references were checked on 2026-07-04 against Arch's official package pa
 Install or verify the host packages Seatgeist relies on:
 
 ```bash
-sudo pacman -S --needed base-devel rust cargo jq plasma-meta plasma-workspace kde-cli-tools spectacle xdg-desktop-portal xdg-desktop-portal-kde wl-clipboard
+sudo pacman -S --needed base-devel cmake rust cargo jq plasma-meta plasma-workspace kde-cli-tools spectacle xdg-desktop-portal xdg-desktop-portal-kde wl-clipboard
 ```
 
 If you manage Rust with `rustup`, keep using that toolchain instead of Arch's `rust` and `cargo` packages. Seatgeist currently targets Rust 2024 crates in a Cargo resolver 3 workspace.
@@ -17,6 +17,7 @@ If you manage Rust with `rustup`, keep using that toolchain instead of Arch's `r
 The package roles are:
 
 - `plasma-meta` / `plasma-workspace`: KDE Plasma session and KWin.
+- `cmake`: builds the optional version-matched KWin binary plugins.
 - `kde-cli-tools`: `kpackagetool6`, `kwriteconfig6`, and related KDE command tools.
 - `spectacle`: screenshot tile backend and compatibility fallback.
 - `xdg-desktop-portal` / `xdg-desktop-portal-kde`: portal services for current consented full-screen Screenshot capture, capture/control diagnostics, and future RemoteDesktop control backends.
