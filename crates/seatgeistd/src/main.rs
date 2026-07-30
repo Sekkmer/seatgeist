@@ -72,7 +72,7 @@ use keymap::Settings as XkbKeymapSettings;
 use keymap::{Config as XkbKeymapConfig, resolve as effective_xkb_keymap_resolution};
 use kwin_bridge::{
     ActiveWindowState, WindowActionQueue, WindowListState, start_kwin_bridge,
-    status as kwin_bridge_status,
+    status as kwin_bridge_status, supervise_kwin_bridge_ownership,
 };
 use kwin_capture_backend::RoutedScreenBackend;
 use libseatgeist::{
@@ -390,6 +390,9 @@ struct Args {
     #[arg(long, env = "SEATGEIST_CAPTURE_RESTORE_FILE")]
     capture_restore_file: Option<PathBuf>,
 
+    #[arg(long, env = "SEATGEIST_DISABLE_KWIN_BRIDGE")]
+    disable_kwin_bridge: bool,
+
     #[arg(long, env = "SEATGEIST_INPUT_BACKEND", value_enum)]
     input_backend: Option<InputBackendPreference>,
 
@@ -490,6 +493,7 @@ async fn main() -> Result<()> {
         panic_stop_path: panic_stop_file,
         approval_file_path: approval_file,
         capture_restore_path: capture_restore_file,
+        kwin_bridge_enabled: !args.disable_kwin_bridge,
         policy_config,
         app_policy,
         safety_settings,
@@ -507,6 +511,7 @@ struct RunSettings {
     panic_stop_path: PathBuf,
     approval_file_path: Option<PathBuf>,
     capture_restore_path: PathBuf,
+    kwin_bridge_enabled: bool,
     policy_config: PolicyConfig,
     app_policy: AppPolicy,
     safety_settings: SafetySettings,
@@ -523,6 +528,7 @@ async fn run(settings: RunSettings) -> Result<()> {
         panic_stop_path,
         approval_file_path,
         capture_restore_path,
+        kwin_bridge_enabled,
         policy_config,
         app_policy,
         safety_settings,
@@ -554,23 +560,38 @@ async fn run(settings: RunSettings) -> Result<()> {
     let window_action_queue = WindowActionQueue::default();
     let agent_seat_backend = agent_seat::KwinAgentSeatBackend::default();
     let focus_backend: Arc<dyn interaction::FocusBackend> = Arc::new(interaction::KwinFocusBackend);
-    let _kwin_bridge_connection = match start_kwin_bridge(
-        active_window_state.clone(),
-        window_list_state.clone(),
-        activity_tracker.clone(),
-        window_action_queue.clone(),
-        agent_seat_backend.clone(),
-    )
-    .await
-    {
-        Ok(connection) => Some(connection),
-        Err(err) => {
-            warn!(error = %err, "KWin bridge DBus service is unavailable");
-            None
+    let _kwin_bridge_connection = if kwin_bridge_enabled {
+        match start_kwin_bridge(
+            active_window_state.clone(),
+            window_list_state.clone(),
+            activity_tracker.clone(),
+            window_action_queue.clone(),
+            agent_seat_backend.clone(),
+        )
+        .await
+        {
+            Ok(connection) => Some(connection),
+            Err(err) => {
+                warn!(error = %err, "KWin bridge DBus service is unavailable");
+                None
+            }
         }
+    } else {
+        info!("KWin bridge disabled for isolated daemon");
+        None
     };
     let kwin_bridge_registered = _kwin_bridge_connection.is_some();
     window_action_queue.set_registered(kwin_bridge_registered);
+    if kwin_bridge_enabled {
+        supervise_kwin_bridge_ownership(
+            _kwin_bridge_connection,
+            active_window_state.clone(),
+            window_list_state.clone(),
+            activity_tracker.clone(),
+            window_action_queue.clone(),
+            agent_seat_backend.clone(),
+        );
+    }
     let window_backend: Arc<dyn WindowBackend> = Arc::new(KwinWindowBackend::new(
         active_window_state.clone(),
         window_list_state.clone(),
@@ -581,7 +602,6 @@ async fn run(settings: RunSettings) -> Result<()> {
         health_status,
         active_window_state,
         window_list_state,
-        kwin_bridge_registered,
         journal,
         panic_stop,
         control_rate_limiter: ControlRateLimiter::new(
@@ -665,7 +685,6 @@ struct DaemonRuntime {
     health_status: HealthStatus,
     active_window_state: ActiveWindowState,
     window_list_state: WindowListState,
-    kwin_bridge_registered: bool,
     journal: ActionJournal,
     panic_stop: PanicStopState,
     control_rate_limiter: ControlRateLimiter,
@@ -752,6 +771,7 @@ fn parse_daemon_request_line(
 struct PreparedPostAction {
     options: PostActionOptions,
     condition: ActionSettleCondition,
+    delivery_ack: bool,
     expected_active_window: Option<String>,
     before: Option<Observation>,
 }
@@ -787,16 +807,14 @@ async fn prepare_post_action(
                 | ActionSettleCondition::AccessibilityChange
                 | ActionSettleCondition::AnyChange
         );
-    let condition = match options.settle_condition {
-        ActionSettleCondition::Auto if matches!(request, DaemonRequest::FocusWindow(_)) => {
-            ActionSettleCondition::ActiveWindowChange
-        }
-        ActionSettleCondition::Auto if target_event_settle => {
-            ActionSettleCondition::AccessibilityChange
-        }
-        ActionSettleCondition::Auto => ActionSettleCondition::Stable,
-        condition => condition,
-    };
+    let delivery_ack = options.settle_condition == ActionSettleCondition::Auto
+        && uses_independent_agent_seat(request, runtime.input_backend_preference);
+    let condition = resolve_post_action_condition(
+        request,
+        options.settle_condition,
+        runtime.input_backend_preference,
+        target_event_settle,
+    );
     let expected_active_window = match request {
         DaemonRequest::FocusWindow(request) => Some(request.window_id.clone()),
         _ => None,
@@ -809,9 +827,31 @@ async fn prepare_post_action(
     Ok(Some(PreparedPostAction {
         options,
         condition,
+        delivery_ack,
         expected_active_window,
         before,
     }))
+}
+
+fn resolve_post_action_condition(
+    request: &DaemonRequest,
+    requested: ActionSettleCondition,
+    preference: InputBackendPreference,
+    target_event_settle: bool,
+) -> ActionSettleCondition {
+    match requested {
+        ActionSettleCondition::Auto if uses_independent_agent_seat(request, preference) => {
+            ActionSettleCondition::None
+        }
+        ActionSettleCondition::Auto if matches!(request, DaemonRequest::FocusWindow(_)) => {
+            ActionSettleCondition::ActiveWindowChange
+        }
+        ActionSettleCondition::Auto if target_event_settle => {
+            ActionSettleCondition::AccessibilityChange
+        }
+        ActionSettleCondition::Auto => ActionSettleCondition::Stable,
+        condition => condition,
+    }
 }
 
 fn validate_post_action_response_options(
@@ -896,8 +936,12 @@ async fn finish_post_action(
             libseatgeist::ActionConfirmation::UnconfirmedTimeout
         },
         condition: prepared.condition,
-        backend: libseatgeist::ActionSettleBackend::Polling,
-        target_scoped: false,
+        backend: if prepared.delivery_ack {
+            libseatgeist::ActionSettleBackend::DeliveryAck
+        } else {
+            libseatgeist::ActionSettleBackend::Polling
+        },
+        target_scoped: prepared.delivery_ack,
         event: None,
         settled,
         timed_out: !settled,
@@ -1814,7 +1858,6 @@ async fn execute_request(
             match kwin_bridge_status(
                 &runtime.active_window_state,
                 &runtime.window_list_state,
-                runtime.kwin_bridge_registered,
                 &runtime.window_action_queue,
             ) {
                 Ok(status) => DaemonResponse::KwinBridgeStatus(status),
@@ -5708,6 +5751,8 @@ fn classify_error_reason(message: &str, kind: ErrorKind) -> &'static str {
         "window_identity_changed"
     } else if lower.contains("kwin script bridge dbus receiver is unavailable") {
         "kwin_bridge_unavailable"
+    } else if lower.contains("kwin script bridge heartbeat is stale") {
+        "kwin_bridge_stale"
     } else if lower.contains("channel closed") {
         "backend_channel_closed"
     } else if lower.contains("without geometry metadata")
@@ -5791,6 +5836,7 @@ fn classify_error_message(message: &str) -> ErrorKind {
         }
     } else if lower.contains("not available")
         || lower.contains("dbus receiver is unavailable")
+        || lower.contains("bridge heartbeat is stale")
         || lower.contains("no executable")
         || lower.contains("requires a stored remotedesktop eis session")
         || lower.contains("/dev/uinput")
@@ -5935,10 +5981,19 @@ fn summarize_response(response: &DaemonResponse) -> String {
             status.path.display()
         ),
         DaemonResponse::KwinBridgeStatus(status) => format!(
-            "kwin bridge dbus={} active_update_seen={} window_list_update_seen={} window_count={} installed={} enabled={}",
+            "kwin bridge dbus={} active_update_seen={} active_age_ms={} window_list_update_seen={} window_list_age_ms={} stale={} window_count={} installed={} enabled={}",
             status.dbus_service_registered,
             status.active_window_update_seen,
+            status
+                .active_window_update_age_ms
+                .map(|age| age.to_string())
+                .unwrap_or_else(|| "none".to_string()),
             status.window_list_update_seen,
+            status
+                .window_list_update_age_ms
+                .map(|age| age.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            status.snapshot_stale,
             status.window_count,
             status.package_installed,
             status
@@ -8176,6 +8231,24 @@ mod tests {
             &bound,
             InputBackendPreference::Uinput
         ));
+        assert_eq!(
+            resolve_post_action_condition(
+                &bound,
+                ActionSettleCondition::Auto,
+                InputBackendPreference::KwinAgentSeat,
+                false,
+            ),
+            ActionSettleCondition::None
+        );
+        assert_eq!(
+            resolve_post_action_condition(
+                &bound,
+                ActionSettleCondition::Stable,
+                InputBackendPreference::KwinAgentSeat,
+                false,
+            ),
+            ActionSettleCondition::Stable
+        );
     }
 
     fn test_client(tool: &str, pid: u32, process_name: &str) -> JournalClientContext {
@@ -8527,6 +8600,10 @@ mod tests {
                 ErrorKind::BackendUnavailable,
             ),
             (
+                "KWin script bridge heartbeat is stale; reload only the seatgeist-bridge script",
+                ErrorKind::BackendUnavailable,
+            ),
+            (
                 "launch succeeded without geometry metadata",
                 ErrorKind::BackendFailed,
             ),
@@ -8553,6 +8630,13 @@ mod tests {
                 ErrorKind::BackendUnavailable
             ),
             "kwin_bridge_unavailable"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "KWin script bridge heartbeat is stale; reload only the seatgeist-bridge script",
+                ErrorKind::BackendUnavailable
+            ),
+            "kwin_bridge_stale"
         );
         assert_eq!(
             classify_error_reason(

@@ -247,14 +247,17 @@ registers object, window, and focus event interest before the side effect and
 accepts only signals from the correlated application bus name whose source path
 is the resolved node or its containing window. It then reads only that target
 node once instead of rescanning the focused desktop tree. Settle metadata names
-the `atspi_event`, `target_read`, or `polling` backend, whether it is
+the `atspi_event`, `target_read`, `delivery_ack`, or `polling` backend, whether it is
 target-scoped, and the non-content event class/member when present. If event
 subscription is unavailable, a bounded target-node read/poll fallback is used;
 it never retries through pointer or keyboard input.
 
 `settle_condition=auto` resolves to exact requested-window activation for
 `seatgeist.focus_window`, `accessibility_change` through target-scoped events for
-guarded high-level semantic actions, and `stable` polling otherwise. Explicit conditions are
+guarded high-level semantic actions, compositor delivery acknowledgment for
+session-bound independent agent-seat actions, and `stable` polling otherwise.
+Agent-seat acknowledgment confirms exact-target delivery without waiting for an
+unrelated foreground-window or accessibility change. Explicit conditions are
 `none`, `stable`, `active_window_change`, `accessibility_change`, and
 `any_change`. A default focus timeout returns `ok=false` because dispatch was
 accepted but the requested target was never confirmed active; MCP marks that

@@ -24,6 +24,7 @@ impl DaemonFixture {
         let journal = root.join("journal.jsonl");
         let panic_stop = root.join("panic-stop");
         let child = Command::new(daemon_binary()?)
+            .arg("--disable-kwin-bridge")
             .arg("--socket")
             .arg(&socket)
             .arg("--journal")
@@ -71,6 +72,7 @@ impl DaemonFixture {
 
         let mut command = Command::new(daemon_binary()?);
         command
+            .arg("--disable-kwin-bridge")
             .arg("--config")
             .arg(&config)
             .stdout(Stdio::null())

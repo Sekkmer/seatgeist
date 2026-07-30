@@ -239,3 +239,8 @@ plugin installation hash, and KWin's available/loaded plugin lists. This avoids
 attempting a dynamic load across KWin upgrades. The running compositor exposes
 `org.kde.KWin.Plugins.LoadPlugin`, but it is used only after installation and
 an exact ABI match; otherwise a normal session restart is required.
+
+`scripts/reload-kwin-integration.py` exposes allowlisted bridge, activity, and
+agent-seat reloads through KWin's `/Scripting` and `/Plugins` APIs. Binary
+reloads fail closed unless the installed factory ABI exactly matches the
+running compositor, and the helper never restarts KWin.

@@ -39,6 +39,7 @@ impl DaemonFixture {
         let journal = root.join("journal.jsonl");
         let panic_stop = root.join("panic-stop");
         let child = Command::new(env!("CARGO_BIN_EXE_seatgeistd"))
+            .arg("--disable-kwin-bridge")
             .arg("--socket")
             .arg(&socket)
             .arg("--journal")
@@ -74,6 +75,7 @@ impl DaemonFixture {
         .context("write daemon config fixture")?;
 
         let child = Command::new(env!("CARGO_BIN_EXE_seatgeistd"))
+            .arg("--disable-kwin-bridge")
             .arg("--config")
             .arg(&config)
             .stdout(Stdio::null())

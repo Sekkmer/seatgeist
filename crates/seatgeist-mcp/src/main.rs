@@ -1191,13 +1191,22 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status.path.display()
         ),
         DaemonResponse::KwinBridgeStatus(status) => format!(
-            "kwin bridge dbus={} window_resize={} window_move={} window_launch={} active_update_seen={} window_list_update_seen={} window_count={} installed={} enabled={}",
+            "kwin bridge dbus={} window_resize={} window_move={} window_launch={} active_update_seen={} active_age_ms={} window_list_update_seen={} window_list_age_ms={} stale={} window_count={} installed={} enabled={}",
             status.dbus_service_registered,
             status.window_resize_supported,
             status.window_move_supported,
             status.window_launch_supported,
             status.active_window_update_seen,
+            status
+                .active_window_update_age_ms
+                .map(|age| age.to_string())
+                .unwrap_or_else(|| "none".to_string()),
             status.window_list_update_seen,
+            status
+                .window_list_update_age_ms
+                .map(|age| age.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            status.snapshot_stale,
             status.window_count,
             status.package_installed,
             status

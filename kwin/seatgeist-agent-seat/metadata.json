@@ -1,6 +1,5 @@
 {
     "KPlugin": {
-        "Id": "seatgeistagentseat",
         "Name": "Seatgeist Agent Seat",
         "Description": "Experimental policy-gated independent Wayland input seat for Seatgeist",
         "Version": "0.1.0",

@@ -90,3 +90,11 @@ pointer data. Successful delivery adds an `agent_seat_delivery` journal record
 containing the session, action id, window id, app id, PID, and backend, but no
 text, title, coordinates, or keycodes. The normal request journal record
 remains the authoritative policy result.
+
+The plugin watches the bridge's well-known-name owner and stops its timer while
+the daemon is absent, so daemon downtime cannot create an ownerless D-Bus call
+storm. While connected it polls at 50 ms, refreshes a one-second readiness
+heartbeat, and resumes automatically when the daemon returns. The daemon's
+default post-action confirmation for this exact-target lane is the compositor
+completion (`delivery_ack`); an explicit settle condition still requests
+additional observation-based verification.

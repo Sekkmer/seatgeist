@@ -6,7 +6,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -26,6 +26,9 @@ const KWIN_SERVICE: &str = "org.kde.KWin";
 const PATH: &str = "/org/seatgeist/KWinBridge1";
 const INTERFACE: &str = "org.seatgeist.KWinBridge1";
 const WINDOW_ACTION_TIMEOUT: Duration = Duration::from_secs(3);
+const SCRIPT_HEARTBEAT_TTL: Duration = Duration::from_secs(1);
+const BRIDGE_OWNERSHIP_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+const SNAPSHOT_STALE_AFTER: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct WindowActionQueue {
@@ -41,6 +44,7 @@ struct WindowActionState {
     pending: VecDeque<PendingWindowAction>,
     waiters: HashMap<String, oneshot::Sender<WindowActionResult>>,
     acknowledgements: HashMap<String, oneshot::Sender<()>>,
+    script_last_seen: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -125,7 +129,7 @@ impl WindowActionQueue {
         self.registered.store(registered, Ordering::Release);
     }
 
-    pub(super) fn register_script_capabilities(&self, capabilities: &str) {
+    pub(super) fn register_script_capabilities(&self, capabilities: &str) -> Result<()> {
         let resize = capabilities
             .split(',')
             .map(str::trim)
@@ -141,18 +145,41 @@ impl WindowActionQueue {
             .map(str::trim)
             .any(|capability| capability == "launch_window");
         self.launch_ready.store(launch_window, Ordering::Release);
+        self.inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("KWin action queue lock is poisoned"))?
+            .script_last_seen = Some(Instant::now());
+        Ok(())
+    }
+
+    pub(super) fn dbus_service_registered(&self) -> bool {
+        self.registered.load(Ordering::Acquire)
+    }
+
+    fn script_heartbeat_fresh(&self) -> bool {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|state| state.script_last_seen)
+            .is_some_and(|last_seen| last_seen.elapsed() <= SCRIPT_HEARTBEAT_TTL)
     }
 
     pub(super) fn resize_ready(&self) -> bool {
-        self.registered.load(Ordering::Acquire) && self.script_ready.load(Ordering::Acquire)
+        self.registered.load(Ordering::Acquire)
+            && self.script_ready.load(Ordering::Acquire)
+            && self.script_heartbeat_fresh()
     }
 
     pub(super) fn move_ready(&self) -> bool {
-        self.registered.load(Ordering::Acquire) && self.move_ready.load(Ordering::Acquire)
+        self.registered.load(Ordering::Acquire)
+            && self.move_ready.load(Ordering::Acquire)
+            && self.script_heartbeat_fresh()
     }
 
     pub(super) fn launch_ready(&self) -> bool {
-        self.registered.load(Ordering::Acquire) && self.launch_ready.load(Ordering::Acquire)
+        self.registered.load(Ordering::Acquire)
+            && self.launch_ready.load(Ordering::Acquire)
+            && self.script_heartbeat_fresh()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -169,6 +196,9 @@ impl WindowActionQueue {
     ) -> Result<LaunchWindowTicket> {
         if !self.registered.load(Ordering::Acquire) {
             bail!("KWin script bridge DBus receiver is unavailable");
+        }
+        if !self.script_heartbeat_fresh() {
+            bail!("KWin script bridge heartbeat is stale; reload only the seatgeist-bridge script");
         }
         if !self.launch_ready.load(Ordering::Acquire) {
             bail!(
@@ -287,6 +317,9 @@ impl WindowActionQueue {
         if !self.registered.load(Ordering::Acquire) {
             bail!("KWin script bridge DBus receiver is unavailable");
         }
+        if !self.script_heartbeat_fresh() {
+            bail!("KWin script bridge heartbeat is stale; reload only the seatgeist-bridge script");
+        }
         if !self.move_ready.load(Ordering::Acquire) {
             bail!(
                 "installed KWin script has not registered move_window support; install/reload the current seatgeist-bridge package"
@@ -345,6 +378,9 @@ impl WindowActionQueue {
         if !self.registered.load(Ordering::Acquire) {
             bail!("KWin script bridge DBus receiver is unavailable");
         }
+        if !self.script_heartbeat_fresh() {
+            bail!("KWin script bridge heartbeat is stale; reload only the seatgeist-bridge script");
+        }
         if !self.script_ready.load(Ordering::Acquire) {
             bail!(
                 "installed KWin script has not registered resize_window support; install/reload the current seatgeist-bridge package"
@@ -400,6 +436,7 @@ impl WindowActionQueue {
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("KWin action queue lock is poisoned"))?;
+        state.script_last_seen = Some(Instant::now());
         Ok(state
             .pending
             .pop_front()
@@ -462,6 +499,7 @@ impl ActiveWindowState {
             .lock()
             .map_err(|_| anyhow::anyhow!("active-window state lock is poisoned"))?;
         snapshot.updated = true;
+        snapshot.updated_at = Some(Instant::now());
         snapshot.window = window;
         Ok(())
     }
@@ -477,11 +515,20 @@ impl ActiveWindowState {
             Ok(None)
         }
     }
+
+    fn update_age_ms(&self) -> Result<Option<u64>> {
+        let snapshot = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("active-window state lock is poisoned"))?;
+        Ok(snapshot.updated_at.map(elapsed_ms))
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 struct ActiveWindowSnapshot {
     updated: bool,
+    updated_at: Option<Instant>,
     window: Option<WindowInfo>,
 }
 
@@ -505,6 +552,7 @@ impl WindowListState {
             .lock()
             .map_err(|_| anyhow::anyhow!("window-list state lock is poisoned"))?;
         snapshot.updated = true;
+        snapshot.updated_at = Some(Instant::now());
         snapshot.windows = windows;
         Ok(())
     }
@@ -520,11 +568,24 @@ impl WindowListState {
             Ok(None)
         }
     }
+
+    fn update_age_ms(&self) -> Result<Option<u64>> {
+        let snapshot = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("window-list state lock is poisoned"))?;
+        Ok(snapshot.updated_at.map(elapsed_ms))
+    }
+}
+
+fn elapsed_ms(updated_at: Instant) -> u64 {
+    updated_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 #[derive(Debug, Clone, Default)]
 struct WindowListSnapshot {
     updated: bool,
+    updated_at: Option<Instant>,
     windows: Vec<WindowInfo>,
 }
 
@@ -585,8 +646,8 @@ impl Bridge {
 
     async fn register_action_capabilities(&self, capabilities: &str) -> zbus::fdo::Result<()> {
         self.window_action_queue
-            .register_script_capabilities(capabilities);
-        Ok(())
+            .register_script_capabilities(capabilities)
+            .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
     }
 
     async fn register_agent_seat_backend(
@@ -731,7 +792,6 @@ impl From<ActiveWindowGeometry> for WindowGeometry {
 pub(super) fn status(
     active_window_state: &ActiveWindowState,
     window_list_state: &WindowListState,
-    dbus_service_registered: bool,
     window_action_queue: &WindowActionQueue,
 ) -> Result<KwinBridgeStatus> {
     let package_dir = xdg::data_home().join("kwin/scripts/seatgeist-bridge");
@@ -740,7 +800,7 @@ pub(super) fn status(
     status_with_installation(
         active_window_state,
         window_list_state,
-        dbus_service_registered,
+        window_action_queue.dbus_service_registered(),
         window_action_queue.resize_ready(),
         window_action_queue.move_ready(),
         window_action_queue.launch_ready(),
@@ -770,9 +830,15 @@ fn status_with_installation(
     let active_window_snapshot = active_window_state.snapshot()?;
     let active_window_update_seen = active_window_snapshot.is_some();
     let active_window = active_window_snapshot.flatten();
+    let active_window_update_age_ms = active_window_state.update_age_ms()?;
     let window_list_snapshot = window_list_state.snapshot()?;
     let window_list_update_seen = window_list_snapshot.is_some();
     let window_count = window_list_snapshot.map_or(0, |windows| windows.len());
+    let window_list_update_age_ms = window_list_state.update_age_ms()?;
+    let snapshot_stale = active_window_update_age_ms
+        .is_none_or(|age| age > SNAPSHOT_STALE_AFTER.as_millis() as u64)
+        || window_list_update_age_ms
+            .is_none_or(|age| age > SNAPSHOT_STALE_AFTER.as_millis() as u64);
 
     Ok(KwinBridgeStatus {
         dbus_service_registered,
@@ -781,6 +847,9 @@ fn status_with_installation(
         window_launch_supported,
         active_window_update_seen,
         window_list_update_seen,
+        active_window_update_age_ms,
+        window_list_update_age_ms,
+        snapshot_stale,
         window_count,
         active_window,
         package_installed: installation.package_dir.join("metadata.json").is_file(),
@@ -840,6 +909,11 @@ pub(super) async fn start_kwin_bridge(
 ) -> Result<zbus::Connection> {
     let connection = zbus::connection::Builder::session()
         .context("connect to session bus for KWin bridge")?
+        // The production daemon must remain the owner until it exits. zbus
+        // enables replacement flags by default, which allowed short-lived
+        // test daemons to steal the live bridge name without returning it.
+        .allow_name_replacements(false)
+        .replace_existing_names(false)
         .name(SERVICE)
         .context("request KWin bridge DBus service name")?
         .serve_at(
@@ -863,6 +937,76 @@ pub(super) async fn start_kwin_bridge(
         "KWin bridge DBus service registered"
     );
     Ok(connection)
+}
+
+pub(super) fn supervise_kwin_bridge_ownership(
+    initial_connection: Option<zbus::Connection>,
+    active_window_state: ActiveWindowState,
+    window_list_state: WindowListState,
+    activity_tracker: activity::ActivityTracker,
+    window_action_queue: WindowActionQueue,
+    agent_seat_backend: crate::agent_seat::KwinAgentSeatBackend,
+) {
+    tokio::spawn(async move {
+        let mut connection = initial_connection;
+        let mut previously_owned = connection.is_some();
+        let mut interval = tokio::time::interval(BRIDGE_OWNERSHIP_CHECK_INTERVAL);
+        loop {
+            interval.tick().await;
+            let mut owned = false;
+            if let Some(current) = connection.as_ref() {
+                owned = service_owned_by_connection(current).await.unwrap_or(false);
+                if !owned {
+                    owned = current.request_name(SERVICE).await.is_ok()
+                        && service_owned_by_connection(current).await.unwrap_or(false);
+                    if !owned {
+                        connection = None;
+                    }
+                }
+            }
+            if connection.is_none()
+                && let Ok(reconnected) = start_kwin_bridge(
+                    active_window_state.clone(),
+                    window_list_state.clone(),
+                    activity_tracker.clone(),
+                    window_action_queue.clone(),
+                    agent_seat_backend.clone(),
+                )
+                .await
+            {
+                owned = true;
+                connection = Some(reconnected);
+            }
+            window_action_queue.set_registered(owned);
+            if owned != previously_owned {
+                if owned {
+                    info!(service = SERVICE, "KWin bridge D-Bus ownership recovered");
+                } else {
+                    tracing::warn!(
+                        service = SERVICE,
+                        "KWin bridge D-Bus ownership lost; window actions disabled"
+                    );
+                }
+                previously_owned = owned;
+            }
+        }
+    });
+}
+
+async fn service_owned_by_connection(connection: &zbus::Connection) -> Result<bool> {
+    let Some(unique_name) = connection.unique_name() else {
+        return Ok(false);
+    };
+    let proxy = zbus::fdo::DBusProxy::new(connection)
+        .await
+        .context("create session D-Bus ownership proxy")?;
+    let service =
+        zbus::names::BusName::try_from(SERVICE).context("parse KWin bridge D-Bus service name")?;
+    let owner = proxy
+        .get_name_owner(service)
+        .await
+        .context("query KWin bridge D-Bus owner")?;
+    Ok(owner.as_str() == unique_name.as_str())
 }
 
 #[cfg(test)]
@@ -923,6 +1067,9 @@ mod tests {
         assert!(!status.window_launch_supported);
         assert!(!status.active_window_update_seen);
         assert!(status.window_list_update_seen);
+        assert!(status.active_window_update_age_ms.is_none());
+        assert!(status.window_list_update_age_ms.is_some());
+        assert!(status.snapshot_stale);
         assert_eq!(status.window_count, 2);
         assert!(status.active_window.is_none());
         assert!(!status.package_installed);
@@ -933,7 +1080,9 @@ mod tests {
     async fn resize_actions_round_trip_through_the_bridge_queue() {
         let queue = WindowActionQueue::default();
         queue.set_registered(true);
-        queue.register_script_capabilities("resize_window");
+        queue
+            .register_script_capabilities("resize_window")
+            .expect("capability registration succeeds");
         let resize_queue = queue.clone();
         let resize =
             tokio::spawn(async move { resize_queue.resize_window("window-1", 1280, 720).await });
@@ -975,7 +1124,7 @@ mod tests {
             .resize_window("window-1", 1280, 720)
             .await
             .expect_err("missing capability handshake fails closed");
-        assert!(error.to_string().contains("has not registered"));
+        assert!(error.to_string().contains("heartbeat is stale"));
         assert!(queue.take().expect("queue remains readable").is_empty());
     }
 
@@ -983,7 +1132,9 @@ mod tests {
     async fn launch_intent_is_acknowledged_before_completion() {
         let queue = WindowActionQueue::default();
         queue.set_registered(true);
-        queue.register_script_capabilities("resize_window,move_window,launch_window");
+        queue
+            .register_script_capabilities("resize_window,move_window,launch_window")
+            .expect("capability registration succeeds");
         let arm_queue = queue.clone();
         let arm = tokio::spawn(async move {
             arm_queue

@@ -273,6 +273,7 @@ pub enum ActionSettleBackend {
     Polling,
     AtspiEvent,
     TargetRead,
+    DeliveryAck,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -10,6 +10,7 @@
 #include <workspace.h>
 
 #include <QDBusConnection>
+#include <QDBusConnectionInterface>
 #include <QDBusMessage>
 #include <QDBusPendingCall>
 #include <QDBusPendingCallWatcher>
@@ -33,7 +34,7 @@ constexpr auto Service = "org.seatgeist.KWinBridge";
 constexpr auto Path = "/org/seatgeist/KWinBridge1";
 constexpr auto Interface = "org.seatgeist.KWinBridge1";
 constexpr auto Backend = "kwin_agent_seat_v1";
-constexpr int PollIntervalMs = 10;
+constexpr int PollIntervalMs = 50;
 constexpr int DefaultRepeatRate = 25;
 constexpr int DefaultRepeatDelayMs = 600;
 
@@ -91,18 +92,26 @@ SeatgeistAgentSeatPlugin::SeatgeistAgentSeatPlugin()
         &QDBusServiceWatcher::serviceOwnerChanged,
         this,
         [this](const QString &, const QString &, const QString &newOwner) {
-            if (newOwner.isEmpty()) {
+            m_serviceAvailable = !newOwner.isEmpty();
+            if (!m_serviceAvailable) {
+                m_pollTimer->stop();
                 clearTarget();
                 return;
             }
             registerBackend();
+            m_pollTimer->start();
         });
 
     m_pollTimer = new QTimer(this);
     m_pollTimer->setInterval(PollIntervalMs);
     connect(m_pollTimer, &QTimer::timeout, this, &SeatgeistAgentSeatPlugin::poll);
-    m_pollTimer->start();
-    registerBackend();
+    auto *busInterface = QDBusConnection::sessionBus().interface();
+    m_serviceAvailable = busInterface && busInterface->isServiceRegistered(
+        QString::fromLatin1(Service));
+    if (m_serviceAvailable) {
+        registerBackend();
+        m_pollTimer->start();
+    }
 }
 
 SeatgeistAgentSeatPlugin::~SeatgeistAgentSeatPlugin()
@@ -151,6 +160,9 @@ bool SeatgeistAgentSeatPlugin::initializeKeymap(QString *error)
 
 void SeatgeistAgentSeatPlugin::registerBackend()
 {
+    if (!m_serviceAvailable) {
+        return;
+    }
     auto message = methodCall(QStringLiteral("RegisterAgentSeatBackend"));
     message << QString::fromLatin1(Backend);
     QDBusConnection::sessionBus().asyncCall(message);
@@ -158,7 +170,7 @@ void SeatgeistAgentSeatPlugin::registerBackend()
 
 void SeatgeistAgentSeatPlugin::poll()
 {
-    if (m_pollInFlight) {
+    if (!m_serviceAvailable || m_pollInFlight) {
         return;
     }
     m_pollInFlight = true;

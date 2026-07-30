@@ -56,6 +56,7 @@ private:
     std::unique_ptr<QDBusServiceWatcher> m_serviceWatcher;
     QTimer *m_pollTimer = nullptr;
     QElapsedTimer m_monotonicClock;
+    bool m_serviceAvailable = false;
     bool m_pollInFlight = false;
     QPointer<Window> m_target;
     QPointF m_localPointerPosition;

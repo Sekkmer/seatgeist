@@ -15,7 +15,11 @@ Naming: the public project name is `Seatgeist`. Binaries, crates, service names,
   action to CLI/MCP callers and is journaled as failed.
 - AT-SPI readiness now connects to the advertised accessibility bus and probes
   the Registry root instead of treating a published but stale socket address as
-  available. External diagnostic commands have all standard streams detached,
+  available. It honors an explicit `AT_SPI_BUS_ADDRESS` for isolated
+  accessibility tests and identifies an advertised but unreachable Unix socket
+  as a likely test-broker collision. Headless tests disable the bridge and use a
+  private `XDG_RUNTIME_DIR`; accessibility-enabled fixtures must additionally
+  use their own bus address. External diagnostic commands have all standard streams detached,
   preventing expected probe failures from polluting daemon logs.
 - Health responses expose protocol version, daemon run id, build timestamp and
   source/hash provenance, plus an effective-config fingerprint. Deployment
@@ -26,6 +30,17 @@ Naming: the public project name is `Seatgeist`. Binaries, crates, service names,
   that list, and app-policy failures remain `app_denied` across focus,
   keyboard, pointer, accessibility, and exact capture targeting. MCP renders
   these as explicit non-retryable policy denials.
+- The KWin bridge name is non-replaceable, ownership is checked and reacquired
+  once per second, and action capability readiness expires with the script
+  heartbeat. Bridge status reports snapshot ages and staleness rather than a
+  cached startup boolean. Owner loss therefore disables window actions
+  immediately instead of producing a three-second unknown timeout.
+- The agent-seat KWin plugin stops polling when the bridge owner disappears,
+  removing the ownerless D-Bus log storm. Default independent-seat settlement
+  uses the compositor delivery acknowledgment rather than generic desktop
+  change polling.
+- Narrow KWin script/plugin reload tooling verifies ABI and post-load state and
+  always refuses an in-place compositor restart.
 - MCP removes timestamped runtime screenshots after successfully embedding
   their image bytes. Explicit output paths and metadata-only requests remain
   persistent. The user service uses bounded restart bursts and stepped backoff

@@ -165,6 +165,12 @@ pub struct KwinBridgeStatus {
     pub window_launch_supported: bool,
     pub active_window_update_seen: bool,
     pub window_list_update_seen: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_window_update_age_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_list_update_age_ms: Option<u64>,
+    #[serde(default)]
+    pub snapshot_stale: bool,
     pub window_count: usize,
     pub active_window: Option<WindowInfo>,
     pub package_dir: PathBuf,
@@ -2413,6 +2419,9 @@ mod tests {
             window_launch_supported: true,
             active_window_update_seen: false,
             window_list_update_seen: false,
+            active_window_update_age_ms: None,
+            window_list_update_age_ms: None,
+            snapshot_stale: true,
             window_count: 0,
             active_window: None,
             package_dir: PathBuf::from("/home/user/.local/share/kwin/scripts/seatgeist-bridge"),

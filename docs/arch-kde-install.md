@@ -172,7 +172,26 @@ reloads only the Seatgeist script when the KWin scripting service is live. If
 it reports that loading was deferred, log into the target KDE session and run
 the target again, or let the enabled script load at the next session start.
 
+Private host-bus test daemons must pass `--disable-kwin-bridge` (or set
+`SEATGEIST_DISABLE_KWIN_BRIDGE=1`) so they cannot publish the production
+well-known name. Nested KDE fixtures instead use their own session bus and may
+exercise the bridge normally.
+
 Before the script publishes its first active-window update, active-window reads can report the documented bridge-not-yet-reporting state. The script republishes its current snapshot every two seconds, so a daemon-only restart should recover without focusing a window. If it remains empty, update/reload the installed script with `make install-kwin-script`, then re-check status.
+
+For an already-installed integration, use the narrow reload targets:
+
+```bash
+make reload-kwin-bridge
+make reload-kwin-activity
+make reload-kwin-agent-seat
+```
+
+The binary-plugin targets compare the embedded plugin factory ABI with the
+running KWin version before calling KWin's `/Plugins` API. The helper verifies
+the component after loading and refuses a compositor restart request. If the
+ABI differs, rebuild and use a normal logout/login; never replace
+`plasma-kwin_wayland` in place on a DRM session.
 
 ### KDE Connect recovery after KWin restarts
 

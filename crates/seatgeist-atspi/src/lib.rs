@@ -1,4 +1,4 @@
-use std::{collections::HashMap, process::Command};
+use std::{collections::HashMap, env, os::unix::net::UnixStream, path::PathBuf, process::Command};
 
 mod cache;
 mod events;
@@ -324,9 +324,9 @@ pub fn set_current_value(node_id: &str, value: f64) -> Result<()> {
 
 impl AtspiBus {
     fn connect() -> Result<Self> {
-        Ok(Self {
-            address: accessibility_bus_address()?,
-        })
+        let address = accessibility_bus_address()?;
+        validate_accessibility_bus_socket(&address)?;
+        Ok(Self { address })
     }
 
     fn find_focused(
@@ -1193,6 +1193,12 @@ impl AtspiBus {
 }
 
 fn accessibility_bus_address() -> Result<String> {
+    if let Some(address) = env::var_os("AT_SPI_BUS_ADDRESS")
+        .and_then(|address| address.into_string().ok())
+        .filter(|address| !address.trim().is_empty())
+    {
+        return Ok(address);
+    }
     let output = Command::new("busctl")
         .args([
             BUSCTL_TIMEOUT_ARG,
@@ -1206,6 +1212,57 @@ fn accessibility_bus_address() -> Result<String> {
         .output()
         .map_err(|err| SeatgeistError::BackendUnavailable(format!("run busctl: {err}")))?;
     parse_single_string(&command_output(output, "busctl org.a11y.Bus GetAddress")?)
+}
+
+fn validate_accessibility_bus_socket(address: &str) -> Result<()> {
+    let Some(path) = unix_path_from_dbus_address(address) else {
+        return Ok(());
+    };
+    UnixStream::connect(&path).map(|_| ()).map_err(|error| {
+        SeatgeistError::BackendUnavailable(format!(
+            "AT-SPI bus advertised an unreachable Unix socket ({error}); a test accessibility \
+             broker may have replaced the live bus path. Isolate tests with a private \
+             XDG_RUNTIME_DIR and AT_SPI_BUS_ADDRESS, then restart the user AT-SPI bus only after \
+             the conflicting test is stopped"
+        ))
+    })
+}
+
+fn unix_path_from_dbus_address(address: &str) -> Option<PathBuf> {
+    let unix = address
+        .split(';')
+        .find_map(|transport| transport.strip_prefix("unix:"))?;
+    let encoded = unix
+        .split(',')
+        .find_map(|parameter| parameter.strip_prefix("path="))?;
+    percent_decode(encoded).map(PathBuf::from)
+}
+
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        let high = *bytes.get(index + 1)?;
+        let low = *bytes.get(index + 2)?;
+        decoded.push(hex_value(high)? << 4 | hex_value(low)?);
+        index += 3;
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn validate_find_request(request: &AccessibilityFindRequest) -> Result<()> {
@@ -1720,6 +1777,19 @@ mod tests {
     fn parses_accessibility_bus_connection_process_id() {
         assert_eq!(parse_connection_process_id("u 4242\n"), Some(4242));
         assert_eq!(parse_connection_process_id("u invalid\n"), None);
+    }
+
+    #[test]
+    fn parses_percent_encoded_unix_bus_paths_without_accepting_abstract_addresses() {
+        assert_eq!(
+            unix_path_from_dbus_address("unix:path=/run/user/1000/at-spi/bus_1%2Dprivate,guid=abc"),
+            Some(PathBuf::from("/run/user/1000/at-spi/bus_1-private"))
+        );
+        assert_eq!(
+            unix_path_from_dbus_address("unix:abstract=/tmp/dbus-abc,guid=abc"),
+            None
+        );
+        assert_eq!(unix_path_from_dbus_address("tcp:host=localhost"), None);
     }
 
     #[test]

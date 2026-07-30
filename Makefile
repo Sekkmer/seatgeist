@@ -2,7 +2,7 @@ SHELL := /usr/bin/bash
 .ONESHELL:
 
 .PHONY: fmt check test clippy check-kwin-activity-plugin check-kwin-agent-seat-plugin validate-kwin-bridge validate-plugin validate-install-assets validate-release validate-computer-use-baseline verify-cooperative-use-acceptance package-release verify-release-artifacts verify-release-install sign-release-artifacts verify-release-signatures write-release-evidence verify-release-evidence check-public-name check-local-codex-install release-readiness release-external-preflight release-live-evals portal-screenshot-v3-status deploy-user-daemon validate-traces verify smoke smoke-codex-plugin-install smoke-monitors smoke-windows smoke-focus smoke-clipboard smoke-atspi smoke-uinput-status smoke-capture-backends smoke-pointer-calibration smoke-human-input-pause smoke-trace-replay smoke-gui-input smoke-mcp gui-eval gui-eval-status gui-eval-session-preflight gui-eval-observe gui-eval-a11y-quality-status gui-eval-a11y-focused-tree gui-eval-a11y-find gui-eval-a11y-text-attributes gui-eval-a11y-control-denied gui-eval-semantic-denied gui-eval-input-denied gui-eval-clipboard-status gui-eval-clipboard-denied gui-eval-kwin-bridge-status gui-eval-keymap-status gui-eval-screenshot-preview gui-eval-screenshot-coordinate-map gui-eval-screenshot-config-bounds gui-eval-journal-artifacts gui-eval-full-resolution-denied gui-eval-control-safety gui-eval-text-editor-input gui-eval-kcalc-visual gui-eval-firefox-localhost-button gui-eval-portal-screenshot gui-eval-remote-desktop-probe gui-eval-remote-desktop-eis-session install-kwin-script
-.PHONY: kwin-activity-preflight install-kwin-activity-user uninstall-kwin-activity-user install-kwin-agent-seat-user uninstall-kwin-agent-seat-user install-kdeconnect-kwin-recovery-user uninstall-kdeconnect-kwin-recovery-user probe-nested-kde-multi-output probe-nested-seatgeist probe-nested-remote-desktop probe-nested-retained-apps gui-eval-nested-retained-capture gui-eval-nested-eis-isolation gui-eval-cooperative-sticky gui-eval-retained-capture gui-eval-capture-restore-prepare gui-eval-capture-restore-resume gui-eval-capture-revocation gui-eval-target-reopen gui-eval-background-semantic
+.PHONY: kwin-activity-preflight reload-kwin-bridge reload-kwin-activity reload-kwin-agent-seat install-kwin-activity-user uninstall-kwin-activity-user install-kwin-agent-seat-user uninstall-kwin-agent-seat-user install-kdeconnect-kwin-recovery-user uninstall-kdeconnect-kwin-recovery-user probe-nested-kde-multi-output probe-nested-seatgeist probe-nested-remote-desktop probe-nested-retained-apps gui-eval-nested-retained-capture gui-eval-nested-eis-isolation gui-eval-cooperative-sticky gui-eval-retained-capture gui-eval-capture-restore-prepare gui-eval-capture-restore-resume gui-eval-capture-revocation gui-eval-target-reopen gui-eval-background-semantic
 .PHONY: refresh-local-codex-plugin
 
 fmt:
@@ -50,6 +50,7 @@ validate-computer-use-baseline: validate-kwin-bridge
 	scripts/test-install-kwin-screenshot-authorization.py
 	scripts/test-plugin-hook-resolution.py
 	scripts/test-kwin-activity-preflight.py
+	scripts/test-reload-kwin-integration.py
 	scripts/test-kwin-activity-abi-watch.py
 	scripts/test-install-kwin-activity-user.py
 	scripts/test-install-kdeconnect-kwin-recovery.py
@@ -102,6 +103,15 @@ verify-cooperative-use-acceptance:
 
 kwin-activity-preflight: check-kwin-activity-plugin
 	scripts/kwin-activity-preflight.py
+
+reload-kwin-bridge:
+	scripts/reload-kwin-integration.py bridge
+
+reload-kwin-activity: check-kwin-activity-plugin
+	scripts/reload-kwin-integration.py activity
+
+reload-kwin-agent-seat: check-kwin-agent-seat-plugin
+	scripts/reload-kwin-integration.py agent-seat
 
 install-kwin-activity-user: check-kwin-activity-plugin
 	scripts/install-kwin-activity-user.py
@@ -272,7 +282,7 @@ smoke:
 	rm -rf target/seatgeist-smoke "$$log" "$$journal"
 	mkdir -p target
 	cargo build -p seatgeistd -p seatgeist-cli
-	target/debug/seatgeistd --socket "$$socket" --journal "$$journal" >"$$log" 2>&1 &
+	target/debug/seatgeistd --disable-kwin-bridge --socket "$$socket" --journal "$$journal" >"$$log" 2>&1 &
 	pid=$$!
 	cleanup() {
 		kill "$$pid" 2>/dev/null || true
