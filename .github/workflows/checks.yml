@@ -24,7 +24,10 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libpipewire-0.3-dev
+          sudo apt-get install --yes \
+            libei-dev \
+            libpipewire-0.3-dev \
+            libxkbcommon-dev
 
       - name: Install Rust toolchain
         run: |
