@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -29,7 +29,10 @@ impl DaemonFixture {
         let socket = root.join("seatgeistd.sock");
         let journal = root.join("journal.jsonl");
         let panic_stop = root.join("panic-stop");
-        let child = Command::new(daemon_binary()?)
+        let stderr = root.join("daemon.stderr");
+        let stderr_file = fs::File::create(&stderr).context("create daemon stderr fixture")?;
+        let mut child = Command::new(daemon_binary()?)
+            .arg("--disable-kwin-bridge")
             .arg("--socket")
             .arg(&socket)
             .arg("--journal")
@@ -38,10 +41,15 @@ impl DaemonFixture {
             .arg(&panic_stop)
             .env("HOME", &root)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(stderr_file))
             .spawn()
             .context("spawn seatgeistd")?;
-        wait_for_socket(&socket)?;
+        if let Err(error) = wait_for_socket(&socket, &mut child, &stderr) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_dir_all(&root);
+            return Err(error);
+        }
         Ok(Self {
             child,
             socket,
@@ -63,6 +71,7 @@ impl DaemonFixture {
         let journal = root.join("configured-journal.jsonl");
         let panic_stop = root.join("configured-panic-stop");
         let config = root.join("config.toml");
+        let stderr = root.join("daemon.stderr");
         let empty_bin = root.join("empty-bin");
         fs::create_dir_all(&empty_bin).context("create empty PATH fixture")?;
         fs::write(
@@ -77,12 +86,14 @@ impl DaemonFixture {
         .context("write daemon config fixture")?;
 
         let mut command = Command::new(daemon_binary()?);
+        let stderr_file = fs::File::create(&stderr).context("create daemon stderr fixture")?;
         command
+            .arg("--disable-kwin-bridge")
             .arg("--config")
             .arg(&config)
             .env("HOME", &root)
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(Stdio::from(stderr_file));
         for (key, value) in env_overrides {
             command.env(
                 key,
@@ -91,8 +102,13 @@ impl DaemonFixture {
                     .replace("__EMPTY_BIN__", &empty_bin.display().to_string()),
             );
         }
-        let child = command.spawn().context("spawn configured seatgeistd")?;
-        wait_for_socket(&socket)?;
+        let mut child = command.spawn().context("spawn configured seatgeistd")?;
+        if let Err(error) = wait_for_socket(&socket, &mut child, &stderr) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_dir_all(&root);
+            return Err(error);
+        }
         Ok(Self {
             child,
             socket,
@@ -2143,6 +2159,9 @@ fn assert_error_kind_trace(
 
 fn daemon_binary() -> Result<PathBuf> {
     let candidate = PathBuf::from(env!("CARGO_BIN_EXE_seatgeist-cli")).with_file_name("seatgeistd");
+    if candidate.exists() {
+        return Ok(candidate);
+    }
 
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -2165,14 +2184,39 @@ fn daemon_binary() -> Result<PathBuf> {
     bail!("seatgeistd binary was not built at {}", candidate.display())
 }
 
-fn wait_for_socket(socket: &Path) -> Result<()> {
-    for _ in 0..50 {
+fn wait_for_socket(socket: &Path, child: &mut Child, stderr: &Path) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(status) = child.try_wait().context("poll seatgeistd startup")? {
+            bail!(
+                "daemon exited with {status} before creating socket {}: {}",
+                socket.display(),
+                daemon_stderr(stderr)
+            );
+        }
         if socket.exists() {
             return Ok(());
         }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let status = child.wait().ok();
+            bail!(
+                "daemon socket did not appear within 30s at {}; status={status:?}; stderr={}",
+                socket.display(),
+                daemon_stderr(stderr)
+            );
+        }
         thread::sleep(Duration::from_millis(100));
     }
-    bail!("daemon socket did not appear at {}", socket.display())
+}
+
+fn daemon_stderr(path: &Path) -> String {
+    let output = fs::read_to_string(path).unwrap_or_else(|error| format!("<unreadable: {error}>"));
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return "<empty>".to_string();
+    }
+    trimmed.chars().take(2_000).collect()
 }
 
 fn unique_temp_dir() -> PathBuf {

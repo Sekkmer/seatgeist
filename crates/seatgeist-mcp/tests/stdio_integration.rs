@@ -807,6 +807,9 @@ fn require_success(label: &str, output: &Output) -> Result<()> {
 
 fn daemon_binary() -> Result<PathBuf> {
     let candidate = PathBuf::from(env!("CARGO_BIN_EXE_seatgeist-mcp")).with_file_name("seatgeistd");
+    if candidate.exists() {
+        return Ok(candidate);
+    }
 
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
