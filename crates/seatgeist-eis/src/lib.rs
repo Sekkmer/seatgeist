@@ -4,6 +4,7 @@ use std::{
     marker::PhantomData,
     os::fd::{IntoRawFd, OwnedFd, RawFd},
     ptr::{self, NonNull},
+    sync::OnceLock,
 };
 use thiserror::Error;
 
@@ -592,6 +593,8 @@ where
 pub enum LibeiSinkError {
     #[error("libei text event contains an interior NUL byte")]
     InteriorNulText,
+    #[error("libei text event API {symbol} is unavailable; libei 1.6 or newer is required")]
+    TextApiUnavailable { symbol: &'static str },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -659,15 +662,59 @@ unsafe extern "C" {
     fn ei_device_frame(device: *mut EiDevice, time: u64);
     fn ei_device_pointer_motion_absolute(device: *mut EiDevice, x: f64, y: f64);
     fn ei_device_keyboard_key(device: *mut EiDevice, keycode: u32, is_press: bool);
-    fn ei_device_text_keysym(device: *mut EiDevice, keysym: u32, is_press: bool);
     fn ei_device_button_button(device: *mut EiDevice, button: u32, is_press: bool);
     fn ei_device_scroll_discrete(device: *mut EiDevice, x: i32, y: i32);
     fn ei_device_scroll_stop(device: *mut EiDevice, stop_x: bool, stop_y: bool);
-    fn ei_device_text_utf8_with_length(
-        device: *mut EiDevice,
-        text: *const libc::c_char,
-        length: usize,
-    );
+}
+
+type LibeiTextKeysymFn = unsafe extern "C" fn(*mut EiDevice, u32, bool);
+type LibeiTextUtf8Fn = unsafe extern "C" fn(*mut EiDevice, *const libc::c_char, usize);
+
+fn libei_text_keysym_fn() -> Option<LibeiTextKeysymFn> {
+    static SYMBOL: OnceLock<Option<LibeiTextKeysymFn>> = OnceLock::new();
+    *SYMBOL.get_or_init(|| {
+        // SAFETY: the symbol name is NUL-terminated. A non-null result is a libei
+        // function with the signature published since libei 1.6.
+        let symbol = unsafe {
+            libc::dlsym(
+                libc::RTLD_DEFAULT,
+                b"ei_device_text_keysym\0".as_ptr().cast(),
+            )
+        };
+        if symbol.is_null() {
+            None
+        } else {
+            // SAFETY: libei exports this symbol with `LibeiTextKeysymFn`'s ABI.
+            Some(unsafe { std::mem::transmute::<*mut libc::c_void, LibeiTextKeysymFn>(symbol) })
+        }
+    })
+}
+
+fn libei_text_utf8_fn() -> Option<LibeiTextUtf8Fn> {
+    static SYMBOL: OnceLock<Option<LibeiTextUtf8Fn>> = OnceLock::new();
+    *SYMBOL.get_or_init(|| {
+        // SAFETY: the symbol name is NUL-terminated. A non-null result is a libei
+        // function with the signature published since libei 1.6.
+        let symbol = unsafe {
+            libc::dlsym(
+                libc::RTLD_DEFAULT,
+                b"ei_device_text_utf8_with_length\0".as_ptr().cast(),
+            )
+        };
+        if symbol.is_null() {
+            None
+        } else {
+            // SAFETY: libei exports this symbol with `LibeiTextUtf8Fn`'s ABI.
+            Some(unsafe { std::mem::transmute::<*mut libc::c_void, LibeiTextUtf8Fn>(symbol) })
+        }
+    })
+}
+
+fn require_libei_text_symbol<T>(
+    symbol: Option<T>,
+    name: &'static str,
+) -> std::result::Result<T, LibeiSinkError> {
+    symbol.ok_or(LibeiSinkError::TextApiUnavailable { symbol: name })
 }
 
 #[link(name = "xkbcommon")]
@@ -1323,8 +1370,10 @@ impl EisEventSink for LibeiDeviceSink<'_> {
     }
 
     fn text_keysym(&mut self, keysym: u32, is_press: bool) -> std::result::Result<(), Self::Error> {
+        let text_keysym =
+            require_libei_text_symbol(libei_text_keysym_fn(), "ei_device_text_keysym")?;
         // SAFETY: `device` is guaranteed valid by `from_raw` for this sink's lifetime.
-        unsafe { ei_device_text_keysym(self.device.as_ptr(), keysym, is_press) };
+        unsafe { text_keysym(self.device.as_ptr(), keysym, is_press) };
         Ok(())
     }
 
@@ -1350,9 +1399,11 @@ impl EisEventSink for LibeiDeviceSink<'_> {
         if text.as_bytes().contains(&0) {
             return Err(LibeiSinkError::InteriorNulText);
         }
+        let text_utf8 =
+            require_libei_text_symbol(libei_text_utf8_fn(), "ei_device_text_utf8_with_length")?;
         // SAFETY: `device` is valid, and the pointer/length pair is valid for this call.
         unsafe {
-            ei_device_text_utf8_with_length(
+            text_utf8(
                 self.device.as_ptr(),
                 text.as_ptr().cast::<libc::c_char>(),
                 text.len(),
@@ -2633,6 +2684,16 @@ mod tests {
             sink.text_utf8("bad\0text"),
             Err(LibeiSinkError::InteriorNulText)
         );
+    }
+
+    #[test]
+    fn missing_libei_text_api_fails_closed() {
+        assert!(matches!(
+            require_libei_text_symbol::<LibeiTextKeysymFn>(None, "ei_device_text_keysym"),
+            Err(LibeiSinkError::TextApiUnavailable {
+                symbol: "ei_device_text_keysym"
+            })
+        ));
     }
 
     #[test]
