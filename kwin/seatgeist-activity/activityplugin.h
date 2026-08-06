@@ -6,6 +6,7 @@
 
 #include <QElapsedTimer>
 #include <QHash>
+#include <QPointF>
 
 #include <memory>
 
@@ -15,6 +16,7 @@ namespace KWin
 {
 
 class InputDevice;
+class Window;
 
 class SeatgeistActivityPlugin final : public Plugin, public InputEventSpy
 {
@@ -34,11 +36,18 @@ public:
 
 private:
     QString provenanceFor(const InputDevice *device) const;
-    void publish(const QString &eventClass, const InputDevice *device, bool throttle);
+    QString windowIdAt(const QPointF &position) const;
+    QString activeWindowId() const;
+    void publish(
+        const QString &eventClass,
+        const InputDevice *device,
+        const QString &windowId,
+        bool throttle);
     void registerBackend();
 
     QElapsedTimer m_monotonicClock;
     QHash<QString, qint64> m_lastPublished;
+    QHash<qint32, QString> m_touchTargets;
     std::unique_ptr<QDBusServiceWatcher> m_serviceWatcher;
 };
 

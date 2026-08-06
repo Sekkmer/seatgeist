@@ -1,4 +1,9 @@
-use std::{collections::HashMap, fmt, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use anyhow::{Result, bail};
 use libseatgeist::{
@@ -20,6 +25,7 @@ use libseatgeist::WindowCaptureOpenRequest;
 
 pub(crate) const MAX_CAPTURE_FRAME_TIMEOUT_MS: u64 = 30_000;
 const MAX_CAPTURE_OPEN_TIMEOUT_MS: u64 = 300_000;
+const MAX_EXACT_WINDOW_SESSIONS_PER_OWNER: usize = 4;
 
 #[derive(Clone, Default)]
 pub(crate) struct CaptureSessionStore {
@@ -48,12 +54,38 @@ struct PendingCaptureOpen {
 struct CaptureSessionSlot {
     requested_source: CaptureSource,
     owner: SessionOwner,
-    latest_revision: Option<String>,
+    latest_frame: Option<CaptureFrameResult>,
+    latest_frame_user_invalidated: bool,
     direct_exact_window: bool,
     session: Arc<dyn CaptureSession>,
 }
 
 impl CaptureSessionStore {
+    pub(crate) async fn active_session_ids(&self) -> HashSet<String> {
+        self.reap_ended().await;
+        self.state.lock().await.sessions.keys().cloned().collect()
+    }
+
+    pub(crate) async fn invalidate_latest_frames_for_window(&self, window_id: &str) -> usize {
+        let mut state = self.state.lock().await;
+        let mut invalidated = 0;
+        for slot in state.sessions.values_mut() {
+            let matches = matches!(
+                &slot.requested_source,
+                CaptureSource::Window {
+                    requested_window_id: Some(requested),
+                } if requested == window_id
+            );
+            if matches {
+                slot.latest_frame_user_invalidated = true;
+                if slot.latest_frame.take().is_some() {
+                    invalidated += 1;
+                }
+            }
+        }
+        invalidated
+    }
+
     async fn reap_ended(&self) {
         let sessions = {
             let state = self.state.lock().await;
@@ -92,18 +124,27 @@ impl CaptureSessionStore {
         self.reap_ended().await;
         let mut state = self.state.lock().await;
         let owner_identity = owner.identity();
-        if state
+        let direct_exact_window = is_direct_exact_window(&requested_source);
+        let owner_pending = state
             .pending
             .values()
-            .any(|pending| pending.owner.identity() == owner_identity)
-            || state
-                .sessions
-                .values()
-                .any(|slot| slot.owner.identity() == owner_identity)
-        {
+            .filter(|pending| pending.owner.identity() == owner_identity)
+            .count();
+        let owner_sessions = state
+            .sessions
+            .values()
+            .filter(|slot| slot.owner.identity() == owner_identity)
+            .count();
+        if !direct_exact_window && owner_pending + owner_sessions > 0 {
             bail!("this client already has an opening or active capture session");
         }
-        let direct_exact_window = is_direct_exact_window(&requested_source);
+        if direct_exact_window
+            && owner_pending + owner_sessions >= MAX_EXACT_WINDOW_SESSIONS_PER_OWNER
+        {
+            bail!(
+                "this client reached the exact-window capture session quota ({MAX_EXACT_WINDOW_SESSIONS_PER_OWNER})"
+            );
+        }
         if !direct_exact_window
             && (state
                 .pending
@@ -145,7 +186,8 @@ impl CaptureSessionStore {
             CaptureSessionSlot {
                 requested_source: pending.requested_source,
                 owner: pending.owner,
-                latest_revision: None,
+                latest_frame: None,
+                latest_frame_user_invalidated: false,
                 direct_exact_window: pending.direct_exact_window,
                 session,
             },
@@ -180,12 +222,15 @@ impl CaptureSessionStore {
         self.reap_ended().await;
         let state = self.state.lock().await;
         let identity = owner.identity();
-        if let Some(slot) = state
+        let mut slots = state
             .sessions
             .values()
-            .find(|slot| slot.owner.identity() == identity)
-        {
-            return status_from_slot(slot, None);
+            .filter(|slot| slot.owner.identity() == identity);
+        if let Some(slot) = slots.next() {
+            if slots.next().is_none() {
+                return status_from_slot(slot, None);
+            }
+            return empty_capture_status(true, false, None, Some(owner), None);
         }
         let pending = state
             .pending
@@ -256,21 +301,14 @@ impl CaptureSessionStore {
             })
             .await
             .map_err(anyhow::Error::msg)?;
-        if let Some(slot) = self
-            .state
-            .lock()
-            .await
-            .sessions
-            .get_mut(&request.session_id)
-        {
-            slot.latest_revision = Some(frame.revision.clone());
-        }
-        Ok(capture_frame_result(
+        let result = capture_frame_result(
             &request.session_id,
             &metadata.backend,
             metadata.occlusion_possible,
             frame,
-        ))
+        );
+        self.update_latest_frame(&result).await?;
+        Ok(result)
     }
 
     pub(crate) async fn wait(&self, request: CaptureWaitRequest) -> Result<CaptureWaitResult> {
@@ -299,27 +337,79 @@ impl CaptureSessionStore {
             })
             .await
             .map_err(anyhow::Error::msg)?;
-        if let Some(slot) = self
-            .state
-            .lock()
-            .await
-            .sessions
-            .get_mut(&request.session_id)
-        {
-            slot.latest_revision = Some(result.frame.revision.clone());
-        }
+        let frame = capture_frame_result(
+            &request.session_id,
+            &metadata.backend,
+            metadata.occlusion_possible,
+            result.frame,
+        );
+        self.update_latest_frame(&frame).await?;
         Ok(CaptureWaitResult {
-            frame: capture_frame_result(
-                &request.session_id,
-                &metadata.backend,
-                metadata.occlusion_possible,
-                result.frame,
-            ),
+            frame,
             changed: result.changed,
             timed_out: result.timed_out,
             timeout_ms,
             elapsed_ms: result.elapsed_ms,
         })
+    }
+
+    pub(crate) async fn update_latest_frame(&self, frame: &CaptureFrameResult) -> Result<()> {
+        let mut state = self.state.lock().await;
+        let slot = state
+            .sessions
+            .get_mut(&frame.session_id)
+            .ok_or_else(|| anyhow::anyhow!("capture session ended before frame metadata update"))?;
+        slot.latest_frame = Some(frame.clone());
+        slot.latest_frame_user_invalidated = false;
+        Ok(())
+    }
+
+    pub(crate) async fn resolve_capture_output_point(
+        &self,
+        session_id: &str,
+        capture_revision: &str,
+        point: libseatgeist::Point,
+    ) -> Result<libseatgeist::Point> {
+        if point.space != CoordinateSpace::CaptureOutput {
+            bail!("capture output mapping requires capture_output coordinates");
+        }
+        let state = self.state.lock().await;
+        let slot = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| anyhow::anyhow!("no active capture session with that id"))?;
+        if slot.latest_frame_user_invalidated {
+            bail!(
+                "capture frame invalidated by user input; acquire a fresh frame before preview-derived pointer input"
+            );
+        }
+        let frame = slot
+            .latest_frame
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("capture session has no captured frame to map"))?;
+        if frame.revision != capture_revision {
+            bail!("capture revision is stale; acquire a fresh frame before pointer input");
+        }
+        if !point.x.is_finite()
+            || !point.y.is_finite()
+            || point.x < 0.0
+            || point.y < 0.0
+            || point.x >= f64::from(frame.screenshot.output_width)
+            || point.y >= f64::from(frame.screenshot.output_height)
+        {
+            bail!(
+                "capture_output pointer coordinate {},{} is outside preview {}x{}",
+                point.x,
+                point.y,
+                frame.screenshot.output_width,
+                frame.screenshot.output_height
+            );
+        }
+        frame
+            .screenshot
+            .transform
+            .output_to_source_point(point.x, point.y)
+            .ok_or_else(|| anyhow::anyhow!("capture frame has an invalid coordinate transform"))
     }
 
     pub(crate) async fn close(
@@ -362,7 +452,8 @@ impl CaptureSessionStore {
                     requested_window_id: requested_window_id.clone(),
                 },
                 owner: SessionOwner::test_process(1),
-                latest_revision: None,
+                latest_frame: None,
+                latest_frame_user_invalidated: false,
                 direct_exact_window: requested_window_id.is_some(),
                 session,
             },
@@ -400,7 +491,10 @@ fn status_from_slot(
         owner_tool: slot.owner.tool().map(str::to_string),
         owner_pid: Some(slot.owner.pid()),
         owner_scope: Some(slot.owner.scope().as_str().to_string()),
-        latest_revision: slot.latest_revision.clone(),
+        latest_revision: slot
+            .latest_frame
+            .as_ref()
+            .map(|frame| frame.revision.clone()),
         consent_required: metadata.consent_required,
         occlusion_possible: metadata.occlusion_possible,
         sticky_target_bound: false,
@@ -626,7 +720,9 @@ fn capture_frame_result(
             output_height: screenshot.height,
             transform: ScreenshotTransform {
                 source_coordinate_space: CoordinateSpace::PhysicalPixel,
-                output_coordinate_space: CoordinateSpace::PhysicalPixel,
+                output_coordinate_space: CoordinateSpace::CaptureOutput,
+                source_extent_width: Some(screenshot.source_width),
+                source_extent_height: Some(screenshot.source_height),
                 source_origin_x: 0,
                 source_origin_y: 0,
                 scale_x: f64::from(screenshot.width) / f64::from(screenshot.source_width.max(1)),
@@ -816,6 +912,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_window_physical_activity_invalidates_only_matching_preview_frames() {
+        let store = CaptureSessionStore::default();
+        store
+            .install(mock_session("capture-1"), Some("window-1".to_string()))
+            .await;
+        store
+            .snapshot(CaptureSnapshotRequest {
+                session_id: "capture-1".to_string(),
+                output: PathBuf::from("/tmp/seatgeist-target-invalidation.png"),
+                max_edge: Some(640),
+                timeout_ms: 1000,
+            })
+            .await
+            .expect("frame is retained");
+        assert_eq!(
+            store
+                .status_for_session("capture-1")
+                .await
+                .latest_revision
+                .as_deref(),
+            Some("revision-1")
+        );
+        assert_eq!(
+            store.invalidate_latest_frames_for_window("window-2").await,
+            0
+        );
+        assert_eq!(
+            store.invalidate_latest_frames_for_window("window-1").await,
+            1
+        );
+        assert_eq!(
+            store.status_for_session("capture-1").await.latest_revision,
+            None
+        );
+        let error = store
+            .resolve_capture_output_point(
+                "capture-1",
+                "revision-1",
+                libseatgeist::Point {
+                    x: 10.0,
+                    y: 10.0,
+                    space: CoordinateSpace::CaptureOutput,
+                },
+            )
+            .await
+            .expect_err("preview-derived input requires a new frame after user activity");
+        assert!(error.to_string().contains("invalidated by user input"));
+        store
+            .snapshot(CaptureSnapshotRequest {
+                session_id: "capture-1".to_string(),
+                output: PathBuf::from("/tmp/seatgeist-target-refreshed.png"),
+                max_edge: Some(640),
+                timeout_ms: 1000,
+            })
+            .await
+            .expect("fresh frame clears user invalidation");
+        let mapped = store
+            .resolve_capture_output_point(
+                "capture-1",
+                "revision-1",
+                libseatgeist::Point {
+                    x: 10.0,
+                    y: 10.0,
+                    space: CoordinateSpace::CaptureOutput,
+                },
+            )
+            .await
+            .expect("preview-derived input may resume after a fresh frame");
+        assert_eq!(mapped.space, CoordinateSpace::PhysicalPixel);
+    }
+
+    #[tokio::test]
     async fn daemon_open_routes_the_retained_window_request_through_screen_backend() {
         let seen = Arc::new(StdMutex::new(None));
         let backend = RecordingScreenBackend {
@@ -855,7 +1023,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_window_sessions_are_parallel_across_owners_but_portal_is_singleton() {
+    async fn exact_window_sessions_are_parallel_with_bounded_per_owner_quota() {
         let store = CaptureSessionStore::default();
         let exact = |id: &str| CaptureSource::Window {
             requested_window_id: Some(id.to_string()),
@@ -895,13 +1063,17 @@ mod tests {
         );
         assert!(store.status().await.active);
         assert_eq!(store.status().await.session_id, None);
-        assert!(
+        for window_id in ["window-3", "window-4", "window-5"] {
             store
-                .begin_open(exact("window-3"), SessionOwner::test_process(1))
+                .begin_open(exact(window_id), SessionOwner::test_process(1))
                 .await
-                .is_err(),
-            "one owner keeps one unambiguous session"
-        );
+                .expect("one owner may reserve several exact observation sessions");
+        }
+        let quota_error = store
+            .begin_open(exact("window-6"), SessionOwner::test_process(1))
+            .await
+            .expect_err("the per-owner exact observation quota remains bounded");
+        assert!(quota_error.to_string().contains("session quota"));
 
         let portal_source = CaptureSource::Window {
             requested_window_id: None,
@@ -921,6 +1093,86 @@ mod tests {
                 .is_err(),
             "chooser-backed portal sessions remain globally serialized"
         );
+    }
+
+    #[tokio::test]
+    async fn capture_output_mapping_uses_exact_revision_and_preview_transform() {
+        let store = CaptureSessionStore::default();
+        store
+            .install(
+                mock_session("capture-map"),
+                Some("kwin-window-scaled".to_string()),
+            )
+            .await;
+        let mut frame = store
+            .snapshot(CaptureSnapshotRequest {
+                session_id: "capture-map".to_string(),
+                output: PathBuf::from("/tmp/capture-map.png"),
+                max_edge: Some(1_280),
+                timeout_ms: 5_000,
+            })
+            .await
+            .expect("frame is captured");
+        frame.screenshot.output_width = 1_280;
+        frame.screenshot.output_height = 720;
+        frame.screenshot.transform = ScreenshotTransform {
+            source_coordinate_space: CoordinateSpace::WindowLocal,
+            output_coordinate_space: CoordinateSpace::CaptureOutput,
+            source_extent_width: Some(1_920),
+            source_extent_height: Some(1_080),
+            source_origin_x: 0,
+            source_origin_y: 0,
+            scale_x: 1_280.0 / 1_920.0,
+            scale_y: 720.0 / 1_080.0,
+        };
+        store
+            .update_latest_frame(&frame)
+            .await
+            .expect("annotated transform is retained atomically");
+
+        let point = store
+            .resolve_capture_output_point(
+                "capture-map",
+                "revision-1",
+                libseatgeist::Point {
+                    x: 640.0,
+                    y: 360.0,
+                    space: CoordinateSpace::CaptureOutput,
+                },
+            )
+            .await
+            .expect("preview coordinate maps through DPI-aware transform");
+        assert_eq!(point.space, CoordinateSpace::WindowLocal);
+        assert_eq!(point.x, 960.0);
+        assert_eq!(point.y, 540.0);
+
+        let stale = store
+            .resolve_capture_output_point(
+                "capture-map",
+                "revision-0",
+                libseatgeist::Point {
+                    x: 640.0,
+                    y: 360.0,
+                    space: CoordinateSpace::CaptureOutput,
+                },
+            )
+            .await
+            .expect_err("stale preview clicks are rejected");
+        assert!(stale.to_string().contains("revision is stale"));
+
+        let outside = store
+            .resolve_capture_output_point(
+                "capture-map",
+                "revision-1",
+                libseatgeist::Point {
+                    x: 1_280.0,
+                    y: 360.0,
+                    space: CoordinateSpace::CaptureOutput,
+                },
+            )
+            .await
+            .expect_err("preview boundary is exclusive");
+        assert!(outside.to_string().contains("outside preview"));
     }
 
     #[tokio::test]

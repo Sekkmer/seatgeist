@@ -19,8 +19,8 @@ the features you want.
   actions.
 - `kwin/seatgeist-activity`: a KWin binary plugin that distinguishes physical
   activity from Seatgeist activity.
-- `kwin/seatgeist-agent-seat`: an experimental second Wayland seat that can
-  work in one native Wayland window while you use another.
+- `kwin/seatgeist-agent-seat`: an experimental bounded pool of per-agent
+  Wayland seats that can work in native Wayland windows while you use another.
 
 Actions still pass through the daemon's policy checks and are recorded in its
 compact journal. The defaults are deliberately cautious, but this is useful
@@ -35,8 +35,8 @@ The integrations are separate so you can install only the parts you need:
 | KWin script bridge | Window list, active-window updates, move, resize, and launch coordination | Baseline for the intended KDE experience |
 | KWin screenshot authorization | Lets the user daemon use KWin's exact-window screenshot interface | Needed for direct capture of covered or background windows |
 | Codex plugin | Seatgeist MCP tools and desktop-use skills inside Codex | When using Seatgeist from Codex |
-| Activity plugin | Trusted physical keyboard/pointer activity reporting | When using pause-on-human-input or cooperative focus handling |
-| Agent-seat plugin | Input routed to a pinned native Wayland window without taking your normal focus | Optional and experimental |
+| Activity plugin | Trusted physical activity reporting, including target-local user preemption | When using pause-on-human-input, cooperative focus handling, or parallel agent seats |
+| Agent-seat plugin | Per-agent input routed to exclusively leased native Wayland windows without taking your normal focus | Optional and experimental |
 | KDE portal services | Screenshots and portal/libei input sessions | Used by the portal backends |
 | uinput setup | Virtual keyboard and pointer fallback | Optional; requires local system setup |
 
@@ -134,7 +134,7 @@ seatgeist-cli doctor
 seatgeist-cli readiness
 seatgeist-cli kwin-bridge-status
 seatgeist-cli capture-backends
-seatgeist-cli input backends
+seatgeist-cli input status
 seatgeist-cli journal tail --limit 20
 ```
 

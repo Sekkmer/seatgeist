@@ -6,8 +6,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Core DBus Gui)
+find_package(Qt6 REQUIRED COMPONENTS Core DBus Gui Widgets)
 find_package(KF6Config REQUIRED)
+find_package(KF6WindowSystem REQUIRED)
 include(GNUInstallDirs)
 
 find_path(KWIN_INCLUDE_DIR plugin.h PATH_SUFFIXES kwin REQUIRED)
@@ -49,7 +50,9 @@ target_link_libraries(seatgeistactivity PRIVATE
     Qt6::Core
     Qt6::DBus
     Qt6::Gui
+    Qt6::Widgets
     KF6::ConfigCore
+    KF6::WindowSystem
 )
 
 install(TARGETS seatgeistactivity

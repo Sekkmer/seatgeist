@@ -6,15 +6,26 @@ binary plugin under `kwin/seatgeist-activity` implements KWin's
 `InputEventSpy`, reduces each event to a class and provenance, and sends only
 this compact payload to the existing local daemon D-Bus object:
 
-- backend contract: `kwin_input_spy_v1`
+- backend contract: `kwin_input_spy_v2`
 - logical seat: `default`
 - monotonic plugin timestamp
 - class: `keyboard`, `pointer`, or `touch`
 - provenance: `trusted_physical`, `seatgeist_injected`, or `unknown`
+- target: KWin window UUID, or `desktop` when the event has no window
 
-It never sends keys, text, modifiers, pointer coordinates, device names,
-device paths, vendor/product identifiers, or touch positions. The daemon also
-rejects payloads containing fields outside this contract.
+It never sends keys, text, modifiers, pointer coordinates, window titles,
+application ids, device names, device paths, vendor/product identifiers, or
+touch positions. The daemon also rejects payloads containing fields outside
+this contract, and accepts registration and updates only from the D-Bus
+connection that owns `org.kde.KWin`.
+
+Target metadata lets the independent agent-seat path pause only when physical
+input reaches the same window. A matching event cancels queued delivery and
+starts a 350 ms target-local quiet period, and invalidates retained preview
+metadata for that window. Events in other windows do not
+interrupt the background lane. A matching physical event racing with delivery
+produces `confirmation=user_preempted` instead of a successful-click
+assumption.
 
 Physical libinput devices are recognized by a non-virtual sysfs path.
 Seatgeist's uinput and EIS devices are recognized by their explicit
@@ -101,8 +112,12 @@ The helper watches for the daemon's D-Bus service and re-registers when the
 daemon starts or restarts, so KWin and Seatgeist service ordering does not
 silently disable provenance.
 
-There is no silent JavaScript, X11, idle-time, or file-based provenance
-fallback. `seatgeist.safety_status` reports `activity_trusted=false` when the
+The daemon accepts legacy `kwin_input_spy_v1` payloads after a daemon-only
+restart. They remain trusted for global pause and restoration decisions, but
+cannot provide target-local preemption; agent action summaries report that
+capability as unavailable until v2 loads. There is no silent JavaScript, X11,
+idle-time, or file-based provenance fallback. `seatgeist.safety_status` reports
+`activity_trusted=false` when the
 binary plugin is absent or has not registered. Sticky input remains fail-safe
 and leaves the target focused in that state; it does not restore prior focus.
 The legacy activity file remains supported only as a conservative control

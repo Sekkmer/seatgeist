@@ -308,26 +308,32 @@ impl CaptureSession for MockCaptureSession {
 
 #[derive(Debug, Clone)]
 pub struct MockWindowBackend {
-    windows: Vec<WindowInfo>,
+    windows: Arc<Mutex<Vec<WindowInfo>>>,
     active_window: Arc<Mutex<Option<WindowInfo>>>,
     active_window_reads: Arc<Mutex<u64>>,
     focused_windows: Arc<Mutex<Vec<WindowId>>>,
+    closed_windows: Arc<Mutex<Vec<WindowId>>>,
     resized_windows: Arc<Mutex<Vec<(WindowId, u32, u32)>>>,
 }
 
 impl MockWindowBackend {
     pub fn new(windows: Vec<WindowInfo>, active_window: Option<WindowInfo>) -> Self {
         Self {
-            windows,
+            windows: Arc::new(Mutex::new(windows)),
             active_window: Arc::new(Mutex::new(active_window)),
             active_window_reads: Arc::new(Mutex::new(0)),
             focused_windows: Arc::new(Mutex::new(Vec::new())),
+            closed_windows: Arc::new(Mutex::new(Vec::new())),
             resized_windows: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     pub fn focused_windows(&self) -> Result<Vec<WindowId>> {
         Ok(lock(&self.focused_windows)?.clone())
+    }
+
+    pub fn closed_windows(&self) -> Result<Vec<WindowId>> {
+        Ok(lock(&self.closed_windows)?.clone())
     }
 
     pub fn resized_windows(&self) -> Result<Vec<(WindowId, u32, u32)>> {
@@ -358,7 +364,7 @@ impl WindowBackend for MockWindowBackend {
     }
 
     async fn list_windows(&self) -> Result<Vec<WindowInfo>> {
-        Ok(self.windows.clone())
+        Ok(lock(&self.windows)?.clone())
     }
 
     async fn active_window(&self) -> Result<Option<WindowInfo>> {
@@ -371,9 +377,19 @@ impl WindowBackend for MockWindowBackend {
         Ok(())
     }
 
+    async fn close_window(&self, id: WindowId) -> Result<()> {
+        let mut windows = lock(&self.windows)?;
+        let position = windows
+            .iter()
+            .position(|window| window.id == id)
+            .ok_or_else(|| SeatgeistError::BackendUnavailable("mock window not found".into()))?;
+        windows.remove(position);
+        lock(&self.closed_windows)?.push(id);
+        Ok(())
+    }
+
     async fn move_window(&self, id: WindowId, x: i32, y: i32) -> Result<WindowGeometry> {
-        let mut geometry = self
-            .windows
+        let mut geometry = lock(&self.windows)?
             .iter()
             .find(|window| window.id == id)
             .and_then(|window| window.geometry.clone())
@@ -385,8 +401,7 @@ impl WindowBackend for MockWindowBackend {
 
     async fn resize_window(&self, id: WindowId, width: u32, height: u32) -> Result<WindowGeometry> {
         lock(&self.resized_windows)?.push((id.clone(), width, height));
-        let mut geometry = self
-            .windows
+        let mut geometry = lock(&self.windows)?
             .iter()
             .find(|window| window.id == id)
             .and_then(|window| window.geometry.clone())

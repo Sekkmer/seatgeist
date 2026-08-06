@@ -19,14 +19,15 @@ use super::{
     capture_diagnostics::{screenshot_portal_status, tile_capture_backend},
     commands::exists as command_exists,
     compatibility_capture_backend,
-    config::SafetySettings,
+    config::{AppPolicy, SafetySettings},
     kwin_bridge::WindowListState,
+    observation_policy,
     screenshot_image::{
         apply_screenshot_redactions, prepare_screenshot_output, read_png_dimensions_with_retry,
         temporary_capture_path, validate_tile_bounds, validate_tile_request, write_preview_or_copy,
         write_tile_preview,
     },
-    window_backend::list_monitors,
+    window_backend::{list_monitors, list_windows_with_monitors},
 };
 
 static SCREENSHOT_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -36,6 +37,7 @@ pub(crate) async fn capture_screenshot(
     request: ScreenshotRequest,
     safety_settings: &SafetySettings,
     window_list_state: &WindowListState,
+    app_policy: &AppPolicy,
 ) -> Result<ScreenshotInfo> {
     if !request.full_resolution && request.max_edge == Some(0) {
         bail!("max_edge must be greater than zero");
@@ -44,25 +46,31 @@ pub(crate) async fn capture_screenshot(
     prepare_screenshot_output(&request.output)?;
 
     if request.visible_window_crop_id.is_some() {
+        ensure_exact_target_observable(&request, window_list_state, app_policy)?;
         return compatibility_capture_backend::capture_visible_window_crop(
             request,
             safety_settings,
             window_list_state,
+            app_policy,
         )
         .await;
     }
 
     let screenshot_portal = screenshot_portal_status();
     validate_portal_screenshot_target_request(&request, &screenshot_portal)?;
+    ensure_portal_target_observable(&request, window_list_state, app_policy)?;
 
     if request.portal_target.is_some() {
-        return compatibility_capture_backend::capture_portal_target(request, safety_settings)
-            .await;
+        let info =
+            compatibility_capture_backend::capture_portal_target(request, safety_settings).await?;
+        return apply_protected_window_redactions(info, window_list_state, app_policy);
     }
 
     if screenshot_portal.screenshot_interface_available {
         match capture_screenshot_portal(request.clone(), safety_settings).await {
-            Ok(Some(info)) => return Ok(info),
+            Ok(Some(info)) => {
+                return apply_protected_window_redactions(info, window_list_state, app_policy);
+            }
             Ok(None) => {
                 bail!(
                     "portal screenshot request was cancelled or ended without a screenshot; not falling back to Spectacle"
@@ -81,7 +89,114 @@ pub(crate) async fn capture_screenshot(
         }
     }
 
-    capture_screenshot_spectacle(request, safety_settings)
+    let info = capture_screenshot_spectacle(request, safety_settings)?;
+    apply_protected_window_redactions(info, window_list_state, app_policy)
+}
+
+fn protected_windows(
+    window_list_state: &WindowListState,
+    app_policy: &AppPolicy,
+) -> Result<Vec<libseatgeist::WindowInfo>> {
+    let monitors = list_monitors().unwrap_or_default();
+    let windows = list_windows_with_monitors(window_list_state, &monitors)?;
+    Ok(windows
+        .into_iter()
+        .filter(|window| observation_policy::app_is_protected(app_policy, window.app_id.as_deref()))
+        .collect())
+}
+
+fn ensure_exact_target_observable(
+    request: &ScreenshotRequest,
+    window_list_state: &WindowListState,
+    app_policy: &AppPolicy,
+) -> Result<()> {
+    let Some(window_id) = request.visible_window_crop_id.as_deref() else {
+        return Ok(());
+    };
+    if protected_windows(window_list_state, app_policy)?
+        .iter()
+        .any(|window| window.id == window_id)
+    {
+        bail!(
+            "app policy denied observation of a protected application for exact-window capture; \
+             do not retry through another screenshot or capture backend"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_portal_target_observable(
+    request: &ScreenshotRequest,
+    window_list_state: &WindowListState,
+    app_policy: &AppPolicy,
+) -> Result<()> {
+    if matches!(
+        request.portal_target,
+        Some(
+            PortalScreenshotTarget::Window
+                | PortalScreenshotTarget::ActiveWindow
+                | PortalScreenshotTarget::Area
+        )
+    ) && !protected_windows(window_list_state, app_policy)?.is_empty()
+    {
+        bail!(
+            "app policy denied an uncorrelated portal window/area screenshot while a protected \
+             application is open; use a screen capture with automatic protected-window redaction"
+        );
+    }
+    Ok(())
+}
+
+fn apply_protected_window_redactions(
+    info: ScreenshotInfo,
+    window_list_state: &WindowListState,
+    app_policy: &AppPolicy,
+) -> Result<ScreenshotInfo> {
+    let output = info.path.clone();
+    let result = apply_protected_window_redactions_inner(info, window_list_state, app_policy);
+    if result.is_err() {
+        fs::remove_file(output).ok();
+    }
+    result
+}
+
+fn apply_protected_window_redactions_inner(
+    info: ScreenshotInfo,
+    window_list_state: &WindowListState,
+    app_policy: &AppPolicy,
+) -> Result<ScreenshotInfo> {
+    let windows = list_windows_with_monitors(window_list_state, &info.monitors)?;
+    let protected = windows
+        .iter()
+        .filter(|window| observation_policy::app_is_protected(app_policy, window.app_id.as_deref()))
+        .collect::<Vec<_>>();
+    if protected.is_empty() {
+        return Ok(info);
+    }
+    if protected.iter().any(|window| window.geometry.is_none()) {
+        bail!(
+            "app policy could not safely redact a protected application because its window \
+             geometry is unavailable; close it or use an exact allowed-window capture"
+        );
+    }
+    let redactions =
+        observation_policy::protected_window_redactions(app_policy, &windows, &info.monitors)?;
+    if redactions.is_empty() {
+        bail!(
+            "app policy could not map a protected application into screenshot coordinates; \
+             close it or use an exact allowed-window capture"
+        );
+    }
+    apply_screenshot_redactions(&info, &redactions)?;
+    Ok(info)
+}
+
+pub(crate) fn apply_capture_frame_protection(
+    info: ScreenshotInfo,
+    window_list_state: &WindowListState,
+    app_policy: &AppPolicy,
+) -> Result<ScreenshotInfo> {
+    apply_protected_window_redactions(info, window_list_state, app_policy)
 }
 
 fn validate_screenshot_source_selection(request: &ScreenshotRequest) -> Result<()> {
@@ -295,7 +410,9 @@ fn screenshot_info_from_capture(
         output_height,
         transform: ScreenshotTransform {
             source_coordinate_space: CoordinateSpace::PhysicalPixel,
-            output_coordinate_space: CoordinateSpace::PhysicalPixel,
+            output_coordinate_space: CoordinateSpace::CaptureOutput,
+            source_extent_width: Some(transform_source_width),
+            source_extent_height: Some(transform_source_height),
             source_origin_x,
             source_origin_y,
             scale_x: f64::from(output_width) / f64::from(transform_source_width),
@@ -318,6 +435,8 @@ struct TileCaptureSource {
 pub(crate) async fn capture_screenshot_tile(
     request: ScreenshotTileRequest,
     safety_settings: &SafetySettings,
+    window_list_state: &WindowListState,
+    app_policy: &AppPolicy,
 ) -> Result<ScreenshotInfo> {
     validate_tile_request(&request)?;
     prepare_screenshot_output(&request.output)?;
@@ -344,7 +463,9 @@ pub(crate) async fn capture_screenshot_tile(
         output_height,
         transform: ScreenshotTransform {
             source_coordinate_space: CoordinateSpace::PhysicalPixel,
-            output_coordinate_space: CoordinateSpace::PhysicalPixel,
+            output_coordinate_space: CoordinateSpace::CaptureOutput,
+            source_extent_width: Some(request.width),
+            source_extent_height: Some(request.height),
             source_origin_x: request.x,
             source_origin_y: request.y,
             scale_x: f64::from(output_width) / f64::from(request.width),
@@ -354,11 +475,11 @@ pub(crate) async fn capture_screenshot_tile(
         monitors,
     };
     apply_screenshot_redactions(&info, &safety_settings.screenshot_redactions)?;
-
+    let protected = apply_protected_window_redactions(info, window_list_state, app_policy);
     if capture.cleanup_after_use {
         fs::remove_file(&capture.path).ok();
     }
-    Ok(info)
+    protected
 }
 
 async fn capture_tile_source(output: &Path, portal_interactive: bool) -> Result<TileCaptureSource> {
@@ -438,6 +559,7 @@ pub(crate) async fn wait_for_change(
     request: WaitForChangeRequest,
     safety_settings: &SafetySettings,
     window_list_state: &WindowListState,
+    app_policy: &AppPolicy,
 ) -> Result<WaitForChangeResult> {
     validate_wait_for_change_request(&request)?;
     let timeout = Duration::from_millis(request.timeout_ms);
@@ -452,8 +574,13 @@ pub(crate) async fn wait_for_change(
         visible_window_crop_id: None,
     };
 
-    let baseline_info =
-        capture_screenshot(screenshot_request(), safety_settings, window_list_state).await?;
+    let baseline_info = capture_screenshot(
+        screenshot_request(),
+        safety_settings,
+        window_list_state,
+        app_policy,
+    )
+    .await?;
     let baseline = read_image_sample(&baseline_info.path)?;
     let mut final_info = baseline_info;
     let mut captures = 1;
@@ -463,8 +590,13 @@ pub(crate) async fn wait_for_change(
     while started.elapsed() < timeout {
         let remaining = timeout.saturating_sub(started.elapsed());
         tokio::time::sleep(interval.min(remaining)).await;
-        final_info =
-            capture_screenshot(screenshot_request(), safety_settings, window_list_state).await?;
+        final_info = capture_screenshot(
+            screenshot_request(),
+            safety_settings,
+            window_list_state,
+            app_policy,
+        )
+        .await?;
         captures += 1;
 
         let candidate = read_image_sample(&final_info.path)?;
@@ -680,5 +812,42 @@ mod tests {
         let error = validate_screenshot_source_selection(&request)
             .expect_err("interactive portal cannot change exact crop target");
         assert!(error.to_string().contains("cannot be combined"));
+    }
+
+    #[test]
+    fn protected_exact_and_uncorrelated_portal_targets_fail_closed() {
+        let window_list_state = WindowListState::default();
+        window_list_state
+            .update_from_payload(
+                r#"{
+                    "windows": [{
+                        "id": "secret-window",
+                        "title": "Private database",
+                        "app_id": "org.keepassxc.KeePassXC",
+                        "geometry": {"x": 10, "y": 20, "width": 300, "height": 200}
+                    }]
+                }"#,
+            )
+            .expect("protected window list fixture is accepted");
+        let policy = AppPolicy {
+            allow: Vec::new(),
+            deny: vec!["org.keepassxc.KeePassXC".to_string()],
+        };
+
+        let mut exact = screenshot_request("protected-exact");
+        exact.visible_window_crop_id = Some("secret-window".to_string());
+        let error = ensure_exact_target_observable(&exact, &window_list_state, &policy)
+            .expect_err("protected exact capture is denied");
+        assert!(error.to_string().contains("protected application"));
+
+        let mut portal = screenshot_request("protected-portal");
+        portal.portal_target = Some(PortalScreenshotTarget::Window);
+        let error = ensure_portal_target_observable(&portal, &window_list_state, &policy)
+            .expect_err("uncorrelated portal target is denied");
+        assert!(
+            error
+                .to_string()
+                .contains("automatic protected-window redaction")
+        );
     }
 }

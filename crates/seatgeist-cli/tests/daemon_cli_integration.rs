@@ -228,7 +228,13 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
     );
     assert!(status.focus_guard_required);
 
-    let uinput = daemon.cli_json(&["input", "status"])?;
+    let input_status = daemon.cli_json(&["input", "status"])?;
+    let DaemonResponse::InputBackendStatus(status) = input_status else {
+        bail!("expected input backend status response, got {input_status:?}");
+    };
+    assert!(!status.setup_hint.is_empty());
+
+    let uinput = daemon.cli_json(&["input", "uinput-status"])?;
     let DaemonResponse::UinputStatus(UinputStatus {
         path, setup_hint, ..
     }) = uinput
@@ -879,7 +885,7 @@ require_focus_guard = false
             offset: 0,
             include_defaults: false,
         }),
-        "accessibility_unavailable",
+        "validation",
         "invalid AT-SPI node id",
     )?;
 

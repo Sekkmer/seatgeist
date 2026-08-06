@@ -55,6 +55,13 @@ impl WindowBackend for KwinWindowBackend {
         self.focus_backend.focus(&id).map_err(backend_error)
     }
 
+    async fn close_window(&self, id: WindowId) -> seatgeist_backend::Result<()> {
+        self.window_action_queue
+            .close_window(&id)
+            .await
+            .map_err(backend_error)
+    }
+
     async fn move_window(
         &self,
         id: WindowId,

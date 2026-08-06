@@ -50,6 +50,15 @@ pub(crate) async fn enforce_app_policy(
         )
         .await;
     }
+    if let DaemonRequest::CloseWindow(request) = request {
+        return enforce_explicit_window_app_policy(
+            window_backend,
+            app_policy,
+            &request.window_id,
+            "close target",
+        )
+        .await;
+    }
     if let DaemonRequest::ResizeWindow(request) = request {
         return enforce_explicit_window_app_policy(
             window_backend,

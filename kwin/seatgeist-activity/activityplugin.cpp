@@ -5,6 +5,8 @@
 #include <core/inputdevice.h>
 #include <input.h>
 #include <input_event.h>
+#include <window.h>
+#include <workspace.h>
 
 #include <QDBusConnection>
 #include <QDBusMessage>
@@ -19,7 +21,8 @@ namespace
 constexpr auto Service = "org.seatgeist.KWinBridge";
 constexpr auto Path = "/org/seatgeist/KWinBridge1";
 constexpr auto Interface = "org.seatgeist.KWinBridge1";
-constexpr auto Backend = "kwin_input_spy_v1";
+constexpr auto Backend = "kwin_input_spy_v2";
+constexpr auto DesktopTarget = "desktop";
 constexpr qint64 PointerPublishIntervalMs = 20;
 
 QDBusMessage methodCall(const QString &method)
@@ -82,11 +85,13 @@ QString SeatgeistActivityPlugin::provenanceFor(const InputDevice *device) const
 void SeatgeistActivityPlugin::publish(
     const QString &eventClass,
     const InputDevice *device,
+    const QString &windowId,
     bool throttle)
 {
     const QString provenance = provenanceFor(device);
     const qint64 now = m_monotonicClock.elapsed();
-    const QString throttleKey = eventClass + QLatin1Char(':') + provenance;
+    const QString throttleKey = eventClass + QLatin1Char(':') + provenance
+        + QLatin1Char(':') + windowId;
     if (throttle && m_lastPublished.contains(throttleKey)
         && now - m_lastPublished.value(throttleKey) < PointerPublishIntervalMs) {
         return;
@@ -99,45 +104,78 @@ void SeatgeistActivityPlugin::publish(
         {QStringLiteral("class"), eventClass},
         {QStringLiteral("provenance"), provenance},
         {QStringLiteral("monotonic_ms"), now},
+        {QStringLiteral("window_id"), windowId},
     };
     auto message = methodCall(QStringLiteral("UpdateInputActivity"));
     message << QString::fromUtf8(QJsonDocument(payload).toJson(QJsonDocument::Compact));
     QDBusConnection::sessionBus().asyncCall(message);
 }
 
+QString SeatgeistActivityPlugin::windowIdAt(const QPointF &position) const
+{
+    Window *window = input()->findToplevel(position);
+    return window ? window->internalId().toString() : QString::fromLatin1(DesktopTarget);
+}
+
+QString SeatgeistActivityPlugin::activeWindowId() const
+{
+    Window *window = workspace()->activeWindow();
+    return window ? window->internalId().toString() : QString::fromLatin1(DesktopTarget);
+}
+
 void SeatgeistActivityPlugin::pointerMotion(PointerMotionEvent *event)
 {
-    publish(QStringLiteral("pointer"), event->device, true);
+    publish(
+        QStringLiteral("pointer"),
+        event->device,
+        windowIdAt(event->position),
+        true);
 }
 
 void SeatgeistActivityPlugin::pointerButton(PointerButtonEvent *event)
 {
-    publish(QStringLiteral("pointer"), event->device, false);
+    publish(
+        QStringLiteral("pointer"),
+        event->device,
+        windowIdAt(event->position),
+        false);
 }
 
 void SeatgeistActivityPlugin::pointerAxis(PointerAxisEvent *event)
 {
-    publish(QStringLiteral("pointer"), event->device, true);
+    publish(
+        QStringLiteral("pointer"),
+        event->device,
+        windowIdAt(event->position),
+        true);
 }
 
 void SeatgeistActivityPlugin::keyboardKey(KeyboardKeyEvent *event)
 {
-    publish(QStringLiteral("keyboard"), event->device, false);
+    publish(QStringLiteral("keyboard"), event->device, activeWindowId(), false);
 }
 
-void SeatgeistActivityPlugin::touchDown(TouchDownEvent *)
+void SeatgeistActivityPlugin::touchDown(TouchDownEvent *event)
 {
-    publish(QStringLiteral("touch"), nullptr, false);
+    const QString windowId = windowIdAt(event->pos);
+    m_touchTargets.insert(event->id, windowId);
+    publish(QStringLiteral("touch"), nullptr, windowId, false);
 }
 
-void SeatgeistActivityPlugin::touchMotion(TouchMotionEvent *)
+void SeatgeistActivityPlugin::touchMotion(TouchMotionEvent *event)
 {
-    publish(QStringLiteral("touch"), nullptr, true);
+    const QString windowId = windowIdAt(event->pos);
+    m_touchTargets.insert(event->id, windowId);
+    publish(QStringLiteral("touch"), nullptr, windowId, true);
 }
 
-void SeatgeistActivityPlugin::touchUp(TouchUpEvent *)
+void SeatgeistActivityPlugin::touchUp(TouchUpEvent *event)
 {
-    publish(QStringLiteral("touch"), nullptr, false);
+    QString windowId = m_touchTargets.take(event->id);
+    if (windowId.isEmpty()) {
+        windowId = QString::fromLatin1(DesktopTarget);
+    }
+    publish(QStringLiteral("touch"), nullptr, windowId, false);
 }
 
 } // namespace KWin

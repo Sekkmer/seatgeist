@@ -36,7 +36,11 @@ and the optional version-6 PipeWire serial are modeled explicitly. Cancellation
 or failure after session creation closes the session best-effort, and an invalid
 PipeWire descriptor is never returned as a usable connection.
 
-The production daemon owns one retained window capture session at a time. Its
+The production daemon permits up to four exact KWin window sessions per trusted
+client owner, and exact sessions from different owners can coexist. This keeps
+parallel model observation independent without allowing unbounded retained
+images. Chooser-backed portal capture remains a single global session because
+the consent UI and portal selection are inherently shared. Its
 dedicated `capture_backend` adapter implements `ScreenBackend`, owns private
 restore-token state, and is injected into the daemon runtime as a trait object;
 the `capture` session store no longer calls portal or PipeWire constructors.
@@ -51,6 +55,14 @@ explicitly, and no source silently falls back to desktop capture. The store keep
 session metadata, enforces the configured bounded-preview limit, and routes
 snapshot, revision wait, status, and id-checked close requests. A failed close
 using the wrong session id leaves the active session intact.
+
+Retained frame output pixels use the explicit `capture_output` coordinate
+space. Pointer move, click, and drag can name the session plus the exact frame
+revision; the daemon then maps preview pixels through that retained frame's
+transform after policy and ownership checks. Exact KWin captures use native
+source dimensions and the output scale to recover client-surface logical
+coordinates. Stale revisions, missing frames, invalid transforms, and points
+outside the preview fail closed before input.
 
 The retained PipeWire session now polls the pre-subscribed portal
 `Session.Closed` stream as part of lifecycle checks. A portal-ended or failed

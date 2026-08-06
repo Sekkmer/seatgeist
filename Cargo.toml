@@ -39,6 +39,7 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
 toml = "0.8"
 uuid = { version = "1.17.0", features = ["serde", "v4"] }
+wait-timeout = "0.2.1"
 zbus = { version = "5.16.0", default-features = false, features = ["tokio"] }
 
 [workspace.lints.rust]

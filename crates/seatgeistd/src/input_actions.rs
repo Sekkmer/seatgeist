@@ -5,7 +5,7 @@ use libseatgeist::{
     TypeTextRequest, WindowInfo,
 };
 use seatgeist_backend::{
-    ScreenBackend, TargetedInputBackend, TargetedInputDelivery, WindowBackend,
+    ScreenBackend, TargetedInputBackend, TargetedInputContext, TargetedInputDelivery, WindowBackend,
 };
 use uuid::Uuid;
 
@@ -40,6 +40,7 @@ pub(crate) fn type_text(
 
 pub(crate) async fn agent_type_text(
     request: TypeTextRequest,
+    context: &TargetedInputContext,
     target: &WindowInfo,
     backend: &dyn TargetedInputBackend,
 ) -> Result<ActionResult> {
@@ -69,13 +70,13 @@ pub(crate) async fn agent_type_text(
     };
     let char_count = chords.len();
     let delivery = backend
-        .key_sequence(target, &chords)
+        .key_sequence(context, target, &chords)
         .await
         .map_err(anyhow::Error::msg)?;
     Ok(agent_result(
         delivery,
         format!(
-            "typed text length={char_count} target_window={} lane=independent keymap=us",
+            "typed text length={char_count} target_window={} routing=independent keymap=us",
             target.id
         ),
     ))
@@ -83,6 +84,7 @@ pub(crate) async fn agent_type_text(
 
 pub(crate) async fn agent_key_combo(
     request: KeyComboRequest,
+    context: &TargetedInputContext,
     target: &WindowInfo,
     backend: &dyn TargetedInputBackend,
 ) -> Result<ActionResult> {
@@ -96,13 +98,13 @@ pub(crate) async fn agent_key_combo(
     let codes = crate::eis_key_combo::codes(&request.combo, &settings)?;
     let key_count = codes.len();
     let delivery = backend
-        .key_combo(target, &codes)
+        .key_combo(context, target, &codes)
         .await
         .map_err(anyhow::Error::msg)?;
     Ok(agent_result(
         delivery,
         format!(
-            "sent key combo keys={key_count} target_window={} lane=independent",
+            "sent key combo keys={key_count} target_window={} routing=independent",
             target.id
         ),
     ))
@@ -110,19 +112,20 @@ pub(crate) async fn agent_key_combo(
 
 pub(crate) async fn agent_move_pointer(
     request: MovePointerRequest,
+    context: &TargetedInputContext,
     target: &WindowInfo,
     backend: &dyn TargetedInputBackend,
 ) -> Result<ActionResult> {
     validate_agent_point(target, request.point)?;
     let point = request.point;
     let delivery = backend
-        .move_pointer(target, point)
+        .move_pointer(context, target, point)
         .await
         .map_err(anyhow::Error::msg)?;
     Ok(agent_result(
         delivery,
         format!(
-            "moved pointer x={:.0} y={:.0} space=WindowLocal target_window={} lane=independent",
+            "moved pointer x={:.0} y={:.0} space=WindowLocal target_window={} routing=independent",
             point.x, point.y, target.id
         ),
     ))
@@ -130,6 +133,7 @@ pub(crate) async fn agent_move_pointer(
 
 pub(crate) async fn agent_click_pointer(
     request: ClickPointerRequest,
+    context: &TargetedInputContext,
     target: &WindowInfo,
     backend: &dyn TargetedInputBackend,
 ) -> Result<ActionResult> {
@@ -137,13 +141,13 @@ pub(crate) async fn agent_click_pointer(
     validate_agent_point(target, request.point)?;
     let point = request.point;
     let delivery = backend
-        .click(target, point, request.button, request.clicks)
+        .click(context, target, point, request.button, request.clicks)
         .await
         .map_err(anyhow::Error::msg)?;
     Ok(agent_result(
         delivery,
         format!(
-            "clicked pointer button={:?} clicks={} x={:.0} y={:.0} space=WindowLocal target_window={} lane=independent",
+            "clicked pointer button={:?} clicks={} x={:.0} y={:.0} space=WindowLocal target_window={} routing=independent",
             request.button, request.clicks, point.x, point.y, target.id
         ),
     ))
@@ -151,6 +155,7 @@ pub(crate) async fn agent_click_pointer(
 
 pub(crate) async fn agent_drag_pointer(
     request: DragPointerRequest,
+    context: &TargetedInputContext,
     target: &WindowInfo,
     backend: &dyn TargetedInputBackend,
 ) -> Result<ActionResult> {
@@ -158,13 +163,13 @@ pub(crate) async fn agent_drag_pointer(
     validate_agent_point(target, request.from)?;
     validate_agent_point(target, request.to)?;
     let delivery = backend
-        .drag(target, request.from, request.to, request.button)
+        .drag(context, target, request.from, request.to, request.button)
         .await
         .map_err(anyhow::Error::msg)?;
     Ok(agent_result(
         delivery,
         format!(
-            "dragged pointer button={:?} from={:.0},{:.0} to={:.0},{:.0} duration_ms={} space=WindowLocal target_window={} lane=independent",
+            "dragged pointer button={:?} from={:.0},{:.0} to={:.0},{:.0} duration_ms={} space=WindowLocal target_window={} routing=independent",
             request.button,
             request.from.x,
             request.from.y,
@@ -178,18 +183,19 @@ pub(crate) async fn agent_drag_pointer(
 
 pub(crate) async fn agent_scroll_pointer(
     request: ScrollPointerRequest,
+    context: &TargetedInputContext,
     target: &WindowInfo,
     backend: &dyn TargetedInputBackend,
 ) -> Result<ActionResult> {
     validate_scroll(request.vertical, request.horizontal)?;
     let delivery = backend
-        .scroll(target, request.vertical, request.horizontal)
+        .scroll(context, target, request.vertical, request.horizontal)
         .await
         .map_err(anyhow::Error::msg)?;
     Ok(agent_result(
         delivery,
         format!(
-            "scrolled pointer vertical={} horizontal={} target_window={} lane=independent",
+            "scrolled pointer vertical={} horizontal={} target_window={} routing=independent",
             request.vertical, request.horizontal, target.id
         ),
     ))

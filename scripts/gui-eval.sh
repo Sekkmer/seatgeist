@@ -669,7 +669,7 @@ eval_kwin_bridge_status() {
 }
 
 eval_keymap_status() {
-	cli input backends >"$run_dir/keymap-status.json"
+	cli input status >"$run_dir/keymap-status.json"
 	jq -e '
 		.type == "input_backend_status"
 		and (.data.eis_keymap.source | type == "string")
@@ -973,7 +973,7 @@ eval_portal_screenshot() {
 }
 
 eval_remote_desktop_probe() {
-	cli input backends >"$run_dir/remote-desktop-backends.json"
+	cli input status >"$run_dir/remote-desktop-backends.json"
 	if ! jq -e '.type == "input_backend_status" and .data.remote_desktop_portal.remote_desktop_interface_available == true' "$run_dir/remote-desktop-backends.json" >/dev/null; then
 		skip_eval "remote-desktop-probe: xdg-desktop-portal RemoteDesktop interface is not visible"
 		return 0
@@ -1016,7 +1016,7 @@ eval_remote_desktop_probe() {
 }
 
 eval_remote_desktop_eis_session() {
-	cli input backends >"$run_dir/remote-desktop-eis-backends-before.json"
+	cli input status >"$run_dir/remote-desktop-eis-backends-before.json"
 	if ! jq -e '.type == "input_backend_status" and .data.remote_desktop_portal.remote_desktop_interface_available == true' "$run_dir/remote-desktop-eis-backends-before.json" >/dev/null; then
 		skip_eval "remote-desktop-eis-session: xdg-desktop-portal RemoteDesktop interface is not visible"
 		return 0
@@ -1068,7 +1068,7 @@ eval_remote_desktop_eis_session() {
 		and (.data.selected_devices | index("keyboard"))
 		and (.data.selected_devices | index("pointer"))
 	' "$run_dir/remote-desktop-eis-status.json" >/dev/null
-	cli input backends >"$run_dir/remote-desktop-eis-backends-active.json"
+	cli input status >"$run_dir/remote-desktop-eis-backends-active.json"
 	jq -e '
 		.type == "input_backend_status"
 		and .data.configured_backend == "portal_remote_desktop"

@@ -78,6 +78,16 @@ function runBridge({
       window.output = output;
     },
   };
+  activeWindow.closeWindow = function () {
+    const index = workspace.stackingOrder.indexOf(this);
+    if (index >= 0) {
+      workspace.stackingOrder.splice(index, 1);
+    }
+    if (workspace.activeWindow === this) {
+      workspace.activeWindow = null;
+    }
+    workspace.windowRemoved.emit(this);
+  };
   const context = {
     workspace,
     KWin: { PlacementArea: 0 },
@@ -149,11 +159,11 @@ function assertSnapshot(calls, offset, activeId = "window-1") {
 {
   const runtime = runBridge();
   assertSnapshot(runtime.calls, 0);
-  assert.deepEqual(runtime.registeredCapabilities, ["resize_window,move_window,launch_window"]);
+  assert.deepEqual(runtime.registeredCapabilities, ["resize_window,move_window,launch_window,close_window"]);
   assert.equal(runtime.timers.length, 2);
   assert.equal(runtime.timers[0].interval, 2000);
   assert.equal(runtime.timers[0].started, true);
-  assert.equal(runtime.timers[1].interval, 50);
+  assert.equal(runtime.timers[1].interval, 1000);
   assert.equal(runtime.timers[1].started, true);
 
   runtime.timers[0].timeout.emit();
@@ -161,6 +171,27 @@ function assertSnapshot(calls, offset, activeId = "window-1") {
 
   runtime.workspace.windowRemoved.emit();
   assertSnapshot(runtime.calls, 4);
+}
+
+{
+  const runtime = runBridge({
+    pendingActions: [
+      JSON.stringify({
+        id: "close-1",
+        action: "close_window",
+        window_id: "window-1",
+      }),
+    ],
+  });
+  runtime.timers[1].timeout.emit();
+  assert.equal(runtime.workspace.stackingOrder.length, 0);
+  runtime.timers[2].timeout.emit();
+  const completion = runtime.calls.find((call) => call.method === "CompleteAction");
+  assert.deepEqual(JSON.parse(completion.payload), {
+    id: "close-1",
+    ok: true,
+    window_id: "window-1",
+  });
 }
 
 {
@@ -311,7 +342,7 @@ function assertSnapshot(calls, offset, activeId = "window-1") {
     runtime.calls.filter((call) => call.method === "TakePendingAction").length,
     1,
   );
-  runtime.advanceTime(1000);
+  runtime.advanceTime(5000);
   runtime.timers[1].timeout.emit();
   assert.equal(runtime.workspace.activeWindow.width, 1024);
   assert.equal(runtime.workspace.activeWindow.height, 768);

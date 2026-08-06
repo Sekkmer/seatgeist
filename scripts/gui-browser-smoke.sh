@@ -242,7 +242,7 @@ grant_approval control-pointer click_pointer
 grant_approval control-keyboard key_combo
 test "$(stat -c '%a' "$approval_file")" = "600"
 
-cli input status >"$uinput_json"
+cli input uinput-status >"$uinput_json"
 jq -e '.type == "uinput_status" and .data.available == true' "$uinput_json" >/dev/null
 
 firefox --no-remote --profile "$profile_dir" --new-window "$url" >/dev/null 2>"$run_dir/firefox.err" &

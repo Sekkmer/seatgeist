@@ -292,7 +292,9 @@ mod tests {
     fn physical_transform(origin_x: u32, origin_y: u32, scale: f64) -> ScreenshotTransform {
         ScreenshotTransform {
             source_coordinate_space: CoordinateSpace::PhysicalPixel,
-            output_coordinate_space: CoordinateSpace::PhysicalPixel,
+            output_coordinate_space: CoordinateSpace::CaptureOutput,
+            source_extent_width: None,
+            source_extent_height: None,
             source_origin_x: origin_x,
             source_origin_y: origin_y,
             scale_x: scale,

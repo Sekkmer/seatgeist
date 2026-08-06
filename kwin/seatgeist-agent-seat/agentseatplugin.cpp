@@ -26,6 +26,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <algorithm>
 
 namespace
 {
@@ -34,9 +35,10 @@ constexpr auto Service = "org.seatgeist.KWinBridge";
 constexpr auto Path = "/org/seatgeist/KWinBridge1";
 constexpr auto Interface = "org.seatgeist.KWinBridge1";
 constexpr auto Backend = "kwin_agent_seat_v1";
-constexpr int PollIntervalMs = 50;
+constexpr int PollIntervalMs = 5000;
 constexpr int DefaultRepeatRate = 25;
 constexpr int DefaultRepeatDelayMs = 600;
+constexpr int MaxAgentLanes = 4;
 
 QDBusMessage methodCall(const QString &method)
 {
@@ -60,23 +62,6 @@ namespace KWin
 SeatgeistAgentSeatPlugin::SeatgeistAgentSeatPlugin()
 {
     m_monotonicClock.start();
-    m_seat = std::make_unique<SeatInterface>(
-        waylandServer()->display(),
-        QStringLiteral("seatgeist-agent-0"),
-        this);
-    m_seat->setHasPointer(true);
-    m_seat->setHasKeyboard(true);
-
-    if (auto *primarySeat = waylandServer()->seat()) {
-        auto *primaryKeyboard = primarySeat->keyboard();
-        m_seat->keyboard()->setRepeatInfo(
-            primaryKeyboard->keyRepeatRate(),
-            primaryKeyboard->keyRepeatDelay());
-    } else {
-        qWarning("Seatgeist agent seat could not read the primary seat repeat settings; using defaults");
-        m_seat->keyboard()->setRepeatInfo(DefaultRepeatRate, DefaultRepeatDelayMs);
-    }
-
     QString keymapError;
     if (!initializeKeymap(&keymapError)) {
         qWarning("Seatgeist agent seat keymap unavailable: %s", qPrintable(keymapError));
@@ -95,7 +80,10 @@ SeatgeistAgentSeatPlugin::SeatgeistAgentSeatPlugin()
             m_serviceAvailable = !newOwner.isEmpty();
             if (!m_serviceAvailable) {
                 m_pollTimer->stop();
-                clearTarget();
+                for (auto &[laneId, lane] : m_lanes) {
+                    Q_UNUSED(laneId)
+                    clearLaneTarget(*lane);
+                }
                 return;
             }
             registerBackend();
@@ -116,10 +104,7 @@ SeatgeistAgentSeatPlugin::SeatgeistAgentSeatPlugin()
 
 SeatgeistAgentSeatPlugin::~SeatgeistAgentSeatPlugin()
 {
-    clearTarget();
-    if (m_xkbState) {
-        xkb_state_unref(m_xkbState);
-    }
+    clearLanes();
     if (m_xkbKeymap) {
         xkb_keymap_unref(m_xkbKeymap);
     }
@@ -143,18 +128,6 @@ bool SeatgeistAgentSeatPlugin::initializeKeymap(QString *error)
         *error = QStringLiteral("xkb_keymap_new_from_names failed");
         return false;
     }
-    m_xkbState = xkb_state_new(m_xkbKeymap);
-    if (!m_xkbState) {
-        *error = QStringLiteral("xkb_state_new failed");
-        return false;
-    }
-    char *keymap = xkb_keymap_get_as_string(m_xkbKeymap, XKB_KEYMAP_FORMAT_TEXT_V1);
-    if (!keymap) {
-        *error = QStringLiteral("xkb_keymap_get_as_string failed");
-        return false;
-    }
-    m_seat->keyboard()->setKeymap(QByteArray(keymap));
-    free(keymap);
     return true;
 }
 
@@ -190,15 +163,20 @@ void SeatgeistAgentSeatPlugin::handlePendingAction(QDBusPendingCallWatcher *watc
     m_pollInFlight = false;
     QDBusPendingReply<QString> reply = *watcher;
     watcher->deleteLater();
-    if (reply.isError() || reply.value().isEmpty()) {
+    if (reply.isError()) {
         return;
     }
-    QJsonParseError parseError;
-    const auto document = QJsonDocument::fromJson(reply.value().toUtf8(), &parseError);
-    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
-        return;
+    if (!reply.value().isEmpty()) {
+        QJsonParseError parseError;
+        const auto document = QJsonDocument::fromJson(reply.value().toUtf8(), &parseError);
+        if (parseError.error == QJsonParseError::NoError && document.isObject()) {
+            executeAction(document.object());
+        }
     }
-    executeAction(document.object());
+    // The daemon keeps this call pending until work arrives or its heartbeat
+    // timeout expires. Re-arm immediately after a successful response; the
+    // periodic timer is only a watchdog for stalled/error calls.
+    QTimer::singleShot(0, this, &SeatgeistAgentSeatPlugin::poll);
 }
 
 void SeatgeistAgentSeatPlugin::executeAction(const QJsonObject &action)
@@ -215,21 +193,26 @@ void SeatgeistAgentSeatPlugin::executeAction(const QJsonObject &action)
         complete(id, false, error);
         return;
     }
+    AgentLane *lane = laneFor(action.value(QStringLiteral("lane_id")).toString(), &error);
+    if (!lane) {
+        complete(id, false, error);
+        return;
+    }
 
     const QString kind = action.value(QStringLiteral("action")).toString();
     bool ok = false;
     if (kind == QLatin1String("key_combo")) {
-        ok = sendKeyCombo(action, window, &error);
+        ok = sendKeyCombo(action, *lane, window, &error);
     } else if (kind == QLatin1String("key_sequence")) {
-        ok = sendKeySequence(action, window, &error);
+        ok = sendKeySequence(action, *lane, window, &error);
     } else if (kind == QLatin1String("pointer_move")) {
-        ok = movePointer(action, window, &error);
+        ok = movePointer(action, *lane, window, &error);
     } else if (kind == QLatin1String("pointer_click")) {
-        ok = clickPointer(action, window, &error);
+        ok = clickPointer(action, *lane, window, &error);
     } else if (kind == QLatin1String("pointer_drag")) {
-        ok = dragPointer(action, window, &error);
+        ok = dragPointer(action, *lane, window, &error);
     } else if (kind == QLatin1String("pointer_scroll")) {
-        ok = scrollPointer(action, window, &error);
+        ok = scrollPointer(action, *lane, window, &error);
     } else {
         error = QStringLiteral("unsupported agent-seat action");
     }
@@ -257,7 +240,81 @@ Window *SeatgeistAgentSeatPlugin::resolveNativeWaylandWindow(
     return window;
 }
 
+SeatgeistAgentSeatPlugin::AgentLane *SeatgeistAgentSeatPlugin::laneFor(
+    const QString &laneId,
+    QString *error)
+{
+    const QUuid uuid(laneId);
+    if (uuid.isNull()) {
+        *error = QStringLiteral("invalid agent lane id");
+        return nullptr;
+    }
+    auto existing = m_lanes.find(laneId);
+    if (existing != m_lanes.end()) {
+        existing->second->lastUsedMs = m_monotonicClock.elapsed();
+        return existing->second.get();
+    }
+    if (m_lanes.size() >= MaxAgentLanes) {
+        auto oldest = std::min_element(
+            m_lanes.begin(),
+            m_lanes.end(),
+            [](const auto &left, const auto &right) {
+                return left.second->lastUsedMs < right.second->lastUsedMs;
+            });
+        clearLaneTarget(*oldest->second);
+        if (oldest->second->xkbState) {
+            xkb_state_unref(oldest->second->xkbState);
+        }
+        m_lanes.erase(oldest);
+    }
+    auto lane = std::make_unique<AgentLane>();
+    if (!initializeLane(*lane, error)) {
+        return nullptr;
+    }
+    lane->lastUsedMs = m_monotonicClock.elapsed();
+    AgentLane *result = lane.get();
+    m_lanes.emplace(laneId, std::move(lane));
+    return result;
+}
+
+bool SeatgeistAgentSeatPlugin::initializeLane(AgentLane &lane, QString *error)
+{
+    if (!m_xkbKeymap) {
+        *error = QStringLiteral("agent-seat keymap is unavailable");
+        return false;
+    }
+    lane.seat = std::make_unique<SeatInterface>(
+        waylandServer()->display(),
+        QStringLiteral("seatgeist-agent-%1").arg(m_nextLaneIndex++),
+        this);
+    lane.seat->setHasPointer(true);
+    lane.seat->setHasKeyboard(true);
+    if (auto *primarySeat = waylandServer()->seat()) {
+        auto *primaryKeyboard = primarySeat->keyboard();
+        lane.seat->keyboard()->setRepeatInfo(
+            primaryKeyboard->keyRepeatRate(),
+            primaryKeyboard->keyRepeatDelay());
+    } else {
+        qWarning("Seatgeist agent seat could not read the primary seat repeat settings; using defaults");
+        lane.seat->keyboard()->setRepeatInfo(DefaultRepeatRate, DefaultRepeatDelayMs);
+    }
+    char *keymap = xkb_keymap_get_as_string(m_xkbKeymap, XKB_KEYMAP_FORMAT_TEXT_V1);
+    if (!keymap) {
+        *error = QStringLiteral("xkb_keymap_get_as_string failed");
+        return false;
+    }
+    lane.seat->keyboard()->setKeymap(QByteArray(keymap));
+    free(keymap);
+    lane.xkbState = xkb_state_new(m_xkbKeymap);
+    if (!lane.xkbState) {
+        *error = QStringLiteral("xkb_state_new failed");
+        return false;
+    }
+    return true;
+}
+
 bool SeatgeistAgentSeatPlugin::bindTarget(
+    AgentLane &lane,
     Window *window,
     const QPointF &localPosition,
     QString *error)
@@ -266,30 +323,35 @@ bool SeatgeistAgentSeatPlugin::bindTarget(
         *error = QStringLiteral("target surface is unavailable");
         return false;
     }
-    const QRectF frame = window->frameGeometry();
-    if (!QRectF(QPointF(0, 0), frame.size()).contains(localPosition)) {
+    // ScreenShot2 exact-window captures exclude server-side decorations, so
+    // Seatgeist's window-local coordinates are relative to the client surface,
+    // not to frameGeometry(). inputTransformation() still expects the global
+    // logical point and applies the compositor's output scaling internally.
+    const QRectF client = window->clientGeometry();
+    if (!QRectF(QPointF(0, 0), client.size()).contains(localPosition)) {
         *error = QStringLiteral("window-local pointer coordinate is outside the target");
         return false;
     }
-    const QPointF globalPosition = frame.topLeft() + localPosition;
-    setTimestamp();
-    m_seat->setFocusedKeyboardSurface(window->surface());
-    m_seat->notifyPointerEnter(
+    const QPointF globalPosition = client.topLeft() + localPosition;
+    setTimestamp(lane);
+    lane.seat->setFocusedKeyboardSurface(window->surface());
+    lane.seat->notifyPointerEnter(
         window->surface(),
         globalPosition,
         window->inputTransformation());
-    m_seat->notifyPointerFrame();
-    m_target = window;
-    m_localPointerPosition = localPosition;
+    lane.seat->notifyPointerFrame();
+    lane.target = window;
+    lane.localPointerPosition = localPosition;
     return true;
 }
 
 bool SeatgeistAgentSeatPlugin::sendKeyCombo(
     const QJsonObject &action,
+    AgentLane &lane,
     Window *window,
     QString *error)
 {
-    if (!m_xkbState) {
+    if (!lane.xkbState) {
         *error = QStringLiteral("agent-seat keymap is unavailable");
         return false;
     }
@@ -298,10 +360,12 @@ bool SeatgeistAgentSeatPlugin::sendKeyCombo(
         *error = QStringLiteral("key combo must contain between 1 and 8 keys");
         return false;
     }
-    const QPointF position = m_target == window
-        ? m_localPointerPosition
-        : QPointF(window->width() / 2.0, window->height() / 2.0);
-    if (!bindTarget(window, position, error)) {
+    const QPointF position = lane.target == window
+        ? lane.localPointerPosition
+        : QPointF(
+            window->clientGeometry().width() / 2.0,
+            window->clientGeometry().height() / 2.0);
+    if (!bindTarget(lane, window, position, error)) {
         return false;
     }
 
@@ -315,33 +379,34 @@ bool SeatgeistAgentSeatPlugin::sendKeyCombo(
         codes.push_back(static_cast<quint32>(code));
     }
     for (const quint32 code : codes) {
-        setTimestamp();
-        m_seat->notifyKeyboardKey(
+        setTimestamp(lane);
+        lane.seat->notifyKeyboardKey(
             code,
             KeyboardKeyState::Pressed,
             waylandServer()->display()->nextSerial());
-        xkb_state_update_key(m_xkbState, code + 8, XKB_KEY_DOWN);
-        updateKeyboardModifiers();
+        xkb_state_update_key(lane.xkbState, code + 8, XKB_KEY_DOWN);
+        updateKeyboardModifiers(lane);
     }
     for (auto it = codes.crbegin(); it != codes.crend(); ++it) {
         const quint32 code = *it;
-        setTimestamp();
-        m_seat->notifyKeyboardKey(
+        setTimestamp(lane);
+        lane.seat->notifyKeyboardKey(
             code,
             KeyboardKeyState::Released,
             waylandServer()->display()->nextSerial());
-        xkb_state_update_key(m_xkbState, code + 8, XKB_KEY_UP);
-        updateKeyboardModifiers();
+        xkb_state_update_key(lane.xkbState, code + 8, XKB_KEY_UP);
+        updateKeyboardModifiers(lane);
     }
     return true;
 }
 
 bool SeatgeistAgentSeatPlugin::sendKeySequence(
     const QJsonObject &action,
+    AgentLane &lane,
     Window *window,
     QString *error)
 {
-    if (!m_xkbState) {
+    if (!lane.xkbState) {
         *error = QStringLiteral("agent-seat keymap is unavailable");
         return false;
     }
@@ -350,10 +415,12 @@ bool SeatgeistAgentSeatPlugin::sendKeySequence(
         *error = QStringLiteral("key sequence must contain between 1 and 8192 chords");
         return false;
     }
-    const QPointF position = m_target == window
-        ? m_localPointerPosition
-        : QPointF(window->width() / 2.0, window->height() / 2.0);
-    if (!bindTarget(window, position, error)) {
+    const QPointF position = lane.target == window
+        ? lane.localPointerPosition
+        : QPointF(
+            window->clientGeometry().width() / 2.0,
+            window->clientGeometry().height() / 2.0);
+    if (!bindTarget(lane, window, position, error)) {
         return false;
     }
 
@@ -373,23 +440,23 @@ bool SeatgeistAgentSeatPlugin::sendKeySequence(
             codes.push_back(static_cast<quint32>(code));
         }
         for (const quint32 code : codes) {
-            setTimestamp();
-            m_seat->notifyKeyboardKey(
+            setTimestamp(lane);
+            lane.seat->notifyKeyboardKey(
                 code,
                 KeyboardKeyState::Pressed,
                 waylandServer()->display()->nextSerial());
-            xkb_state_update_key(m_xkbState, code + 8, XKB_KEY_DOWN);
-            updateKeyboardModifiers();
+            xkb_state_update_key(lane.xkbState, code + 8, XKB_KEY_DOWN);
+            updateKeyboardModifiers(lane);
         }
         for (auto it = codes.crbegin(); it != codes.crend(); ++it) {
             const quint32 code = *it;
-            setTimestamp();
-            m_seat->notifyKeyboardKey(
+            setTimestamp(lane);
+            lane.seat->notifyKeyboardKey(
                 code,
                 KeyboardKeyState::Released,
                 waylandServer()->display()->nextSerial());
-            xkb_state_update_key(m_xkbState, code + 8, XKB_KEY_UP);
-            updateKeyboardModifiers();
+            xkb_state_update_key(lane.xkbState, code + 8, XKB_KEY_UP);
+            updateKeyboardModifiers(lane);
         }
     }
     return true;
@@ -397,6 +464,7 @@ bool SeatgeistAgentSeatPlugin::sendKeySequence(
 
 bool SeatgeistAgentSeatPlugin::movePointer(
     const QJsonObject &action,
+    AgentLane &lane,
     Window *window,
     QString *error)
 {
@@ -406,6 +474,7 @@ bool SeatgeistAgentSeatPlugin::movePointer(
         return false;
     }
     return bindTarget(
+        lane,
         window,
         QPointF(
             action.value(QStringLiteral("x")).toDouble(),
@@ -415,10 +484,11 @@ bool SeatgeistAgentSeatPlugin::movePointer(
 
 bool SeatgeistAgentSeatPlugin::clickPointer(
     const QJsonObject &action,
+    AgentLane &lane,
     Window *window,
     QString *error)
 {
-    if (!movePointer(action, window, error)) {
+    if (!movePointer(action, lane, window, error)) {
         return false;
     }
     const int button = action.value(QStringLiteral("button")).toInt(-1);
@@ -429,22 +499,23 @@ bool SeatgeistAgentSeatPlugin::clickPointer(
         return false;
     }
     for (int click = 0; click < clicks; ++click) {
-        setTimestamp();
-        m_seat->notifyPointerButton(
+        setTimestamp(lane);
+        lane.seat->notifyPointerButton(
             static_cast<quint32>(button),
             PointerButtonState::Pressed);
-        m_seat->notifyPointerFrame();
-        setTimestamp();
-        m_seat->notifyPointerButton(
+        lane.seat->notifyPointerFrame();
+        setTimestamp(lane);
+        lane.seat->notifyPointerButton(
             static_cast<quint32>(button),
             PointerButtonState::Released);
-        m_seat->notifyPointerFrame();
+        lane.seat->notifyPointerFrame();
     }
     return true;
 }
 
 bool SeatgeistAgentSeatPlugin::dragPointer(
     const QJsonObject &action,
+    AgentLane &lane,
     Window *window,
     QString *error)
 {
@@ -459,31 +530,32 @@ bool SeatgeistAgentSeatPlugin::dragPointer(
         *error = QStringLiteral("invalid pointer drag");
         return false;
     }
-    if (!bindTarget(window, QPointF(fromX.toDouble(), fromY.toDouble()), error)) {
+    if (!bindTarget(lane, window, QPointF(fromX.toDouble(), fromY.toDouble()), error)) {
         return false;
     }
-    setTimestamp();
-    m_seat->notifyPointerButton(
+    setTimestamp(lane);
+    lane.seat->notifyPointerButton(
         static_cast<quint32>(button),
         PointerButtonState::Pressed);
-    m_seat->notifyPointerFrame();
-    if (!bindTarget(window, QPointF(toX.toDouble(), toY.toDouble()), error)) {
-        m_seat->notifyPointerButton(
+    lane.seat->notifyPointerFrame();
+    if (!bindTarget(lane, window, QPointF(toX.toDouble(), toY.toDouble()), error)) {
+        lane.seat->notifyPointerButton(
             static_cast<quint32>(button),
             PointerButtonState::Released);
-        m_seat->notifyPointerFrame();
+        lane.seat->notifyPointerFrame();
         return false;
     }
-    setTimestamp();
-    m_seat->notifyPointerButton(
+    setTimestamp(lane);
+    lane.seat->notifyPointerButton(
         static_cast<quint32>(button),
         PointerButtonState::Released);
-    m_seat->notifyPointerFrame();
+    lane.seat->notifyPointerFrame();
     return true;
 }
 
 bool SeatgeistAgentSeatPlugin::scrollPointer(
     const QJsonObject &action,
+    AgentLane &lane,
     Window *window,
     QString *error)
 {
@@ -493,43 +565,45 @@ bool SeatgeistAgentSeatPlugin::scrollPointer(
         *error = QStringLiteral("scroll delta must be non-zero");
         return false;
     }
-    const QPointF position = m_target == window
-        ? m_localPointerPosition
-        : QPointF(window->width() / 2.0, window->height() / 2.0);
-    if (!bindTarget(window, position, error)) {
+    const QPointF position = lane.target == window
+        ? lane.localPointerPosition
+        : QPointF(
+            window->clientGeometry().width() / 2.0,
+            window->clientGeometry().height() / 2.0);
+    if (!bindTarget(lane, window, position, error)) {
         return false;
     }
-    setTimestamp();
+    setTimestamp(lane);
     if (vertical != 0) {
-        m_seat->notifyPointerAxis(
+        lane.seat->notifyPointerAxis(
             Qt::Vertical,
             vertical * 15.0,
             vertical * 120,
             PointerAxisSource::Wheel);
     }
     if (horizontal != 0) {
-        m_seat->notifyPointerAxis(
+        lane.seat->notifyPointerAxis(
             Qt::Horizontal,
             horizontal * 15.0,
             horizontal * 120,
             PointerAxisSource::Wheel);
     }
-    m_seat->notifyPointerFrame();
+    lane.seat->notifyPointerFrame();
     return true;
 }
 
-void SeatgeistAgentSeatPlugin::updateKeyboardModifiers()
+void SeatgeistAgentSeatPlugin::updateKeyboardModifiers(AgentLane &lane)
 {
-    m_seat->notifyKeyboardModifiers(
-        xkb_state_serialize_mods(m_xkbState, XKB_STATE_MODS_DEPRESSED),
-        xkb_state_serialize_mods(m_xkbState, XKB_STATE_MODS_LATCHED),
-        xkb_state_serialize_mods(m_xkbState, XKB_STATE_MODS_LOCKED),
-        xkb_state_serialize_layout(m_xkbState, XKB_STATE_LAYOUT_EFFECTIVE));
+    lane.seat->notifyKeyboardModifiers(
+        xkb_state_serialize_mods(lane.xkbState, XKB_STATE_MODS_DEPRESSED),
+        xkb_state_serialize_mods(lane.xkbState, XKB_STATE_MODS_LATCHED),
+        xkb_state_serialize_mods(lane.xkbState, XKB_STATE_MODS_LOCKED),
+        xkb_state_serialize_layout(lane.xkbState, XKB_STATE_LAYOUT_EFFECTIVE));
 }
 
-void SeatgeistAgentSeatPlugin::setTimestamp()
+void SeatgeistAgentSeatPlugin::setTimestamp(AgentLane &lane)
 {
-    m_seat->setTimestamp(std::chrono::microseconds(m_monotonicClock.nsecsElapsed() / 1000));
+    lane.seat->setTimestamp(std::chrono::microseconds(m_monotonicClock.nsecsElapsed() / 1000));
 }
 
 void SeatgeistAgentSeatPlugin::complete(
@@ -551,15 +625,28 @@ void SeatgeistAgentSeatPlugin::complete(
     QDBusConnection::sessionBus().asyncCall(message);
 }
 
-void SeatgeistAgentSeatPlugin::clearTarget()
+void SeatgeistAgentSeatPlugin::clearLaneTarget(AgentLane &lane)
 {
-    if (!m_seat) {
+    if (!lane.seat) {
         return;
     }
-    m_seat->setFocusedKeyboardSurface(nullptr);
-    m_seat->notifyPointerLeave();
-    m_seat->notifyPointerFrame();
-    m_target = nullptr;
+    lane.seat->setFocusedKeyboardSurface(nullptr);
+    lane.seat->notifyPointerLeave();
+    lane.seat->notifyPointerFrame();
+    lane.target = nullptr;
+}
+
+void SeatgeistAgentSeatPlugin::clearLanes()
+{
+    for (auto &[laneId, lane] : m_lanes) {
+        Q_UNUSED(laneId)
+        clearLaneTarget(*lane);
+        if (lane->xkbState) {
+            xkb_state_unref(lane->xkbState);
+            lane->xkbState = nullptr;
+        }
+    }
+    m_lanes.clear();
 }
 
 } // namespace KWin

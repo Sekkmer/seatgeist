@@ -30,6 +30,7 @@ mod keymap;
 mod kwin_bridge;
 mod kwin_capture_backend;
 mod observation;
+mod observation_policy;
 mod pointer_coordinates;
 mod portal_eis_probe;
 mod portal_eis_session;
@@ -82,25 +83,26 @@ use libseatgeist::{
     AccessibilitySetSelectionRequest, AccessibilitySetTextRequest,
     AccessibilityTextAttributesRequest, ActionReadiness, ActionResult, ActionSettleCondition,
     ActionSettleResult, ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard,
-    BackendCapability, CapabilitySet, CaptureOpenRequest, CaptureSourceKind, ClickButtonRequest,
-    ComputerUseReadinessStatus, CoordinateSpace, DaemonClientIdentity, DaemonRequest,
-    DaemonRequestEnvelope, DaemonResponse, DaemonResponseOptions, DesktopSessionStatus, ErrorKind,
+    BackendCapability, CapabilitySet, CaptureOpenRequest, CaptureSessionRequest, CaptureSourceKind,
+    ClickButtonRequest, ClickPointerRequest, CloseWindowRequest, ComputerUseReadinessStatus,
+    CoordinateSpace, DaemonClientIdentity, DaemonRequest, DaemonRequestEnvelope, DaemonResponse,
+    DaemonResponseOptions, DesktopSessionStatus, DragPointerRequest, ErrorKind,
     FocusTextFieldRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest, HealthStatus,
     InputBackendStatus, JournalArtifactContext, JournalClientContext, JournalControlContext,
     JournalEntry, JournalRequestedTarget, JournalWindowContext, LaunchWindowRequest,
-    MoveWindowRequest, Observation, PanicStopStatus, Point, PolicyStatus, PostActionOptions,
-    ResizeWindowRequest, SafetyClass, SafetyStatus, ScreenshotInfo, SelectItemRequest,
-    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest,
-    ToggleCheckRequest, ToolApprovalLevel, WindowInfo, current_euid, default_capture_restore_path,
-    default_journal_path, default_panic_stop_path, default_socket_path,
+    MovePointerRequest, MoveWindowRequest, Observation, PanicStopStatus, Point, PolicyStatus,
+    PostActionOptions, ResizeWindowRequest, SafetyClass, SafetyStatus, ScreenshotInfo,
+    ScreenshotTransform, SelectItemRequest, SelectMenuRequest, SetPanicStopRequest,
+    SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, ToolApprovalLevel, WindowInfo,
+    current_euid, default_capture_restore_path, default_journal_path, default_panic_stop_path,
+    default_socket_path,
 };
 #[cfg(test)]
 use libseatgeist::{
-    AccessibilityNode, ClickPointerRequest, DragPointerRequest, KeyComboRequest,
-    MovePointerRequest, ObserveRequest, PointerButton, PointerCalibrationPoint,
+    AccessibilityNode, KeyComboRequest, ObserveRequest, PointerButton, PointerCalibrationPoint,
     PointerPhysicalBounds, RemoteDesktopSessionProbeRequest, ScreenshotRequest,
-    ScreenshotTransform, ScrollPointerRequest, TypeTextRequest, WaitForChangeRequest,
-    WaitForChangeResult, WindowGeometry,
+    ScrollPointerRequest, TypeTextRequest, WaitForChangeRequest, WaitForChangeResult,
+    WindowGeometry,
 };
 #[cfg(test)]
 use pointer_coordinates::{
@@ -121,7 +123,7 @@ use portal_eis_session::{
 };
 use safety_runtime::{ApprovalStore, ControlRateLimiter, PanicStopState};
 use screenshot::{capture_screenshot, capture_screenshot_tile, wait_for_change};
-use seatgeist_backend::{ScreenBackend, TargetedInputBackend, WindowBackend};
+use seatgeist_backend::{ScreenBackend, TargetedInputBackend, TargetedInputContext, WindowBackend};
 use seatgeist_policy::{PolicyConfig, PolicyEngine};
 use session_owner::SessionOwner;
 use sha2::{Digest, Sha256};
@@ -139,6 +141,8 @@ use window_safety::{enforce_active_window_guard, enforce_app_policy, enforce_app
 const SEMANTIC_CHOICE_LIMIT: usize = 5;
 const ACCESSIBILITY_QUALITY_SAMPLE_DEPTH: usize = 4;
 const ACCESSIBILITY_QUALITY_SAMPLE_MAX_NODES: usize = 512;
+const ACCESSIBILITY_QUALITY_TIMEOUT: Duration = Duration::from_millis(1_500);
+const ACCESSIBILITY_TREE_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_PROTOCOL_VERSION: &str = "1";
 
 #[derive(Debug, Clone)]
@@ -268,6 +272,7 @@ impl ActionJournal {
     fn record_agent_seat_delivery(
         &self,
         session_id: &str,
+        lane_id: &str,
         action_id: Uuid,
         window: &WindowInfo,
         backend: &str,
@@ -275,6 +280,7 @@ impl ActionJournal {
     ) -> Result<()> {
         let mut target = journal_target("independent_agent_seat");
         target.add("session_id", session_id);
+        target.add("lane_id", lane_id);
         target.add("window_id", &window.id);
         if let Some(app_id) = window.app_id.as_deref() {
             target.add("app_id", app_id);
@@ -302,8 +308,8 @@ impl ActionJournal {
             artifacts: Vec::new(),
             ok: true,
             summary: format!(
-                "independent agent seat session={} action={} window={} backend={} ok=true",
-                session_id, action_id, window.id, backend
+                "independent agent seat session={} lane={} action={} window={} backend={} ok=true",
+                session_id, lane_id, action_id, window.id, backend
             ),
         };
         append_journal_entry(&self.path, &entry)
@@ -441,6 +447,7 @@ async fn main() -> Result<()> {
                 false,
                 false,
                 false,
+                false,
             ))?
         );
         return Ok(());
@@ -565,6 +572,7 @@ async fn run(settings: RunSettings) -> Result<()> {
             active_window_state.clone(),
             window_list_state.clone(),
             activity_tracker.clone(),
+            capture_session_store.clone(),
             window_action_queue.clone(),
             agent_seat_backend.clone(),
         )
@@ -588,6 +596,7 @@ async fn run(settings: RunSettings) -> Result<()> {
             active_window_state.clone(),
             window_list_state.clone(),
             activity_tracker.clone(),
+            capture_session_store.clone(),
             window_action_queue.clone(),
             agent_seat_backend.clone(),
         );
@@ -732,6 +741,7 @@ async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()>
     journal_context.active_window_after = active_window_context_for_safety_class(
         &journal_context.safety_class,
         &runtime.active_window_state,
+        &runtime.app_policy,
     );
     runtime
         .journal
@@ -903,7 +913,12 @@ async fn finish_post_action(
     let timeout = Duration::from_millis(prepared.options.settle_timeout_ms);
     let interval = Duration::from_millis(prepared.options.settle_interval_ms);
     let mut previous = None;
-    let mut current = observation::post_action(runtime).await;
+    let mut current = if prepared.condition == ActionSettleCondition::None || prepared.delivery_ack
+    {
+        observation::post_action_window_only(runtime).await
+    } else {
+        observation::post_action(runtime).await
+    };
     let mut samples = 1_u32;
     let mut settled = post_action_condition_met(
         prepared.condition,
@@ -1037,8 +1052,11 @@ fn journal_context_for_request(
     client: Option<JournalClientContext>,
 ) -> JournalContext {
     let safety_class = safety_class_for_request(request);
-    let active_window_before =
-        active_window_context_for_safety_class(&safety_class, &runtime.active_window_state);
+    let active_window_before = active_window_context_for_safety_class(
+        &safety_class,
+        &runtime.active_window_state,
+        &runtime.app_policy,
+    );
     let control = journal_control_context_for_request(
         request,
         &safety_class,
@@ -1058,14 +1076,18 @@ fn journal_context_for_request(
 fn active_window_context_for_safety_class(
     safety_class: &SafetyClass,
     active_window_state: &ActiveWindowState,
+    app_policy: &AppPolicy,
 ) -> Option<JournalWindowContext> {
     if !is_control_safety_class(safety_class) {
         return None;
     }
-    active_window(active_window_state)
-        .ok()
-        .flatten()
-        .map(journal_window_context)
+    observation_policy::observable_journal_window(
+        app_policy,
+        active_window(active_window_state)
+            .ok()
+            .flatten()
+            .map(journal_window_context),
+    )
 }
 
 fn journal_control_context_for_request(
@@ -1147,7 +1169,8 @@ fn journal_backend_for_request(
         | DaemonRequest::CaptureSessionClose(_) => "portal_screencast_pipewire",
         DaemonRequest::CaptureSessionRenew(_) => "interaction_session",
         DaemonRequest::FocusWindow(_) => "kwin",
-        DaemonRequest::MoveWindow(_)
+        DaemonRequest::CloseWindow(_)
+        | DaemonRequest::MoveWindow(_)
         | DaemonRequest::LaunchWindow(_)
         | DaemonRequest::ResizeWindow(_) => "kwin_script_bridge",
         DaemonRequest::PageZoom(_) => {
@@ -1247,6 +1270,14 @@ fn journal_requested_target_for_request(request: &DaemonRequest) -> Option<Journ
         DaemonRequest::FocusWindow(request) => {
             let mut target = journal_target("window");
             target.add("window_id", &request.window_id);
+            target
+        }
+        DaemonRequest::CloseWindow(request) => {
+            let mut target = journal_target("window_close");
+            target.add("window_id", &request.window_id);
+            if let Some(session_id) = request.session_id.as_deref() {
+                target.add("session_id", session_id);
+            }
             target
         }
         DaemonRequest::MoveWindow(request) => {
@@ -1363,6 +1394,10 @@ fn journal_requested_target_for_request(request: &DaemonRequest) -> Option<Journ
                     .filter(|part| !part.trim().is_empty())
                     .count()
                     .to_string(),
+            );
+            target.add_bool(
+                "destructive",
+                request.destructive || destructive_key_combo(&request.combo),
             );
             if let Some(session_id) = request.session_id.as_deref() {
                 target.add("session_id", session_id);
@@ -1725,11 +1760,17 @@ async fn handle_request(
     if let Err(err) = validate_post_action_response_options(&request, response_options) {
         return daemon_error_with_kind(err, ErrorKind::Validation);
     }
+    if let Err(err) = validate_targeted_key_combo(&request, runtime.input_backend_preference) {
+        return daemon_error_with_kind(err, ErrorKind::Validation);
+    }
     if let Err(err) =
         enforce_policy_with_approvals(&runtime.policy, &runtime.approval_store, &request)
     {
         let kind = policy_error_kind(&err);
         return daemon_error_with_kind(err, kind);
+    }
+    if let Err(err) = enforce_mcp_focus_isolation(&request, client) {
+        return daemon_error_with_kind(err, ErrorKind::Validation);
     }
     if let Err(err) = enforce_panic_stop(&runtime.panic_stop, &request) {
         return daemon_error_with_kind(err, ErrorKind::PanicStop);
@@ -1756,6 +1797,9 @@ async fn handle_request(
     if let Err(err) = validate_interaction_session_request(&request) {
         return daemon_error_with_kind(err, ErrorKind::Validation);
     }
+    if let Err(err) = validate_capture_output_request(&request) {
+        return daemon_error_with_kind(err, ErrorKind::Validation);
+    }
     if let Err(err) =
         resolve_semantic_handle_for_request(&mut request, &runtime.semantic_handle_store, client)
     {
@@ -1771,6 +1815,21 @@ async fn handle_request(
         runtime.window_backend.as_ref(),
         &runtime.app_policy,
         &request,
+    )
+    .await
+    {
+        return daemon_error_with_kind(err, ErrorKind::AppDenied);
+    }
+    if let DaemonRequest::AccessibilityTextAttributes(request) = &request
+        && let Err(err) =
+            seatgeist_atspi::validate_text_attributes_request(&request.node_id, request.offset)
+    {
+        return daemon_error_with_kind(anyhow::anyhow!(err), ErrorKind::Validation);
+    }
+    if let Err(err) = observation_policy::enforce_observation_app_policy(
+        &request,
+        runtime.window_backend.as_ref(),
+        &runtime.app_policy,
     )
     .await
     {
@@ -1819,7 +1878,13 @@ async fn execute_request(
 ) -> DaemonResponse {
     let post_action = response_options.and_then(|options| options.post_action.as_ref());
     match request {
-        DaemonRequest::Health => DaemonResponse::Health(runtime.health_status.clone()),
+        DaemonRequest::Health => {
+            let mut status = runtime.health_status.clone();
+            let (current, peak) = process_resident_memory();
+            status.resident_memory_bytes = current;
+            status.resident_memory_peak_bytes = peak;
+            DaemonResponse::Health(status)
+        }
         DaemonRequest::Capabilities => DaemonResponse::Capabilities(capabilities(
             runtime.input_backend_preference,
             &runtime.portal_eis_session_store,
@@ -1827,6 +1892,7 @@ async fn execute_request(
             runtime.window_action_queue.resize_ready(),
             runtime.window_action_queue.move_ready(),
             runtime.window_action_queue.launch_ready(),
+            runtime.window_action_queue.close_ready(),
         )),
         DaemonRequest::PolicyStatus => {
             DaemonResponse::PolicyStatus(policy_status_from_config(runtime.policy.config()))
@@ -1860,7 +1926,18 @@ async fn execute_request(
                 &runtime.window_list_state,
                 &runtime.window_action_queue,
             ) {
-                Ok(status) => DaemonResponse::KwinBridgeStatus(status),
+                Ok(mut status) => {
+                    status.active_window = observation_policy::observable_window(
+                        &runtime.app_policy,
+                        status.active_window,
+                    );
+                    if let Ok(Some(windows)) = runtime.window_list_state.snapshot() {
+                        status.window_count =
+                            observation_policy::observable_windows(&runtime.app_policy, windows)
+                                .len();
+                    }
+                    DaemonResponse::KwinBridgeStatus(status)
+                }
                 Err(err) => daemon_error(err),
             }
         }
@@ -1986,8 +2063,27 @@ async fn execute_request(
                 Ok(()) => {}
                 Err(err) => return daemon_error_with_kind(err, ErrorKind::Validation),
             }
+            let session_id = request.session_id.clone();
+            if let Err(err) = preflight_retained_capture_observation(&session_id, runtime).await {
+                return daemon_error_with_kind(err, ErrorKind::AppDenied);
+            }
             match runtime.capture_session_store.snapshot(request).await {
-                Ok(frame) => DaemonResponse::CaptureFrame(frame),
+                Ok(mut frame) => {
+                    if let Err(err) =
+                        protect_retained_capture_frame(&session_id, &mut frame, runtime).await
+                    {
+                        fs::remove_file(&frame.screenshot.path).ok();
+                        return daemon_error_with_kind(err, ErrorKind::AppDenied);
+                    }
+                    if let Err(err) = runtime
+                        .capture_session_store
+                        .update_latest_frame(&frame)
+                        .await
+                    {
+                        return daemon_error_with_kind(err, ErrorKind::TargetLost);
+                    }
+                    DaemonResponse::CaptureFrame(frame)
+                }
                 Err(err) => daemon_error(err),
             }
         }
@@ -2000,8 +2096,28 @@ async fn execute_request(
                 Ok(()) => {}
                 Err(err) => return daemon_error_with_kind(err, ErrorKind::Validation),
             }
+            let session_id = request.session_id.clone();
+            if let Err(err) = preflight_retained_capture_observation(&session_id, runtime).await {
+                return daemon_error_with_kind(err, ErrorKind::AppDenied);
+            }
             match runtime.capture_session_store.wait(request).await {
-                Ok(result) => DaemonResponse::CaptureWait(Box::new(result)),
+                Ok(mut result) => {
+                    if let Err(err) =
+                        protect_retained_capture_frame(&session_id, &mut result.frame, runtime)
+                            .await
+                    {
+                        fs::remove_file(&result.frame.screenshot.path).ok();
+                        return daemon_error_with_kind(err, ErrorKind::AppDenied);
+                    }
+                    if let Err(err) = runtime
+                        .capture_session_store
+                        .update_latest_frame(&result.frame)
+                        .await
+                    {
+                        return daemon_error_with_kind(err, ErrorKind::TargetLost);
+                    }
+                    DaemonResponse::CaptureWait(Box::new(result))
+                }
                 Err(err) => daemon_error(err),
             }
         }
@@ -2041,15 +2157,26 @@ async fn execute_request(
             Err(err) => daemon_error(err),
         },
         DaemonRequest::ListWindows => match runtime.window_backend.list_windows().await {
-            Ok(windows) => DaemonResponse::Windows(windows),
+            Ok(windows) => DaemonResponse::Windows(observation_policy::observable_windows(
+                &runtime.app_policy,
+                windows,
+            )),
             Err(err) => daemon_error(anyhow::Error::msg(err)),
         },
         DaemonRequest::ActiveWindow => match runtime.window_backend.active_window().await {
-            Ok(window) => DaemonResponse::ActiveWindow(window),
+            Ok(window) => DaemonResponse::ActiveWindow(observation_policy::observable_window(
+                &runtime.app_policy,
+                window,
+            )),
             Err(err) => daemon_error(anyhow::Error::msg(err)),
         },
         DaemonRequest::WindowInventory => {
-            match observation::window_inventory(runtime.window_backend.as_ref()).await {
+            match observation::window_inventory(
+                runtime.window_backend.as_ref(),
+                &runtime.app_policy,
+            )
+            .await
+            {
                 Ok(mut inventory) => match runtime
                     .semantic_handle_store
                     .issue_for_windows(&inventory.windows, client)
@@ -2064,8 +2191,12 @@ async fn execute_request(
             }
         }
         DaemonRequest::WindowInventoryWait(request) => {
-            match observation::wait_for_window_inventory(runtime.window_backend.as_ref(), request)
-                .await
+            match observation::wait_for_window_inventory(
+                runtime.window_backend.as_ref(),
+                &runtime.app_policy,
+                request,
+            )
+            .await
             {
                 Ok(mut result) => match runtime
                     .semantic_handle_store
@@ -2087,6 +2218,7 @@ async fn execute_request(
                 runtime.screen_backend.as_ref(),
                 &runtime.window_list_state,
                 &runtime.safety_settings,
+                &runtime.app_policy,
             )
             .await
             {
@@ -2099,6 +2231,7 @@ async fn execute_request(
                 request,
                 &runtime.safety_settings,
                 &runtime.window_list_state,
+                &runtime.app_policy,
             )
             .await
             {
@@ -2107,7 +2240,14 @@ async fn execute_request(
             }
         }
         DaemonRequest::ScreenshotTile(request) => {
-            match capture_screenshot_tile(request, &runtime.safety_settings).await {
+            match capture_screenshot_tile(
+                request,
+                &runtime.safety_settings,
+                &runtime.window_list_state,
+                &runtime.app_policy,
+            )
+            .await
+            {
                 Ok(info) => DaemonResponse::Screenshot(info),
                 Err(err) => daemon_error(err),
             }
@@ -2117,6 +2257,7 @@ async fn execute_request(
                 request,
                 &runtime.safety_settings,
                 &runtime.window_list_state,
+                &runtime.app_policy,
             )
             .await
             {
@@ -2136,10 +2277,10 @@ async fn execute_request(
             Err(err) => daemon_error(err),
         },
         DaemonRequest::AccessibilityQualityStatus => {
-            DaemonResponse::AccessibilityQualityStatus(accessibility_quality_status())
+            DaemonResponse::AccessibilityQualityStatus(accessibility_quality_status().await)
         }
         DaemonRequest::FocusedAccessibilityTree(request) => {
-            match focused_accessibility_tree(request) {
+            match focused_accessibility_tree_bounded(request, ACCESSIBILITY_TREE_TIMEOUT).await {
                 Ok(tree) => DaemonResponse::AccessibilityTree(tree),
                 Err(err) => daemon_error(err),
             }
@@ -2198,28 +2339,36 @@ async fn execute_request(
         }
         DaemonRequest::TypeText(request) => {
             let session_id = request.session_id.clone();
-            let result = if runtime.input_backend_preference
-                == InputBackendPreference::KwinAgentSeat
-            {
-                interaction::execute_agent_seat_action(
-                    runtime,
-                    session_id.as_deref(),
-                    SafetyClass::ControlKeyboard,
-                    |target| async move {
-                        agent_type_text(request, &target.window, &runtime.agent_seat_backend).await
-                    },
-                )
-                .await
-            } else {
-                interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
-                    type_text(
-                        request,
-                        runtime.input_backend_preference,
-                        &runtime.portal_eis_session_store,
+            let result =
+                if runtime.input_backend_preference == InputBackendPreference::KwinAgentSeat {
+                    interaction::execute_agent_seat_action(
+                        runtime,
+                        session_id.as_deref(),
+                        SafetyClass::ControlKeyboard,
+                        |target| async move {
+                            let context = TargetedInputContext {
+                                lane_id: target.lane_id,
+                            };
+                            agent_type_text(
+                                request,
+                                &context,
+                                &target.window,
+                                &runtime.agent_seat_backend,
+                            )
+                            .await
+                        },
                     )
-                })
-                .await
-            };
+                    .await
+                } else {
+                    interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
+                        type_text(
+                            request,
+                            runtime.input_backend_preference,
+                            &runtime.portal_eis_session_store,
+                        )
+                    })
+                    .await
+                };
             match result {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => daemon_error(err),
@@ -2227,35 +2376,47 @@ async fn execute_request(
         }
         DaemonRequest::KeyCombo(request) => {
             let session_id = request.session_id.clone();
-            let result = if runtime.input_backend_preference
-                == InputBackendPreference::KwinAgentSeat
-            {
-                interaction::execute_agent_seat_action(
-                    runtime,
-                    session_id.as_deref(),
-                    SafetyClass::ControlKeyboard,
-                    |target| async move {
-                        agent_key_combo(request, &target.window, &runtime.agent_seat_backend).await
-                    },
-                )
-                .await
-            } else {
-                interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
-                    key_combo(
-                        request,
-                        runtime.input_backend_preference,
-                        &runtime.xkb_keymap_config,
-                        &runtime.portal_eis_session_store,
+            let result =
+                if runtime.input_backend_preference == InputBackendPreference::KwinAgentSeat {
+                    interaction::execute_agent_seat_action(
+                        runtime,
+                        session_id.as_deref(),
+                        SafetyClass::ControlKeyboard,
+                        |target| async move {
+                            let context = TargetedInputContext {
+                                lane_id: target.lane_id,
+                            };
+                            agent_key_combo(
+                                request,
+                                &context,
+                                &target.window,
+                                &runtime.agent_seat_backend,
+                            )
+                            .await
+                        },
                     )
-                })
-                .await
-            };
+                    .await
+                } else {
+                    interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
+                        key_combo(
+                            request,
+                            runtime.input_backend_preference,
+                            &runtime.xkb_keymap_config,
+                            &runtime.portal_eis_session_store,
+                        )
+                    })
+                    .await
+                };
             match result {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => daemon_error(err),
             }
         }
         DaemonRequest::MovePointer(request) => {
+            let request = match resolve_move_capture_coordinates(request, runtime).await {
+                Ok(request) => request,
+                Err(err) => return daemon_error_with_kind(err, ErrorKind::Validation),
+            };
             let session_id = request.session_id.clone();
             let result =
                 if runtime.input_backend_preference == InputBackendPreference::KwinAgentSeat {
@@ -2264,8 +2425,16 @@ async fn execute_request(
                         session_id.as_deref(),
                         SafetyClass::ControlPointer,
                         |target| async move {
-                            agent_move_pointer(request, &target.window, &runtime.agent_seat_backend)
-                                .await
+                            let context = TargetedInputContext {
+                                lane_id: target.lane_id,
+                            };
+                            agent_move_pointer(
+                                request,
+                                &context,
+                                &target.window,
+                                &runtime.agent_seat_backend,
+                            )
+                            .await
                         },
                     )
                     .await
@@ -2288,39 +2457,10 @@ async fn execute_request(
             }
         }
         DaemonRequest::ClickPointer(request) => {
-            let session_id = request.session_id.clone();
-            let result = if runtime.input_backend_preference
-                == InputBackendPreference::KwinAgentSeat
-            {
-                interaction::execute_agent_seat_action(
-                    runtime,
-                    session_id.as_deref(),
-                    SafetyClass::ControlPointer,
-                    |target| async move {
-                        agent_click_pointer(request, &target.window, &runtime.agent_seat_backend)
-                            .await
-                    },
-                )
-                .await
-            } else {
-                interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
-                    click_pointer(
-                        request,
-                        runtime.window_backend.as_ref(),
-                        runtime.screen_backend.as_ref(),
-                        runtime.input_backend_preference,
-                        &runtime.portal_eis_session_store,
-                    )
-                    .await
-                })
-                .await
+            let request = match resolve_click_capture_coordinates(request, runtime).await {
+                Ok(request) => request,
+                Err(err) => return daemon_error_with_kind(err, ErrorKind::Validation),
             };
-            match result {
-                Ok(result) => DaemonResponse::Action(Box::new(result)),
-                Err(err) => daemon_error(err),
-            }
-        }
-        DaemonRequest::DragPointer(request) => {
             let session_id = request.session_id.clone();
             let result =
                 if runtime.input_backend_preference == InputBackendPreference::KwinAgentSeat {
@@ -2329,8 +2469,60 @@ async fn execute_request(
                         session_id.as_deref(),
                         SafetyClass::ControlPointer,
                         |target| async move {
-                            agent_drag_pointer(request, &target.window, &runtime.agent_seat_backend)
-                                .await
+                            let context = TargetedInputContext {
+                                lane_id: target.lane_id,
+                            };
+                            agent_click_pointer(
+                                request,
+                                &context,
+                                &target.window,
+                                &runtime.agent_seat_backend,
+                            )
+                            .await
+                        },
+                    )
+                    .await
+                } else {
+                    interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
+                        click_pointer(
+                            request,
+                            runtime.window_backend.as_ref(),
+                            runtime.screen_backend.as_ref(),
+                            runtime.input_backend_preference,
+                            &runtime.portal_eis_session_store,
+                        )
+                        .await
+                    })
+                    .await
+                };
+            match result {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => daemon_error(err),
+            }
+        }
+        DaemonRequest::DragPointer(request) => {
+            let request = match resolve_drag_capture_coordinates(request, runtime).await {
+                Ok(request) => request,
+                Err(err) => return daemon_error_with_kind(err, ErrorKind::Validation),
+            };
+            let session_id = request.session_id.clone();
+            let result =
+                if runtime.input_backend_preference == InputBackendPreference::KwinAgentSeat {
+                    interaction::execute_agent_seat_action(
+                        runtime,
+                        session_id.as_deref(),
+                        SafetyClass::ControlPointer,
+                        |target| async move {
+                            let context = TargetedInputContext {
+                                lane_id: target.lane_id,
+                            };
+                            agent_drag_pointer(
+                                request,
+                                &context,
+                                &target.window,
+                                &runtime.agent_seat_backend,
+                            )
+                            .await
                         },
                     )
                     .await
@@ -2354,31 +2546,38 @@ async fn execute_request(
         }
         DaemonRequest::ScrollPointer(request) => {
             let session_id = request.session_id.clone();
-            let result = if runtime.input_backend_preference
-                == InputBackendPreference::KwinAgentSeat
-            {
-                interaction::execute_agent_seat_action(
-                    runtime,
-                    session_id.as_deref(),
-                    SafetyClass::ControlPointer,
-                    |target| async move {
-                        agent_scroll_pointer(request, &target.window, &runtime.agent_seat_backend)
+            let result =
+                if runtime.input_backend_preference == InputBackendPreference::KwinAgentSeat {
+                    interaction::execute_agent_seat_action(
+                        runtime,
+                        session_id.as_deref(),
+                        SafetyClass::ControlPointer,
+                        |target| async move {
+                            let context = TargetedInputContext {
+                                lane_id: target.lane_id,
+                            };
+                            agent_scroll_pointer(
+                                request,
+                                &context,
+                                &target.window,
+                                &runtime.agent_seat_backend,
+                            )
                             .await
-                    },
-                )
-                .await
-            } else {
-                interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
-                    scroll_pointer(
-                        request,
-                        runtime.screen_backend.as_ref(),
-                        runtime.input_backend_preference,
-                        &runtime.portal_eis_session_store,
+                        },
                     )
                     .await
-                })
-                .await
-            };
+                } else {
+                    interaction::execute_raw_action(runtime, session_id.as_deref(), || async move {
+                        scroll_pointer(
+                            request,
+                            runtime.screen_backend.as_ref(),
+                            runtime.input_backend_preference,
+                            &runtime.portal_eis_session_store,
+                        )
+                        .await
+                    })
+                    .await
+                };
             match result {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => daemon_error(err),
@@ -2507,7 +2706,19 @@ async fn execute_request(
                 request.method_filter.as_deref(),
                 request.ok,
             ) {
-                Ok(entries) => DaemonResponse::Journal(entries),
+                Ok(mut entries) => {
+                    for entry in &mut entries {
+                        entry.active_window_before = observation_policy::observable_journal_window(
+                            &runtime.app_policy,
+                            entry.active_window_before.take(),
+                        );
+                        entry.active_window_after = observation_policy::observable_journal_window(
+                            &runtime.app_policy,
+                            entry.active_window_after.take(),
+                        );
+                    }
+                    DaemonResponse::Journal(entries)
+                }
                 Err(err) => daemon_error(err),
             }
         }
@@ -2517,6 +2728,10 @@ async fn execute_request(
                 Err(err) => daemon_error(err),
             }
         }
+        DaemonRequest::CloseWindow(request) => match close_window(request, runtime).await {
+            Ok(result) => DaemonResponse::Action(Box::new(result)),
+            Err(err) => daemon_error_with_kind(err, ErrorKind::TargetMismatch),
+        },
         DaemonRequest::MoveWindow(request) => {
             match move_window(request, runtime.window_backend.as_ref()).await {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
@@ -2550,6 +2765,157 @@ async fn execute_request(
     }
 }
 
+async fn preflight_retained_capture_observation(
+    session_id: &str,
+    runtime: &DaemonRuntime,
+) -> Result<()> {
+    let status = runtime
+        .capture_session_store
+        .status_for_session(session_id)
+        .await;
+    verify_chooser_backed_window_capture_policy(&status, runtime).await
+}
+
+async fn verify_chooser_backed_window_capture_policy(
+    status: &libseatgeist::CaptureSessionStatus,
+    runtime: &DaemonRuntime,
+) -> Result<()> {
+    if status.source_type.as_deref() != Some("window") || status.requested_window_id.is_some() {
+        return Ok(());
+    }
+    let windows = runtime
+        .window_backend
+        .list_windows()
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("verify chooser-backed window capture against protected-app policy")?;
+    if windows.iter().any(|window| {
+        observation_policy::app_is_protected(&runtime.app_policy, window.app_id.as_deref())
+    }) {
+        bail!(
+            "app policy denied an uncorrelated chooser-backed window capture while a protected \
+             application is open; use an exact authorized window capture"
+        );
+    }
+    Ok(())
+}
+
+async fn protect_retained_capture_frame(
+    session_id: &str,
+    frame: &mut libseatgeist::CaptureFrameResult,
+    runtime: &DaemonRuntime,
+) -> Result<()> {
+    let status = runtime
+        .capture_session_store
+        .status_for_session(session_id)
+        .await;
+    if status.source_type.as_deref() == Some("window") && status.requested_window_id.is_some() {
+        // Exact window sessions were app-authorized before opening and produce
+        // window-local pixels rather than a composed desktop.
+        annotate_exact_window_capture_transform(&status, frame, runtime).await?;
+        return Ok(());
+    }
+    if status.source_type.as_deref() == Some("window") {
+        verify_chooser_backed_window_capture_policy(&status, runtime).await?;
+        return Ok(());
+    }
+    frame.screenshot = screenshot::apply_capture_frame_protection(
+        frame.screenshot.clone(),
+        &runtime.window_list_state,
+        &runtime.app_policy,
+    )?;
+    let bytes = fs::read(&frame.screenshot.path).with_context(|| {
+        format!(
+            "hash protected capture frame {}",
+            frame.screenshot.path.display()
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"seatgeist-protected-capture-v1\0");
+    hasher.update(bytes);
+    frame.revision = format!("protected:{:x}", hasher.finalize());
+    Ok(())
+}
+
+async fn annotate_exact_window_capture_transform(
+    status: &libseatgeist::CaptureSessionStatus,
+    frame: &mut libseatgeist::CaptureFrameResult,
+    runtime: &DaemonRuntime,
+) -> Result<()> {
+    let window_id = status
+        .requested_window_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("exact capture status omitted its requested window id"))?;
+    let windows = runtime
+        .window_backend
+        .list_windows()
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("resolve exact capture window geometry")?;
+    let window = windows
+        .iter()
+        .find(|window| window.id == window_id)
+        .ok_or_else(|| anyhow::anyhow!("requested window does not exist"))?;
+    let geometry = window
+        .geometry
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("exact capture window has no geometry metadata"))?;
+    if geometry.space != CoordinateSpace::LogicalPixel
+        || geometry.width == 0
+        || geometry.height == 0
+    {
+        bail!("exact capture window has invalid logical geometry");
+    }
+    let monitors = runtime
+        .screen_backend
+        .list_monitors()
+        .await
+        .unwrap_or_default();
+    let monitor_scale = window
+        .monitor_id
+        .as_deref()
+        .and_then(|id| monitors.iter().find(|monitor| monitor.id == id))
+        .or_else(|| {
+            let center_x = f64::from(geometry.x) + f64::from(geometry.width) / 2.0;
+            let center_y = f64::from(geometry.y) + f64::from(geometry.height) / 2.0;
+            monitors.iter().find(|monitor| {
+                let right = f64::from(monitor.logical_origin_x) + f64::from(monitor.logical_width);
+                let bottom =
+                    f64::from(monitor.logical_origin_y) + f64::from(monitor.logical_height);
+                center_x >= f64::from(monitor.logical_origin_x)
+                    && center_x < right
+                    && center_y >= f64::from(monitor.logical_origin_y)
+                    && center_y < bottom
+            })
+        })
+        .map(|monitor| monitor.scale_factor)
+        .filter(|scale| scale.is_finite() && *scale > 0.0);
+    // ScreenShot2 excludes decorations and reports native-resolution source
+    // pixels. Prefer its client-surface extent over the bridge's frame extent
+    // so fractional output scaling and server-side decorations cannot shift a
+    // preview-derived click.
+    let logical_source_width = monitor_scale
+        .map(|scale| (f64::from(frame.screenshot.source_width) / scale).round())
+        .filter(|width| *width >= 1.0 && *width <= f64::from(u32::MAX))
+        .map_or(geometry.width, |width| width as u32);
+    let logical_source_height = monitor_scale
+        .map(|scale| (f64::from(frame.screenshot.source_height) / scale).round())
+        .filter(|height| *height >= 1.0 && *height <= f64::from(u32::MAX))
+        .map_or(geometry.height, |height| height as u32);
+    frame.screenshot.transform = ScreenshotTransform {
+        source_coordinate_space: CoordinateSpace::WindowLocal,
+        output_coordinate_space: CoordinateSpace::CaptureOutput,
+        source_extent_width: Some(logical_source_width),
+        source_extent_height: Some(logical_source_height),
+        source_origin_x: 0,
+        source_origin_y: 0,
+        scale_x: f64::from(frame.screenshot.output_width) / f64::from(logical_source_width),
+        scale_y: f64::from(frame.screenshot.output_height) / f64::from(logical_source_height),
+    };
+    frame.screenshot.coordinate_space = CoordinateSpace::WindowLocal;
+    Ok(())
+}
+
 fn health(
     journal: &ActionJournal,
     config_fingerprint: String,
@@ -2567,7 +2933,29 @@ fn health(
             .or_else(executable_modified_unix_ms),
         binary_sha256,
         config_fingerprint: Some(config_fingerprint),
+        resident_memory_bytes: None,
+        resident_memory_peak_bytes: None,
     }
+}
+
+fn process_resident_memory() -> (Option<u64>, Option<u64>) {
+    let Ok(status) = fs::read_to_string("/proc/self/status") else {
+        return (None, None);
+    };
+    (
+        proc_status_kib(&status, "VmRSS:"),
+        proc_status_kib(&status, "VmHWM:"),
+    )
+}
+
+fn proc_status_kib(status: &str, key: &str) -> Option<u64> {
+    let line = status.lines().find(|line| line.starts_with(key))?;
+    let kib = line[key.len()..]
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()?;
+    kib.checked_mul(1024)
 }
 
 fn executable_sha256() -> Option<String> {
@@ -2602,6 +2990,7 @@ fn capabilities(
     window_resize_ready: bool,
     window_move_ready: bool,
     window_launch_ready: bool,
+    window_close_ready: bool,
 ) -> CapabilitySet {
     let stored_session_active = portal_eis_session_store.active().unwrap_or(false);
     CapabilitySet {
@@ -2612,6 +3001,7 @@ fn capabilities(
             window_resize_ready,
             window_move_ready,
             window_launch_ready,
+            window_close_ready,
         ),
     }
 }
@@ -2699,7 +3089,7 @@ async fn computer_use_readiness_status(runtime: &DaemonRuntime) -> ComputerUseRe
     let panic_stop = runtime.panic_stop.status();
     let capture = capture_backend_status();
     let clipboard = clipboard::status();
-    let accessibility = accessibility_quality_status();
+    let accessibility = accessibility_quality_status().await;
     let input = match input_backend_status(
         runtime.input_backend_preference,
         &runtime.portal_eis_session_store,
@@ -3098,6 +3488,7 @@ fn session_backend_role_for_request(
         | DaemonRequest::SelectItem(_)
         | DaemonRequest::SelectMenu(_) => Some(session_execution::BackendRole::Semantic),
         DaemonRequest::FocusWindow(_)
+        | DaemonRequest::CloseWindow(_)
         | DaemonRequest::MoveWindow(_)
         | DaemonRequest::LaunchWindow(_)
         | DaemonRequest::ResizeWindow(_) => Some(session_execution::BackendRole::Other),
@@ -3239,14 +3630,99 @@ fn enforce_required_focus_guard(settings: &SafetySettings, request: &DaemonReque
 
 fn pointer_request_uses_window_local(request: &DaemonRequest) -> bool {
     match request {
-        DaemonRequest::MovePointer(request) => request.point.space == CoordinateSpace::WindowLocal,
-        DaemonRequest::ClickPointer(request) => request.point.space == CoordinateSpace::WindowLocal,
+        DaemonRequest::MovePointer(request) => matches!(
+            request.point.space,
+            CoordinateSpace::WindowLocal | CoordinateSpace::CaptureOutput
+        ),
+        DaemonRequest::ClickPointer(request) => matches!(
+            request.point.space,
+            CoordinateSpace::WindowLocal | CoordinateSpace::CaptureOutput
+        ),
         DaemonRequest::DragPointer(request) => {
-            request.from.space == CoordinateSpace::WindowLocal
-                || request.to.space == CoordinateSpace::WindowLocal
+            matches!(
+                request.from.space,
+                CoordinateSpace::WindowLocal | CoordinateSpace::CaptureOutput
+            ) || matches!(
+                request.to.space,
+                CoordinateSpace::WindowLocal | CoordinateSpace::CaptureOutput
+            )
         }
         _ => false,
     }
+}
+
+async fn resolve_move_capture_coordinates(
+    mut request: MovePointerRequest,
+    runtime: &DaemonRuntime,
+) -> Result<MovePointerRequest> {
+    request.point = resolve_capture_output_point(
+        request.point,
+        request.session_id.as_deref(),
+        request.capture_revision.as_deref(),
+        runtime,
+    )
+    .await?;
+    request.capture_revision = None;
+    Ok(request)
+}
+
+async fn resolve_click_capture_coordinates(
+    mut request: ClickPointerRequest,
+    runtime: &DaemonRuntime,
+) -> Result<ClickPointerRequest> {
+    request.point = resolve_capture_output_point(
+        request.point,
+        request.session_id.as_deref(),
+        request.capture_revision.as_deref(),
+        runtime,
+    )
+    .await?;
+    request.capture_revision = None;
+    Ok(request)
+}
+
+async fn resolve_drag_capture_coordinates(
+    mut request: DragPointerRequest,
+    runtime: &DaemonRuntime,
+) -> Result<DragPointerRequest> {
+    request.from = resolve_capture_output_point(
+        request.from,
+        request.session_id.as_deref(),
+        request.capture_revision.as_deref(),
+        runtime,
+    )
+    .await?;
+    request.to = resolve_capture_output_point(
+        request.to,
+        request.session_id.as_deref(),
+        request.capture_revision.as_deref(),
+        runtime,
+    )
+    .await?;
+    request.capture_revision = None;
+    Ok(request)
+}
+
+async fn resolve_capture_output_point(
+    point: Point,
+    session_id: Option<&str>,
+    capture_revision: Option<&str>,
+    runtime: &DaemonRuntime,
+) -> Result<Point> {
+    if point.space != CoordinateSpace::CaptureOutput {
+        if capture_revision.is_some() {
+            bail!("capture_revision requires capture_output coordinates");
+        }
+        return Ok(point);
+    }
+    let session_id =
+        session_id.ok_or_else(|| anyhow::anyhow!("capture_output requires session_id"))?;
+    let capture_revision = capture_revision
+        .ok_or_else(|| anyhow::anyhow!("capture_output requires capture_revision"))?;
+    runtime
+        .capture_session_store
+        .resolve_capture_output_point(session_id, capture_revision, point)
+        .await
 }
 
 fn is_control_safety_class(safety_class: &SafetyClass) -> bool {
@@ -3269,8 +3745,55 @@ fn validate_interaction_session_request(request: &DaemonRequest) -> Result<()> {
     Ok(())
 }
 
+fn validate_capture_output_request(request: &DaemonRequest) -> Result<()> {
+    let (points, revision, session_id): (&[Point], Option<&str>, Option<&str>) = match request {
+        DaemonRequest::MovePointer(request) => (
+            std::slice::from_ref(&request.point),
+            request.capture_revision.as_deref(),
+            request.session_id.as_deref(),
+        ),
+        DaemonRequest::ClickPointer(request) => (
+            std::slice::from_ref(&request.point),
+            request.capture_revision.as_deref(),
+            request.session_id.as_deref(),
+        ),
+        DaemonRequest::DragPointer(request) => (
+            std::slice::from_ref(&request.from),
+            request.capture_revision.as_deref(),
+            request.session_id.as_deref(),
+        ),
+        _ => return Ok(()),
+    };
+    let uses_capture_output = match request {
+        DaemonRequest::DragPointer(request) => {
+            request.from.space == CoordinateSpace::CaptureOutput
+                || request.to.space == CoordinateSpace::CaptureOutput
+        }
+        _ => points
+            .iter()
+            .any(|point| point.space == CoordinateSpace::CaptureOutput),
+    };
+    if uses_capture_output && session_id.is_none() {
+        bail!("capture_output coordinates require session_id");
+    }
+    if uses_capture_output && revision.is_none() {
+        bail!("capture_output coordinates require capture_revision");
+    }
+    if !uses_capture_output && revision.is_some() {
+        bail!("capture_revision requires capture_output coordinates");
+    }
+    if let DaemonRequest::DragPointer(request) = request
+        && (request.from.space == CoordinateSpace::CaptureOutput)
+            != (request.to.space == CoordinateSpace::CaptureOutput)
+    {
+        bail!("drag endpoints must both use capture_output coordinates");
+    }
+    Ok(())
+}
+
 fn interaction_session_id_for_request(request: &DaemonRequest) -> Option<&str> {
     match request {
+        DaemonRequest::CloseWindow(request) => request.session_id.as_deref(),
         DaemonRequest::TypeText(request) => request.session_id.as_deref(),
         DaemonRequest::KeyCombo(request) => request.session_id.as_deref(),
         DaemonRequest::MovePointer(request) => request.session_id.as_deref(),
@@ -3301,6 +3824,7 @@ fn uses_independent_agent_seat(
 fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWindowGuard> {
     match request {
         DaemonRequest::FocusWindow(request) => request.guard.as_ref(),
+        DaemonRequest::CloseWindow(request) => request.guard.as_ref(),
         DaemonRequest::MoveWindow(request) => request.guard.as_ref(),
         DaemonRequest::LaunchWindow(request) => request.guard.as_ref(),
         DaemonRequest::ResizeWindow(request) => request.guard.as_ref(),
@@ -3450,9 +3974,15 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::ClickPointer(_)
         | DaemonRequest::DragPointer(_)
         | DaemonRequest::ScrollPointer(_) => SafetyClass::ControlPointer,
-        DaemonRequest::TypeText(_) | DaemonRequest::KeyCombo(_) | DaemonRequest::PageZoom(_) => {
-            SafetyClass::ControlKeyboard
+        DaemonRequest::TypeText(_) | DaemonRequest::PageZoom(_) => SafetyClass::ControlKeyboard,
+        DaemonRequest::KeyCombo(request) => {
+            if request.destructive || destructive_key_combo(&request.combo) {
+                SafetyClass::DestructiveAction
+            } else {
+                SafetyClass::ControlKeyboard
+            }
         }
+        DaemonRequest::CloseWindow(_) => SafetyClass::DestructiveAction,
         DaemonRequest::FocusWindow(_)
         | DaemonRequest::MoveWindow(_)
         | DaemonRequest::LaunchWindow(_)
@@ -3573,6 +4103,58 @@ fn destructive_label(label: &str) -> bool {
         || normalized.starts_with("erase ")
 }
 
+fn destructive_key_combo(combo: &str) -> bool {
+    let parts = combo
+        .split('+')
+        .map(|part| part.trim().to_ascii_lowercase())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let has = |name: &str| parts.iter().any(|part| part == name);
+    let control = has("ctrl") || has("control");
+    let close_key = has("q") || has("w");
+    (parts.len() == 2 && has("alt") && has("f4"))
+        || ((parts.len() == 2 || (parts.len() == 3 && has("shift"))) && control && close_key)
+        || (parts.len() == 2 && has("q") && (has("meta") || has("super")))
+}
+
+fn enforce_mcp_focus_isolation(
+    request: &DaemonRequest,
+    client: Option<&JournalClientContext>,
+) -> Result<()> {
+    if client.and_then(|client| client.tool.as_deref()) != Some("seatgeist-mcp") {
+        return Ok(());
+    }
+    match request {
+        DaemonRequest::FocusWindow(_) => bail!(
+            "MCP focus_window is disabled because it changes the physical user's workspace focus; open and use an exact retained window session instead"
+        ),
+        DaemonRequest::LaunchWindow(request)
+            if request.activation != libseatgeist::WindowActivationMode::PreserveFocus =>
+        {
+            bail!("MCP launch_window must preserve the physical user's workspace focus")
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_targeted_key_combo(
+    request: &DaemonRequest,
+    preference: InputBackendPreference,
+) -> Result<()> {
+    let DaemonRequest::KeyCombo(request) = request else {
+        return Ok(());
+    };
+    if preference == InputBackendPreference::KwinAgentSeat
+        && request.session_id.is_some()
+        && (request.destructive || destructive_key_combo(&request.combo))
+    {
+        bail!(
+            "destructive or window-global key combinations are not target-safe on an independent agent seat; use close_window with the exact retained session and KWin window id"
+        );
+    }
+    Ok(())
+}
+
 fn set_panic_stop(
     panic_stop: &PanicStopState,
     request: SetPanicStopRequest,
@@ -3587,6 +4169,7 @@ fn current_capabilities(
     window_resize_ready: bool,
     window_move_ready: bool,
     window_launch_ready: bool,
+    window_close_ready: bool,
 ) -> Vec<BackendCapability> {
     let mut capabilities = vec![
         BackendCapability::DaemonHealth,
@@ -3610,6 +4193,9 @@ fn current_capabilities(
         }
         if window_launch_ready {
             capabilities.push(BackendCapability::WindowLaunch);
+        }
+        if window_close_ready {
+            capabilities.push(BackendCapability::WindowClose);
         }
     }
     if clipboard::available() {
@@ -3737,11 +4323,28 @@ async fn execute_capture_open(
                 .open(session_id.clone(), capture_backend, sticky_target.is_some())
                 .await;
             if let Some(window) = sticky_target {
+                let active_session_ids = runtime.capture_session_store.active_session_ids().await;
+                runtime
+                    .interaction_session_store
+                    .retain_active_capture_sessions(&active_session_ids)
+                    .await;
                 if let Err(err) = runtime
                     .interaction_session_store
                     .bind(session_id.clone(), &window, owner)
                     .await
                 {
+                    let cleanup = runtime
+                        .capture_session_store
+                        .close(CaptureSessionRequest {
+                            session_id: session_id.clone(),
+                        })
+                        .await;
+                    let _ = runtime.session_execution_store.clear(&session_id).await;
+                    if let Err(cleanup_error) = cleanup {
+                        return daemon_error(err.context(format!(
+                            "could not close rejected capture session: {cleanup_error}"
+                        )));
+                    }
                     return daemon_error(err);
                 }
                 if let Err(err) = runtime
@@ -3815,6 +4418,111 @@ async fn focus_window(
 
         screenshot: None,
         message: Some(format!("focused window {}", request.window_id)),
+    })
+}
+
+async fn close_window(
+    request: CloseWindowRequest,
+    runtime: &DaemonRuntime,
+) -> Result<ActionResult> {
+    if request.window_id.trim().is_empty() {
+        bail!("window id must not be empty");
+    }
+    let windows_before = runtime
+        .window_backend
+        .list_windows()
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let target = if let Some(session_id) = request.session_id.as_deref() {
+        runtime
+            .capture_session_store
+            .require_active(session_id)
+            .await?;
+        let pinned = runtime
+            .interaction_session_store
+            .resolve(session_id, &windows_before)
+            .await?;
+        if pinned.window.id != request.window_id {
+            bail!(
+                "close target mismatch: retained session is pinned to {}, not {}",
+                pinned.window.id,
+                request.window_id
+            );
+        }
+        pinned.window
+    } else {
+        windows_before
+            .iter()
+            .find(|window| window.id == request.window_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("close target window was not found"))?
+    };
+    enforce_app_policy_for_app(
+        &runtime.app_policy,
+        target.app_id.as_deref(),
+        "exact close target",
+    )?;
+    runtime
+        .window_backend
+        .close_window(target.id.clone())
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let windows_after = loop {
+        let windows = runtime
+            .window_backend
+            .list_windows()
+            .await
+            .map_err(anyhow::Error::msg)?;
+        if !windows.iter().any(|window| window.id == target.id) {
+            break windows;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "exact close was not confirmed: target KWin window {} remains present",
+                target.id
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    if let Some(session_id) = request.session_id.as_deref() {
+        runtime
+            .interaction_session_store
+            .clear_if_present(session_id)
+            .await;
+    }
+    let active_window = runtime
+        .window_backend
+        .active_window()
+        .await
+        .map_err(anyhow::Error::msg)?;
+    Ok(ActionResult {
+        id: Uuid::new_v4(),
+        ok: true,
+        observation: Some(Observation {
+            active_window,
+            target_window: Some(target.clone()),
+            windows: windows_after,
+            monitors: Vec::new(),
+            focused_accessibility: None,
+            target_accessibility: None,
+            screenshot_path: None,
+            revision: None,
+            issues: Vec::new(),
+            settle: None,
+        }),
+        screenshot: None,
+        message: Some(format!(
+            "closed exact window {} app={} pid={} backend={} confirmation=target_absent",
+            target.id,
+            target.app_id.as_deref().unwrap_or("unknown"),
+            target
+                .pid
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            runtime.window_backend.backend_name(),
+        )),
     })
 }
 
@@ -4012,14 +4720,19 @@ async fn resize_window(
     })
 }
 
-fn focused_accessibility_tree(
+async fn focused_accessibility_tree_bounded(
     request: FocusedAccessibilityTreeRequest,
+    timeout: Duration,
 ) -> Result<Option<libseatgeist::AccessibilityNode>> {
     if request.max_nodes == 0 {
         bail!("max_nodes must be greater than zero");
     }
-    seatgeist_atspi::focused_tree(request.depth, request.max_nodes)
-        .map_err(|err| anyhow::anyhow!(err))
+    tokio::task::spawn_blocking(move || {
+        seatgeist_atspi::focused_tree_bounded(request.depth, request.max_nodes, timeout)
+            .map_err(|err| anyhow::anyhow!(err))
+    })
+    .await
+    .context("join bounded AT-SPI focused-tree worker")?
 }
 
 fn accessibility_find(
@@ -4045,25 +4758,81 @@ struct AccessibilityQualityCounts {
     max_depth_seen: usize,
 }
 
-fn accessibility_quality_status() -> AccessibilityQualityStatus {
+async fn accessibility_quality_status() -> AccessibilityQualityStatus {
     let sample_depth = ACCESSIBILITY_QUALITY_SAMPLE_DEPTH;
     let sample_max_nodes = ACCESSIBILITY_QUALITY_SAMPLE_MAX_NODES;
-    if let Err(err) = seatgeist_atspi::availability() {
-        return accessibility_quality_unavailable_status(
+    let sample = focused_accessibility_tree_bounded(
+        FocusedAccessibilityTreeRequest {
+            depth: sample_depth,
+            max_nodes: sample_max_nodes,
+        },
+        ACCESSIBILITY_QUALITY_TIMEOUT,
+    )
+    .await;
+    let status = match sample {
+        Err(err) => accessibility_quality_unavailable_status(
             sample_depth,
             sample_max_nodes,
             Some(&err.to_string()),
-        );
-    }
+        ),
+        sample => accessibility_quality_status_from_sample(sample_depth, sample_max_nodes, sample),
+    };
+    with_accessibility_registry_diagnostics(status)
+}
 
-    accessibility_quality_status_from_sample(
-        sample_depth,
-        sample_max_nodes,
-        focused_accessibility_tree(FocusedAccessibilityTreeRequest {
-            depth: sample_depth,
-            max_nodes: sample_max_nodes,
-        }),
-    )
+fn with_accessibility_registry_diagnostics(
+    mut status: AccessibilityQualityStatus,
+) -> AccessibilityQualityStatus {
+    let count = current_euid()
+        .ok()
+        .and_then(|uid| accessibility_registry_process_count(Path::new("/proc"), uid));
+    status.registry_process_count = count;
+    status.extra_registry_process_count = count.map(|count| count.saturating_sub(1));
+    if let Some(extra) = status
+        .extra_registry_process_count
+        .filter(|extra| *extra > 0)
+    {
+        status.setup_hint.push_str(&format!(
+            "; detected {extra} extra same-user AT-SPI registry process(es), so stale accessibility bus generations may be present"
+        ));
+    }
+    status
+}
+
+fn accessibility_registry_process_count(proc_root: &Path, uid: u32) -> Option<usize> {
+    let entries = fs::read_dir(proc_root).ok()?;
+    let mut count = 0;
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .chars()
+            .all(|character| character.is_ascii_digit())
+        {
+            continue;
+        }
+        let process_dir = entry.path();
+        let comm = match fs::read_to_string(process_dir.join("comm")) {
+            Ok(comm) => comm,
+            Err(_) => continue,
+        };
+        if !comm.trim().starts_with("at-spi2-registr") {
+            continue;
+        }
+        let status = match fs::read_to_string(process_dir.join("status")) {
+            Ok(status) => status,
+            Err(_) => continue,
+        };
+        let process_uid = status.lines().find_map(|line| {
+            line.strip_prefix("Uid:")
+                .and_then(|ids| ids.split_whitespace().next())
+                .and_then(|id| id.parse::<u32>().ok())
+        });
+        if process_uid == Some(uid) {
+            count += 1;
+        }
+    }
+    Some(count)
 }
 
 fn accessibility_quality_unavailable_status(
@@ -4079,6 +4848,8 @@ fn accessibility_quality_unavailable_status(
     };
     AccessibilityQualityStatus {
         atspi_available: false,
+        registry_process_count: None,
+        extra_registry_process_count: None,
         target_event_settle_available: false,
         event_backend: "atspi_registry".to_string(),
         target_event_classes: target_event_classes(),
@@ -4109,6 +4880,8 @@ fn accessibility_quality_status_from_sample(
         Err(err) => {
             return AccessibilityQualityStatus {
                 atspi_available: true,
+                registry_process_count: None,
+                extra_registry_process_count: None,
                 target_event_settle_available: true,
                 event_backend: "atspi_registry".to_string(),
                 target_event_classes: target_event_classes(),
@@ -4136,6 +4909,8 @@ fn accessibility_quality_status_from_sample(
     let Some(root) = focused else {
         return AccessibilityQualityStatus {
             atspi_available: true,
+            registry_process_count: None,
+            extra_registry_process_count: None,
             target_event_settle_available: true,
             event_backend: "atspi_registry".to_string(),
             target_event_classes: target_event_classes(),
@@ -4183,6 +4958,8 @@ fn accessibility_quality_status_from_sample(
 
     AccessibilityQualityStatus {
         atspi_available: true,
+        registry_process_count: None,
+        extra_registry_process_count: None,
         target_event_settle_available: true,
         event_backend: "atspi_registry".to_string(),
         target_event_classes: target_event_classes(),
@@ -5743,6 +6520,46 @@ fn classify_error_reason(message: &str, kind: ErrorKind) -> &'static str {
         || lower.contains("capture session is already opening or active")
     {
         "capture_session_already_active"
+    } else if lower.contains("exact-window capture session quota") {
+        "capture_session_quota"
+    } else if lower.contains("capture revision is stale") {
+        "capture_revision_stale"
+    } else if lower.contains("capture_output") && lower.contains("requires session_id") {
+        "capture_session_required"
+    } else if lower.contains("capture_output") && lower.contains("requires capture_revision") {
+        "capture_revision_required"
+    } else if lower.contains("capture session has no captured frame") {
+        "capture_frame_missing"
+    } else if lower.contains("capture frame invalidated by user input") {
+        "capture_frame_invalidated_by_user"
+    } else if lower.contains("no non-sensitive activatable tab matched") {
+        "semantic_target_not_actionable"
+    } else if lower.contains("launch intent expired before a matching window appeared") {
+        "launch_no_new_window"
+    } else if lower.contains("capture_output pointer coordinate")
+        && lower.contains("outside preview")
+    {
+        "capture_coordinate_out_of_bounds"
+    } else if lower.contains("invalid coordinate transform") {
+        "capture_transform_invalid"
+    } else if lower.contains("invalid at-spi node id") {
+        "invalid_accessibility_node_id"
+    } else if lower.contains("clicks must be 1 or 2") {
+        "invalid_click_count"
+    } else if lower.contains("window_local pointer coordinate") && lower.contains("outside") {
+        "pointer_coordinate_out_of_bounds"
+    } else if lower.contains("agent-seat plugin did not complete") {
+        "agent_seat_timeout"
+    } else if lower.contains("agent-seat plugin is not registered") {
+        "agent_seat_unavailable"
+    } else if lower.contains("agent target in use") {
+        "agent_target_in_use"
+    } else if lower.contains("agent lane quota reached") {
+        "agent_lane_quota"
+    } else if lower.contains("agent target user active")
+        || lower.contains("agent target received physical user input")
+    {
+        "agent_target_user_active"
     } else if lower.contains("requested window does not exist")
         || lower.contains("pinned window closed")
     {
@@ -5760,6 +6577,8 @@ fn classify_error_reason(message: &str, kind: ErrorKind) -> &'static str {
         || lower.contains("omitted window geometry")
     {
         "backend_confirmation_incomplete"
+    } else if kind == ErrorKind::Validation {
+        "validation"
     } else if lower.contains("at-spi") || lower.contains("accessibility bus") {
         "atspi_registry_unreachable"
     } else {
@@ -5798,12 +6617,23 @@ fn classify_error_message(message: &str) -> ErrorKind {
         || lower.contains("capture open reservation was lost")
     {
         ErrorKind::TargetLost
-    } else if lower.contains("focus lease conflict") {
+    } else if lower.contains("focus lease conflict")
+        || lower.contains("agent target in use")
+        || lower.contains("agent lane quota reached")
+    {
         ErrorKind::FocusLeaseConflict
     } else if lower.contains("active-window guard") || lower.contains("focus guard") {
         ErrorKind::FocusGuard
-    } else if lower.contains("human input activity") {
+    } else if lower.contains("human input activity")
+        || lower.contains("agent target user active")
+        || lower.contains("agent target received physical user input")
+    {
         ErrorKind::HumanInputPause
+    } else if lower.contains("capture frame invalidated by user input")
+        || lower.contains("no non-sensitive activatable tab matched")
+        || lower.contains("launch intent expired before a matching window appeared")
+    {
+        ErrorKind::Validation
     } else if lower.contains("panic-stop is active") {
         ErrorKind::PanicStop
     } else if lower.contains("rate limit") || lower.contains("rate-limited") {
@@ -5835,6 +6665,7 @@ fn classify_error_message(message: &str) -> ErrorKind {
             ErrorKind::AccessibilityUnavailable
         }
     } else if lower.contains("not available")
+        || lower.contains("agent-seat plugin is not registered")
         || lower.contains("dbus receiver is unavailable")
         || lower.contains("bridge heartbeat is stale")
         || lower.contains("no executable")
@@ -5981,8 +6812,14 @@ fn summarize_response(response: &DaemonResponse) -> String {
             status.path.display()
         ),
         DaemonResponse::KwinBridgeStatus(status) => format!(
-            "kwin bridge dbus={} active_update_seen={} active_age_ms={} window_list_update_seen={} window_list_age_ms={} stale={} window_count={} installed={} enabled={}",
+            "kwin bridge dbus={} ownership_retries={} ownership_retry_in_ms={} ownership_error={} active_update_seen={} active_age_ms={} window_list_update_seen={} window_list_age_ms={} stale={} window_count={} installed={} enabled={}",
             status.dbus_service_registered,
+            status.ownership_retry_count,
+            status
+                .ownership_retry_in_ms
+                .map(|delay| delay.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            status.ownership_last_error.is_some(),
             status.active_window_update_seen,
             status
                 .active_window_update_age_ms
@@ -6241,8 +7078,14 @@ fn summarize_response(response: &DaemonResponse) -> String {
             text.backend
         ),
         DaemonResponse::AccessibilityQualityStatus(status) => format!(
-            "accessibility quality atspi={} focused={} reliable={} nodes={} named={} actionable={} text={} generic={} flat={} fallback={}",
+            "accessibility quality atspi={} registries={} extra_registries={} focused={} reliable={} nodes={} named={} actionable={} text={} generic={} flat={} fallback={}",
             status.atspi_available,
+            status
+                .registry_process_count
+                .map_or_else(|| "unknown".to_string(), |count| count.to_string()),
+            status
+                .extra_registry_process_count
+                .map_or_else(|| "unknown".to_string(), |count| count.to_string()),
             status.focused_node_present,
             status.semantic_targeting_reliable,
             status.sampled_node_count,
@@ -6694,12 +7537,21 @@ mod tests {
             .expect("payload updates active-window state");
 
         assert!(
-            active_window_context_for_safety_class(&SafetyClass::Observe, &state).is_none(),
+            active_window_context_for_safety_class(
+                &SafetyClass::Observe,
+                &state,
+                &AppPolicy::default(),
+            )
+            .is_none(),
             "observe requests should not add active-window journal context"
         );
 
-        let context = active_window_context_for_safety_class(&SafetyClass::ControlSemantic, &state)
-            .expect("control requests include active-window context");
+        let context = active_window_context_for_safety_class(
+            &SafetyClass::ControlSemantic,
+            &state,
+            &AppPolicy::default(),
+        )
+        .expect("control requests include active-window context");
         assert_eq!(context.id, "window-1");
         assert_eq!(context.app_id.as_deref(), Some("org.kde.test"));
         assert_eq!(context.title, "Test Window");
@@ -6786,6 +7638,8 @@ mod tests {
                     build_unix_ms: None,
                     binary_sha256: None,
                     config_fingerprint: None,
+                    resident_memory_bytes: None,
+                    resident_memory_peak_bytes: None,
                 }),
             )
             .expect("health record appends");
@@ -7297,6 +8151,7 @@ mod tests {
         journal
             .record_agent_seat_delivery(
                 "capture-1",
+                "0194e9f8-1910-7e24-b5bd-52d184b6427f",
                 action_id,
                 &window,
                 agent_seat::KWIN_AGENT_SEAT_BACKEND,
@@ -7316,6 +8171,7 @@ mod tests {
         );
         let encoded = serde_json::to_string(&entries).expect("journal serializes");
         assert!(encoded.contains("capture-1"));
+        assert!(encoded.contains("0194e9f8-1910-7e24-b5bd-52d184b6427f"));
         assert!(encoded.contains(&window.id));
         assert!(!encoded.contains("Sensitive document title"));
         fs::remove_file(path).ok();
@@ -8211,11 +9067,13 @@ mod tests {
     fn only_session_bound_raw_actions_use_the_independent_agent_lane() {
         let bound = DaemonRequest::KeyCombo(libseatgeist::KeyComboRequest {
             combo: "Ctrl+L".to_string(),
+            destructive: false,
             guard: None,
             session_id: Some("capture-1".to_string()),
         });
         let unbound = DaemonRequest::KeyCombo(libseatgeist::KeyComboRequest {
             combo: "Ctrl+L".to_string(),
+            destructive: false,
             guard: None,
             session_id: None,
         });
@@ -8248,6 +9106,126 @@ mod tests {
                 false,
             ),
             ActionSettleCondition::Stable
+        );
+    }
+
+    #[test]
+    fn destructive_browser_shortcuts_are_classified_and_rejected_on_retained_seats() {
+        let close_combo = DaemonRequest::KeyCombo(KeyComboRequest {
+            combo: "CTRL+SHIFT+W".to_string(),
+            destructive: false,
+            guard: None,
+            session_id: Some("capture-firefox".to_string()),
+        });
+        assert_eq!(
+            safety_class_for_request(&close_combo),
+            SafetyClass::DestructiveAction
+        );
+        assert!(
+            validate_targeted_key_combo(&close_combo, InputBackendPreference::KwinAgentSeat)
+                .expect_err("process-global close shortcut fails before delivery")
+                .to_string()
+                .contains("not target-safe")
+        );
+
+        let address_bar = DaemonRequest::KeyCombo(KeyComboRequest {
+            combo: "Ctrl+L".to_string(),
+            destructive: false,
+            guard: None,
+            session_id: Some("capture-firefox".to_string()),
+        });
+        assert_eq!(
+            safety_class_for_request(&address_bar),
+            SafetyClass::ControlKeyboard
+        );
+        validate_targeted_key_combo(&address_bar, InputBackendPreference::KwinAgentSeat)
+            .expect("ordinary targeted browser shortcut remains available");
+
+        let exact_close = DaemonRequest::CloseWindow(CloseWindowRequest {
+            window_id: "firefox-agent".to_string(),
+            session_id: Some("capture-firefox".to_string()),
+            guard: None,
+        });
+        assert_eq!(
+            safety_class_for_request(&exact_close),
+            SafetyClass::DestructiveAction
+        );
+        assert!(
+            enforce_policy(&PolicyEngine::new(PolicyConfig::default()), &exact_close)
+                .expect_err("exact close requires destructive approval by default")
+                .to_string()
+                .contains("prompt required")
+        );
+    }
+
+    #[test]
+    fn mcp_clients_cannot_change_the_physical_workspace_focus() {
+        let mcp = test_client("seatgeist-mcp", 7, "seatgeist-mcp");
+        let focus = DaemonRequest::FocusWindow(FocusWindowRequest {
+            window_id: "firefox-agent".to_string(),
+            guard: None,
+        });
+        assert!(
+            enforce_mcp_focus_isolation(&focus, Some(&mcp))
+                .expect_err("MCP focus is refused")
+                .to_string()
+                .contains("physical user's workspace focus")
+        );
+
+        let activate = DaemonRequest::LaunchWindow(LaunchWindowRequest {
+            desktop_entry: "firefox".to_string(),
+            anchor: libseatgeist::WindowPlacementAnchor::Center,
+            monitor_id: None,
+            width: None,
+            height: None,
+            margin: 0,
+            activation: libseatgeist::WindowActivationMode::Activate,
+            timeout_ms: 10_000,
+            guard: None,
+        });
+        assert!(enforce_mcp_focus_isolation(&activate, Some(&mcp)).is_err());
+
+        let cli = test_client("seatgeist-cli", 8, "seatgeist-cli");
+        enforce_mcp_focus_isolation(&focus, Some(&cli))
+            .expect("explicit operator CLI focus remains available");
+    }
+
+    #[tokio::test]
+    async fn exact_close_distinguishes_same_process_firefox_windows_by_kwin_uuid() {
+        let user_window = WindowInfo {
+            id: "firefox-user".to_string(),
+            app_id: Some("firefox".to_string()),
+            title: "AOF — Mozilla Firefox".to_string(),
+            pid: Some(727_994),
+            monitor_id: None,
+            geometry: None,
+        };
+        let agent_window = WindowInfo {
+            id: "firefox-agent".to_string(),
+            app_id: Some("firefox".to_string()),
+            title: "LocaleWeave — Mozilla Firefox".to_string(),
+            pid: Some(727_994),
+            monitor_id: None,
+            geometry: None,
+        };
+        let backend = seatgeist_testkit::MockWindowBackend::new(
+            vec![user_window.clone(), agent_window.clone()],
+            Some(user_window.clone()),
+        );
+
+        backend
+            .close_window(agent_window.id.clone())
+            .await
+            .expect("exact UUID closes");
+        let remaining = backend.list_windows().await.expect("windows list");
+        assert_eq!(remaining, vec![user_window.clone()]);
+        assert_eq!(
+            backend.active_window().await.expect("active"),
+            Some(user_window)
+        );
+        assert_eq!(
+            backend.closed_windows().expect("close journal"),
+            vec!["firefox-agent".to_string()]
         );
     }
 
@@ -8404,6 +9382,7 @@ mod tests {
                 },
                 button: PointerButton::Left,
                 clicks: 1,
+                capture_revision: None,
                 guard: None,
                 session_id: None,
             }),
@@ -8421,6 +9400,7 @@ mod tests {
                 },
                 button: PointerButton::Left,
                 clicks: 1,
+                capture_revision: None,
                 guard: Some(ActiveWindowGuard {
                     desktop_revision: None,
                     expected_window_id: Some("window-1".to_string()),
@@ -8564,6 +9544,26 @@ mod tests {
                 ErrorKind::FocusLeaseConflict,
             ),
             (
+                "agent target in use: another agent owns the window interaction lease",
+                ErrorKind::FocusLeaseConflict,
+            ),
+            (
+                "agent target user active: physical input reached this window 40ms ago",
+                ErrorKind::HumanInputPause,
+            ),
+            (
+                "capture frame invalidated by user input; acquire a fresh frame before preview-derived pointer input",
+                ErrorKind::Validation,
+            ),
+            (
+                "no non-sensitive activatable tab matched name=AOF",
+                ErrorKind::Validation,
+            ),
+            (
+                "KWin launch placement failed: launch intent expired before a matching window appeared",
+                ErrorKind::Validation,
+            ),
+            (
                 "human input activity is fresh from kwin_input_spy_v1; refusing ControlKeyboard until quiet for 1000ms",
                 ErrorKind::HumanInputPause,
             ),
@@ -8656,6 +9656,84 @@ mod tests {
             classify_error_reason("unsupported key name: Hyper", ErrorKind::Validation),
             "validation"
         );
+        assert_eq!(
+            classify_error_reason(
+                "invalid request: invalid AT-SPI node id: invalid-atspi-node",
+                ErrorKind::Validation
+            ),
+            "invalid_accessibility_node_id"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "capture revision is stale; acquire a fresh frame before pointer input",
+                ErrorKind::Validation
+            ),
+            "capture_revision_stale"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "capture frame invalidated by user input; acquire a fresh frame before preview-derived pointer input",
+                ErrorKind::Validation
+            ),
+            "capture_frame_invalidated_by_user"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "no non-sensitive activatable tab matched name=AOF",
+                ErrorKind::Validation
+            ),
+            "semantic_target_not_actionable"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "KWin launch placement failed: launch intent expired before a matching window appeared",
+                ErrorKind::Validation
+            ),
+            "launch_no_new_window"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "capture_output pointer coordinate 1280,360 is outside preview 1280x720",
+                ErrorKind::Validation
+            ),
+            "capture_coordinate_out_of_bounds"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "KWin agent-seat plugin is not registered",
+                ErrorKind::BackendUnavailable
+            ),
+            "agent_seat_unavailable"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "agent target in use: another agent owns the window interaction lease",
+                ErrorKind::FocusLeaseConflict
+            ),
+            "agent_target_in_use"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "agent lane quota reached: at most 4 agent owners may hold interaction sessions",
+                ErrorKind::FocusLeaseConflict
+            ),
+            "agent_lane_quota"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "agent target user active: physical input reached this window 40ms ago",
+                ErrorKind::HumanInputPause
+            ),
+            "agent_target_user_active"
+        );
+    }
+
+    #[test]
+    fn parses_linux_resident_memory_status_in_bytes() {
+        let status = "Name:\tseatgeistd\nVmHWM:\t  410624 kB\nVmRSS:\t  181392 kB\n";
+        assert_eq!(proc_status_kib(status, "VmRSS:"), Some(185_745_408));
+        assert_eq!(proc_status_kib(status, "VmHWM:"), Some(420_478_976));
+        assert_eq!(proc_status_kib(status, "VmSwap:"), None);
     }
 
     #[test]
@@ -9984,6 +11062,7 @@ height = 40
             false,
             false,
             false,
+            false,
         );
 
         assert!(
@@ -10003,6 +11082,7 @@ height = 40
         let capabilities = current_capabilities(
             InputBackendPreference::PortalRemoteDesktop,
             true,
+            false,
             false,
             false,
             false,
@@ -10030,6 +11110,7 @@ height = 40
             false,
             false,
             false,
+            false,
         );
         assert!(!unavailable.contains(&BackendCapability::KeyboardInput));
 
@@ -10037,6 +11118,7 @@ height = 40
             InputBackendPreference::KwinAgentSeat,
             false,
             true,
+            false,
             false,
             false,
             false,
@@ -10244,6 +11326,7 @@ height = 40
             &policy,
             &DaemonRequest::KeyCombo(KeyComboRequest {
                 combo: "Ctrl+L".to_string(),
+                destructive: false,
                 guard: None,
                 session_id: None,
             }),
@@ -10259,6 +11342,7 @@ height = 40
             &policy,
             &DaemonRequest::MovePointer(MovePointerRequest {
                 point: physical_point(3840.0, 2160.0),
+                capture_revision: None,
                 guard: None,
                 session_id: None,
             }),
@@ -10272,6 +11356,7 @@ height = 40
                 point: physical_point(100.0, 200.0),
                 button: PointerButton::Left,
                 clicks: 1,
+                capture_revision: None,
                 guard: None,
                 session_id: None,
             }),
@@ -10286,6 +11371,7 @@ height = 40
                 to: physical_point(300.0, 400.0),
                 button: PointerButton::Left,
                 duration_ms: 250,
+                capture_revision: None,
                 guard: None,
                 session_id: None,
             }),
@@ -10337,6 +11423,7 @@ height = 40
                 point: physical_point(100.0, 200.0),
                 button: PointerButton::Left,
                 clicks: 1,
+                capture_revision: None,
                 guard: None,
                 session_id: None,
             }),
@@ -11126,6 +12213,33 @@ height = 40
         assert_eq!(counts.sensitive_node_count, 1);
         assert_eq!(counts.generic_role_count, 1);
         assert_eq!(counts.max_depth_seen, 1);
+    }
+
+    #[test]
+    fn accessibility_registry_process_count_ignores_other_users_and_processes() {
+        let proc_root = temp_test_private_dir("atspi-proc");
+        for (pid, comm, uid) in [
+            ("101", "at-spi2-registryd\n", 1000),
+            ("102", "at-spi2-registr\n", 1000),
+            ("103", "at-spi2-registryd\n", 1001),
+            ("104", "firefox\n", 1000),
+        ] {
+            let process_dir = proc_root.join(pid);
+            fs::create_dir_all(&process_dir).expect("process fixture directory is created");
+            fs::write(process_dir.join("comm"), comm).expect("process comm fixture is written");
+            fs::write(
+                process_dir.join("status"),
+                format!("Name:\tfixture\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n"),
+            )
+            .expect("process status fixture is written");
+        }
+        fs::create_dir_all(proc_root.join("not-a-pid")).expect("non-pid fixture is created");
+
+        assert_eq!(
+            accessibility_registry_process_count(&proc_root, 1000),
+            Some(2)
+        );
+        fs::remove_dir_all(proc_root).ok();
     }
 
     #[test]
@@ -11957,7 +13071,9 @@ height = 40
             output_height: 900,
             transform: ScreenshotTransform {
                 source_coordinate_space: CoordinateSpace::PhysicalPixel,
-                output_coordinate_space: CoordinateSpace::PhysicalPixel,
+                output_coordinate_space: CoordinateSpace::CaptureOutput,
+                source_extent_width: Some(7680),
+                source_extent_height: Some(4320),
                 source_origin_x: 0,
                 source_origin_y: 0,
                 scale_x: 1600.0 / 7680.0,

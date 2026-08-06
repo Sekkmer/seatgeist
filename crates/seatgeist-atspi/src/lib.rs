@@ -1,4 +1,13 @@
-use std::{collections::HashMap, env, os::unix::net::UnixStream, path::PathBuf, process::Command};
+use std::{
+    collections::HashMap,
+    env,
+    io::Read,
+    os::unix::net::UnixStream,
+    path::PathBuf,
+    process::{Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
 
 mod cache;
 mod events;
@@ -11,6 +20,7 @@ use libseatgeist::{
     AccessibilityTextAttributes, CoordinateSpace, SeatgeistError, TextAttribute,
 };
 use roles::{resolve_role_id, resolve_role_value};
+use wait_timeout::ChildExt;
 
 pub const BACKEND_NAME: &str = "atspi";
 
@@ -30,6 +40,8 @@ const DEFAULT_SEARCH_DEPTH: usize = 12;
 const DEFAULT_VALUE_MAX_CHARS: i32 = 512;
 const DEFAULT_SET_TEXT_MAX_CHARS: usize = 8192;
 const BUSCTL_TIMEOUT_ARG: &str = "--timeout=2s";
+const BUSCTL_DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_BUSCTL_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 
 pub type Result<T> = std::result::Result<T, SeatgeistError>;
 
@@ -65,6 +77,7 @@ struct AtspiRef {
 #[derive(Debug, Clone)]
 struct AtspiBus {
     address: String,
+    deadline: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -102,13 +115,33 @@ pub fn availability() -> Result<()> {
 }
 
 pub fn focused_tree(depth: usize, max_nodes: usize) -> Result<Option<AccessibilityNode>> {
+    focused_tree_with_bus(AtspiBus::connect()?, depth, max_nodes)
+}
+
+pub fn focused_tree_bounded(
+    depth: usize,
+    max_nodes: usize,
+    timeout: Duration,
+) -> Result<Option<AccessibilityNode>> {
+    if timeout.is_zero() {
+        return Err(SeatgeistError::InvalidRequest(
+            "AT-SPI timeout must be greater than zero".to_string(),
+        ));
+    }
+    focused_tree_with_bus(AtspiBus::connect_bounded(timeout)?, depth, max_nodes)
+}
+
+fn focused_tree_with_bus(
+    bus: AtspiBus,
+    depth: usize,
+    max_nodes: usize,
+) -> Result<Option<AccessibilityNode>> {
     if max_nodes == 0 {
         return Err(SeatgeistError::InvalidRequest(
             "max_nodes must be greater than zero".to_string(),
         ));
     }
 
-    let bus = AtspiBus::connect()?;
     let roots = bus.children(&AtspiRef {
         service: ATSPI_ROOT_SERVICE.to_string(),
         path: ATSPI_ROOT_PATH.to_string(),
@@ -216,14 +249,25 @@ pub fn text_attributes(
     offset: i32,
     include_defaults: bool,
 ) -> Result<AccessibilityTextAttributes> {
+    validate_text_attributes_request(node_id, offset)?;
+    let node = parse_node_id(node_id)?;
+    let bus = AtspiBus::connect()?;
+    bus.text_attributes(&node, node_id, offset, include_defaults)
+}
+
+pub fn validate_text_attributes_request(node_id: &str, offset: i32) -> Result<()> {
+    if node_id.trim().is_empty() {
+        return Err(SeatgeistError::InvalidRequest(
+            "node_id must be non-empty".to_string(),
+        ));
+    }
     if offset < 0 {
         return Err(SeatgeistError::InvalidRequest(
             "offset must be greater than or equal to zero".to_string(),
         ));
     }
-    let node = parse_node_id(node_id)?;
-    let bus = AtspiBus::connect()?;
-    bus.text_attributes(&node, node_id, offset, include_defaults)
+    parse_node_id(node_id)?;
+    Ok(())
 }
 
 pub fn invoke(node_id: &str, action: AccessibilityAction) -> Result<()> {
@@ -326,7 +370,42 @@ impl AtspiBus {
     fn connect() -> Result<Self> {
         let address = accessibility_bus_address()?;
         validate_accessibility_bus_socket(&address)?;
-        Ok(Self { address })
+        Ok(Self {
+            address,
+            deadline: None,
+        })
+    }
+
+    fn connect_bounded(timeout: Duration) -> Result<Self> {
+        let deadline = Instant::now() + timeout;
+        let micros = timeout.as_micros().clamp(1_000, 2_000_000);
+        let address =
+            accessibility_bus_address_with_timeout(&format!("--timeout={micros}us"), timeout)?;
+        validate_accessibility_bus_socket(&address)?;
+        Ok(Self {
+            address,
+            deadline: Some(deadline),
+        })
+    }
+
+    fn timeout_arg(&self) -> Result<String> {
+        let timeout = self.command_timeout()?;
+        let micros = timeout.as_micros().clamp(1_000, 2_000_000);
+        Ok(format!("--timeout={micros}us"))
+    }
+
+    fn command_timeout(&self) -> Result<Duration> {
+        let timeout = match self.deadline {
+            Some(deadline) => deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| {
+                    SeatgeistError::BackendUnavailable(
+                        "AT-SPI operation deadline exceeded".to_string(),
+                    )
+                })?,
+            None => BUSCTL_DEFAULT_TIMEOUT,
+        };
+        Ok(timeout)
     }
 
     fn find_focused(
@@ -609,21 +688,20 @@ impl AtspiBus {
                 "AT-SPI application returned an empty direct bus address".to_string(),
             ));
         }
-        let output = Command::new("busctl")
-            .args([
-                BUSCTL_TIMEOUT_ARG,
-                "--address",
-                &app_address,
-                "call",
-                ATSPI_CACHE,
-                ATSPI_CACHE_PATH,
-                ATSPI_CACHE,
-                "GetItems",
-            ])
-            .output()
-            .map_err(|err| {
-                SeatgeistError::BackendUnavailable(format!("run busctl AT-SPI cache: {err}"))
-            })?;
+        let timeout_arg = self.timeout_arg()?;
+        let mut command = Command::new("busctl");
+        command.args([
+            &timeout_arg,
+            "--address",
+            &app_address,
+            "call",
+            ATSPI_CACHE,
+            ATSPI_CACHE_PATH,
+            ATSPI_CACHE,
+            "GetItems",
+        ]);
+        let output =
+            run_command_bounded(&mut command, self.command_timeout()?, "busctl AT-SPI cache")?;
         cache::parse_items(&command_output(output, "busctl AT-SPI cache GetItems")?)
     }
 
@@ -661,19 +739,20 @@ impl AtspiBus {
     }
 
     fn call(&self, service: &str, path: &str, interface: &str, method: &str) -> Result<String> {
-        let output = Command::new("busctl")
-            .args([
-                BUSCTL_TIMEOUT_ARG,
-                "--address",
-                &self.address,
-                "call",
-                service,
-                path,
-                interface,
-                method,
-            ])
-            .output()
-            .map_err(|err| SeatgeistError::BackendUnavailable(format!("run busctl: {err}")))?;
+        let timeout_arg = self.timeout_arg()?;
+        let mut command = Command::new("busctl");
+        command.args([
+            &timeout_arg,
+            "--address",
+            &self.address,
+            "call",
+            service,
+            path,
+            interface,
+            method,
+        ]);
+        let output =
+            run_command_bounded(&mut command, self.command_timeout()?, "busctl AT-SPI call")?;
         command_output(output, "busctl AT-SPI call")
     }
 
@@ -700,9 +779,11 @@ impl AtspiBus {
         method: &str,
         args: &[&str],
     ) -> Result<String> {
-        let output = Command::new("busctl")
+        let timeout_arg = self.timeout_arg()?;
+        let mut command = Command::new("busctl");
+        command
             .args([
-                BUSCTL_TIMEOUT_ARG,
+                &timeout_arg,
                 "--address",
                 &self.address,
                 "call",
@@ -711,9 +792,9 @@ impl AtspiBus {
                 interface,
                 method,
             ])
-            .args(args)
-            .output()
-            .map_err(|err| SeatgeistError::BackendUnavailable(format!("run busctl: {err}")))?;
+            .args(args);
+        let output =
+            run_command_bounded(&mut command, self.command_timeout()?, "busctl AT-SPI call")?;
         command_output(output, "busctl AT-SPI call")
     }
 
@@ -724,19 +805,23 @@ impl AtspiBus {
         interface: &str,
         property: &str,
     ) -> Result<String> {
-        let output = Command::new("busctl")
-            .args([
-                BUSCTL_TIMEOUT_ARG,
-                "--address",
-                &self.address,
-                "get-property",
-                service,
-                path,
-                interface,
-                property,
-            ])
-            .output()
-            .map_err(|err| SeatgeistError::BackendUnavailable(format!("run busctl: {err}")))?;
+        let timeout_arg = self.timeout_arg()?;
+        let mut command = Command::new("busctl");
+        command.args([
+            &timeout_arg,
+            "--address",
+            &self.address,
+            "get-property",
+            service,
+            path,
+            interface,
+            property,
+        ]);
+        let output = run_command_bounded(
+            &mut command,
+            self.command_timeout()?,
+            "busctl AT-SPI get-property",
+        )?;
         command_output(output, "busctl AT-SPI get-property")
     }
 
@@ -749,21 +834,25 @@ impl AtspiBus {
         signature: &str,
         value: &str,
     ) -> Result<String> {
-        let output = Command::new("busctl")
-            .args([
-                BUSCTL_TIMEOUT_ARG,
-                "--address",
-                &self.address,
-                "set-property",
-                service,
-                path,
-                interface,
-                property,
-                signature,
-                value,
-            ])
-            .output()
-            .map_err(|err| SeatgeistError::BackendUnavailable(format!("run busctl: {err}")))?;
+        let timeout_arg = self.timeout_arg()?;
+        let mut command = Command::new("busctl");
+        command.args([
+            &timeout_arg,
+            "--address",
+            &self.address,
+            "set-property",
+            service,
+            path,
+            interface,
+            property,
+            signature,
+            value,
+        ]);
+        let output = run_command_bounded(
+            &mut command,
+            self.command_timeout()?,
+            "busctl AT-SPI set-property",
+        )?;
         command_output(output, "busctl AT-SPI set-property")
     }
 
@@ -832,9 +921,13 @@ impl AtspiBus {
     }
 
     fn actions(&self, node: &AtspiRef) -> Result<Vec<String>> {
-        let output = action_query_command(&self.address, node)
-            .output()
-            .map_err(|err| SeatgeistError::BackendUnavailable(format!("run busctl: {err}")))?;
+        let timeout_arg = self.timeout_arg()?;
+        let mut command = action_query_command(&self.address, &timeout_arg, node);
+        let output = run_command_bounded(
+            &mut command,
+            self.command_timeout()?,
+            "busctl AT-SPI action query",
+        )?;
         let output = command_output(output, "busctl AT-SPI action query")?;
         Ok(parse_action_names(&output))
     }
@@ -1193,24 +1286,27 @@ impl AtspiBus {
 }
 
 fn accessibility_bus_address() -> Result<String> {
+    accessibility_bus_address_with_timeout(BUSCTL_TIMEOUT_ARG, BUSCTL_DEFAULT_TIMEOUT)
+}
+
+fn accessibility_bus_address_with_timeout(timeout_arg: &str, timeout: Duration) -> Result<String> {
     if let Some(address) = env::var_os("AT_SPI_BUS_ADDRESS")
         .and_then(|address| address.into_string().ok())
         .filter(|address| !address.trim().is_empty())
     {
         return Ok(address);
     }
-    let output = Command::new("busctl")
-        .args([
-            BUSCTL_TIMEOUT_ARG,
-            "--user",
-            "call",
-            "org.a11y.Bus",
-            "/org/a11y/bus",
-            "org.a11y.Bus",
-            "GetAddress",
-        ])
-        .output()
-        .map_err(|err| SeatgeistError::BackendUnavailable(format!("run busctl: {err}")))?;
+    let mut command = Command::new("busctl");
+    command.args([
+        timeout_arg,
+        "--user",
+        "call",
+        "org.a11y.Bus",
+        "/org/a11y/bus",
+        "org.a11y.Bus",
+        "GetAddress",
+    ]);
+    let output = run_command_bounded(&mut command, timeout, "busctl org.a11y.Bus GetAddress")?;
     parse_single_string(&command_output(output, "busctl org.a11y.Bus GetAddress")?)
 }
 
@@ -1346,7 +1442,88 @@ fn parse_node_id(node_id: &str) -> Result<AtspiRef> {
     })
 }
 
-fn command_output(output: std::process::Output, context: &str) -> Result<String> {
+fn run_command_bounded(command: &mut Command, timeout: Duration, context: &str) -> Result<Output> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| SeatgeistError::BackendUnavailable(format!("run {context}: {err}")))?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        SeatgeistError::BackendUnavailable(format!("{context} stdout pipe was unavailable"))
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        SeatgeistError::BackendUnavailable(format!("{context} stderr pipe was unavailable"))
+    })?;
+    let stdout_reader = thread::spawn(move || read_stream_bounded(stdout));
+    let stderr_reader = thread::spawn(move || read_stream_bounded(stderr));
+    let status = child
+        .wait_timeout(timeout)
+        .map_err(|err| SeatgeistError::BackendUnavailable(format!("wait for {context}: {err}")))?;
+    let timed_out = status.is_none();
+    let status = match status {
+        Some(status) => status,
+        None => {
+            let _ = child.kill();
+            child.wait().map_err(|err| {
+                SeatgeistError::BackendUnavailable(format!(
+                    "reap timed-out {context} process: {err}"
+                ))
+            })?
+        }
+    };
+    let (stdout, stdout_truncated) = stdout_reader
+        .join()
+        .map_err(|_| {
+            SeatgeistError::BackendUnavailable(format!("{context} stdout reader panicked"))
+        })?
+        .map_err(|err| {
+            SeatgeistError::BackendUnavailable(format!("read {context} stdout: {err}"))
+        })?;
+    let (stderr, stderr_truncated) = stderr_reader
+        .join()
+        .map_err(|_| {
+            SeatgeistError::BackendUnavailable(format!("{context} stderr reader panicked"))
+        })?
+        .map_err(|err| {
+            SeatgeistError::BackendUnavailable(format!("read {context} stderr: {err}"))
+        })?;
+    if timed_out {
+        return Err(SeatgeistError::BackendUnavailable(format!(
+            "{context} exceeded its {}ms process deadline",
+            timeout.as_millis()
+        )));
+    }
+    if stdout_truncated || stderr_truncated {
+        return Err(SeatgeistError::BackendUnavailable(format!(
+            "{context} exceeded the {} byte output bound",
+            MAX_BUSCTL_OUTPUT_BYTES
+        )));
+    }
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn read_stream_bounded(mut stream: impl Read) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut output = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = stream.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        let remaining = MAX_BUSCTL_OUTPUT_BYTES.saturating_sub(output.len());
+        let retained = count.min(remaining);
+        output.extend_from_slice(&buffer[..retained]);
+        truncated |= retained != count;
+    }
+    Ok((output, truncated))
+}
+
+fn command_output(output: Output, context: &str) -> Result<String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(SeatgeistError::BackendUnavailable(format!(
@@ -1387,10 +1564,10 @@ where
     }
 }
 
-fn action_query_command(address: &str, node: &AtspiRef) -> Command {
+fn action_query_command(address: &str, timeout_arg: &str, node: &AtspiRef) -> Command {
     let mut command = Command::new("busctl");
     command.args([
-        BUSCTL_TIMEOUT_ARG,
+        timeout_arg,
         "--address",
         address,
         "call",
@@ -1620,10 +1797,13 @@ fn normalize_actions(actions: &[String]) -> Vec<AccessibilityAction> {
 
 fn normalize_actions_for_role(role: &str, actions: &[String]) -> Vec<AccessibilityAction> {
     let mut normalized = normalize_actions(actions);
-    if normalized.is_empty()
-        && action_index_for_role(role, actions, &AccessibilityAction::Press).is_some()
-    {
-        normalized.push(AccessibilityAction::Press);
+    if normalized.is_empty() {
+        for fallback in [AccessibilityAction::Select, AccessibilityAction::Press] {
+            if action_index_for_role(role, actions, &fallback).is_some() {
+                normalized.push(fallback);
+                break;
+            }
+        }
     }
     normalized
 }
@@ -1637,11 +1817,13 @@ fn action_index_for_role(
         .iter()
         .position(|candidate| action_name_matches(candidate, action))
         .or_else(|| {
-            (*action == AccessibilityAction::Press
-                && matches!(role.to_ascii_lowercase().as_str(), "button" | "push button")
-                && actions.len() == 1
-                && action_label_is_empty(&actions[0]))
-            .then_some(0)
+            let role = role.to_ascii_lowercase();
+            let role_fallback = matches!(
+                (role.as_str(), action),
+                ("button" | "push button", AccessibilityAction::Press)
+                    | ("page tab" | "tab", AccessibilityAction::Select)
+            );
+            (role_fallback && actions.len() == 1 && action_label_is_empty(&actions[0])).then_some(0)
         })
 }
 
@@ -1754,6 +1936,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn external_command_deadline_kills_a_stalled_decoder() {
+        let started = Instant::now();
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec sleep 2"]);
+        let error = run_command_bounded(&mut command, Duration::from_millis(30), "stalled fixture")
+            .expect_err("stalled child is killed");
+        assert!(error.to_string().contains("process deadline"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
     fn parses_object_refs_from_busctl_output() {
         let refs = parse_object_refs(
             r#"a(so) 2 ":1.23" "/org/a11y/atspi/accessible/root" ":1.37" "/org/a11y/atspi/accessible/1""#,
@@ -1827,7 +2020,11 @@ mod tests {
             service: ":1.42".to_string(),
             path: "/org/a11y/atspi/accessible/7".to_string(),
         };
-        let command = action_query_command("unix:path=/run/user/1000/at-spi/bus_1", &node);
+        let command = action_query_command(
+            "unix:path=/run/user/1000/at-spi/bus_1",
+            BUSCTL_TIMEOUT_ARG,
+            &node,
+        );
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -1952,6 +2149,24 @@ mod tests {
     }
 
     #[test]
+    fn maps_one_unlabeled_firefox_page_tab_action_to_select_only() {
+        let unlabeled = vec![";;".to_string()];
+        assert_eq!(
+            normalize_actions_for_role("page tab", &unlabeled),
+            vec![AccessibilityAction::Select]
+        );
+        assert_eq!(
+            action_index_for_role("page tab", &unlabeled, &AccessibilityAction::Select),
+            Some(0)
+        );
+        assert_eq!(
+            action_index_for_role("page tab", &unlabeled, &AccessibilityAction::Press),
+            None
+        );
+        assert!(normalize_actions_for_role("text", &unlabeled).is_empty());
+    }
+
+    #[test]
     fn generic_button_query_matches_qt_push_button_role() {
         assert!(role_name_matches("button", "button"));
         assert!(role_name_matches("push button", "button"));
@@ -2018,6 +2233,7 @@ mod tests {
     fn cached_name_prefilter_does_not_starve_later_same_app_roots() {
         let bus = AtspiBus {
             address: "unused-for-nonmatches".to_string(),
+            deadline: None,
         };
         let items = (0..600)
             .map(|index| cache::CacheItem {

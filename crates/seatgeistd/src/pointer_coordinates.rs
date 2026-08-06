@@ -19,9 +19,12 @@ impl ResolutionContext {
         window_backend: &dyn WindowBackend,
         screen_backend: &dyn ScreenBackend,
     ) -> Result<Self> {
-        if space == CoordinateSpace::AccessibilityNode {
+        if matches!(
+            space,
+            CoordinateSpace::AccessibilityNode | CoordinateSpace::CaptureOutput
+        ) {
             bail!(
-                "pointer actions currently support physical_pixel, logical_pixel, and active-window window_local coordinate spaces, got {:?}",
+                "pointer coordinate resolution requires capture_output coordinates to be resolved from their capture session first; got {:?}",
                 space
             );
         }
@@ -64,7 +67,9 @@ impl ResolutionContext {
                 self.active_window.as_ref(),
                 &self.monitors,
             )?,
-            CoordinateSpace::AccessibilityNode => unreachable!("rejected while loading context"),
+            CoordinateSpace::AccessibilityNode | CoordinateSpace::CaptureOutput => {
+                unreachable!("rejected while loading context")
+            }
         };
         validate_physical_pointer_point(point, self.bounds)?;
         Ok(point)

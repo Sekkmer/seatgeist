@@ -12,6 +12,7 @@ pub enum CoordinateSpace {
     PhysicalPixel,
     LogicalPixel,
     WindowLocal,
+    CaptureOutput,
     AccessibilityNode,
 }
 
@@ -23,6 +24,7 @@ impl FromStr for CoordinateSpace {
             "physical_pixel" | "physical" | "pixel" => Ok(Self::PhysicalPixel),
             "logical_pixel" | "logical" => Ok(Self::LogicalPixel),
             "window_local" | "window" => Ok(Self::WindowLocal),
+            "capture_output" | "capture" | "preview" => Ok(Self::CaptureOutput),
             "accessibility_node" | "accessibility" | "a11y" => Ok(Self::AccessibilityNode),
             other => Err(format!("unsupported coordinate space: {other}")),
         }
@@ -220,6 +222,7 @@ pub enum BackendCapability {
     MonitorMetadata,
     WindowList,
     WindowFocus,
+    WindowClose,
     WindowLaunch,
     WindowMove,
     WindowResize,
@@ -281,6 +284,7 @@ pub enum ActionSettleBackend {
 pub enum ActionConfirmation {
     Confirmed,
     UnconfirmedTimeout,
+    UserPreempted,
     #[default]
     NotRequested,
 }
@@ -290,6 +294,7 @@ impl ActionConfirmation {
         match self {
             Self::Confirmed => "confirmed",
             Self::UnconfirmedTimeout => "unconfirmed_timeout",
+            Self::UserPreempted => "user_preempted",
             Self::NotRequested => "not_requested",
         }
     }
@@ -362,5 +367,13 @@ mod tests {
         assert_eq!(result.backend, ActionSettleBackend::Polling);
         assert!(!result.target_scoped);
         assert_eq!(result.event, None);
+    }
+
+    #[test]
+    fn user_preemption_has_a_stable_confirmation_value() {
+        let encoded = serde_json::to_string(&ActionConfirmation::UserPreempted)
+            .expect("confirmation serializes");
+        assert_eq!(encoded, r#""user_preempted""#);
+        assert_eq!(ActionConfirmation::UserPreempted.as_str(), "user_preempted");
     }
 }

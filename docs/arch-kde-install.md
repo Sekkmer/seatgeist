@@ -225,8 +225,8 @@ Run safe read-only diagnostics before enabling control:
 
 ```bash
 seatgeist-cli capture-backends
-seatgeist-cli input backends
 seatgeist-cli input status
+seatgeist-cli input uinput-status
 seatgeist-cli input pointer-calibration
 seatgeist-cli atspi tree --focused
 ```
@@ -268,8 +268,8 @@ The upstream xdg-desktop-portal frontend and backend documentation describes the
 Use uinput only when the local operator accepts a privileged virtual-input fallback. Install the packaged udev rule and add the user to the narrow `uinput` group as documented in `docs/uinput-setup.md`, then log out and back in before retrying:
 
 ```bash
+seatgeist-cli input uinput-status
 seatgeist-cli input status
-seatgeist-cli input backends
 ```
 
 All keyboard and pointer actions still flow through daemon policy, panic-stop, active-window guards when supplied, and the journal.
@@ -317,4 +317,4 @@ also include `reason_code`; for example, a KeePassXC target is
 `kind=app_denied reason=protected_application`, which is a terminal policy
 decision rather than a signal to try another backend.
 
-If capture fails, check `seatgeist-cli capture-backends` first. If input fails, check `seatgeist-cli input backends` and `seatgeist-cli input status` before changing udev, groups, or services.
+If capture fails, check `seatgeist-cli capture-backends` first. If input fails, check `seatgeist-cli input status` and `seatgeist-cli input uinput-status` before changing udev, groups, or services.

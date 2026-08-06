@@ -14,6 +14,7 @@ async-trait.workspace = true
 libseatgeist.workspace = true
 seatgeist-backend.workspace = true
 tokio.workspace = true
+wait-timeout.workspace = true
 zbus.workspace = true
 
 [lints]

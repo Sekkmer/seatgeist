@@ -7,7 +7,7 @@ Seatgeist can use Linux uinput as a privileged local fallback for keyboard and p
 Start the daemon normally, then run:
 
 ```bash
-seatgeist-cli input status
+seatgeist-cli input uinput-status
 ```
 
 The same diagnostic is available to MCP as `seatgeist.uinput_status`. It reports whether the daemon can open `/dev/uinput` read/write, whether the path exists and is a character device, file mode and owner ids when available, daemon effective uid/gid, and a short setup hint.
@@ -15,7 +15,7 @@ The same diagnostic is available to MCP as `seatgeist.uinput_status`. It reports
 To compare the supported input paths before relying on uinput, run:
 
 ```bash
-seatgeist-cli input backends
+seatgeist-cli input status
 ```
 
 The same aggregate probe is available to MCP as `seatgeist.input_backend_status`. It checks xdg-desktop-portal RemoteDesktop interface visibility, KDE portal service visibility, libei client metadata/socket hints, and uinput fallback availability without starting a portal consent flow or sending input.
@@ -49,7 +49,7 @@ sudo udevadm trigger --subsystem-match=misc --sysname-match=uinput
 sudo usermod -aG uinput "$USER"
 ```
 
-Log out and back in, or restart the user service after group membership changes. Then run `seatgeist-cli input status` again.
+Log out and back in, or restart the user service after group membership changes. Then run `seatgeist-cli input uinput-status` again.
 
 ## Systemd User Service
 

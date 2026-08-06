@@ -34,6 +34,10 @@ pub struct HealthStatus {
     pub binary_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resident_memory_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resident_memory_peak_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,11 +162,19 @@ pub struct PanicStopStatus {
 pub struct KwinBridgeStatus {
     pub dbus_service_registered: bool,
     #[serde(default)]
+    pub ownership_retry_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ownership_retry_in_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ownership_last_error: Option<String>,
+    #[serde(default)]
     pub window_resize_supported: bool,
     #[serde(default)]
     pub window_move_supported: bool,
     #[serde(default)]
     pub window_launch_supported: bool,
+    #[serde(default)]
+    pub window_close_supported: bool,
     pub active_window_update_seen: bool,
     pub window_list_update_seen: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -611,6 +623,10 @@ pub struct ScreenshotInfo {
 pub struct ScreenshotTransform {
     pub source_coordinate_space: CoordinateSpace,
     pub output_coordinate_space: CoordinateSpace,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_extent_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_extent_height: Option<u32>,
     pub source_origin_x: u32,
     pub source_origin_y: u32,
     pub scale_x: f64,
@@ -619,14 +635,21 @@ pub struct ScreenshotTransform {
 
 impl ScreenshotTransform {
     pub fn output_to_source_point(&self, output_x: f64, output_y: f64) -> Option<Point> {
-        if self.scale_x <= 0.0 || self.scale_y <= 0.0 {
+        if !output_x.is_finite()
+            || !output_y.is_finite()
+            || !self.scale_x.is_finite()
+            || !self.scale_y.is_finite()
+            || self.scale_x <= 0.0
+            || self.scale_y <= 0.0
+        {
             return None;
         }
-        Some(Point {
+        let point = Point {
             x: f64::from(self.source_origin_x) + output_x / self.scale_x,
             y: f64::from(self.source_origin_y) + output_y / self.scale_y,
             space: self.source_coordinate_space,
-        })
+        };
+        (point.x.is_finite() && point.y.is_finite()).then_some(point)
     }
 }
 
@@ -914,6 +937,10 @@ pub struct ClipboardSetRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessibilityQualityStatus {
     pub atspi_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_process_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_registry_process_count: Option<usize>,
     #[serde(default)]
     pub target_event_settle_available: bool,
     #[serde(default)]
@@ -1090,6 +1117,8 @@ pub struct TypeTextRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyComboRequest {
     pub combo: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub destructive: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1099,6 +1128,8 @@ pub struct KeyComboRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MovePointerRequest {
     pub point: Point,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1111,6 +1142,8 @@ pub struct ClickPointerRequest {
     pub button: PointerButton,
     pub clicks: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -1122,6 +1155,8 @@ pub struct DragPointerRequest {
     pub to: Point,
     pub button: PointerButton,
     pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<ActiveWindowGuard>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1319,6 +1354,15 @@ pub struct FocusWindowRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloseWindowRequest {
+    pub window_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<ActiveWindowGuard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResizeWindowRequest {
     pub window_id: String,
     pub width: u32,
@@ -1471,6 +1515,7 @@ pub enum DaemonRequest {
     SelectMenu(SelectMenuRequest),
     JournalTail(JournalTailRequest),
     FocusWindow(FocusWindowRequest),
+    CloseWindow(CloseWindowRequest),
     MoveWindow(MoveWindowRequest),
     LaunchWindow(LaunchWindowRequest),
     ResizeWindow(ResizeWindowRequest),
@@ -1547,6 +1592,7 @@ impl DaemonRequest {
             Self::SelectMenu(_) => "select_menu",
             Self::JournalTail(_) => "journal_tail",
             Self::FocusWindow(_) => "focus_window",
+            Self::CloseWindow(_) => "close_window",
             Self::MoveWindow(_) => "move_window",
             Self::LaunchWindow(_) => "launch_window",
             Self::ResizeWindow(_) => "resize_window",
@@ -1583,6 +1629,7 @@ impl DaemonRequest {
                 | Self::SelectItem(_)
                 | Self::SelectMenu(_)
                 | Self::FocusWindow(_)
+                | Self::CloseWindow(_)
                 | Self::MoveWindow(_)
                 | Self::LaunchWindow(_)
                 | Self::ResizeWindow(_)
@@ -2015,7 +2062,9 @@ mod tests {
                 output_height: 360,
                 transform: ScreenshotTransform {
                     source_coordinate_space: CoordinateSpace::PhysicalPixel,
-                    output_coordinate_space: CoordinateSpace::PhysicalPixel,
+                    output_coordinate_space: CoordinateSpace::CaptureOutput,
+                    source_extent_width: Some(1280),
+                    source_extent_height: Some(720),
                     source_origin_x: 0,
                     source_origin_y: 0,
                     scale_x: 0.5,
@@ -2062,7 +2111,9 @@ mod tests {
                 output_height: 900,
                 transform: ScreenshotTransform {
                     source_coordinate_space: CoordinateSpace::PhysicalPixel,
-                    output_coordinate_space: CoordinateSpace::PhysicalPixel,
+                    output_coordinate_space: CoordinateSpace::CaptureOutput,
+                    source_extent_width: Some(7680),
+                    source_extent_height: Some(4320),
                     source_origin_x: 0,
                     source_origin_y: 0,
                     scale_x: 1600.0 / 7680.0,
@@ -2085,7 +2136,9 @@ mod tests {
     fn screenshot_transform_maps_8k_preview_to_source_pixels() {
         let transform = ScreenshotTransform {
             source_coordinate_space: CoordinateSpace::PhysicalPixel,
-            output_coordinate_space: CoordinateSpace::PhysicalPixel,
+            output_coordinate_space: CoordinateSpace::CaptureOutput,
+            source_extent_width: Some(7680),
+            source_extent_height: Some(4320),
             source_origin_x: 0,
             source_origin_y: 0,
             scale_x: 1600.0 / 7680.0,
@@ -2104,7 +2157,9 @@ mod tests {
     fn screenshot_transform_maps_tile_preview_to_source_pixels() {
         let transform = ScreenshotTransform {
             source_coordinate_space: CoordinateSpace::PhysicalPixel,
-            output_coordinate_space: CoordinateSpace::PhysicalPixel,
+            output_coordinate_space: CoordinateSpace::CaptureOutput,
+            source_extent_width: Some(1600),
+            source_extent_height: Some(1200),
             source_origin_x: 3200,
             source_origin_y: 1600,
             scale_x: 0.5,
@@ -2123,7 +2178,9 @@ mod tests {
     fn screenshot_transform_rejects_zero_scale_mapping() {
         let transform = ScreenshotTransform {
             source_coordinate_space: CoordinateSpace::PhysicalPixel,
-            output_coordinate_space: CoordinateSpace::PhysicalPixel,
+            output_coordinate_space: CoordinateSpace::CaptureOutput,
+            source_extent_width: Some(1),
+            source_extent_height: Some(1),
             source_origin_x: 0,
             source_origin_y: 0,
             scale_x: 0.0,
@@ -2338,6 +2395,7 @@ mod tests {
                 y: 2160.0,
                 space: CoordinateSpace::PhysicalPixel,
             },
+            capture_revision: None,
             guard: None,
             session_id: None,
         });
@@ -2354,6 +2412,7 @@ mod tests {
             },
             button: PointerButton::Left,
             clicks: 2,
+            capture_revision: None,
             guard: Some(ActiveWindowGuard {
                 desktop_revision: None,
                 expected_window_id: Some("current-window".to_string()),
@@ -2382,6 +2441,7 @@ mod tests {
             },
             button: PointerButton::Left,
             duration_ms: 250,
+            capture_revision: None,
             guard: None,
             session_id: None,
         });
@@ -2414,9 +2474,13 @@ mod tests {
 
         let response = DaemonResponse::KwinBridgeStatus(KwinBridgeStatus {
             dbus_service_registered: true,
+            ownership_retry_count: 0,
+            ownership_retry_in_ms: None,
+            ownership_last_error: None,
             window_resize_supported: true,
             window_move_supported: true,
             window_launch_supported: true,
+            window_close_supported: true,
             active_window_update_seen: false,
             window_list_update_seen: false,
             active_window_update_age_ms: None,
@@ -2882,6 +2946,8 @@ mod tests {
             build_unix_ms: None,
             binary_sha256: None,
             config_fingerprint: None,
+            resident_memory_bytes: None,
+            resident_memory_peak_bytes: None,
         });
         assert_eq!(health.response_type(), "health");
         assert!(health.ok());
@@ -3062,6 +3128,8 @@ mod tests {
 
         let response = DaemonResponse::AccessibilityQualityStatus(AccessibilityQualityStatus {
             atspi_available: true,
+            registry_process_count: Some(1),
+            extra_registry_process_count: Some(0),
             target_event_settle_available: true,
             event_backend: "atspi_registry".to_string(),
             target_event_classes: vec![
@@ -3468,6 +3536,7 @@ mod tests {
 
         let key_combo = DaemonRequest::KeyCombo(KeyComboRequest {
             combo: "Ctrl+L".to_string(),
+            destructive: false,
             guard: None,
             session_id: Some("capture-1".to_string()),
         });
@@ -3475,6 +3544,27 @@ mod tests {
         assert_eq!(
             encoded,
             r#"{"method":"key_combo","combo":"Ctrl+L","session_id":"capture-1"}"#
+        );
+
+        let destructive = DaemonRequest::KeyCombo(KeyComboRequest {
+            combo: "Ctrl+Shift+W".to_string(),
+            destructive: true,
+            guard: None,
+            session_id: Some("capture-1".to_string()),
+        });
+        assert_eq!(
+            serde_json::to_string(&destructive).expect("destructive combo serializes"),
+            r#"{"method":"key_combo","combo":"Ctrl+Shift+W","destructive":true,"session_id":"capture-1"}"#
+        );
+
+        let close = DaemonRequest::CloseWindow(CloseWindowRequest {
+            window_id: "{d9ba63dd-1081-42c7-90cf-6f7c1c26e009}".to_string(),
+            session_id: Some("capture-1".to_string()),
+            guard: None,
+        });
+        assert_eq!(
+            serde_json::to_string(&close).expect("exact close serializes"),
+            r#"{"method":"close_window","window_id":"{d9ba63dd-1081-42c7-90cf-6f7c1c26e009}","session_id":"capture-1"}"#
         );
     }
 

@@ -19,7 +19,7 @@ use seatgeist_backend::{
 };
 use uuid::Uuid;
 
-use super::{SafetySettings, WindowListState};
+use super::{AppPolicy, SafetySettings, WindowListState};
 
 const ONE_SHOT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const ONE_SHOT_TIMEOUT_MS: u64 = 120_000;
@@ -401,6 +401,7 @@ impl WindowCropResolver for ProductionWindowCropResolver {
 struct ProductionDesktopCapture {
     safety_settings: SafetySettings,
     window_list_state: WindowListState,
+    app_policy: AppPolicy,
 }
 
 #[async_trait]
@@ -417,6 +418,7 @@ impl OneShotFrameCapture for ProductionDesktopCapture {
             },
             &self.safety_settings,
             &self.window_list_state,
+            &self.app_policy,
         )
         .await
         .map_err(|error| {
@@ -479,6 +481,7 @@ impl VisibleWindowCropScreenBackend {
     pub(crate) fn new(
         safety_settings: &SafetySettings,
         window_list_state: &WindowListState,
+        app_policy: &AppPolicy,
     ) -> Self {
         Self {
             resolver: Arc::new(ProductionWindowCropResolver {
@@ -487,6 +490,7 @@ impl VisibleWindowCropScreenBackend {
             desktop_capture: Arc::new(ProductionDesktopCapture {
                 safety_settings: safety_settings.clone(),
                 window_list_state: window_list_state.clone(),
+                app_policy: app_policy.clone(),
             }),
         }
     }
@@ -671,11 +675,37 @@ fn crop_visible_window(
         output_height,
         transform: ScreenshotTransform {
             source_coordinate_space: CoordinateSpace::WindowLocal,
-            output_coordinate_space: CoordinateSpace::WindowLocal,
+            output_coordinate_space: CoordinateSpace::CaptureOutput,
+            source_extent_width: Some(
+                window
+                    .geometry
+                    .as_ref()
+                    .map_or(rect.width, |geometry| geometry.width),
+            ),
+            source_extent_height: Some(
+                window
+                    .geometry
+                    .as_ref()
+                    .map_or(rect.height, |geometry| geometry.height),
+            ),
             source_origin_x: 0,
             source_origin_y: 0,
-            scale_x: f64::from(output_width) / f64::from(rect.width),
-            scale_y: f64::from(output_height) / f64::from(rect.height),
+            scale_x: f64::from(output_width)
+                / f64::from(
+                    window
+                        .geometry
+                        .as_ref()
+                        .map_or(rect.width, |geometry| geometry.width)
+                        .max(1),
+                ),
+            scale_y: f64::from(output_height)
+                / f64::from(
+                    window
+                        .geometry
+                        .as_ref()
+                        .map_or(rect.height, |geometry| geometry.height)
+                        .max(1),
+                ),
         },
         coordinate_space: CoordinateSpace::WindowLocal,
         monitors: monitors.to_vec(),
@@ -789,6 +819,7 @@ pub(crate) async fn capture_visible_window_crop(
     request: ScreenshotRequest,
     safety_settings: &SafetySettings,
     window_list_state: &WindowListState,
+    app_policy: &AppPolicy,
 ) -> anyhow::Result<ScreenshotInfo> {
     if request.portal_interactive {
         anyhow::bail!(
@@ -801,7 +832,8 @@ pub(crate) async fn capture_visible_window_crop(
         .map(str::trim)
         .filter(|window_id| !window_id.is_empty())
         .ok_or_else(|| anyhow::anyhow!("visible_window_crop_id must not be blank"))?;
-    let backend = VisibleWindowCropScreenBackend::new(safety_settings, window_list_state);
+    let backend =
+        VisibleWindowCropScreenBackend::new(safety_settings, window_list_state, app_policy);
     let session = backend
         .open_capture(CaptureSessionRequest {
             source: CaptureSource::DesktopCompatibility {
@@ -842,7 +874,9 @@ pub(crate) async fn capture_visible_window_crop(
         output_height: screenshot.height,
         transform: ScreenshotTransform {
             source_coordinate_space: CoordinateSpace::WindowLocal,
-            output_coordinate_space: CoordinateSpace::WindowLocal,
+            output_coordinate_space: CoordinateSpace::CaptureOutput,
+            source_extent_width: Some(screenshot.source_width),
+            source_extent_height: Some(screenshot.source_height),
             source_origin_x: 0,
             source_origin_y: 0,
             scale_x: f64::from(screenshot.width) / f64::from(screenshot.source_width.max(1)),
@@ -911,7 +945,9 @@ pub(crate) async fn capture_portal_target(
         output_height: screenshot.height,
         transform: ScreenshotTransform {
             source_coordinate_space: CoordinateSpace::PhysicalPixel,
-            output_coordinate_space: CoordinateSpace::PhysicalPixel,
+            output_coordinate_space: CoordinateSpace::CaptureOutput,
+            source_extent_width: Some(screenshot.source_width),
+            source_extent_height: Some(screenshot.source_height),
             source_origin_x: 0,
             source_origin_y: 0,
             scale_x: f64::from(screenshot.width) / f64::from(screenshot.source_width.max(1)),
@@ -973,7 +1009,9 @@ mod tests {
                 output_height: 100,
                 transform: ScreenshotTransform {
                     source_coordinate_space: CoordinateSpace::PhysicalPixel,
-                    output_coordinate_space: CoordinateSpace::PhysicalPixel,
+                    output_coordinate_space: CoordinateSpace::CaptureOutput,
+                    source_extent_width: Some(100),
+                    source_extent_height: Some(100),
                     source_origin_x: 0,
                     source_origin_y: 0,
                     scale_x: 1.0,
@@ -1009,7 +1047,9 @@ mod tests {
                 output_height: 2,
                 transform: ScreenshotTransform {
                     source_coordinate_space: CoordinateSpace::PhysicalPixel,
-                    output_coordinate_space: CoordinateSpace::PhysicalPixel,
+                    output_coordinate_space: CoordinateSpace::CaptureOutput,
+                    source_extent_width: Some(4),
+                    source_extent_height: Some(2),
                     source_origin_x: 0,
                     source_origin_y: 0,
                     scale_x: 1.0,

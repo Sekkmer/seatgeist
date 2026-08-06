@@ -575,9 +575,9 @@ smoke-uinput-status:
 		cat "$$log"
 		exit 1
 	fi
-	target/debug/seatgeist-cli --socket "$$socket" input status >"$$out"
+	target/debug/seatgeist-cli --socket "$$socket" input uinput-status >"$$out"
 	jq -e '.type == "uinput_status" and (.data.available | type == "boolean") and (.data.setup_hint | type == "string")' "$$out" >/dev/null
-	target/debug/seatgeist-cli --socket "$$socket" input backends >"$$out"
+	target/debug/seatgeist-cli --socket "$$socket" input status >"$$out"
 	jq -e '.type == "input_backend_status" and (.data.uinput_available | type == "boolean") and ((.data.implemented_available_backend == null) or (.data.implemented_available_backend == "uinput") or (.data.implemented_available_backend == "kwin_agent_seat")) and (.data.remote_desktop_portal.setup_hint | type == "string") and (.data.libei.setup_hint | type == "string") and (.data.eis_keymap.source | type == "string") and (.data.eis_keymap.setup_hint | type == "string")' "$$out" >/dev/null
 	target/debug/seatgeist-cli --socket "$$socket" journal tail --limit 10 | grep -q "uinput_status"
 	target/debug/seatgeist-cli --socket "$$socket" journal tail --limit 10 | grep -q "input_backend_status"
@@ -806,7 +806,7 @@ smoke-mcp:
 	jq -e 'select(.id == 2) | any(.result.tools[]; .name == "seatgeist.a11y_set_selection")' "$$out" >/dev/null
 	jq -e 'select(.id == 3) | .result.isError == false and .result.structuredContent.type == "health"' "$$out" >/dev/null
 	jq -e 'select(.id == 4) | .result.isError == false and .result.structuredContent.type == "observation"' "$$out" >/dev/null
-	jq -e 'select(.id == 5) | .result.isError == true and .result.structuredContent.type == "error" and .result.structuredContent.data.kind == "accessibility_unavailable" and (.result.structuredContent.data.message | contains("invalid AT-SPI node id")) and (.result.content[0].text | contains("invalid AT-SPI node id"))' "$$out" >/dev/null
+	jq -e 'select(.id == 5) | .result.isError == true and .result.structuredContent.type == "error" and .result.structuredContent.data.kind == "validation" and .result.structuredContent.data.reason_code == "invalid_accessibility_node_id" and (.result.structuredContent.data.message | contains("invalid AT-SPI node id")) and (.result.content[0].text | contains("invalid AT-SPI node id"))' "$$out" >/dev/null
 
 gui-eval:
 	scripts/gui-eval.sh all

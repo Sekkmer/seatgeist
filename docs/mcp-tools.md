@@ -93,7 +93,7 @@ policy-checks, and invokes the AT-SPI target atomically.
 Initial tool groups:
 
 - Observation: `seatgeist.health`, `seatgeist.capabilities`, `seatgeist.list_monitors`, `seatgeist.list_windows`, `seatgeist.active_window`, `seatgeist.screenshot`, `seatgeist.screenshot_tile`, `seatgeist.observe`, `seatgeist.wait_for_change`.
-- Control: `seatgeist.focus_window`, `seatgeist.move_window`, `seatgeist.launch_window`, `seatgeist.resize_window`, `seatgeist.page_zoom`, `seatgeist.type_text`, `seatgeist.key_combo`, `seatgeist.move_pointer`, `seatgeist.click_pointer`, `seatgeist.drag_pointer`, `seatgeist.scroll_pointer`, `seatgeist.click_button`, `seatgeist.set_text_field`, `seatgeist.focus_text_field`, `seatgeist.select_menu`, `seatgeist.activate_tab`, `seatgeist.activate_link`, `seatgeist.toggle_check`, `seatgeist.set_value`, `seatgeist.select_item`.
+- Control: `seatgeist.close_window`, `seatgeist.move_window`, `seatgeist.launch_window`, `seatgeist.resize_window`, `seatgeist.page_zoom`, `seatgeist.type_text`, `seatgeist.key_combo`, `seatgeist.move_pointer`, `seatgeist.click_pointer`, `seatgeist.drag_pointer`, `seatgeist.scroll_pointer`, `seatgeist.click_button`, `seatgeist.set_text_field`, `seatgeist.focus_text_field`, `seatgeist.select_menu`, `seatgeist.activate_tab`, `seatgeist.activate_link`, `seatgeist.toggle_check`, `seatgeist.set_value`, `seatgeist.select_item`. MCP deliberately does not advertise `focus_window`; changing the physical user's workspace focus remains an explicit CLI/operator operation.
 - Clipboard: `seatgeist.clipboard_status`, `seatgeist.clipboard_get_text`, `seatgeist.clipboard_set_text`.
 - Accessibility: `seatgeist.a11y_quality_status`, `seatgeist.a11y_focused_tree`, `seatgeist.a11y_find`, `seatgeist.a11y_text_attributes`, `seatgeist.a11y_invoke`, `seatgeist.a11y_set_text`, `seatgeist.a11y_insert_text`, `seatgeist.a11y_delete_text`, `seatgeist.a11y_copy_text`, `seatgeist.a11y_cut_text`, `seatgeist.a11y_paste_text`, `seatgeist.a11y_set_caret`, `seatgeist.a11y_set_selection`.
 - Retained capture: expert `seatgeist.capture_open` for explicit window/monitor/virtual-output sources, plus `seatgeist.window_capture_open`, `seatgeist.capture_session_status`, `seatgeist.capture_session_renew`, `seatgeist.capture_snapshot`, `seatgeist.capture_wait`, `seatgeist.capture_session_close`.
@@ -103,7 +103,9 @@ All coordinate-bearing tools must require an explicit coordinate space. Full-res
 
 `seatgeist.resize_window` takes a listed KWin `window_id` plus a width and height from 64 through 32768 logical pixels. It preserves the current position, passes `ControlSemantic` policy, panic-stop, optional active-window guard, app policy, rate limiting, and journal checks before the shared window backend queues a compositor action. The compact action result reports requested and actual geometry. Use `seatgeist-cli resize --window <id> --width <logical-width> --height <logical-height>` for the same daemon contract.
 
-`seatgeist.move_window` moves an exact listed KWin id to explicit logical-pixel coordinates while preserving its size. `seatgeist.launch_window` accepts a desktop-entry id, never a shell command or path, and arms a one-shot KWin intent before invoking `gtk-launch`. The compositor matches the new window by desktop entry, anchors it inside the panel-aware placement area (`top_left`, `top_right`, `bottom_left`, `bottom_right`, or `center`), optionally applies monitor, margin, and size, and verifies the settled geometry. `activation=preserve_focus` restores and confirms the previously active window; `activate` deliberately focuses the new one. Both paths pass policy, panic-stop, optional active-window guard, app policy, rate limiting, and journaling. CLI equivalents are `seatgeist-cli move ...` and `seatgeist-cli launch --desktop-entry <id> --anchor top-right ...`.
+`seatgeist.move_window` moves an exact listed KWin id to explicit logical-pixel coordinates while preserving its size. `seatgeist.launch_window` accepts a desktop-entry id, never a shell command or path, and arms a one-shot KWin intent before invoking `gtk-launch`. The compositor matches the new window by desktop entry, anchors it inside the panel-aware placement area (`top_left`, `top_right`, `bottom_left`, `bottom_right`, or `center`), optionally applies monitor, margin, and size, and verifies the settled geometry. MCP accepts only `activation=preserve_focus` and confirms the previously active physical window stayed active. The protocol and CLI retain `activate` for deliberate operator use, but an MCP request for it fails before launch. Both paths pass policy, panic-stop, optional active-window guard, app policy, rate limiting, and journaling. CLI equivalents are `seatgeist-cli move ...` and `seatgeist-cli launch --desktop-entry <id> --anchor top-right ...`.
+
+`seatgeist.close_window` is the target-safe lifecycle path for an owned retained window. It requires the retained `session_id` and exact pinned KWin `window_id`, classifies the request as `DestructiveAction`, re-resolves UUID, app id, and PID, asks the KWin bridge to close that exact UUID, and returns success only after that UUID disappears. It never falls back to a key combination. This distinction matters for Firefox: several browser windows can share one PID, while window-global shortcuts can be consumed by the physically active same-process window. Retained-seat `Alt+F4`, `Ctrl+W`, `Ctrl+Shift+W`, and `Ctrl+Q` requests therefore fail closed before input.
 
 `seatgeist.page_zoom` takes `operation=in|out|reset`, an optional 1-20 step count, and a required exact active-window id guard. Immediately before input it rechecks that the active app id belongs to Firefox or a Chromium-family browser, then sends the standard Linux browser zoom shortcut through the configured keyboard backend under `ControlKeyboard` policy. It does not claim an exact percentage: Firefox and Chromium can customize shortcuts or zoom ladders, and Firefox persists zoom per hostname. Use `seatgeist-cli page-zoom --operation out --steps 2 --expected-active-window <id>` for the same path.
 
@@ -118,7 +120,9 @@ deliberate portal cancellation (`consent_cancelled`), portal/backend
 unavailability, backend failure, accessibility unavailability or weak trees,
 validation, and unknown failures. Stable reasons preserve actionable causes
 inside those broad groups, such as `protected_application`,
-`atspi_registry_unreachable`, or `kwin_bridge_unavailable`. MCP compact text
+`atspi_registry_unreachable`, `kwin_bridge_unavailable`,
+`agent_target_in_use`, `agent_lane_quota`, `agent_target_user_active`, or
+`capture_frame_invalidated_by_user`. MCP compact text
 includes both fields. An `app_denied` result is rendered as `POLICY DENIED`
 with an instruction to stop and not retry through another control backend;
 structured content keeps the full daemon error JSON.
@@ -156,6 +160,16 @@ requests; status, identity-validated renew, and id-checked close are policy-clas
 Every call is journaled, while output paths become journal artifacts only when
 artifact metadata is explicitly enabled.
 
+Exact KWin window sessions are parallel: each trusted client owner may keep up
+to four, and different owners do not block one another. Chooser-backed portal
+sessions remain globally serialized. A retained frame reports its preview
+dimensions, source extent, scale, and `capture_output -> source` transform.
+When a pointer coordinate was measured on that preview, pass
+`coordinate_space="capture_output"`, the frame's `session_id`, and its exact
+`capture_revision`. The daemon rejects stale revisions and maps the point
+atomically, including fractional-DPI and preview downscaling; do not copy
+preview pixels into `window_local`.
+
 Capture status includes an optional compact `last_end_reason`. Portal-driven
 `Session.Closed` is reported as `portal_closed`; explicit id-checked close is
 reported as `client_closed`; a failed portal closure monitor fails closed as
@@ -165,7 +179,13 @@ are removed before reuse, and cannot authorize sticky raw input.
 Status also reports compact `owner_tool`, `owner_pid`, and `owner_scope`
 metadata. A session opened by one MCP server process cannot be renewed, read,
 closed, used for sticky raw control, or used for a post-action image by another
-process. A verified CLI session remains usable by later CLI invocations.
+process. MCP `capture_session_status` is therefore an owner-scoped view:
+`active=false` says that the calling MCP process owns no session, not that the
+daemon has no sessions belonging to other agents. A verified CLI session
+remains usable by later CLI invocations, and `seatgeist-cli capture status` is
+the explicit global operator view used by the guarded daemon deployment
+workflow. Agents must not close another owner's session merely to unblock a
+deployment.
 
 High-level semantic actions accept a target-window guard independently of the
 active-window guard. MCP and the core `seatgeist.act` facade use
@@ -201,10 +221,14 @@ semantic side effect.
 
 `seatgeist.safety_status` includes the registered activity backend and trust
 state plus the last redacted activity class/provenance. It never exposes input
-content, coordinates, or device identity. A trusted `kwin_input_spy_v1`
+content, coordinates, titles, or device identity. A trusted
+`kwin_input_spy_v1` or `kwin_input_spy_v2`
 backend lets a sticky raw action restore the previously focused window when no
 physical or unknown activity occurred; otherwise restoration is skipped and
-the action result reports the compact reason.
+the action result reports the compact reason. Version 2 additionally reports
+only the KWin window UUID, allowing independent agent seats to ignore activity
+in other windows, pause 350 ms after same-window input, and return
+`confirmation=user_preempted` for an in-flight collision.
 
 A raw keyboard or pointer action may instead carry the `session_id` of a
 window session with a pinned target. The daemon re-resolves the exact KWin

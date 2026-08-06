@@ -15,7 +15,7 @@ use libseatgeist::{
     WindowPlacementAnchor,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 use tracing::info;
 use uuid::Uuid;
 
@@ -26,8 +26,11 @@ const KWIN_SERVICE: &str = "org.kde.KWin";
 const PATH: &str = "/org/seatgeist/KWinBridge1";
 const INTERFACE: &str = "org.seatgeist.KWinBridge1";
 const WINDOW_ACTION_TIMEOUT: Duration = Duration::from_secs(3);
-const SCRIPT_HEARTBEAT_TTL: Duration = Duration::from_secs(1);
+const ACTION_LONG_POLL_TIMEOUT: Duration = Duration::from_secs(2);
+const SCRIPT_HEARTBEAT_TTL: Duration = Duration::from_secs(5);
 const BRIDGE_OWNERSHIP_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+const BRIDGE_OWNERSHIP_RETRY_MAX: Duration = Duration::from_secs(30);
+const BRIDGE_OWNERSHIP_ERROR_MAX_CHARS: usize = 240;
 const SNAPSHOT_STALE_AFTER: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Default)]
@@ -36,7 +39,9 @@ pub(super) struct WindowActionQueue {
     script_ready: Arc<AtomicBool>,
     move_ready: Arc<AtomicBool>,
     launch_ready: Arc<AtomicBool>,
+    close_ready: Arc<AtomicBool>,
     inner: Arc<Mutex<WindowActionState>>,
+    wake: Arc<Notify>,
 }
 
 #[derive(Debug, Default)]
@@ -45,6 +50,16 @@ struct WindowActionState {
     waiters: HashMap<String, oneshot::Sender<WindowActionResult>>,
     acknowledgements: HashMap<String, oneshot::Sender<()>>,
     script_last_seen: Option<Instant>,
+    ownership_retry_count: u64,
+    ownership_retry_at: Option<Instant>,
+    ownership_last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct BridgeOwnershipStatus {
+    retry_count: u64,
+    retry_in_ms: Option<u64>,
+    last_error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -69,6 +84,13 @@ struct MoveWindowAction<'a> {
     window_id: &'a str,
     x: i32,
     y: i32,
+}
+
+#[derive(Debug, Serialize)]
+struct CloseWindowAction<'a> {
+    id: &'a str,
+    action: &'static str,
+    window_id: &'a str,
 }
 
 #[derive(Debug, Serialize)]
@@ -129,6 +151,45 @@ impl WindowActionQueue {
         self.registered.store(registered, Ordering::Release);
     }
 
+    fn record_ownership_failure(&self, error: &anyhow::Error, retry_after: Duration) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.ownership_retry_count = state.ownership_retry_count.saturating_add(1);
+            state.ownership_retry_at = Some(Instant::now() + retry_after);
+            state.ownership_last_error = Some(
+                error
+                    .to_string()
+                    .chars()
+                    .filter(|character| !character.is_control())
+                    .take(BRIDGE_OWNERSHIP_ERROR_MAX_CHARS)
+                    .collect(),
+            );
+        }
+    }
+
+    fn record_ownership_recovered(&self) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.ownership_retry_count = 0;
+            state.ownership_retry_at = None;
+            state.ownership_last_error = None;
+        }
+    }
+
+    fn ownership_status(&self) -> BridgeOwnershipStatus {
+        self.inner
+            .lock()
+            .map(|state| BridgeOwnershipStatus {
+                retry_count: state.ownership_retry_count,
+                retry_in_ms: state.ownership_retry_at.map(|retry_at| {
+                    retry_at
+                        .saturating_duration_since(Instant::now())
+                        .as_millis()
+                        .min(u128::from(u64::MAX)) as u64
+                }),
+                last_error: state.ownership_last_error.clone(),
+            })
+            .unwrap_or_default()
+    }
+
     pub(super) fn register_script_capabilities(&self, capabilities: &str) -> Result<()> {
         let resize = capabilities
             .split(',')
@@ -145,6 +206,11 @@ impl WindowActionQueue {
             .map(str::trim)
             .any(|capability| capability == "launch_window");
         self.launch_ready.store(launch_window, Ordering::Release);
+        let close_window = capabilities
+            .split(',')
+            .map(str::trim)
+            .any(|capability| capability == "close_window");
+        self.close_ready.store(close_window, Ordering::Release);
         self.inner
             .lock()
             .map_err(|_| anyhow::anyhow!("KWin action queue lock is poisoned"))?
@@ -180,6 +246,64 @@ impl WindowActionQueue {
         self.registered.load(Ordering::Acquire)
             && self.launch_ready.load(Ordering::Acquire)
             && self.script_heartbeat_fresh()
+    }
+
+    pub(super) fn close_ready(&self) -> bool {
+        self.registered.load(Ordering::Acquire)
+            && self.close_ready.load(Ordering::Acquire)
+            && self.script_heartbeat_fresh()
+    }
+
+    pub(super) async fn close_window(&self, window_id: &str) -> Result<()> {
+        if !self.registered.load(Ordering::Acquire) {
+            bail!("KWin script bridge DBus receiver is unavailable");
+        }
+        if !self.script_heartbeat_fresh() {
+            bail!("KWin script bridge heartbeat is stale; reload only the seatgeist-bridge script");
+        }
+        if !self.close_ready.load(Ordering::Acquire) {
+            bail!(
+                "installed KWin script has not registered close_window support; install/reload the current seatgeist-bridge package"
+            );
+        }
+        let id = Uuid::new_v4().to_string();
+        let payload = serde_json::to_string(&CloseWindowAction {
+            id: &id,
+            action: "close_window",
+            window_id,
+        })
+        .context("encode KWin close action")?;
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut state = self
+                .inner
+                .lock()
+                .map_err(|_| anyhow::anyhow!("KWin action queue lock is poisoned"))?;
+            state.pending.push_back(PendingWindowAction {
+                id: id.clone(),
+                payload,
+            });
+            state.waiters.insert(id.clone(), sender);
+        }
+        self.wake.notify_one();
+        let result = match tokio::time::timeout(WINDOW_ACTION_TIMEOUT, receiver).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => bail!("KWin close action channel closed before acknowledgement"),
+            Err(_) => {
+                self.remove(&id)?;
+                bail!(
+                    "KWin script bridge did not confirm exact window close within {}ms",
+                    WINDOW_ACTION_TIMEOUT.as_millis()
+                );
+            }
+        };
+        if !result.ok {
+            bail!(
+                "KWin close failed: {}",
+                result.error.as_deref().unwrap_or("unknown script error")
+            );
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -233,6 +357,7 @@ impl WindowActionQueue {
             state.waiters.insert(id.clone(), result_sender);
             state.acknowledgements.insert(id.clone(), ack_sender);
         }
+        self.wake.notify_one();
         match tokio::time::timeout(WINDOW_ACTION_TIMEOUT, ack_receiver).await {
             Ok(Ok(())) => Ok(LaunchWindowTicket {
                 id,
@@ -266,6 +391,7 @@ impl WindowActionQueue {
                 id: cancel_id,
                 payload,
             });
+        self.wake.notify_one();
         Ok(())
     }
 
@@ -346,6 +472,7 @@ impl WindowActionQueue {
             });
             state.waiters.insert(id.clone(), sender);
         }
+        self.wake.notify_one();
         let result = match tokio::time::timeout(WINDOW_ACTION_TIMEOUT, receiver).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => bail!("KWin move action channel closed before acknowledgement"),
@@ -407,6 +534,7 @@ impl WindowActionQueue {
             });
             state.waiters.insert(id.clone(), sender);
         }
+        self.wake.notify_one();
 
         let result = match tokio::time::timeout(WINDOW_ACTION_TIMEOUT, receiver).await {
             Ok(Ok(result)) => result,
@@ -442,6 +570,16 @@ impl WindowActionQueue {
             .pop_front()
             .map(|action| action.payload)
             .unwrap_or_default())
+    }
+
+    async fn take_wait(&self) -> Result<String> {
+        let notified = self.wake.notified();
+        let payload = self.take()?;
+        if !payload.is_empty() {
+            return Ok(payload);
+        }
+        let _ = tokio::time::timeout(ACTION_LONG_POLL_TIMEOUT, notified).await;
+        self.take()
     }
 
     fn complete(&self, payload: &str) -> Result<()> {
@@ -594,6 +732,7 @@ struct Bridge {
     active_window_state: ActiveWindowState,
     window_list_state: WindowListState,
     activity_tracker: activity::ActivityTracker,
+    capture_session_store: crate::capture::CaptureSessionStore,
     window_action_queue: WindowActionQueue,
     agent_seat_backend: crate::agent_seat::KwinAgentSeatBackend,
 }
@@ -614,21 +753,44 @@ impl Bridge {
         Ok(())
     }
 
-    async fn register_input_activity_backend(&self, backend: &str) -> zbus::fdo::Result<()> {
+    async fn register_input_activity_backend(
+        &self,
+        backend: &str,
+        #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        verified_kwin_caller(connection, &header).await?;
         self.activity_tracker
             .register_backend(backend)
             .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
     }
 
-    async fn update_input_activity(&self, payload: &str) -> zbus::fdo::Result<()> {
-        self.activity_tracker
+    async fn update_input_activity(
+        &self,
+        payload: &str,
+        #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        verified_kwin_caller(connection, &header).await?;
+        let activity = self
+            .activity_tracker
             .record_payload(payload)
-            .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
+            .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))?;
+        if activity.interference
+            && let Some(window_id) = activity.window_id.as_deref()
+        {
+            self.agent_seat_backend.cancel_pending_for_target(window_id);
+            self.capture_session_store
+                .invalidate_latest_frames_for_window(window_id)
+                .await;
+        }
+        Ok(())
     }
 
     async fn take_pending_action(&self) -> zbus::fdo::Result<String> {
         self.window_action_queue
-            .take()
+            .take_wait()
+            .await
             .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
     }
 
@@ -668,7 +830,8 @@ impl Bridge {
     ) -> zbus::fdo::Result<String> {
         let caller = message_sender(&header)?;
         self.agent_seat_backend
-            .take(&caller)
+            .take_wait(&caller)
+            .await
             .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
     }
 
@@ -804,6 +967,8 @@ pub(super) fn status(
         window_action_queue.resize_ready(),
         window_action_queue.move_ready(),
         window_action_queue.launch_ready(),
+        window_action_queue.close_ready(),
+        window_action_queue.ownership_status(),
         BridgeInstallation {
             package_dir,
             config_path,
@@ -818,6 +983,7 @@ struct BridgeInstallation {
     script_enabled: Option<bool>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn status_with_installation(
     active_window_state: &ActiveWindowState,
     window_list_state: &WindowListState,
@@ -825,6 +991,8 @@ fn status_with_installation(
     window_resize_supported: bool,
     window_move_supported: bool,
     window_launch_supported: bool,
+    window_close_supported: bool,
+    ownership: BridgeOwnershipStatus,
     installation: BridgeInstallation,
 ) -> Result<KwinBridgeStatus> {
     let active_window_snapshot = active_window_state.snapshot()?;
@@ -842,9 +1010,13 @@ fn status_with_installation(
 
     Ok(KwinBridgeStatus {
         dbus_service_registered,
+        ownership_retry_count: ownership.retry_count,
+        ownership_retry_in_ms: ownership.retry_in_ms,
+        ownership_last_error: ownership.last_error,
         window_resize_supported,
         window_move_supported,
         window_launch_supported,
+        window_close_supported,
         active_window_update_seen,
         window_list_update_seen,
         active_window_update_age_ms,
@@ -904,6 +1076,7 @@ pub(super) async fn start_kwin_bridge(
     active_window_state: ActiveWindowState,
     window_list_state: WindowListState,
     activity_tracker: activity::ActivityTracker,
+    capture_session_store: crate::capture::CaptureSessionStore,
     window_action_queue: WindowActionQueue,
     agent_seat_backend: crate::agent_seat::KwinAgentSeatBackend,
 ) -> Result<zbus::Connection> {
@@ -922,6 +1095,7 @@ pub(super) async fn start_kwin_bridge(
                 active_window_state,
                 window_list_state,
                 activity_tracker,
+                capture_session_store,
                 window_action_queue,
                 agent_seat_backend,
             },
@@ -944,40 +1118,82 @@ pub(super) fn supervise_kwin_bridge_ownership(
     active_window_state: ActiveWindowState,
     window_list_state: WindowListState,
     activity_tracker: activity::ActivityTracker,
+    capture_session_store: crate::capture::CaptureSessionStore,
     window_action_queue: WindowActionQueue,
     agent_seat_backend: crate::agent_seat::KwinAgentSeatBackend,
 ) {
     tokio::spawn(async move {
         let mut connection = initial_connection;
         let mut previously_owned = connection.is_some();
-        let mut interval = tokio::time::interval(BRIDGE_OWNERSHIP_CHECK_INTERVAL);
         loop {
-            interval.tick().await;
             let mut owned = false;
+            let mut retry_delay = BRIDGE_OWNERSHIP_CHECK_INTERVAL;
             if let Some(current) = connection.as_ref() {
-                owned = service_owned_by_connection(current).await.unwrap_or(false);
-                if !owned {
-                    owned = current.request_name(SERVICE).await.is_ok()
-                        && service_owned_by_connection(current).await.unwrap_or(false);
-                    if !owned {
+                match service_owned_by_connection(current).await {
+                    Ok(true) => owned = true,
+                    Ok(false) => match request_bridge_name(current).await {
+                        Ok(()) => match service_owned_by_connection(current).await {
+                            Ok(true) => owned = true,
+                            Ok(false) => {
+                                let err = anyhow::anyhow!(
+                                    "KWin bridge D-Bus name request returned without ownership"
+                                );
+                                retry_delay = bridge_ownership_retry_delay(
+                                    window_action_queue.ownership_status().retry_count + 1,
+                                );
+                                window_action_queue.record_ownership_failure(&err, retry_delay);
+                            }
+                            Err(err) => {
+                                retry_delay = bridge_ownership_retry_delay(
+                                    window_action_queue.ownership_status().retry_count + 1,
+                                );
+                                window_action_queue.record_ownership_failure(&err, retry_delay);
+                                connection = None;
+                            }
+                        },
+                        Err(err) => {
+                            retry_delay = bridge_ownership_retry_delay(
+                                window_action_queue.ownership_status().retry_count + 1,
+                            );
+                            window_action_queue.record_ownership_failure(&err, retry_delay);
+                        }
+                    },
+                    Err(err) => {
+                        retry_delay = bridge_ownership_retry_delay(
+                            window_action_queue.ownership_status().retry_count + 1,
+                        );
+                        window_action_queue.record_ownership_failure(&err, retry_delay);
                         connection = None;
                     }
                 }
             }
-            if connection.is_none()
-                && let Ok(reconnected) = start_kwin_bridge(
+            if connection.is_none() {
+                match start_kwin_bridge(
                     active_window_state.clone(),
                     window_list_state.clone(),
                     activity_tracker.clone(),
+                    capture_session_store.clone(),
                     window_action_queue.clone(),
                     agent_seat_backend.clone(),
                 )
                 .await
-            {
-                owned = true;
-                connection = Some(reconnected);
+                {
+                    Ok(reconnected) => {
+                        owned = true;
+                        connection = Some(reconnected);
+                    }
+                    Err(err) => {
+                        retry_delay = bridge_ownership_retry_delay(
+                            window_action_queue.ownership_status().retry_count + 1,
+                        );
+                        window_action_queue.record_ownership_failure(&err, retry_delay);
+                    }
+                }
             }
             window_action_queue.set_registered(owned);
+            if owned {
+                window_action_queue.record_ownership_recovered();
+            }
             if owned != previously_owned {
                 if owned {
                     info!(service = SERVICE, "KWin bridge D-Bus ownership recovered");
@@ -989,8 +1205,27 @@ pub(super) fn supervise_kwin_bridge_ownership(
                 }
                 previously_owned = owned;
             }
+            tokio::time::sleep(retry_delay).await;
         }
     });
+}
+
+async fn request_bridge_name(connection: &zbus::Connection) -> Result<()> {
+    connection
+        .request_name_with_flags(SERVICE, zbus::fdo::RequestNameFlags::DoNotQueue.into())
+        .await
+        .map(|_| ())
+        .context("request non-replacing KWin bridge D-Bus service name")
+}
+
+fn bridge_ownership_retry_delay(retry_count: u64) -> Duration {
+    let exponent = retry_count.saturating_sub(1).min(5) as u32;
+    let base = Duration::from_secs(1u64 << exponent).min(BRIDGE_OWNERSHIP_RETRY_MAX);
+    let jitter_seed = retry_count
+        .wrapping_mul(137)
+        .wrapping_add(u64::from(std::process::id()));
+    base.saturating_add(Duration::from_millis(jitter_seed % 251))
+        .min(BRIDGE_OWNERSHIP_RETRY_MAX)
 }
 
 async fn service_owned_by_connection(connection: &zbus::Connection) -> Result<bool> {
@@ -1002,10 +1237,13 @@ async fn service_owned_by_connection(connection: &zbus::Connection) -> Result<bo
         .context("create session D-Bus ownership proxy")?;
     let service =
         zbus::names::BusName::try_from(SERVICE).context("parse KWin bridge D-Bus service name")?;
-    let owner = proxy
-        .get_name_owner(service)
-        .await
-        .context("query KWin bridge D-Bus owner")?;
+    let owner = match proxy.get_name_owner(service).await {
+        Ok(owner) => owner,
+        Err(zbus::fdo::Error::NameHasNoOwner(_)) => return Ok(false),
+        Err(error) => {
+            return Err(error).context("query KWin bridge D-Bus owner");
+        }
+    };
     Ok(owner.as_str() == unique_name.as_str())
 }
 
@@ -1053,6 +1291,8 @@ mod tests {
             false,
             false,
             false,
+            false,
+            BridgeOwnershipStatus::default(),
             BridgeInstallation {
                 package_dir: PathBuf::from("/missing/seatgeist-bridge"),
                 config_path: PathBuf::from("/missing/kwinrc"),
@@ -1062,6 +1302,9 @@ mod tests {
         .expect("bridge status succeeds");
 
         assert!(status.dbus_service_registered);
+        assert_eq!(status.ownership_retry_count, 0);
+        assert!(status.ownership_retry_in_ms.is_none());
+        assert!(status.ownership_last_error.is_none());
         assert!(!status.window_resize_supported);
         assert!(!status.window_move_supported);
         assert!(!status.window_launch_supported);
@@ -1088,7 +1331,10 @@ mod tests {
             tokio::spawn(async move { resize_queue.resize_window("window-1", 1280, 720).await });
 
         tokio::task::yield_now().await;
-        let payload = queue.take().expect("queued action is available");
+        let payload = queue
+            .take_wait()
+            .await
+            .expect("long-poll queue wakes for the action");
         let action: serde_json::Value =
             serde_json::from_str(&payload).expect("queued action is valid JSON");
         assert_eq!(action["action"], "resize_window");
@@ -1116,6 +1362,38 @@ mod tests {
         assert_eq!(geometry.height, 720);
     }
 
+    #[test]
+    fn ownership_retry_uses_bounded_exponential_backoff_with_jitter() {
+        let first = bridge_ownership_retry_delay(1);
+        let second = bridge_ownership_retry_delay(2);
+        let sixth = bridge_ownership_retry_delay(6);
+        let later = bridge_ownership_retry_delay(100);
+        assert!(first >= Duration::from_secs(1));
+        assert!(first < Duration::from_millis(1_251));
+        assert!(second >= Duration::from_secs(2));
+        assert!(second < Duration::from_millis(2_251));
+        assert!(sixth >= Duration::from_secs(30));
+        assert!(sixth <= BRIDGE_OWNERSHIP_RETRY_MAX);
+        assert_eq!(later, BRIDGE_OWNERSHIP_RETRY_MAX);
+    }
+
+    #[test]
+    fn ownership_failures_are_compact_and_clear_after_recovery() {
+        let queue = WindowActionQueue::default();
+        queue.record_ownership_failure(
+            &anyhow::anyhow!("name already owned"),
+            Duration::from_secs(2),
+        );
+        let failed = queue.ownership_status();
+        assert_eq!(failed.retry_count, 1);
+        assert!(failed.retry_in_ms.is_some_and(|delay| delay <= 2_000));
+        assert_eq!(failed.last_error.as_deref(), Some("name already owned"));
+
+        queue.record_ownership_recovered();
+        assert_eq!(queue.ownership_status().retry_count, 0);
+        assert!(queue.ownership_status().last_error.is_none());
+    }
+
     #[tokio::test]
     async fn stale_script_fails_before_a_resize_is_queued() {
         let queue = WindowActionQueue::default();
@@ -1126,6 +1404,44 @@ mod tests {
             .expect_err("missing capability handshake fails closed");
         assert!(error.to_string().contains("heartbeat is stale"));
         assert!(queue.take().expect("queue remains readable").is_empty());
+    }
+
+    #[tokio::test]
+    async fn exact_close_round_trips_the_requested_kwin_uuid() {
+        let queue = WindowActionQueue::default();
+        queue.set_registered(true);
+        queue
+            .register_script_capabilities("resize_window,move_window,launch_window,close_window")
+            .expect("capability registration succeeds");
+        let close_queue = queue.clone();
+        let close = tokio::spawn(async move {
+            close_queue
+                .close_window("{d9ba63dd-1081-42c7-90cf-6f7c1c26e009}")
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        let payload = queue.take().expect("close action is queued");
+        let action: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
+        assert_eq!(action["action"], "close_window");
+        assert_eq!(
+            action["window_id"],
+            "{d9ba63dd-1081-42c7-90cf-6f7c1c26e009}"
+        );
+        queue
+            .complete(
+                &serde_json::json!({
+                    "id": action["id"],
+                    "ok": true,
+                    "window_id": action["window_id"]
+                })
+                .to_string(),
+            )
+            .expect("close completion is accepted");
+        close
+            .await
+            .expect("close task joins")
+            .expect("exact close confirms");
     }
 
     #[tokio::test]

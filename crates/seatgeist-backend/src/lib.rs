@@ -156,6 +156,7 @@ pub trait WindowBackend: std::fmt::Debug + Send + Sync {
     async fn list_windows(&self) -> Result<Vec<WindowInfo>>;
     async fn active_window(&self) -> Result<Option<WindowInfo>>;
     async fn focus_window(&self, id: WindowId) -> Result<()>;
+    async fn close_window(&self, id: WindowId) -> Result<()>;
     async fn move_window(&self, id: WindowId, x: i32, y: i32) -> Result<WindowGeometry>;
     async fn resize_window(&self, id: WindowId, width: u32, height: u32) -> Result<WindowGeometry>;
 }
@@ -182,27 +183,36 @@ pub struct TargetedInputDelivery {
     pub backend: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetedInputContext {
+    pub lane_id: String,
+}
+
 #[async_trait]
 pub trait TargetedInputBackend: std::fmt::Debug + Send + Sync {
     fn backend_name(&self) -> &'static str;
     fn ready(&self) -> bool;
     async fn key_combo(
         &self,
+        context: &TargetedInputContext,
         target: &WindowInfo,
         keycodes: &[u16],
     ) -> Result<TargetedInputDelivery>;
     async fn key_sequence(
         &self,
+        context: &TargetedInputContext,
         target: &WindowInfo,
         chords: &[Vec<u16>],
     ) -> Result<TargetedInputDelivery>;
     async fn move_pointer(
         &self,
+        context: &TargetedInputContext,
         target: &WindowInfo,
         point: Point,
     ) -> Result<TargetedInputDelivery>;
     async fn click(
         &self,
+        context: &TargetedInputContext,
         target: &WindowInfo,
         point: Point,
         button: PointerButton,
@@ -210,6 +220,7 @@ pub trait TargetedInputBackend: std::fmt::Debug + Send + Sync {
     ) -> Result<TargetedInputDelivery>;
     async fn drag(
         &self,
+        context: &TargetedInputContext,
         target: &WindowInfo,
         from: Point,
         to: Point,
@@ -217,6 +228,7 @@ pub trait TargetedInputBackend: std::fmt::Debug + Send + Sync {
     ) -> Result<TargetedInputDelivery>;
     async fn scroll(
         &self,
+        context: &TargetedInputContext,
         target: &WindowInfo,
         vertical: i32,
         horizontal: i32,

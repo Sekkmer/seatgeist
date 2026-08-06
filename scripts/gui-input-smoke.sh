@@ -135,7 +135,7 @@ grant_approval control-keyboard type_text
 grant_approval control-keyboard key_combo
 test "$(stat -c '%a' "$approval_file")" = "600"
 
-cli input status >"$uinput_json"
+cli input uinput-status >"$uinput_json"
 jq -e '.type == "uinput_status" and .data.available == true' "$uinput_json" >/dev/null
 
 "${editor[@]}" "$test_file" &

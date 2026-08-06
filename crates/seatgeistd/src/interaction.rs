@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt,
     future::Future,
     sync::Arc,
@@ -7,7 +7,10 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use libseatgeist::{ActionResult, DaemonRequest, FocusWindowRequest, WindowInfo};
+use libseatgeist::{
+    ActionConfirmation, ActionResult, ActionSettleBackend, ActionSettleCondition,
+    ActionSettleResult, DaemonRequest, FocusWindowRequest, WindowInfo,
+};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use uuid::Uuid;
 
@@ -15,6 +18,8 @@ use crate::session_owner::SessionOwner;
 
 const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
 const DEFAULT_LEASE_DEADLINE: Duration = Duration::from_millis(1_000);
+const MAX_AGENT_LANES: usize = 4;
+const AGENT_TARGET_QUIET_TIME: Duration = Duration::from_millis(350);
 
 pub(crate) trait FocusBackend: fmt::Debug + Send + Sync {
     fn name(&self) -> &'static str;
@@ -37,6 +42,7 @@ impl FocusBackend for KwinFocusBackend {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PinnedTarget {
     pub session_id: String,
+    pub lane_id: String,
     pub window: WindowInfo,
 }
 
@@ -71,10 +77,18 @@ struct InteractionSession {
     app_id: Option<String>,
     pid: Option<u32>,
     owner: SessionOwner,
+    lane_id: String,
     expires_at: tokio::time::Instant,
 }
 
 impl InteractionSessionStore {
+    pub async fn retain_active_capture_sessions(&self, active_session_ids: &HashSet<String>) {
+        self.sessions
+            .lock()
+            .await
+            .retain(|session_id, _| active_session_ids.contains(session_id));
+    }
+
     pub async fn bind(
         &self,
         session_id: String,
@@ -91,6 +105,28 @@ impl InteractionSessionStore {
             .pid
             .ok_or_else(|| anyhow::anyhow!("interaction target has no process id"))?;
         let mut sessions = self.sessions.lock().await;
+        let now = tokio::time::Instant::now();
+        sessions.retain(|_, session| session.expires_at > now);
+        let owner_identity = owner.identity();
+        if sessions.values().any(|session| {
+            session.window_id == window.id && session.owner.identity() != owner_identity
+        }) {
+            bail!("agent target in use: another agent owns the window interaction lease");
+        }
+        let lane_id = sessions
+            .values()
+            .find(|session| session.owner.identity() == owner_identity)
+            .map(|session| session.lane_id.clone())
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let active_owners = sessions
+            .values()
+            .map(|session| session.owner.identity())
+            .collect::<HashSet<_>>();
+        if !active_owners.contains(&owner_identity) && active_owners.len() >= MAX_AGENT_LANES {
+            bail!(
+                "agent lane quota reached: at most {MAX_AGENT_LANES} agent owners may hold interaction sessions"
+            );
+        }
         sessions.insert(
             session_id.clone(),
             InteractionSession {
@@ -99,6 +135,7 @@ impl InteractionSessionStore {
                 app_id: Some(app_id.to_string()),
                 pid: Some(pid),
                 owner,
+                lane_id,
                 expires_at: tokio::time::Instant::now() + DEFAULT_SESSION_TTL,
             },
         );
@@ -143,6 +180,7 @@ impl InteractionSessionStore {
         }
         Ok(PinnedTarget {
             session_id: session.id.clone(),
+            lane_id: session.lane_id.clone(),
             window,
         })
     }
@@ -388,6 +426,12 @@ where
     )?;
     require_live_capture_session(runtime, session_id).await?;
 
+    let target_activity = runtime
+        .activity_tracker
+        .target_interference_state(&target.window.id, AGENT_TARGET_QUIET_TIME);
+    require_agent_target_quiet(target_activity)?;
+    let activity_snapshot = runtime.activity_tracker.target_snapshot(&target.window.id);
+
     let mut result = action(target.clone()).await?;
     runtime.interaction_session_store.renew(session_id).await?;
     let backend = result
@@ -401,6 +445,7 @@ where
         .unwrap_or(crate::agent_seat::KWIN_AGENT_SEAT_BACKEND);
     runtime.journal.record_agent_seat_delivery(
         session_id,
+        &target.lane_id,
         result.id,
         &target.window,
         backend,
@@ -431,11 +476,62 @@ where
         );
     }
     let message = result.message.take().unwrap_or_default();
+    // The KWin activity plugin publishes over D-Bus. Give an event already in
+    // flight one short turn to reach the daemon before declaring delivery
+    // independent of the physical seat.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let target_activity_safe = runtime
+        .activity_tracker
+        .target_safe_since(&target.window.id, activity_snapshot);
+    let preemption = if !target_activity.available {
+        "unavailable"
+    } else if target_activity_safe {
+        "quiet"
+    } else {
+        "user_preempted"
+    };
+    let delivery = if target_activity_safe {
+        "delivery_ack"
+    } else {
+        "delivered_but_unconfirmed"
+    };
+    let lane_label = target.lane_id.split('-').next().unwrap_or("unknown");
     result.message = Some(format!(
-        "{message} session={} focus_reacquired=false focus_restored=false restoration=independent_agent_seat",
-        target.session_id
+        "{message} session={} lane={} focus_reacquired=false focus_restored=false restoration=independent_agent_seat target_preemption={preemption} target_delivery={delivery}",
+        target.session_id, lane_label
     ));
+    if !target_activity_safe {
+        result.ok = false;
+        let mut observation = super::observation::post_action_window_only(runtime).await;
+        observation.settle = Some(ActionSettleResult {
+            confirmation: ActionConfirmation::UserPreempted,
+            condition: ActionSettleCondition::None,
+            backend: ActionSettleBackend::DeliveryAck,
+            target_scoped: true,
+            event: Some("physical_user_input".to_string()),
+            settled: false,
+            timed_out: false,
+            timeout_ms: 0,
+            interval_ms: 0,
+            samples: 1,
+            elapsed_ms: 0,
+            before_revision: None,
+            after_revision: observation.revision.clone().unwrap_or_default(),
+        });
+        result.observation = Some(observation);
+    }
     Ok(result)
+}
+
+fn require_agent_target_quiet(state: super::activity::TargetInterferenceState) -> Result<()> {
+    if !state.available || !state.fresh {
+        return Ok(());
+    }
+    bail!(
+        "agent target user active: physical input reached this window {}ms ago; wait until it is quiet for {}ms and capture a fresh frame",
+        state.age_ms.unwrap_or_default(),
+        AGENT_TARGET_QUIET_TIME.as_millis()
+    )
 }
 
 fn require_injection_activity_safe(safe: bool) -> Result<()> {
@@ -772,6 +868,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_window_has_one_agent_owner_but_the_user_is_not_locked() {
+        let store = InteractionSessionStore::default();
+        store
+            .bind(
+                "interaction-1".to_string(),
+                &window("firefox-1", 42),
+                SessionOwner::test_process(1),
+            )
+            .await
+            .expect("first agent owns the target");
+        let error = store
+            .bind(
+                "interaction-2".to_string(),
+                &window("firefox-1", 42),
+                SessionOwner::test_process(2),
+            )
+            .await
+            .expect_err("another agent cannot share the target");
+        assert!(error.to_string().contains("agent target in use"));
+
+        store
+            .clear("interaction-1")
+            .await
+            .expect("first agent releases the target");
+        store
+            .bind(
+                "interaction-2".to_string(),
+                &window("firefox-1", 42),
+                SessionOwner::test_process(2),
+            )
+            .await
+            .expect("another agent may bind after release");
+    }
+
+    #[tokio::test]
+    async fn one_owner_reuses_one_lane_across_different_windows() {
+        let store = InteractionSessionStore::default();
+        let owner = SessionOwner::test_process(1);
+        store
+            .bind(
+                "interaction-1".to_string(),
+                &window("firefox-1", 42),
+                owner.clone(),
+            )
+            .await
+            .expect("first target binds");
+        store
+            .bind("interaction-2".to_string(), &window("firefox-2", 43), owner)
+            .await
+            .expect("same owner may bind another target");
+        let windows = [window("firefox-1", 42), window("firefox-2", 43)];
+        let first = store
+            .resolve("interaction-1", &windows)
+            .await
+            .expect("first resolves");
+        let second = store
+            .resolve("interaction-2", &windows)
+            .await
+            .expect("second resolves");
+        assert_eq!(first.lane_id, second.lane_id);
+    }
+
+    #[tokio::test]
+    async fn active_agent_lane_count_is_bounded() {
+        let store = InteractionSessionStore::default();
+        for owner in 1..=MAX_AGENT_LANES {
+            store
+                .bind(
+                    format!("interaction-{owner}"),
+                    &window(&format!("firefox-{owner}"), owner as u32),
+                    SessionOwner::test_process(owner as u32),
+                )
+                .await
+                .expect("lane within quota binds");
+        }
+        let error = store
+            .bind(
+                "interaction-overflow".to_string(),
+                &window("firefox-overflow", 99),
+                SessionOwner::test_process(99),
+            )
+            .await
+            .expect_err("fifth owner exceeds the lane quota");
+        assert!(error.to_string().contains("agent lane quota reached"));
+    }
+
+    #[tokio::test]
+    async fn ended_capture_sessions_release_window_and_lane_leases() {
+        let store = InteractionSessionStore::default();
+        store
+            .bind(
+                "interaction-1".to_string(),
+                &window("firefox-1", 42),
+                SessionOwner::test_process(1),
+            )
+            .await
+            .expect("first target binds");
+        store.retain_active_capture_sessions(&HashSet::new()).await;
+        store
+            .bind(
+                "interaction-2".to_string(),
+                &window("firefox-1", 42),
+                SessionOwner::test_process(2),
+            )
+            .await
+            .expect("ended capture releases the target lease");
+    }
+
+    #[tokio::test]
     async fn clear_requires_matching_session_id() {
         let store = InteractionSessionStore::default();
         store
@@ -855,5 +1060,29 @@ mod tests {
         let error = require_injection_activity_safe(false)
             .expect_err("interfered lease must fail before injection");
         assert!(error.to_string().contains("input was not injected"));
+    }
+
+    #[test]
+    fn target_local_user_activity_pauses_only_while_fresh() {
+        require_agent_target_quiet(crate::activity::TargetInterferenceState {
+            available: false,
+            fresh: false,
+            age_ms: None,
+        })
+        .expect("legacy activity backend preserves compatibility");
+        require_agent_target_quiet(crate::activity::TargetInterferenceState {
+            available: true,
+            fresh: false,
+            age_ms: Some(800),
+        })
+        .expect("quiet target may receive agent input");
+        let error = require_agent_target_quiet(crate::activity::TargetInterferenceState {
+            available: true,
+            fresh: true,
+            age_ms: Some(40),
+        })
+        .expect_err("fresh same-window input preempts the agent");
+        assert!(error.to_string().contains("agent target user active"));
+        assert!(error.to_string().contains("350ms"));
     }
 }

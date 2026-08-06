@@ -19,21 +19,21 @@ use libseatgeist::{
     AccessibilitySetSelectionRequest, AccessibilitySetTextRequest,
     AccessibilityTextAttributesRequest, ActionSettleCondition, ActivateLinkRequest,
     ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest, ClickPointerRequest,
-    ClipboardGetRequest, ClipboardSetRequest, CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES,
-    DEFAULT_POST_ACTION_SETTLE_INTERVAL_MS, DEFAULT_POST_ACTION_SETTLE_TIMEOUT_MS,
-    DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
-    DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonClientIdentity,
-    DaemonRequest, DaemonRequestEnvelope, DaemonResponse, DaemonResponseOptions,
-    DragPointerRequest, FocusTextFieldRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest,
-    JournalTailRequest, KeyComboRequest, LaunchWindowRequest, MovePointerRequest,
-    MoveWindowRequest, ObserveRequest, PageZoomOperation, PageZoomRequest, Point, PointerButton,
-    PortalScreenshotTarget, PostActionImageOptions, PostActionOptions, RemoteDesktopPersistMode,
-    RemoteDesktopSessionProbeRequest, ResizeWindowRequest, ScreenshotInfo, ScreenshotRequest,
-    ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
-    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, TargetWindowGuard,
-    ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest, WindowActivationMode,
-    WindowPlacementAnchor, default_screenshot_dir_path, default_screenshot_output_path,
-    default_socket_path,
+    ClipboardGetRequest, ClipboardSetRequest, CloseWindowRequest, CoordinateSpace,
+    DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_POST_ACTION_SETTLE_INTERVAL_MS,
+    DEFAULT_POST_ACTION_SETTLE_TIMEOUT_MS, DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS,
+    DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
+    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonClientIdentity, DaemonRequest, DaemonRequestEnvelope,
+    DaemonResponse, DaemonResponseOptions, DragPointerRequest, FocusTextFieldRequest,
+    FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest,
+    LaunchWindowRequest, MovePointerRequest, MoveWindowRequest, ObserveRequest, PageZoomOperation,
+    PageZoomRequest, Point, PointerButton, PortalScreenshotTarget, PostActionImageOptions,
+    PostActionOptions, RemoteDesktopPersistMode, RemoteDesktopSessionProbeRequest,
+    ResizeWindowRequest, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest,
+    ScrollPointerRequest, SelectItemRequest, SelectMenuRequest, SetPanicStopRequest,
+    SetTextFieldRequest, SetValueRequest, TargetWindowGuard, ToggleCheckRequest, TypeTextRequest,
+    WaitForChangeRequest, WindowActivationMode, WindowPlacementAnchor, default_screenshot_dir_path,
+    default_screenshot_output_path, default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -45,7 +45,7 @@ const CLIENT_TOOL_NAME: &str = "seatgeist-mcp";
 const MAX_MCP_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MCP_IMAGE_EDGE: u32 = 2_048;
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
-const SERVER_INSTRUCTIONS: &str = "Seatgeist exposes local KDE Plasma observation and carefully policy-gated control tools. Prefer observe/list/screenshot tools first, keep outputs compact, and expect control tools such as focus_window to fail unless the daemon is started with an explicit approval/control policy.";
+const SERVER_INSTRUCTIONS: &str = "Seatgeist exposes local KDE Plasma observation and carefully policy-gated control tools. Prefer exact retained window sessions, keep outputs compact, and never change the physical user's workspace focus. MCP launches preserve focus; exact window close is destructive and session-bound.";
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Seatgeist MCP stdio server")]
@@ -331,13 +331,14 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 bail!("target-window guards are supported only for semantic seatgeist.act actions");
             }
             if sticky_session.is_some() && !facade_action_supports_sticky_session(expert_tool) {
-                bail!(
-                    "session_id is supported only for raw keyboard or pointer seatgeist.act actions"
-                );
+                bail!("session_id is supported only for sticky raw actions and exact close_window");
+            }
+            if expert_tool == "seatgeist.close_window" && sticky_session.is_none() {
+                bail!("close_window requires the exact retained session_id");
             }
             if sticky_session.is_some() && active_guard.is_some() {
                 bail!(
-                    "session_id and active-window guards are mutually exclusive for sticky raw seatgeist.act actions"
+                    "session_id and active-window guards are mutually exclusive for retained-session seatgeist.act actions"
                 );
             }
             daemon_request_for_tool(expert_tool, arguments)
@@ -572,6 +573,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         })),
         "seatgeist.key_combo" => Ok(DaemonRequest::KeyCombo(KeyComboRequest {
             combo: required_string(arguments, "combo")?,
+            destructive: optional_bool(arguments, "destructive")?.unwrap_or(false),
             guard: active_window_guard(arguments)?,
             session_id: optional_string(arguments, "session_id")?,
         })),
@@ -581,6 +583,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 y: required_f64(arguments, "y")?,
                 space: required_coordinate_space(arguments, "coordinate_space")?,
             },
+            capture_revision: optional_string(arguments, "capture_revision")?,
             guard: active_window_guard(arguments)?,
             session_id: optional_string(arguments, "session_id")?,
         })),
@@ -595,6 +598,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 .map(u64_to_u8)
                 .transpose()?
                 .unwrap_or(1),
+            capture_revision: optional_string(arguments, "capture_revision")?,
             guard: active_window_guard(arguments)?,
             session_id: optional_string(arguments, "session_id")?,
         })),
@@ -614,6 +618,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
                 button: optional_pointer_button(arguments, "button")?
                     .unwrap_or(PointerButton::Left),
                 duration_ms: optional_u64(arguments, "duration_ms")?.unwrap_or(250),
+                capture_revision: optional_string(arguments, "capture_revision")?,
                 guard: active_window_guard(arguments)?,
                 session_id: optional_string(arguments, "session_id")?,
             }))
@@ -732,6 +737,11 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
             window_id: required_string(arguments, "window_id")?,
             guard: active_window_guard(arguments)?,
         })),
+        "seatgeist.close_window" => Ok(DaemonRequest::CloseWindow(CloseWindowRequest {
+            window_id: required_string(arguments, "window_id")?,
+            session_id: optional_string(arguments, "session_id")?,
+            guard: active_window_guard(arguments)?,
+        })),
         "seatgeist.resize_window" => Ok(DaemonRequest::ResizeWindow(ResizeWindowRequest {
             window_id: required_string(arguments, "window_id")?,
             width: required_u32(arguments, "width")?,
@@ -760,7 +770,9 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
             margin: optional_u32(arguments, "margin")?.unwrap_or(0),
             activation: match optional_string(arguments, "activation")?.as_deref() {
                 None | Some("preserve_focus") => WindowActivationMode::PreserveFocus,
-                Some("activate") => WindowActivationMode::Activate,
+                Some("activate") => bail!(
+                    "MCP launch_window cannot activate a window because that steals the physical user's workspace focus"
+                ),
                 Some(other) => bail!("unsupported window activation mode: {other}"),
             },
             timeout_ms: optional_u64(arguments, "timeout_ms")?.unwrap_or(10_000),
@@ -791,7 +803,7 @@ fn facade_action_tool(action: &str) -> Result<&'static str> {
         .replace('-', "_")
         .as_str()
     {
-        "focus_window" => Ok("seatgeist.focus_window"),
+        "close_window" => Ok("seatgeist.close_window"),
         "move_window" => Ok("seatgeist.move_window"),
         "launch_window" => Ok("seatgeist.launch_window"),
         "resize_window" => Ok("seatgeist.resize_window"),
@@ -833,6 +845,7 @@ fn facade_action_supports_sticky_session(tool: &str) -> bool {
         tool,
         "seatgeist.type_text"
             | "seatgeist.key_combo"
+            | "seatgeist.close_window"
             | "seatgeist.click_pointer"
             | "seatgeist.scroll_pointer"
     )
@@ -1107,7 +1120,7 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
                 })
                 .unwrap_or_else(|| "unknown".to_string());
             format!(
-                "{} {} ({}) protocol={} run={} build={}",
+                "{} {} ({}) protocol={} run={} build={} rss_mib={} peak_mib={}",
                 status.service,
                 status.status,
                 status.version,
@@ -1116,7 +1129,15 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
                     .run_id
                     .map(|run_id| run_id.to_string())
                     .unwrap_or_else(|| "unknown".to_string()),
-                build
+                build,
+                status
+                    .resident_memory_bytes
+                    .map(|bytes| bytes / (1024 * 1024))
+                    .map_or_else(|| "unknown".to_string(), |mib| mib.to_string()),
+                status
+                    .resident_memory_peak_bytes
+                    .map(|bytes| bytes / (1024 * 1024))
+                    .map_or_else(|| "unknown".to_string(), |mib| mib.to_string())
             )
         }
         DaemonResponse::Capabilities(capabilities) => {
@@ -1191,11 +1212,18 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status.path.display()
         ),
         DaemonResponse::KwinBridgeStatus(status) => format!(
-            "kwin bridge dbus={} window_resize={} window_move={} window_launch={} active_update_seen={} active_age_ms={} window_list_update_seen={} window_list_age_ms={} stale={} window_count={} installed={} enabled={}",
+            "kwin bridge dbus={} ownership_retries={} ownership_retry_in_ms={} ownership_error={} window_resize={} window_move={} window_launch={} window_close={} active_update_seen={} active_age_ms={} window_list_update_seen={} window_list_age_ms={} stale={} window_count={} installed={} enabled={}",
             status.dbus_service_registered,
+            status.ownership_retry_count,
+            status
+                .ownership_retry_in_ms
+                .map(|delay| delay.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            status.ownership_last_error.is_some(),
             status.window_resize_supported,
             status.window_move_supported,
             status.window_launch_supported,
+            status.window_close_supported,
             status.active_window_update_seen,
             status
                 .active_window_update_age_ms
@@ -1328,23 +1356,55 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
         ),
         DaemonResponse::CaptureSessionStatus(status) => compact_capture_session_status(status),
         DaemonResponse::CaptureFrame(frame) => format!(
-            "capture frame session={} revision={} sequence={} output={}x{} backend={} occlusion_possible={}",
+            "capture frame session={} revision={} sequence={} preview={}x{} source_pixels={}x{} map={:?}->{:?} extent={}x{} scale={:.6},{:.6} backend={} occlusion_possible={}",
             frame.session_id,
             frame.revision,
             frame.sequence,
             frame.screenshot.output_width,
             frame.screenshot.output_height,
+            frame.screenshot.source_width,
+            frame.screenshot.source_height,
+            frame.screenshot.transform.output_coordinate_space,
+            frame.screenshot.transform.source_coordinate_space,
+            frame
+                .screenshot
+                .transform
+                .source_extent_width
+                .unwrap_or(frame.screenshot.source_width),
+            frame
+                .screenshot
+                .transform
+                .source_extent_height
+                .unwrap_or(frame.screenshot.source_height),
+            frame.screenshot.transform.scale_x,
+            frame.screenshot.transform.scale_y,
             frame.screenshot.backend,
             frame.screenshot.occlusion_possible
         ),
         DaemonResponse::CaptureWait(result) => format!(
-            "capture wait session={} changed={} timed_out={} elapsed_ms={} revision={} sequence={} backend={} occlusion_possible={}",
+            "capture wait session={} changed={} timed_out={} elapsed_ms={} revision={} sequence={} preview={}x{} map={:?}->{:?} extent={}x{} backend={} occlusion_possible={}",
             result.frame.session_id,
             result.changed,
             result.timed_out,
             result.elapsed_ms,
             result.frame.revision,
             result.frame.sequence,
+            result.frame.screenshot.output_width,
+            result.frame.screenshot.output_height,
+            result.frame.screenshot.transform.output_coordinate_space,
+            result.frame.screenshot.transform.source_coordinate_space,
+            result
+                .frame
+                .screenshot
+                .transform
+                .source_extent_width
+                .unwrap_or(result.frame.screenshot.source_width),
+            result
+                .frame
+                .screenshot
+                .transform
+                .source_extent_height
+                .unwrap_or(result.frame.screenshot.source_height),
             result.frame.screenshot.backend,
             result.frame.screenshot.occlusion_possible
         ),
@@ -1438,8 +1498,14 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             text.backend
         ),
         DaemonResponse::AccessibilityQualityStatus(status) => format!(
-            "accessibility quality atspi={} target_events={} event_backend={} focused={} reliable={} nodes={} named={} actionable={} text={} generic={} flat={} fallback={}",
+            "accessibility quality atspi={} registries={} extra_registries={} target_events={} event_backend={} focused={} reliable={} nodes={} named={} actionable={} text={} generic={} flat={} fallback={}",
             status.atspi_available,
+            status
+                .registry_process_count
+                .map_or_else(|| "unknown".to_string(), |count| count.to_string()),
+            status
+                .extra_registry_process_count
+                .map_or_else(|| "unknown".to_string(), |count| count.to_string()),
             status.target_event_settle_available,
             status.event_backend,
             status.focused_node_present,
@@ -1648,7 +1714,7 @@ fn facade_act_schema() -> Value {
         with_semantic_guard_properties(vec![
             (
                 "action",
-                json!({"type": "string", "enum": ["focus_window", "move_window", "launch_window", "resize_window", "page_zoom", "type_text", "key_combo", "click_pointer", "scroll_pointer", "click_button", "set_text_field", "focus_text_field", "select_menu", "activate_tab", "activate_link", "toggle_check", "set_value", "select_item"], "description": "One logical action to execute."}),
+                json!({"type": "string", "enum": ["close_window", "move_window", "launch_window", "resize_window", "page_zoom", "type_text", "key_combo", "click_pointer", "scroll_pointer", "click_button", "set_text_field", "focus_text_field", "select_menu", "activate_tab", "activate_link", "toggle_check", "set_value", "select_item"], "description": "One logical action to execute. close_window requires the exact retained session and KWin window id."}),
             ),
             ("window_id", json!({"type": "string"})),
             ("desktop_entry", json!({"type": "string"})),
@@ -1663,7 +1729,7 @@ fn facade_act_schema() -> Value {
             ),
             (
                 "activation",
-                json!({"type": "string", "enum": ["preserve_focus", "activate"]}),
+                json!({"type": "string", "enum": ["preserve_focus"], "description": "MCP launches cannot activate the new window or change the physical user's focus."}),
             ),
             (
                 "timeout_ms",
@@ -1705,7 +1771,11 @@ fn facade_act_schema() -> Value {
             ("y", json!({"type": "number"})),
             (
                 "coordinate_space",
-                json!({"type": "string", "enum": ["physical_pixel", "logical_pixel", "window_local"]}),
+                json!({"type": "string", "enum": ["physical_pixel", "logical_pixel", "window_local", "capture_output"], "description": "Use capture_output with session_id and capture_revision for points measured on a retained snapshot preview; the daemon applies preview scaling and DPI."}),
+            ),
+            (
+                "capture_revision",
+                json!({"type": "string", "description": "Exact retained-frame revision required for capture_output pointer coordinates; stale revisions fail closed."}),
             ),
             (
                 "button",
@@ -2140,15 +2210,15 @@ fn expert_tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
-            "seatgeist.focus_window",
-            "Focus Window",
-            "Focus a listed KWin window by id. This is policy-gated control and usually requires explicit daemon approval mode.",
+            "seatgeist.close_window",
+            "Close Exact Window",
+            "Close exactly the KWin UUID pinned by a retained window session. This is always destructive policy, never uses an application shortcut, and confirms that exact UUID disappeared.",
             object_schema(
-                with_guard_properties(vec![(
+                with_raw_guard_properties(vec![(
                     "window_id",
-                    json!({"type": "string", "description": "KWin window id from seatgeist.list_windows."}),
+                    json!({"type": "string", "description": "Exact KWin window id returned when the retained session was opened."}),
                 )]),
-                vec!["window_id"],
+                vec!["window_id", "session_id"],
             ),
         ),
         tool(
@@ -2183,7 +2253,7 @@ fn expert_tool_definitions() -> Vec<Value> {
                     ),
                     (
                         "activation",
-                        json!({"type": "string", "enum": ["preserve_focus", "activate"], "default": "preserve_focus"}),
+                        json!({"type": "string", "enum": ["preserve_focus"], "default": "preserve_focus", "description": "MCP launches always preserve the physical user's active window."}),
                     ),
                     (
                         "timeout_ms",
@@ -2272,17 +2342,23 @@ fn expert_tool_definitions() -> Vec<Value> {
             "Key Combo",
             "Send a named evdev key combination through the configured input executor, such as Ctrl+L or Alt+F4. This is policy-gated keyboard control.",
             object_schema(
-                with_raw_guard_properties(vec![(
-                    "combo",
-                    json!({"type": "string", "description": "Key combination, such as Ctrl+L, Shift+F4, or Super+Space."}),
-                )]),
+                with_raw_guard_properties(vec![
+                    (
+                        "combo",
+                        json!({"type": "string", "description": "Non-destructive key combination, such as Ctrl+L or Super+Space. Close/quit shortcuts are rejected for retained independent-seat sessions."}),
+                    ),
+                    (
+                        "destructive",
+                        json!({"type": "boolean", "description": "Declare any shortcut that can close, quit, discard, overwrite, or lose state. Known close/quit combinations are classified automatically."}),
+                    ),
+                ]),
                 vec!["combo"],
             ),
         ),
         tool(
             "seatgeist.move_pointer",
             "Move Pointer",
-            "Move the pointer to an explicit coordinate. This is policy-gated pointer control; the daemon accepts physical_pixel, global logical_pixel, or guarded active-window window_local coordinates.",
+            "Move the pointer to an explicit coordinate. For coordinates read from an attached retained-session preview, use capture_output with that frame's session_id and revision so Seatgeist applies preview downscaling and desktop DPI safely.",
             object_schema(
                 with_raw_guard_properties(vec![
                     (
@@ -2295,7 +2371,11 @@ fn expert_tool_definitions() -> Vec<Value> {
                     ),
                     (
                         "coordinate_space",
-                        json!({"type": "string", "enum": ["physical_pixel", "logical_pixel", "window_local", "accessibility_node"], "description": "Coordinate space for x and y. Supported daemon spaces are physical_pixel, global logical_pixel, and window_local. window_local is relative to the active window and requires an active-window guard."}),
+                        json!({"type": "string", "enum": ["physical_pixel", "logical_pixel", "window_local", "capture_output"], "description": "Coordinate space for x and y. Use capture_output for pixel positions measured on a retained screenshot preview; it requires session_id and capture_revision and maps atomically to the source coordinate space."}),
+                    ),
+                    (
+                        "capture_revision",
+                        json!({"type": "string", "description": "Exact retained-frame revision required with capture_output coordinates. Rejects stale screenshot clicks."}),
                     ),
                 ]),
                 vec!["x", "y", "coordinate_space"],
@@ -2304,7 +2384,7 @@ fn expert_tool_definitions() -> Vec<Value> {
         tool(
             "seatgeist.click_pointer",
             "Click Pointer",
-            "Move the pointer to an explicit coordinate and click once or twice. This is policy-gated pointer control; the daemon accepts physical_pixel, global logical_pixel, or guarded active-window window_local coordinates.",
+            "Move the pointer and click. When clicking a point seen in an attached retained-session preview, use capture_output with that frame's session_id and revision; never copy preview pixels directly into window_local coordinates.",
             object_schema(
                 with_raw_guard_properties(vec![
                     (
@@ -2317,7 +2397,11 @@ fn expert_tool_definitions() -> Vec<Value> {
                     ),
                     (
                         "coordinate_space",
-                        json!({"type": "string", "enum": ["physical_pixel", "logical_pixel", "window_local", "accessibility_node"], "description": "Coordinate space for x and y. Supported daemon spaces are physical_pixel, global logical_pixel, and window_local. window_local is relative to the active window and requires an active-window guard."}),
+                        json!({"type": "string", "enum": ["physical_pixel", "logical_pixel", "window_local", "capture_output"], "description": "Coordinate space for x and y. capture_output maps preview pixels through the named frame transform and requires session_id plus capture_revision."}),
+                    ),
+                    (
+                        "capture_revision",
+                        json!({"type": "string", "description": "Exact retained-frame revision required with capture_output coordinates. Rejects stale screenshot clicks."}),
                     ),
                     (
                         "button",
@@ -2334,7 +2418,7 @@ fn expert_tool_definitions() -> Vec<Value> {
         tool(
             "seatgeist.drag_pointer",
             "Drag Pointer",
-            "Drag from one explicit coordinate to another by pressing, moving, and releasing a pointer button. This is policy-gated pointer control; the daemon accepts physical_pixel, global logical_pixel, or guarded active-window window_local coordinates.",
+            "Drag between explicit coordinates. Use capture_output with session_id and capture_revision when both endpoints were measured on a retained screenshot preview.",
             object_schema(
                 with_raw_guard_properties(vec![
                     (
@@ -2355,7 +2439,11 @@ fn expert_tool_definitions() -> Vec<Value> {
                     ),
                     (
                         "coordinate_space",
-                        json!({"type": "string", "enum": ["physical_pixel", "logical_pixel", "window_local", "accessibility_node"], "description": "Coordinate space for all coordinates. Supported daemon spaces are physical_pixel, global logical_pixel, and window_local. window_local is relative to the active window and requires an active-window guard."}),
+                        json!({"type": "string", "enum": ["physical_pixel", "logical_pixel", "window_local", "capture_output"], "description": "Coordinate space for both endpoints. capture_output maps preview pixels through the named frame transform and requires session_id plus capture_revision."}),
+                    ),
+                    (
+                        "capture_revision",
+                        json!({"type": "string", "description": "Exact retained-frame revision required with capture_output coordinates. Rejects stale screenshot drags."}),
                     ),
                     (
                         "button",
@@ -3622,6 +3710,52 @@ mod tests {
     }
 
     #[test]
+    fn user_preempted_agent_delivery_is_an_explicit_tool_error() {
+        let response = DaemonResponse::Action(Box::new(libseatgeist::ActionResult {
+            id: "00000000-0000-0000-0000-000000000000"
+                .parse()
+                .expect("nil action id parses"),
+            ok: false,
+            observation: Some(libseatgeist::Observation {
+                active_window: None,
+                target_window: None,
+                windows: Vec::new(),
+                monitors: Vec::new(),
+                focused_accessibility: None,
+                target_accessibility: None,
+                screenshot_path: None,
+                revision: Some("revision".to_string()),
+                issues: Vec::new(),
+                settle: Some(libseatgeist::ActionSettleResult {
+                    confirmation: libseatgeist::ActionConfirmation::UserPreempted,
+                    condition: ActionSettleCondition::None,
+                    backend: libseatgeist::ActionSettleBackend::DeliveryAck,
+                    target_scoped: true,
+                    event: Some("physical_user_input".to_string()),
+                    settled: false,
+                    timed_out: false,
+                    timeout_ms: 0,
+                    interval_ms: 0,
+                    samples: 1,
+                    elapsed_ms: 0,
+                    before_revision: None,
+                    after_revision: "revision".to_string(),
+                }),
+            }),
+            screenshot: None,
+            message: Some("target_delivery=delivered_but_unconfirmed".to_string()),
+        }));
+
+        let result = tool_result_from_daemon("seatgeist.click_pointer", &response, false);
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("compact text is present");
+        assert!(text.contains("confirmation=user_preempted"));
+        assert!(text.contains("event=physical_user_input"));
+    }
+
+    #[test]
     fn bounded_screenshot_result_attaches_native_mcp_image_content() {
         const ONE_PIXEL_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
         let path = temporary_test_path("native-image.png");
@@ -3842,7 +3976,7 @@ mod tests {
     fn action_tool_schemas_expose_post_action_controls() {
         let tools = tool_definitions(ToolProfile::All);
         for name in [
-            "seatgeist.focus_window",
+            "seatgeist.close_window",
             "seatgeist.type_text",
             "seatgeist.click_pointer",
             "seatgeist.click_button",
@@ -3911,6 +4045,8 @@ mod tests {
             "seatgeist.a11y_quality_status",
             &DaemonResponse::AccessibilityQualityStatus(AccessibilityQualityStatus {
                 atspi_available: true,
+                registry_process_count: Some(2),
+                extra_registry_process_count: Some(1),
                 target_event_settle_available: true,
                 event_backend: "atspi_registry".to_string(),
                 target_event_classes: vec![
@@ -4208,6 +4344,11 @@ mod tests {
         );
         assert!(
             tools
+                .iter()
+                .any(|tool| tool["name"] == "seatgeist.close_window")
+        );
+        assert!(
+            !tools
                 .iter()
                 .any(|tool| tool["name"] == "seatgeist.focus_window")
         );
@@ -4655,6 +4796,32 @@ mod tests {
             }) if session_id == "capture-1"
         ));
 
+        let preview_click = daemon_request_for_tool(
+            "seatgeist.act",
+            &json!({
+                "action": "click_pointer",
+                "x": 640,
+                "y": 200,
+                "coordinate_space": "capture_output",
+                "button": "left",
+                "session_id": "capture-1",
+                "capture_revision": "revision-7"
+            }),
+        )
+        .expect("raw facade click accepts an exact retained preview revision");
+        assert!(matches!(
+            preview_click,
+            DaemonRequest::ClickPointer(ClickPointerRequest {
+                point: Point {
+                    space: CoordinateSpace::CaptureOutput,
+                    ..
+                },
+                capture_revision: Some(ref revision),
+                session_id: Some(ref session_id),
+                ..
+            }) if revision == "revision-7" && session_id == "capture-1"
+        ));
+
         let err = daemon_request_for_tool(
             "seatgeist.act",
             &json!({
@@ -4676,7 +4843,10 @@ mod tests {
             }),
         )
         .expect_err("semantic facade action must not reinterpret sticky raw focus");
-        assert!(err.to_string().contains("only for raw keyboard or pointer"));
+        assert!(
+            err.to_string()
+                .contains("sticky raw actions and exact close_window")
+        );
 
         let err = daemon_request_for_tool(
             "seatgeist.click_button",
@@ -4962,18 +5132,36 @@ mod tests {
     }
 
     #[test]
-    fn maps_focus_window_arguments() {
+    fn maps_exact_close_window_arguments() {
         let request = daemon_request_for_tool(
-            "seatgeist.focus_window",
-            &json!({"window_id": "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}"}),
+            "seatgeist.close_window",
+            &json!({
+                "window_id": "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}",
+                "session_id": "kwin-window-1"
+            }),
         )
-        .expect("focus args map");
+        .expect("close args map");
         assert_eq!(
             request,
-            DaemonRequest::FocusWindow(FocusWindowRequest {
+            DaemonRequest::CloseWindow(CloseWindowRequest {
                 window_id: "{96d3c5da-75ec-4a2a-b75f-05c4c077153b}".to_string(),
+                session_id: Some("kwin-window-1".to_string()),
                 guard: None,
             })
+        );
+
+        let error = daemon_request_for_tool(
+            "seatgeist.act",
+            &json!({
+                "action": "close_window",
+                "window_id": "window-1"
+            }),
+        )
+        .expect_err("core close requires retained identity");
+        assert!(
+            error
+                .to_string()
+                .contains("requires the exact retained session_id")
         );
     }
 
@@ -5005,6 +5193,16 @@ mod tests {
                 guard: None,
             })
         );
+        let error = daemon_request_for_tool(
+            "seatgeist.launch_window",
+            &json!({
+                "desktop_entry": "org.kde.kcalc",
+                "anchor": "center",
+                "activation": "activate"
+            }),
+        )
+        .expect_err("MCP launch cannot steal workspace focus");
+        assert!(error.to_string().contains("cannot activate"));
 
         let moved = daemon_request_for_tool(
             "seatgeist.move_window",
@@ -5115,10 +5313,24 @@ mod tests {
             key_combo,
             DaemonRequest::KeyCombo(KeyComboRequest {
                 combo: "Ctrl+L".to_string(),
+                destructive: false,
                 guard: None,
                 session_id: None,
             })
         );
+        let destructive = daemon_request_for_tool(
+            "seatgeist.key_combo",
+            &json!({"combo": "Ctrl+Shift+W", "destructive": true, "session_id": "capture-1"}),
+        )
+        .expect("destructive declaration reaches daemon policy");
+        assert!(matches!(
+            destructive,
+            DaemonRequest::KeyCombo(KeyComboRequest {
+                destructive: true,
+                session_id: Some(ref session_id),
+                ..
+            }) if session_id == "capture-1"
+        ));
     }
 
     #[test]
@@ -5141,6 +5353,7 @@ mod tests {
                     y: 2160.0,
                     space: CoordinateSpace::PhysicalPixel,
                 },
+                capture_revision: None,
                 guard: Some(ActiveWindowGuard {
                     desktop_revision: None,
                     expected_window_id: None,
@@ -5156,9 +5369,11 @@ mod tests {
             &json!({
                 "x": 100.0,
                 "y": 200.0,
-                "coordinate_space": "physical_pixel",
+                "coordinate_space": "capture_output",
                 "button": "left",
-                "clicks": 2
+                "clicks": 2,
+                "session_id": "capture-1",
+                "capture_revision": "revision-7"
             }),
         )
         .expect("click pointer maps");
@@ -5168,12 +5383,13 @@ mod tests {
                 point: Point {
                     x: 100.0,
                     y: 200.0,
-                    space: CoordinateSpace::PhysicalPixel,
+                    space: CoordinateSpace::CaptureOutput,
                 },
                 button: PointerButton::Left,
                 clicks: 2,
+                capture_revision: Some("revision-7".to_string()),
                 guard: None,
-                session_id: None,
+                session_id: Some("capture-1".to_string()),
             })
         );
 
@@ -5206,6 +5422,7 @@ mod tests {
                 },
                 button: PointerButton::Right,
                 duration_ms: 500,
+                capture_revision: None,
                 guard: Some(ActiveWindowGuard {
                     desktop_revision: None,
                     expected_window_id: None,
@@ -6187,7 +6404,9 @@ mod tests {
             output_height: 900,
             transform: ScreenshotTransform {
                 source_coordinate_space: CoordinateSpace::PhysicalPixel,
-                output_coordinate_space: CoordinateSpace::PhysicalPixel,
+                output_coordinate_space: CoordinateSpace::CaptureOutput,
+                source_extent_width: Some(7680),
+                source_extent_height: Some(4320),
                 source_origin_x: 0,
                 source_origin_y: 0,
                 scale_x: 1600.0 / 7680.0,

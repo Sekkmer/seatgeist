@@ -10,19 +10,21 @@ use std::{
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use libseatgeist::{CoordinateSpace, Point, PointerButton, SeatgeistError, WindowInfo};
-use seatgeist_backend::{TargetedInputBackend, TargetedInputDelivery};
+use seatgeist_backend::{TargetedInputBackend, TargetedInputContext, TargetedInputDelivery};
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 use uuid::Uuid;
 
 pub(crate) const KWIN_AGENT_SEAT_BACKEND: &str = "kwin_agent_seat_v1";
 const ACTION_TIMEOUT: Duration = Duration::from_secs(3);
-const BACKEND_HEARTBEAT_TTL: Duration = Duration::from_secs(1);
+const ACTION_LONG_POLL_TIMEOUT: Duration = Duration::from_secs(2);
+const BACKEND_HEARTBEAT_TTL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct KwinAgentSeatBackend {
     registered: Arc<AtomicBool>,
     inner: Arc<Mutex<AgentSeatState>>,
+    wake: Arc<Notify>,
 }
 
 #[derive(Debug, Default)]
@@ -36,6 +38,7 @@ struct AgentSeatState {
 #[derive(Debug)]
 struct PendingAction {
     id: Uuid,
+    window_id: String,
     payload: String,
 }
 
@@ -51,6 +54,7 @@ struct AgentSeatActionResult {
 struct KeyComboAction<'a> {
     id: Uuid,
     action: &'static str,
+    lane_id: &'a str,
     window_id: &'a str,
     keycodes: &'a [u16],
 }
@@ -59,6 +63,7 @@ struct KeyComboAction<'a> {
 struct KeySequenceAction<'a> {
     id: Uuid,
     action: &'static str,
+    lane_id: &'a str,
     window_id: &'a str,
     chords: &'a [Vec<u16>],
 }
@@ -67,6 +72,7 @@ struct KeySequenceAction<'a> {
 struct PointerMoveAction<'a> {
     id: Uuid,
     action: &'static str,
+    lane_id: &'a str,
     window_id: &'a str,
     x: f64,
     y: f64,
@@ -76,6 +82,7 @@ struct PointerMoveAction<'a> {
 struct PointerClickAction<'a> {
     id: Uuid,
     action: &'static str,
+    lane_id: &'a str,
     window_id: &'a str,
     x: f64,
     y: f64,
@@ -87,6 +94,7 @@ struct PointerClickAction<'a> {
 struct PointerDragAction<'a> {
     id: Uuid,
     action: &'static str,
+    lane_id: &'a str,
     window_id: &'a str,
     from_x: f64,
     from_y: f64,
@@ -99,6 +107,7 @@ struct PointerDragAction<'a> {
 struct PointerScrollAction<'a> {
     id: Uuid,
     action: &'static str,
+    lane_id: &'a str,
     window_id: &'a str,
     vertical: i32,
     horizontal: i32,
@@ -135,6 +144,16 @@ impl KwinAgentSeatBackend {
             .map_or_else(String::new, |action| action.payload))
     }
 
+    pub(crate) async fn take_wait(&self, caller: &str) -> Result<String> {
+        let notified = self.wake.notified();
+        let payload = self.take(caller)?;
+        if !payload.is_empty() {
+            return Ok(payload);
+        }
+        let _ = tokio::time::timeout(ACTION_LONG_POLL_TIMEOUT, notified).await;
+        self.take(caller)
+    }
+
     pub(crate) fn complete(&self, caller: &str, payload: &str) -> Result<()> {
         let result: AgentSeatActionResult =
             serde_json::from_str(payload).context("parse KWin agent-seat completion")?;
@@ -155,6 +174,7 @@ impl KwinAgentSeatBackend {
     async fn submit<T: Serialize>(
         &self,
         id: Uuid,
+        window_id: &str,
         action: &T,
     ) -> seatgeist_backend::Result<TargetedInputDelivery> {
         if !self.ready() {
@@ -168,9 +188,14 @@ impl KwinAgentSeatBackend {
             let mut state = self.inner.lock().map_err(|_| {
                 backend_error(anyhow::anyhow!("KWin agent-seat queue lock is poisoned"))
             })?;
-            state.pending.push_back(PendingAction { id, payload });
+            state.pending.push_back(PendingAction {
+                id,
+                window_id: window_id.to_string(),
+                payload,
+            });
             state.waiters.insert(id, sender);
         }
+        self.wake.notify_one();
         let result = match tokio::time::timeout(ACTION_TIMEOUT, receiver).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => {
@@ -213,6 +238,32 @@ impl KwinAgentSeatBackend {
             state.waiters.remove(&id);
         }
     }
+
+    pub(crate) fn cancel_pending_for_target(&self, window_id: &str) -> usize {
+        let Ok(mut state) = self.inner.lock() else {
+            return 0;
+        };
+        let cancelled = state
+            .pending
+            .iter()
+            .filter(|action| action.window_id == window_id)
+            .map(|action| action.id)
+            .collect::<Vec<_>>();
+        state.pending.retain(|action| action.window_id != window_id);
+        for id in &cancelled {
+            if let Some(sender) = state.waiters.remove(id) {
+                let _ = sender.send(AgentSeatActionResult {
+                    id: *id,
+                    ok: false,
+                    backend: Some(KWIN_AGENT_SEAT_BACKEND.to_string()),
+                    error: Some(
+                        "agent target received physical user input before delivery".to_string(),
+                    ),
+                });
+            }
+        }
+        cancelled.len()
+    }
 }
 
 fn require_registered_caller(state: &AgentSeatState, caller: &str) -> Result<()> {
@@ -240,9 +291,11 @@ impl TargetedInputBackend for KwinAgentSeatBackend {
 
     async fn key_combo(
         &self,
+        context: &TargetedInputContext,
         target: &WindowInfo,
         keycodes: &[u16],
     ) -> seatgeist_backend::Result<TargetedInputDelivery> {
+        validate_context(context)?;
         if keycodes.is_empty() || keycodes.len() > 8 {
             return Err(backend_error(anyhow::anyhow!(
                 "agent-seat key combo must contain between 1 and 8 keys"
@@ -251,9 +304,11 @@ impl TargetedInputBackend for KwinAgentSeatBackend {
         let id = Uuid::new_v4();
         self.submit(
             id,
+            &target.id,
             &KeyComboAction {
                 id,
                 action: "key_combo",
+                lane_id: &context.lane_id,
                 window_id: &target.id,
                 keycodes,
             },
@@ -263,9 +318,11 @@ impl TargetedInputBackend for KwinAgentSeatBackend {
 
     async fn key_sequence(
         &self,
+        context: &TargetedInputContext,
         target: &WindowInfo,
         chords: &[Vec<u16>],
     ) -> seatgeist_backend::Result<TargetedInputDelivery> {
+        validate_context(context)?;
         if chords.is_empty()
             || chords.len() > 8192
             || chords
@@ -279,9 +336,11 @@ impl TargetedInputBackend for KwinAgentSeatBackend {
         let id = Uuid::new_v4();
         self.submit(
             id,
+            &target.id,
             &KeySequenceAction {
                 id,
                 action: "key_sequence",
+                lane_id: &context.lane_id,
                 window_id: &target.id,
                 chords,
             },
@@ -291,16 +350,20 @@ impl TargetedInputBackend for KwinAgentSeatBackend {
 
     async fn move_pointer(
         &self,
+        context: &TargetedInputContext,
         target: &WindowInfo,
         point: Point,
     ) -> seatgeist_backend::Result<TargetedInputDelivery> {
+        validate_context(context)?;
         validate_window_local(point)?;
         let id = Uuid::new_v4();
         self.submit(
             id,
+            &target.id,
             &PointerMoveAction {
                 id,
                 action: "pointer_move",
+                lane_id: &context.lane_id,
                 window_id: &target.id,
                 x: point.x,
                 y: point.y,
@@ -311,18 +374,22 @@ impl TargetedInputBackend for KwinAgentSeatBackend {
 
     async fn click(
         &self,
+        context: &TargetedInputContext,
         target: &WindowInfo,
         point: Point,
         button: PointerButton,
         clicks: u8,
     ) -> seatgeist_backend::Result<TargetedInputDelivery> {
+        validate_context(context)?;
         validate_window_local(point)?;
         let id = Uuid::new_v4();
         self.submit(
             id,
+            &target.id,
             &PointerClickAction {
                 id,
                 action: "pointer_click",
+                lane_id: &context.lane_id,
                 window_id: &target.id,
                 x: point.x,
                 y: point.y,
@@ -335,19 +402,23 @@ impl TargetedInputBackend for KwinAgentSeatBackend {
 
     async fn drag(
         &self,
+        context: &TargetedInputContext,
         target: &WindowInfo,
         from: Point,
         to: Point,
         button: PointerButton,
     ) -> seatgeist_backend::Result<TargetedInputDelivery> {
+        validate_context(context)?;
         validate_window_local(from)?;
         validate_window_local(to)?;
         let id = Uuid::new_v4();
         self.submit(
             id,
+            &target.id,
             &PointerDragAction {
                 id,
                 action: "pointer_drag",
+                lane_id: &context.lane_id,
                 window_id: &target.id,
                 from_x: from.x,
                 from_y: from.y,
@@ -361,16 +432,20 @@ impl TargetedInputBackend for KwinAgentSeatBackend {
 
     async fn scroll(
         &self,
+        context: &TargetedInputContext,
         target: &WindowInfo,
         vertical: i32,
         horizontal: i32,
     ) -> seatgeist_backend::Result<TargetedInputDelivery> {
+        validate_context(context)?;
         let id = Uuid::new_v4();
         self.submit(
             id,
+            &target.id,
             &PointerScrollAction {
                 id,
                 action: "pointer_scroll",
+                lane_id: &context.lane_id,
                 window_id: &target.id,
                 vertical,
                 horizontal,
@@ -378,6 +453,13 @@ impl TargetedInputBackend for KwinAgentSeatBackend {
         )
         .await
     }
+}
+
+fn validate_context(context: &TargetedInputContext) -> seatgeist_backend::Result<()> {
+    Uuid::parse_str(&context.lane_id).map_err(|_| {
+        SeatgeistError::InvalidRequest("agent-seat lane id must be an opaque UUID".to_string())
+    })?;
+    Ok(())
 }
 
 fn validate_window_local(point: Point) -> seatgeist_backend::Result<()> {
@@ -421,6 +503,12 @@ mod tests {
         }
     }
 
+    fn context() -> TargetedInputContext {
+        TargetedInputContext {
+            lane_id: "0194e9f8-1910-7e24-b5bd-52d184b6427f".to_string(),
+        }
+    }
+
     #[tokio::test]
     async fn key_combo_round_trips_through_plugin_pull_queue() {
         let backend = KwinAgentSeatBackend::default();
@@ -437,15 +525,19 @@ mod tests {
         let sender = backend.clone();
         let action = tokio::spawn(async move {
             sender
-                .key_combo(&target(), &[29, 30])
+                .key_combo(&context(), &target(), &[29, 30])
                 .await
                 .expect("action completes")
         });
 
         tokio::task::yield_now().await;
-        let payload = backend.take("kwin-owner").expect("queue can be read");
+        let payload = backend
+            .take_wait("kwin-owner")
+            .await
+            .expect("long-poll queue wakes for the action");
         let request: serde_json::Value = serde_json::from_str(&payload).expect("request is JSON");
         assert_eq!(request["action"], "key_combo");
+        assert_eq!(request["lane_id"], context().lane_id);
         assert_eq!(request["window_id"], target().id);
         assert_eq!(request["keycodes"], serde_json::json!([29, 30]));
         assert!(
@@ -492,6 +584,7 @@ mod tests {
                     guard: None,
                     session_id: Some("capture-1".to_string()),
                 },
+                &context(),
                 &target(),
                 &sender,
             )
@@ -532,7 +625,7 @@ mod tests {
     async fn actions_fail_closed_until_plugin_registers() {
         let backend = KwinAgentSeatBackend::default();
         let error = backend
-            .key_combo(&target(), &[28])
+            .key_combo(&context(), &target(), &[28])
             .await
             .expect_err("unregistered backend fails");
         assert!(error.to_string().contains("plugin is not registered"));
@@ -546,6 +639,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn physical_activity_cancels_only_queued_actions_for_that_window() {
+        let backend = KwinAgentSeatBackend::default();
+        backend
+            .register(KWIN_AGENT_SEAT_BACKEND, "kwin-owner")
+            .expect("backend registers");
+        let sender = backend.clone();
+        let action = tokio::spawn(async move {
+            sender
+                .key_combo(&context(), &target(), &[28])
+                .await
+                .expect_err("same-window user activity cancels queued input")
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(backend.cancel_pending_for_target("another-window"), 0);
+        assert_eq!(backend.cancel_pending_for_target(&target().id), 1);
+        let error = action.await.expect("task joins");
+        assert!(
+            error
+                .to_string()
+                .contains("physical user input before delivery")
+        );
+        assert!(
+            backend
+                .take("kwin-owner")
+                .expect("queue remains readable")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn pointer_actions_require_window_local_coordinates() {
         let backend = KwinAgentSeatBackend::default();
         backend
@@ -553,6 +676,7 @@ mod tests {
             .expect("backend registers");
         let error = backend
             .move_pointer(
+                &context(),
                 &target(),
                 Point {
                     x: 10.0,

@@ -641,7 +641,7 @@ require_focus_guard = false
             "node_id": "invalid-atspi-node",
             "offset": 0
         }),
-        "accessibility_unavailable",
+        "validation",
         "invalid AT-SPI node id",
     )?;
 

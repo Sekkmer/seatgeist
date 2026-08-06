@@ -1,6 +1,6 @@
 {
   "name": "seatgeist",
-  "version": "0.1.0+codex.20260718000211",
+  "version": "0.1.0+codex.20260806211948",
   "description": "KDE Plasma desktop-control substrate for Codex CLI via MCP, skills, hooks, and a local daemon.",
   "author": {
     "name": "Sekkmer",

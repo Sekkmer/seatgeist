@@ -19,15 +19,15 @@ use libseatgeist::{
     AccessibilitySetSelectionRequest, AccessibilitySetTextRequest,
     AccessibilityTextAttributesRequest, ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard,
     ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest,
-    CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS,
-    DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
-    DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonClientIdentity, DaemonRequest, DaemonRequestEnvelope,
-    DaemonResponse, DragPointerRequest, FocusTextFieldRequest, FocusWindowRequest,
-    FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest, LaunchWindowRequest,
-    MovePointerRequest, MoveWindowRequest, ObserveRequest, PageZoomOperation, PageZoomRequest,
-    Point, PointerButton, PortalScreenshotTarget, RemoteDesktopPersistMode,
-    RemoteDesktopSessionProbeRequest, ReplayTrace, ResizeWindowRequest, SafetyClass,
-    ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest,
+    CloseWindowRequest, CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES,
+    DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
+    DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonClientIdentity,
+    DaemonRequest, DaemonRequestEnvelope, DaemonResponse, DragPointerRequest,
+    FocusTextFieldRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
+    KeyComboRequest, LaunchWindowRequest, MovePointerRequest, MoveWindowRequest, ObserveRequest,
+    PageZoomOperation, PageZoomRequest, Point, PointerButton, PortalScreenshotTarget,
+    RemoteDesktopPersistMode, RemoteDesktopSessionProbeRequest, ReplayTrace, ResizeWindowRequest,
+    SafetyClass, ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest,
     SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest,
     ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest, WindowActivationMode,
     WindowPlacementAnchor, default_approval_file_path, default_screenshot_output_path,
@@ -126,6 +126,18 @@ enum Command {
     Focus {
         #[arg(long)]
         window: String,
+        #[arg(long)]
+        expected_active_window: Option<String>,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
+    Close {
+        #[arg(long)]
+        window: String,
+        #[arg(long)]
+        session_id: Option<String>,
         #[arg(long)]
         expected_active_window: Option<String>,
         #[arg(long)]
@@ -330,6 +342,7 @@ enum ClipboardCommand {
 enum InputCommand {
     Status,
     Backends,
+    UinputStatus,
     PointerCalibration,
     RemoteDesktopProbe {
         #[arg(long)]
@@ -403,6 +416,8 @@ enum InputCommand {
         #[arg(long)]
         session_id: Option<String>,
         #[arg(long)]
+        capture_revision: Option<String>,
+        #[arg(long)]
         x: f64,
         #[arg(long)]
         y: f64,
@@ -418,6 +433,8 @@ enum InputCommand {
     ClickPointer {
         #[arg(long)]
         session_id: Option<String>,
+        #[arg(long)]
+        capture_revision: Option<String>,
         #[arg(long)]
         x: f64,
         #[arg(long)]
@@ -438,6 +455,8 @@ enum InputCommand {
     DragPointer {
         #[arg(long)]
         session_id: Option<String>,
+        #[arg(long)]
+        capture_revision: Option<String>,
         #[arg(long)]
         from_x: f64,
         #[arg(long)]
@@ -490,6 +509,8 @@ enum InputCommand {
         session_id: Option<String>,
         #[arg(value_name = "COMBO")]
         combo: String,
+        #[arg(long)]
+        destructive: bool,
         #[arg(long)]
         expected_active_window: Option<String>,
         #[arg(long)]
@@ -995,6 +1016,24 @@ fn main() -> Result<()> {
                 ),
             }),
         )?,
+        Command::Close {
+            window,
+            session_id,
+            expected_active_window,
+            expected_active_app,
+            active_title_contains,
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::CloseWindow(CloseWindowRequest {
+                window_id: window,
+                session_id,
+                guard: active_window_guard(
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                ),
+            }),
+        )?,
         Command::Resize {
             window,
             width,
@@ -1102,11 +1141,11 @@ fn main() -> Result<()> {
             DaemonRequest::ClipboardSet(ClipboardSetRequest { text }),
         )?,
         Command::Input {
-            command: InputCommand::Status,
-        } => print_daemon_response(&socket, DaemonRequest::UinputStatus)?,
-        Command::Input {
-            command: InputCommand::Backends,
+            command: InputCommand::Status | InputCommand::Backends,
         } => print_daemon_response(&socket, DaemonRequest::InputBackendStatus)?,
+        Command::Input {
+            command: InputCommand::UinputStatus,
+        } => print_daemon_response(&socket, DaemonRequest::UinputStatus)?,
         Command::Input {
             command: InputCommand::PointerCalibration,
         } => print_daemon_response(&socket, DaemonRequest::PointerCalibration)?,
@@ -1231,6 +1270,7 @@ fn main() -> Result<()> {
             command:
                 InputCommand::MovePointer {
                     session_id,
+                    capture_revision,
                     x,
                     y,
                     coordinate_space,
@@ -1246,6 +1286,7 @@ fn main() -> Result<()> {
                     y,
                     space: coordinate_space,
                 },
+                capture_revision,
                 guard: active_window_guard(
                     expected_active_window,
                     expected_active_app,
@@ -1258,6 +1299,7 @@ fn main() -> Result<()> {
             command:
                 InputCommand::ClickPointer {
                     session_id,
+                    capture_revision,
                     x,
                     y,
                     coordinate_space,
@@ -1277,6 +1319,7 @@ fn main() -> Result<()> {
                 },
                 button,
                 clicks,
+                capture_revision,
                 guard: active_window_guard(
                     expected_active_window,
                     expected_active_app,
@@ -1289,6 +1332,7 @@ fn main() -> Result<()> {
             command:
                 InputCommand::DragPointer {
                     session_id,
+                    capture_revision,
                     from_x,
                     from_y,
                     to_x,
@@ -1315,6 +1359,7 @@ fn main() -> Result<()> {
                 },
                 button,
                 duration_ms,
+                capture_revision,
                 guard: active_window_guard(
                     expected_active_window,
                     expected_active_app,
@@ -1372,6 +1417,7 @@ fn main() -> Result<()> {
                 InputCommand::KeyCombo {
                     session_id,
                     combo,
+                    destructive,
                     expected_active_window,
                     expected_active_app,
                     active_title_contains,
@@ -1380,6 +1426,7 @@ fn main() -> Result<()> {
             &socket,
             DaemonRequest::KeyCombo(KeyComboRequest {
                 combo,
+                destructive,
                 guard: active_window_guard(
                     expected_active_window,
                     expected_active_app,

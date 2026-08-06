@@ -126,6 +126,7 @@ fn expected_action_window_id(request: &DaemonRequest) -> Option<&str> {
         .map(|guard| guard.expected_window_id.as_str())
         .or_else(|| match request {
             DaemonRequest::FocusWindow(request) => Some(request.window_id.as_str()),
+            DaemonRequest::CloseWindow(request) => Some(request.window_id.as_str()),
             DaemonRequest::ResizeWindow(request) => Some(request.window_id.as_str()),
             _ => super::active_window_guard_for_request(request)
                 .and_then(|guard| guard.expected_window_id.as_deref()),

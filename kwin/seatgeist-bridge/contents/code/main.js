@@ -4,8 +4,8 @@ const INTERFACE = "org.seatgeist.KWinBridge1";
 const DEFAULT_SNAPSHOT_INTERVAL_MS = 2000;
 const MIN_SNAPSHOT_INTERVAL_MS = 250;
 const MAX_SNAPSHOT_INTERVAL_MS = 60000;
-const ACTION_POLL_INTERVAL_MS = 50;
-const ACTION_POLL_STALE_MS = 1000;
+const ACTION_POLL_INTERVAL_MS = 1000;
+const ACTION_POLL_STALE_MS = 5000;
 const ACTION_SETTLE_MS = 250;
 const LAUNCH_APPLICATION_SETTLE_MS = 750;
 const MAX_LAUNCH_TIMEOUT_MS = 30000;
@@ -89,7 +89,7 @@ function publishWindows() {
 }
 
 function publishSnapshot() {
-  callDBus(SERVICE, PATH, INTERFACE, "RegisterActionCapabilities", "resize_window,move_window,launch_window");
+  callDBus(SERVICE, PATH, INTERFACE, "RegisterActionCapabilities", "resize_window,move_window,launch_window,close_window");
   publishActiveWindow(workspace.activeWindow);
   publishWindows();
 }
@@ -202,17 +202,20 @@ function finishLaunchIntent(intent, window) {
       const actual = geometryFor(window);
       const previous = findWindowById(intent.previous_window_id);
       const focusPreserved =
-        intent.activation !== "preserve_focus" ||
         (!intent.previous_window_id && !workspace.activeWindow) ||
         (previous && windowId(workspace.activeWindow) === intent.previous_window_id);
+      const activationConfirmed =
+        intent.activation === "preserve_focus"
+          ? focusPreserved
+          : windowId(workspace.activeWindow) === windowId(window);
       const placementConfirmed =
         Math.abs(actual.x - expected.x) <= 1 &&
         Math.abs(actual.y - expected.y) <= 1;
       completeAction({
         id: intent.id,
-        ok: placementConfirmed && focusPreserved,
+        ok: placementConfirmed && activationConfirmed,
         error: placementConfirmed
-          ? (focusPreserved ? null : "focus was not preserved")
+          ? (activationConfirmed ? null : "requested focus policy was not retained")
           : "KWin did not retain the anchored window position",
         geometry: actual,
         window_id: windowId(window),
@@ -406,6 +409,39 @@ function handleMoveWindow(action) {
   completeMoveAfterSettle(action, window, current, x, y);
 }
 
+function handleCloseWindow(action) {
+  const requestedId = maybeString(action.window_id);
+  const window = findWindowById(requestedId);
+  if (!window) {
+    completeAction({ id: action.id, ok: false, error: "window not found" });
+    return;
+  }
+  if (window.specialWindow || typeof window.closeWindow !== "function") {
+    completeAction({ id: action.id, ok: false, error: "window does not support exact compositor close" });
+    return;
+  }
+  if (typeof QTimer === "undefined") {
+    completeAction({ id: action.id, ok: false, error: "QTimer is unavailable for close verification" });
+    return;
+  }
+  window.closeWindow();
+  var settleTimer = new QTimer();
+  settleTimer.timeout.connect(function () {
+    settleTimer.stop();
+    if (findWindowById(requestedId)) {
+      completeAction({
+        id: action.id,
+        ok: false,
+        error: "exact target window remained open after compositor close request",
+      });
+      return;
+    }
+    completeAction({ id: action.id, ok: true, window_id: requestedId });
+    publishSnapshot();
+  });
+  settleTimer.start(ACTION_SETTLE_MS);
+}
+
 function handleActionPayload(payload) {
   if (!payload) {
     return;
@@ -425,6 +461,10 @@ function handleActionPayload(payload) {
   }
   if (action.action === "move_window") {
     handleMoveWindow(action);
+    return;
+  }
+  if (action.action === "close_window") {
+    handleCloseWindow(action);
     return;
   }
   if (action.action === "launch_window") {
@@ -464,7 +504,13 @@ function startSnapshotHeartbeat() {
 var actionTimer = null;
 var actionPollInFlight = false;
 var actionPollStartedAtMs = 0;
+var actionPollRearmPending = false;
 function pollPendingAction() {
+  if (actionPollRearmPending && actionTimer !== null) {
+    actionPollRearmPending = false;
+    actionTimer.stop();
+    actionTimer.start(ACTION_POLL_INTERVAL_MS);
+  }
   pruneLaunchIntents();
   const now = Date.now();
   if (actionPollInFlight && now - actionPollStartedAtMs < ACTION_POLL_STALE_MS) {
@@ -475,7 +521,18 @@ function pollPendingAction() {
   callDBus(SERVICE, PATH, INTERFACE, "TakePendingAction", function (payload) {
     actionPollInFlight = false;
     actionPollStartedAtMs = 0;
+    if (typeof payload !== "string") {
+      return;
+    }
     handleActionPayload(payload);
+    // TakePendingAction is a daemon-side long poll. A successful return opens
+    // the next wait on the next event-loop turn. Reusing the watchdog timer
+    // avoids synchronous callback recursion in script hosts and test shims.
+    actionPollRearmPending = true;
+    if (actionTimer !== null) {
+      actionTimer.stop();
+      actionTimer.start(1);
+    }
   });
 }
 

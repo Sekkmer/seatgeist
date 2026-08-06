@@ -233,6 +233,8 @@ async fn capture_kwin_window(
     let rgba = decode_argb32_premultiplied(&bytes, &metadata)?;
     write_window_png(&rgba, &output, request.max_edge)?;
     let (output_width, output_height) = image::image_dimensions(&output)?;
+    let logical_width = logical_capture_extent(metadata.width, metadata.scale);
+    let logical_height = logical_capture_extent(metadata.height, metadata.scale);
     Ok(ScreenshotInfo {
         path: output,
         backend: "kwin_screenshot2_window".to_string(),
@@ -243,15 +245,23 @@ async fn capture_kwin_window(
         output_height,
         transform: ScreenshotTransform {
             source_coordinate_space: CoordinateSpace::WindowLocal,
-            output_coordinate_space: CoordinateSpace::WindowLocal,
+            output_coordinate_space: CoordinateSpace::CaptureOutput,
+            source_extent_width: Some(logical_width),
+            source_extent_height: Some(logical_height),
             source_origin_x: 0,
             source_origin_y: 0,
-            scale_x: f64::from(output_width) / f64::from(metadata.width.max(1)),
-            scale_y: f64::from(output_height) / f64::from(metadata.height.max(1)),
+            scale_x: f64::from(output_width) / f64::from(logical_width),
+            scale_y: f64::from(output_height) / f64::from(logical_height),
         },
         coordinate_space: CoordinateSpace::WindowLocal,
         monitors: Vec::new(),
     })
+}
+
+fn logical_capture_extent(native_extent: u32, scale: f64) -> u32 {
+    (f64::from(native_extent) / scale)
+        .round()
+        .clamp(1.0, f64::from(u32::MAX)) as u32
 }
 
 fn decode_metadata(results: &HashMap<String, OwnedValue>) -> anyhow::Result<RawCaptureMetadata> {
@@ -579,5 +589,12 @@ mod tests {
         assert!(decode_argb32_premultiplied(&[0; 4], &metadata).is_err());
         metadata.format = KWIN_ARGB32_PREMULTIPLIED;
         assert!(decode_argb32_premultiplied(&[0; 3], &metadata).is_err());
+    }
+
+    #[test]
+    fn native_capture_extent_maps_fractional_dpi_to_logical_surface() {
+        assert_eq!(logical_capture_extent(1_920, 1.5), 1_280);
+        assert_eq!(logical_capture_extent(1_620, 1.5), 1_080);
+        assert_eq!(logical_capture_extent(1_279, 1.25), 1_023);
     }
 }
