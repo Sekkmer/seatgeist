@@ -36,6 +36,7 @@ impl DaemonFixture {
             .arg(&journal)
             .arg("--panic-stop-file")
             .arg(&panic_stop)
+            .env("HOME", &root)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -79,6 +80,7 @@ impl DaemonFixture {
         command
             .arg("--config")
             .arg(&config)
+            .env("HOME", &root)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         for (key, value) in env_overrides {
