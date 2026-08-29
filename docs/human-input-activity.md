@@ -70,12 +70,25 @@ export a global Qt plugin path, because Qt warns that a system-wide
 `QT_PLUGIN_PATH` can interfere with other Qt installations. Remove both files
 with `make uninstall-kwin-activity-user`.
 
-The rootless installer also enables a user-systemd ABI watcher. It checks once
-when Plasma starts and watches `/usr/include/kwin/config-kwin.h` while the
-session is running. If the exact ABI embedded in the installed plugin no longer
-matches KWin, it sends one desktop notification per boot with the rebuild
-command. The check never rebuilds code as root, restarts KWin, or blocks Plasma
-startup. Inspect it without notifying with:
+The rootless installer enables a cheap user-systemd path watcher and timer in
+the graphical session. The checker service itself is deliberately not enabled
+in `plasma-core.target`, `plasma-workspace.target`, or
+`graphical-session.target`, so it cannot hold login readiness. The path watcher
+reacts when pacman or an AUR helper changes
+`/usr/include/kwin/config-kwin.h`; this reports a mismatch in the still-running
+session, before logout or reboot. A two-minute initial timer check and
+five-minute retry provide a fallback if a package transaction replaces the
+header in a way the path watcher misses or Plasma notifications are briefly
+unavailable.
+
+If the exact ABI embedded in the installed plugin no longer matches KWin, the
+checker sends one desktop notification per boot with the rebuild command and
+writes the checked ABI fingerprint and notification outcome to
+`~/.local/state/seatgeist/kwin-activity-abi.json`. Every `notify-send` call has
+a three-second process timeout; a missing or wedged notification service is
+recorded and retried later without delaying login. The check never rebuilds
+code as root, restarts KWin, or dynamically loads the replacement plugin.
+Inspect it without notifying or writing state with:
 
 ```bash
 ~/.local/libexec/seatgeist/kwin-activity-abi-watch --check-only
@@ -86,6 +99,12 @@ guarantee: pacman can upgrade an official KWin dependency without rebuilding an
 already-installed foreign package. The ABI watcher covers both repository and
 AUR update paths at the compatibility boundary itself. A future package can
 install the same watcher while leaving the rebuild an explicit user action.
+
+`make install-kwin-activity-user` copies a rebuilt plugin and updates the user
+units for the next normal Plasma login. It may reload the user manager's unit
+metadata, but it does not start, stop, or reload KWin, Plasma, Seatgeist, or the
+checker units in the active session. Log out and back in normally when ready to
+activate the new binary plugin.
 
 Inspect the built, installed, and currently running compositor ABIs before
 loading it:

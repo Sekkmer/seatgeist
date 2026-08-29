@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -17,6 +18,7 @@ DEFAULT_PLUGIN = (
 )
 DEFAULT_STATE = Path.home() / ".local/state/seatgeist/kwin-activity-abi.json"
 DEFAULT_NOTIFY_COMMAND = Path("/usr/bin/notify-send")
+DEFAULT_NOTIFICATION_TIMEOUT_SECONDS = 3.0
 
 HEADER_ABI_PATTERN = re.compile(
     rb'^\s*#define\s+KWIN_PLUGIN_VERSION_STRING\s+"([^"]+)"', re.MULTILINE
@@ -102,7 +104,12 @@ def notification_text(report: AbiReport) -> tuple[str, str]:
     return title, f"{detail} Run make install-kwin-activity-user from the Seatgeist source tree."
 
 
-def send_notification(command: Path, report: AbiReport) -> bool:
+def send_notification(
+    command: Path,
+    report: AbiReport,
+    *,
+    timeout_seconds: float = DEFAULT_NOTIFICATION_TIMEOUT_SECONDS,
+) -> tuple[bool, str | None]:
     title, body = notification_text(report)
     try:
         completed = subprocess.run(
@@ -117,10 +124,15 @@ def send_notification(command: Path, report: AbiReport) -> bool:
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=timeout_seconds,
         )
+    except subprocess.TimeoutExpired:
+        return False, "timeout"
     except OSError:
-        return False
-    return completed.returncode == 0
+        return False, "unavailable"
+    if completed.returncode != 0:
+        return False, "failed"
+    return True, None
 
 
 def notification_fingerprint(report: AbiReport, boot_id: str) -> dict[str, object]:
@@ -135,14 +147,16 @@ def run_check(
     *,
     check_only: bool,
     boot_id: str | None = None,
+    notification_timeout_seconds: float = DEFAULT_NOTIFICATION_TIMEOUT_SECONDS,
 ) -> dict[str, object]:
     report = inspect_abis(header, plugin)
     result: dict[str, object] = {
         "type": "seatgeist_kwin_activity_abi",
-        "version": 1,
+        "version": 2,
         **asdict(report),
         "notification_sent": False,
         "notification_suppressed": False,
+        "notification_failure": None,
     }
     if check_only:
         return result
@@ -155,15 +169,23 @@ def run_check(
         previous.get("notified")
     )
     sent = False
+    notification_failure = None
     if needs_notification and not already_notified:
-        sent = send_notification(notify_command, report)
+        sent, notification_failure = send_notification(
+            notify_command,
+            report,
+            timeout_seconds=notification_timeout_seconds,
+        )
 
     result["notification_sent"] = sent
     result["notification_suppressed"] = needs_notification and already_notified
+    result["notification_failure"] = notification_failure
     write_state(
         state_path,
         {
+            "checked_at_unix_ms": int(time.time() * 1000),
             "fingerprint": fingerprint,
+            "last_notification_failure": notification_failure,
             "notified": needs_notification and (sent or already_notified),
         },
     )
@@ -179,15 +201,24 @@ def main() -> None:
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument("--notify-command", type=Path, default=DEFAULT_NOTIFY_COMMAND)
     parser.add_argument(
+        "--notification-timeout-seconds",
+        type=float,
+        default=DEFAULT_NOTIFICATION_TIMEOUT_SECONDS,
+        help="Maximum time to wait for notify-send (default: 3 seconds)",
+    )
+    parser.add_argument(
         "--check-only", action="store_true", help="Do not notify or write state"
     )
     args = parser.parse_args()
+    if args.notification_timeout_seconds <= 0:
+        parser.error("--notification-timeout-seconds must be greater than zero")
     result = run_check(
         args.header,
         args.plugin,
         args.state,
         args.notify_command,
         check_only=args.check_only,
+        notification_timeout_seconds=args.notification_timeout_seconds,
     )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
 

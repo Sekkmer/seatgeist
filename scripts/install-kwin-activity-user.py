@@ -24,6 +24,7 @@ DEFAULT_UNIT_DIR = Path.home() / ".config/systemd/user"
 DEFAULT_STATE = Path.home() / ".local/state/seatgeist/kwin-activity-abi.json"
 SERVICE_NAME = "seatgeist-kwin-activity-abi.service"
 PATH_NAME = "seatgeist-kwin-activity-abi.path"
+TIMER_NAME = "seatgeist-kwin-activity-abi.timer"
 
 
 def render_drop_in(plugin_root: Path) -> str:
@@ -74,13 +75,27 @@ def daemon_reload() -> None:
         raise RuntimeError("systemctl --user daemon-reload failed")
 
 
-def manage_units(action: str) -> None:
+def run_systemctl(*arguments: str) -> None:
     completed = subprocess.run(
-        ["systemctl", "--user", action, "--now", SERVICE_NAME, PATH_NAME],
+        ["systemctl", "--user", *arguments],
         check=False,
     )
     if completed.returncode != 0:
-        raise RuntimeError(f"systemctl --user {action} failed")
+        raise RuntimeError(f"systemctl --user {' '.join(arguments)} failed")
+
+
+def manage_units(action: str) -> None:
+    if action == "install":
+        # The service is path/timer-triggered only. In particular, never leave
+        # the checker enabled directly in a graphical boot target.
+        run_systemctl("disable", SERVICE_NAME, PATH_NAME, TIMER_NAME)
+        # Do not use --now: installing the binary plugin is explicitly a
+        # next-login operation and must not disturb the running session.
+        run_systemctl("enable", PATH_NAME, TIMER_NAME)
+    elif action == "remove":
+        run_systemctl("disable", SERVICE_NAME, PATH_NAME, TIMER_NAME)
+    else:
+        raise ValueError(f"unsupported unit management action: {action}")
 
 
 def main() -> None:
@@ -116,9 +131,10 @@ def main() -> None:
     )
     service = args.unit_dir / SERVICE_NAME
     path_unit = args.unit_dir / PATH_NAME
+    timer = args.unit_dir / TIMER_NAME
     if args.remove:
         if not args.no_systemd_management:
-            manage_units("disable")
+            manage_units("remove")
         plugin.unlink(missing_ok=True)
         for experimental_focus_plugin in experimental_focus_plugins:
             experimental_focus_plugin.unlink(missing_ok=True)
@@ -126,6 +142,7 @@ def main() -> None:
         args.watcher.unlink(missing_ok=True)
         service.unlink(missing_ok=True)
         path_unit.unlink(missing_ok=True)
+        timer.unlink(missing_ok=True)
         args.state.unlink(missing_ok=True)
         action = "removed"
     else:
@@ -135,7 +152,12 @@ def main() -> None:
             f"{SERVICE_NAME}.in"
         ).read_text(encoding="utf-8")
         path_source = args.unit_source_dir / PATH_NAME
-        if not args.watcher_source.is_file() or not path_source.is_file():
+        timer_source = args.unit_source_dir / TIMER_NAME
+        if (
+            not args.watcher_source.is_file()
+            or not path_source.is_file()
+            or not timer_source.is_file()
+        ):
             raise SystemExit("activity ABI watcher install assets are missing")
         atomic_copy(args.artifact, plugin, 0o755)
         for experimental_focus_plugin in experimental_focus_plugins:
@@ -144,23 +166,25 @@ def main() -> None:
         atomic_copy(args.watcher_source, args.watcher, 0o755)
         atomic_text(render_service(service_template, args.watcher), service, 0o644)
         atomic_copy(path_source, path_unit, 0o644)
+        atomic_copy(timer_source, timer, 0o644)
         action = "installed"
     if not args.no_daemon_reload:
         daemon_reload()
     if not args.remove and not args.no_systemd_management:
-        manage_units("enable")
+        manage_units("install")
 
     print(
         json.dumps(
             {
                 "type": "seatgeist_kwin_activity_user_install",
-                "version": 2,
+                "version": 3,
                 "action": action,
                 "plugin": str(plugin),
                 "drop_in": str(args.drop_in),
                 "abi_watcher": str(args.watcher),
                 "abi_service": str(service),
                 "abi_path": str(path_unit),
+                "abi_timer": str(timer),
                 "compositor_restarted": False,
                 "next_step": "restart the normal Plasma session, then run make kwin-activity-preflight",
             },

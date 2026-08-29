@@ -5,6 +5,7 @@ import importlib.util
 import subprocess
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +72,69 @@ def main() -> None:
         assert path_unit.read_bytes() == module.DEFAULT_UNIT_SOURCE_DIR.joinpath(
             module.PATH_NAME
         ).read_bytes()
+        timer = unit_dir / module.TIMER_NAME
+        assert timer.read_bytes() == module.DEFAULT_UNIT_SOURCE_DIR.joinpath(
+            module.TIMER_NAME
+        ).read_bytes()
+
+        service_text = service.read_text(encoding="utf-8")
+        path_text = path_unit.read_text(encoding="utf-8")
+        timer_text = timer.read_text(encoding="utf-8")
+        assert "[Install]" not in service_text
+        assert "plasma-core.target" not in service_text
+        assert "plasma-workspace.target" not in service_text
+        assert "WantedBy=graphical-session.target" in path_text
+        assert f"Unit={module.SERVICE_NAME}" in path_text
+        assert "WantedBy=graphical-session.target" in timer_text
+        assert f"Unit={module.SERVICE_NAME}" in timer_text
+
+        # Reinstalling the same artifacts is harmless and yields the same
+        # exact user-local state.
+        subprocess.run(
+            [
+                str(SCRIPT),
+                "--artifact",
+                str(artifact),
+                "--plugin-root",
+                str(plugin_root),
+                "--drop-in",
+                str(drop_in),
+                "--watcher",
+                str(watcher),
+                "--unit-dir",
+                str(unit_dir),
+                "--state",
+                str(state),
+                "--no-daemon-reload",
+                "--no-systemd-management",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        assert installed.read_bytes() == b"plugin fixture"
+
+        with mock.patch.object(module.subprocess, "run") as systemctl_run:
+            systemctl_run.return_value.returncode = 0
+            module.manage_units("install")
+            commands = [call.args[0] for call in systemctl_run.call_args_list]
+        assert commands == [
+            [
+                "systemctl",
+                "--user",
+                "disable",
+                module.SERVICE_NAME,
+                module.PATH_NAME,
+                module.TIMER_NAME,
+            ],
+            [
+                "systemctl",
+                "--user",
+                "enable",
+                module.PATH_NAME,
+                module.TIMER_NAME,
+            ],
+        ]
+        assert all("--now" not in command for command in commands)
 
         subprocess.run(
             [
@@ -97,6 +161,29 @@ def main() -> None:
         assert not watcher.exists()
         assert not service.exists()
         assert not path_unit.exists()
+        assert not timer.exists()
+
+        # Removing an already absent install is also harmless.
+        subprocess.run(
+            [
+                str(SCRIPT),
+                "--plugin-root",
+                str(plugin_root),
+                "--drop-in",
+                str(drop_in),
+                "--watcher",
+                str(watcher),
+                "--unit-dir",
+                str(unit_dir),
+                "--state",
+                str(state),
+                "--remove",
+                "--no-daemon-reload",
+                "--no-systemd-management",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
     print("test-install-kwin-activity-user: ok")
 
 
