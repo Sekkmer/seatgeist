@@ -19,8 +19,11 @@ the daemon rather than the MCP process. Core `open` requires
 app/PID, then uses KWin ScreenShot2 to recapture only that UUID without a portal
 chooser or ScreenCast stream. `status` is side-effect free and reports the
 sticky target identity and expiry. `renew` requires the active opaque session id, revalidates the pinned
-KWin id/app/PID and app policy, and extends only the bounded interaction-target
-lease; it neither opens a portal dialog nor sends input. `close` requires the active opaque session id and clears both capture
+KWin id/app/PID and app policy, and extends the bounded interaction-target and
+exact-window capture leases together; it neither opens a portal dialog nor sends
+input. An unrenewed exact-window capture is closed when its 30-minute target
+lease expires, so abandoned agent sessions cannot consume capture quota or
+block a safe daemon deployment indefinitely. `close` requires the active opaque session id and clears both capture
 and target state.
 
 Session status also carries a compact execution summary: `capture_exec`,
@@ -103,9 +106,9 @@ All coordinate-bearing tools must require an explicit coordinate space. Full-res
 
 `seatgeist.resize_window` takes a listed KWin `window_id` plus a width and height from 64 through 32768 logical pixels. It preserves the current position, passes `ControlSemantic` policy, panic-stop, optional active-window guard, app policy, rate limiting, and journal checks before the shared window backend queues a compositor action. The compact action result reports requested and actual geometry. Use `seatgeist-cli resize --window <id> --width <logical-width> --height <logical-height>` for the same daemon contract.
 
-`seatgeist.move_window` moves an exact listed KWin id to explicit logical-pixel coordinates while preserving its size. `seatgeist.launch_window` accepts a desktop-entry id, never a shell command or path, and arms a one-shot KWin intent before invoking `gtk-launch`. The compositor matches the new window by desktop entry, anchors it inside the panel-aware placement area (`top_left`, `top_right`, `bottom_left`, `bottom_right`, or `center`), optionally applies monitor, margin, and size, and verifies the settled geometry. MCP accepts only `activation=preserve_focus` and confirms the previously active physical window stayed active. The protocol and CLI retain `activate` for deliberate operator use, but an MCP request for it fails before launch. Both paths pass policy, panic-stop, optional active-window guard, app policy, rate limiting, and journaling. CLI equivalents are `seatgeist-cli move ...` and `seatgeist-cli launch --desktop-entry <id> --anchor top-right ...`.
+`seatgeist.move_window` moves an exact listed KWin id to explicit logical-pixel coordinates while preserving its size. `seatgeist.launch_window` accepts a desktop-entry id, never a shell command or path, and arms a one-shot KWin intent before invoking `gtk-launch` in an independent transient user service. The service is placed in `app.slice`, uses cgroup exit tracking, and belongs to the graphical session rather than `seatgeistd.service`; browser processes therefore cannot inflate the daemon's task or memory accounting and do not depend on the daemon lifecycle. There is intentionally no direct-process fallback when `systemd-run` is unavailable. The compositor matches the new window by desktop entry, anchors it inside the panel-aware placement area (`top_left`, `top_right`, `bottom_left`, `bottom_right`, or `center`), optionally applies monitor, margin, and size, and verifies the settled geometry. MCP accepts only `activation=preserve_focus` and confirms the previously active physical window stayed active. The protocol and CLI retain `activate` for deliberate operator use, but an MCP request for it fails before launch. Both paths pass policy, panic-stop, optional active-window guard, app policy, rate limiting, and journaling. CLI equivalents are `seatgeist-cli move ...` and `seatgeist-cli launch --desktop-entry <id> --anchor top-right ...`.
 
-`seatgeist.close_window` is the target-safe lifecycle path for an owned retained window. It requires the retained `session_id` and exact pinned KWin `window_id`, classifies the request as `DestructiveAction`, re-resolves UUID, app id, and PID, asks the KWin bridge to close that exact UUID, and returns success only after that UUID disappears. It never falls back to a key combination. This distinction matters for Firefox: several browser windows can share one PID, while window-global shortcuts can be consumed by the physically active same-process window. Retained-seat `Alt+F4`, `Ctrl+W`, `Ctrl+Shift+W`, and `Ctrl+Q` requests therefore fail closed before input.
+`seatgeist.close_window` is the target-safe lifecycle path for an owned retained window. It requires the retained `session_id` and exact pinned KWin `window_id`, classifies the request as `DestructiveAction`, re-resolves UUID, app id, and PID, asks the KWin bridge to close that exact UUID, and returns success only after that UUID disappears. Under the default prompt policy, the prompt can be satisfied without a separate approval only when the same trusted process launched that exact UUID through Seatgeist, still owns the matching retained session, the app/PID identity is unchanged, and both leases remain live. An explicit destructive-action deny still wins, while pre-existing, user-created, expired, changed, unretained, or other-agent windows remain prompt-gated. Successful close also tears down the matching capture and execution session. It never falls back to a key combination. This distinction matters for Firefox: several browser windows can share one PID, while window-global shortcuts can be consumed by the physically active same-process window. Retained-seat `Alt+F4`, `Ctrl+W`, `Ctrl+Shift+W`, and `Ctrl+Q` requests therefore fail closed before input.
 
 `seatgeist.page_zoom` takes `operation=in|out|reset`, an optional 1-20 step count, and a required exact active-window id guard. Immediately before input it rechecks that the active app id belongs to Firefox or a Chromium-family browser, then sends the standard Linux browser zoom shortcut through the configured keyboard backend under `ControlKeyboard` policy. It does not claim an exact percentage: Firefox and Chromium can customize shortcuts or zoom ladders, and Firefox persists zoom per hostname. Use `seatgeist-cli page-zoom --operation out --steps 2 --expected-active-window <id>` for the same path.
 
@@ -120,7 +123,10 @@ deliberate portal cancellation (`consent_cancelled`), portal/backend
 unavailability, backend failure, accessibility unavailability or weak trees,
 validation, and unknown failures. Stable reasons preserve actionable causes
 inside those broad groups, such as `protected_application`,
-`atspi_registry_unreachable`, `kwin_bridge_unavailable`,
+`atspi_registry_unreachable`, `atspi_action_rejected`, `atspi_timeout`,
+`launch_executor_failed`, `launch_desktop_entry_rejected`,
+`launch_bridge_arm_timeout`, `launch_confirmation_lost`,
+`kwin_bridge_unavailable`,
 `agent_target_in_use`, `agent_lane_quota`, `agent_target_user_active`, or
 `capture_frame_invalidated_by_user`. MCP compact text
 includes both fields. An `app_denied` result is rendered as `POLICY DENIED`

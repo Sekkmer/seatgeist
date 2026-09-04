@@ -101,6 +101,24 @@ systemctl --user daemon-reload
 systemctl --user enable --now seatgeistd.socket
 ```
 
+Both units belong to `graphical-session.target` and run after
+`graphical-session-pre.target`. This prevents an early user-manager start from
+leaving the daemon without `WAYLAND_DISPLAY`, `DISPLAY`, or KDE session
+metadata. `seatgeistd` consumes the inherited systemd Unix listener when
+socket-activated and otherwise safely binds the configured path itself.
+
+The daemon uses four Tokio workers. The shipped service also sets
+`MALLOC_ARENA_MAX=4`; glibc honors this to limit retained per-thread capture
+allocations, while other C libraries may harmlessly ignore it.
+
+For an installation that previously enabled the service under
+`default.target`, stop that direct instance before enabling the socket:
+
+```bash
+systemctl --user disable --now seatgeistd.service
+systemctl --user enable --now seatgeistd.socket
+```
+
 Check the daemon through the CLI:
 
 ```bash
@@ -110,6 +128,11 @@ seatgeist-cli policy-status
 ```
 
 The socket unit uses mode `0600` and directory mode `0700`. Keep the daemon running as the desktop user. Do not run it as root for ordinary operation.
+Daemon-backed integration tests must use a private mode-`0700`
+`XDG_RUNTIME_DIR` and must not inherit the live `AT_SPI_BUS_ADDRESS` or session
+bus. Otherwise a test accessibility broker can replace the desktop AT-SPI
+socket and make semantic tools fail until the user accessibility bus is
+restarted.
 The service limits starts to five per five minutes and uses stepped restart
 backoff from 2 to 30 seconds, so a persistent startup fault cannot create an
 unbounded one-second failure loop.

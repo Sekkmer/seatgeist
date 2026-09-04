@@ -53,7 +53,16 @@ def validate_systemd(root: Path) -> None:
     )
     require_unit_value(service, service_path, "Service", "Restart", "on-failure")
     require_unit_value(service, service_path, "Service", "NoNewPrivileges", "true")
-    require_unit_value(service, service_path, "Install", "WantedBy", "default.target")
+    require_unit_value(service, service_path, "Service", "Environment", "MALLOC_ARENA_MAX=4")
+    require_unit_value(
+        service, service_path, "Unit", "PartOf", "graphical-session.target"
+    )
+    require_unit_value(
+        service, service_path, "Unit", "After", "graphical-session-pre.target"
+    )
+    require_unit_value(
+        service, service_path, "Install", "WantedBy", "graphical-session.target"
+    )
     if service.has_option("Service", "User") or service.has_option("Service", "Group"):
         fail(f"{service_path} must remain user-scoped and not set User/Group")
 
@@ -66,7 +75,15 @@ def validate_systemd(root: Path) -> None:
     )
     require_unit_value(socket, socket_path, "Socket", "SocketMode", "0600")
     require_unit_value(socket, socket_path, "Socket", "DirectoryMode", "0700")
-    require_unit_value(socket, socket_path, "Install", "WantedBy", "sockets.target")
+    require_unit_value(
+        socket, socket_path, "Unit", "PartOf", "graphical-session.target"
+    )
+    require_unit_value(
+        socket, socket_path, "Unit", "After", "graphical-session-pre.target"
+    )
+    require_unit_value(
+        socket, socket_path, "Install", "WantedBy", "graphical-session.target"
+    )
 
 
 def validate_kwin_screenshot_authorization(root: Path) -> None:

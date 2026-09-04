@@ -77,6 +77,21 @@ seatgeist-cli doctor
 seatgeist-cli kwin-bridge-status
 ```
 
+The socket starts with the graphical session, after Plasma has imported its
+Wayland, display, and KDE variables into the user service manager. The daemon
+adopts the systemd-owned Unix listener, so activation does not race a second
+bind. Its async runtime is limited to four workers and the shipped glibc unit
+caps allocator arenas to avoid retaining one large image arena per CPU.
+
+If an older checkout enabled `seatgeistd.service` directly, migrate it after
+copying the current units:
+
+```bash
+systemctl --user disable --now seatgeistd.service
+systemctl --user enable --now seatgeistd.socket
+seatgeist-cli doctor
+```
+
 Install the local Codex plugin:
 
 ```bash

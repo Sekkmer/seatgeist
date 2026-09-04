@@ -19,6 +19,7 @@ base64 = "0.22.1"
 clap = { version = "4.5.41", features = ["derive", "env"] }
 image = { version = "0.25.8", default-features = false, features = ["png"] }
 libc = "0.2.186"
+listenfd = "1.0.2"
 # Ubuntu 24.04 ships PipeWire/SPA 1.0 headers. Seatgeist does not use the
 # explicit-sync APIs added in 1.2, so keep the bindings at the oldest API we
 # actually require instead of making builds depend on newer host headers.

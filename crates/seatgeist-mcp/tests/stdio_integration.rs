@@ -9,6 +9,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+use std::os::unix::fs::PermissionsExt;
 
 struct DaemonFixture {
     child: Child,
@@ -25,7 +26,8 @@ impl DaemonFixture {
         let panic_stop = root.join("panic-stop");
         let stderr = root.join("daemon.stderr");
         let stderr_file = fs::File::create(&stderr).context("create daemon stderr fixture")?;
-        let mut child = Command::new(daemon_binary()?)
+        let mut command = Command::new(daemon_binary()?);
+        command
             .arg("--disable-kwin-bridge")
             .arg("--socket")
             .arg(&socket)
@@ -33,11 +35,10 @@ impl DaemonFixture {
             .arg(&journal)
             .arg("--panic-stop-file")
             .arg(&panic_stop)
-            .env("HOME", &root)
             .stdout(Stdio::null())
-            .stderr(Stdio::from(stderr_file))
-            .spawn()
-            .context("spawn seatgeistd")?;
+            .stderr(Stdio::from(stderr_file));
+        configure_isolated_desktop_env(&mut command, &root)?;
+        let mut child = command.spawn().context("spawn seatgeistd")?;
         if let Err(error) = wait_for_socket(&socket, &mut child, &stderr) {
             let _ = child.kill();
             let _ = child.wait();
@@ -85,9 +86,9 @@ impl DaemonFixture {
             .arg("--disable-kwin-bridge")
             .arg("--config")
             .arg(&config)
-            .env("HOME", &root)
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr_file));
+        configure_isolated_desktop_env(&mut command, &root)?;
         for (key, value) in env_overrides {
             command.env(
                 key,
@@ -145,6 +146,26 @@ impl DaemonFixture {
         require_success("seatgeist-mcp --stdio", &output)?;
         parse_json_lines(&output.stdout)
     }
+}
+
+fn configure_isolated_desktop_env(command: &mut Command, root: &Path) -> Result<()> {
+    let runtime = root.join("runtime");
+    fs::create_dir_all(&runtime).context("create isolated XDG runtime fixture")?;
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700))
+        .context("secure isolated XDG runtime fixture")?;
+    command
+        .env("HOME", root)
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env_remove("AT_SPI_BUS_ADDRESS")
+        .env_remove("DBUS_SESSION_BUS_ADDRESS")
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("XDG_SESSION_TYPE")
+        .env_remove("XDG_CURRENT_DESKTOP")
+        .env_remove("DESKTOP_SESSION")
+        .env_remove("KDE_FULL_SESSION")
+        .env_remove("KDE_SESSION_VERSION");
+    Ok(())
 }
 
 impl Drop for DaemonFixture {

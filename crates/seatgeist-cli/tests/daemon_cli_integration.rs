@@ -9,10 +9,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 use libseatgeist::{
     AccessibilityTextAttributesRequest, BackendCapability, CapabilitySet, ClipboardGetRequest,
-    DaemonRequest, DaemonResponse, DesktopSessionStatus, JournalEntry, PanicStopStatus,
-    PolicyStatus, RemoteDesktopEisSessionStatus, RemoteDesktopSessionProbeRequest, ReplayTrace,
-    SafetyStatus, ToolApprovalLevel, TraceJsonExpectation, TraceStep, TypeTextRequest,
-    UinputStatus,
+    DaemonRequest, DaemonResponse, JournalEntry, PanicStopStatus, PolicyStatus,
+    RemoteDesktopEisSessionStatus, RemoteDesktopSessionProbeRequest, ReplayTrace, SafetyStatus,
+    ToolApprovalLevel, TraceJsonExpectation, TraceStep, TypeTextRequest, UinputStatus,
 };
 use std::os::unix::fs::PermissionsExt;
 
@@ -31,7 +30,8 @@ impl DaemonFixture {
         let panic_stop = root.join("panic-stop");
         let stderr = root.join("daemon.stderr");
         let stderr_file = fs::File::create(&stderr).context("create daemon stderr fixture")?;
-        let mut child = Command::new(daemon_binary()?)
+        let mut command = Command::new(daemon_binary()?);
+        command
             .arg("--disable-kwin-bridge")
             .arg("--socket")
             .arg(&socket)
@@ -39,11 +39,10 @@ impl DaemonFixture {
             .arg(&journal)
             .arg("--panic-stop-file")
             .arg(&panic_stop)
-            .env("HOME", &root)
             .stdout(Stdio::null())
-            .stderr(Stdio::from(stderr_file))
-            .spawn()
-            .context("spawn seatgeistd")?;
+            .stderr(Stdio::from(stderr_file));
+        configure_isolated_desktop_env(&mut command, &root)?;
+        let mut child = command.spawn().context("spawn seatgeistd")?;
         if let Err(error) = wait_for_socket(&socket, &mut child, &stderr) {
             let _ = child.kill();
             let _ = child.wait();
@@ -91,9 +90,9 @@ impl DaemonFixture {
             .arg("--disable-kwin-bridge")
             .arg("--config")
             .arg(&config)
-            .env("HOME", &root)
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr_file));
+        configure_isolated_desktop_env(&mut command, &root)?;
         for (key, value) in env_overrides {
             command.env(
                 key,
@@ -157,6 +156,26 @@ impl DaemonFixture {
         let trace_arg = trace_path.to_string_lossy().into_owned();
         self.cli_value(&["trace", "replay", "--file", &trace_arg])
     }
+}
+
+fn configure_isolated_desktop_env(command: &mut Command, root: &Path) -> Result<()> {
+    let runtime = root.join("runtime");
+    fs::create_dir_all(&runtime).context("create isolated XDG runtime fixture")?;
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700))
+        .context("secure isolated XDG runtime fixture")?;
+    command
+        .env("HOME", root)
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env_remove("AT_SPI_BUS_ADDRESS")
+        .env_remove("DBUS_SESSION_BUS_ADDRESS")
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("XDG_SESSION_TYPE")
+        .env_remove("XDG_CURRENT_DESKTOP")
+        .env_remove("DESKTOP_SESSION")
+        .env_remove("KDE_FULL_SESSION")
+        .env_remove("KDE_SESSION_VERSION");
+    Ok(())
 }
 
 impl Drop for DaemonFixture {
@@ -229,12 +248,14 @@ fn cli_talks_to_real_daemon_for_status_commands() -> Result<()> {
     );
 
     let desktop_session = daemon.cli_json(&["desktop-session-status"])?;
-    let DaemonResponse::DesktopSessionStatus(DesktopSessionStatus { setup_hint, .. }) =
-        desktop_session
-    else {
+    let DaemonResponse::DesktopSessionStatus(status) = desktop_session else {
         bail!("expected desktop session status response, got {desktop_session:?}");
     };
-    assert!(!setup_hint.is_empty());
+    assert!(status.xdg_runtime_dir_present);
+    assert!(!status.dbus_session_bus_address_present);
+    assert!(status.wayland_display.is_none());
+    assert!(status.display.is_none());
+    assert!(!status.setup_hint.is_empty());
 
     let readiness = daemon.cli_json(&["readiness"])?;
     let DaemonResponse::ComputerUseReadiness(status) = readiness else {

@@ -19,6 +19,7 @@ async-trait.workspace = true
 clap.workspace = true
 image.workspace = true
 libseatgeist.workspace = true
+listenfd.workspace = true
 seatgeist-atspi.workspace = true
 seatgeist-backend.workspace = true
 seatgeist-eis.workspace = true

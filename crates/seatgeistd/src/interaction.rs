@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::session_owner::SessionOwner;
 
-const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
+pub(crate) const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
 const DEFAULT_LEASE_DEADLINE: Duration = Duration::from_millis(1_000);
 const MAX_AGENT_LANES: usize = 4;
 const AGENT_TARGET_QUIET_TIME: Duration = Duration::from_millis(350);

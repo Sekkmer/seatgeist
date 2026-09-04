@@ -16,6 +16,9 @@ DEFAULT_HEADER = Path("/usr/include/kwin/config-kwin.h")
 DEFAULT_PLUGIN = (
     Path.home() / ".local/lib/qt6/plugins/kwin/plugins/seatgeistactivity.so"
 )
+DEFAULT_AGENT_SEAT_PLUGIN = (
+    Path.home() / ".local/lib/qt6/plugins/kwin/plugins/seatgeistagentseat.so"
+)
 DEFAULT_STATE = Path.home() / ".local/state/seatgeist/kwin-activity-abi.json"
 DEFAULT_NOTIFY_COMMAND = Path("/usr/bin/notify-send")
 DEFAULT_NOTIFICATION_TIMEOUT_SECONDS = 3.0
@@ -33,6 +36,14 @@ class AbiReport:
     status: str
     required_abi: str | None
     plugin_abi: str | None
+    plugins: tuple["PluginAbiReport", ...] = ()
+
+
+@dataclass(frozen=True)
+class PluginAbiReport:
+    name: str
+    status: str
+    plugin_abi: str | None
 
 
 def extract_header_abi(content: bytes) -> str | None:
@@ -45,19 +56,50 @@ def extract_plugin_abi(content: bytes) -> str | None:
     return match.group(1).decode("ascii") if match else None
 
 
-def inspect_abis(header: Path, plugin: Path) -> AbiReport:
+def inspect_abis(
+    header: Path,
+    plugin: Path,
+    agent_seat_plugin: Path | None = None,
+) -> AbiReport:
     if not header.is_file():
         return AbiReport("missing_header", None, None)
     required_abi = extract_header_abi(header.read_bytes())
     if required_abi is None:
         return AbiReport("invalid_header", None, None)
+    plugin_reports = [inspect_plugin("activity", plugin, required_abi, required=True)]
+    if agent_seat_plugin is not None:
+        plugin_reports.append(
+            inspect_plugin(
+                "agent-seat", agent_seat_plugin, required_abi, required=False
+            )
+        )
+    activity = plugin_reports[0]
+    actionable = [
+        report
+        for report in plugin_reports
+        if report.status not in {"current", "not_installed"}
+    ]
+    status = actionable[0].status if actionable else "current"
+    return AbiReport(
+        status,
+        required_abi,
+        activity.plugin_abi,
+        tuple(plugin_reports),
+    )
+
+
+def inspect_plugin(
+    name: str, plugin: Path, required_abi: str, *, required: bool
+) -> PluginAbiReport:
     if not plugin.is_file():
-        return AbiReport("missing_plugin", required_abi, None)
+        return PluginAbiReport(
+            name, "missing_plugin" if required else "not_installed", None
+        )
     plugin_abi = extract_plugin_abi(plugin.read_bytes())
     if plugin_abi is None:
-        return AbiReport("invalid_plugin", required_abi, None)
+        return PluginAbiReport(name, "invalid_plugin", None)
     status = "current" if required_abi == plugin_abi else "rebuild_required"
-    return AbiReport(status, required_abi, plugin_abi)
+    return PluginAbiReport(name, status, plugin_abi)
 
 
 def read_boot_id() -> str:
@@ -93,15 +135,27 @@ def write_state(path: Path, data: dict[str, object]) -> None:
 
 def notification_text(report: AbiReport) -> tuple[str, str]:
     title = "Seatgeist KWin plugin needs attention"
-    if report.status == "rebuild_required":
-        detail = f"KWin ABI {report.required_abi}; plugin ABI {report.plugin_abi}."
+    affected = [
+        plugin
+        for plugin in report.plugins
+        if plugin.status not in {"current", "not_installed"}
+    ]
+    if report.status == "rebuild_required" and affected:
+        plugins = ", ".join(
+            f"{plugin.name} ABI {plugin.plugin_abi or 'unknown'}"
+            for plugin in affected
+        )
+        detail = f"KWin ABI {report.required_abi}; {plugins}."
     elif report.status == "missing_plugin":
         detail = f"The Seatgeist plugin is missing for KWin ABI {report.required_abi}."
     elif report.status in {"missing_header", "invalid_header"}:
         detail = "The installed KWin plugin ABI could not be determined."
     else:
         detail = "The installed Seatgeist plugin ABI could not be determined."
-    return title, f"{detail} Run make install-kwin-activity-user from the Seatgeist source tree."
+    return title, (
+        f"{detail} Rebuild and reinstall the affected Seatgeist KWin plugins "
+        "before logout or reboot."
+    )
 
 
 def send_notification(
@@ -136,12 +190,19 @@ def send_notification(
 
 
 def notification_fingerprint(report: AbiReport, boot_id: str) -> dict[str, object]:
-    return {"boot_id": boot_id, **asdict(report)}
+    return {
+        "boot_id": boot_id,
+        "status": report.status,
+        "required_abi": report.required_abi,
+        "plugin_abi": report.plugin_abi,
+        "plugins": [asdict(plugin) for plugin in report.plugins],
+    }
 
 
 def run_check(
     header: Path,
     plugin: Path,
+    agent_seat_plugin: Path | None,
     state_path: Path,
     notify_command: Path,
     *,
@@ -149,10 +210,10 @@ def run_check(
     boot_id: str | None = None,
     notification_timeout_seconds: float = DEFAULT_NOTIFICATION_TIMEOUT_SECONDS,
 ) -> dict[str, object]:
-    report = inspect_abis(header, plugin)
+    report = inspect_abis(header, plugin, agent_seat_plugin)
     result: dict[str, object] = {
         "type": "seatgeist_kwin_activity_abi",
-        "version": 2,
+        "version": 3,
         **asdict(report),
         "notification_sent": False,
         "notification_suppressed": False,
@@ -198,6 +259,9 @@ def main() -> None:
     )
     parser.add_argument("--header", type=Path, default=DEFAULT_HEADER)
     parser.add_argument("--plugin", type=Path, default=DEFAULT_PLUGIN)
+    parser.add_argument(
+        "--agent-seat-plugin", type=Path, default=DEFAULT_AGENT_SEAT_PLUGIN
+    )
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument("--notify-command", type=Path, default=DEFAULT_NOTIFY_COMMAND)
     parser.add_argument(
@@ -215,6 +279,7 @@ def main() -> None:
     result = run_check(
         args.header,
         args.plugin,
+        args.agent_seat_plugin,
         args.state,
         args.notify_command,
         check_only=args.check_only,

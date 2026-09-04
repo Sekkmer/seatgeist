@@ -21,6 +21,7 @@ mod clipboard;
 mod commands;
 mod compatibility_capture_backend;
 mod config;
+mod desktop_launch;
 mod eis_key_combo;
 mod input_actions;
 mod input_diagnostics;
@@ -29,6 +30,7 @@ mod interaction;
 mod keymap;
 mod kwin_bridge;
 mod kwin_capture_backend;
+mod launched_window;
 mod observation;
 mod observation_policy;
 mod pointer_coordinates;
@@ -56,6 +58,7 @@ use capture_restore::CaptureRestoreTokenStore;
 use clap::Parser;
 use commands::exists as command_exists;
 use config::*;
+use desktop_launch::{DesktopEntryLauncher, SystemdDesktopEntryLauncher};
 #[cfg(test)]
 use eis_key_combo::codes_with_keymap as eis_key_combo_codes_with_keymap;
 use input_actions::{
@@ -415,8 +418,7 @@ struct Args {
     print_capabilities: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
 
@@ -493,7 +495,7 @@ async fn main() -> Result<()> {
         safety_settings(file_config.safety.as_ref()).context("resolve safety settings")?;
     let journal_settings = journal_settings(file_config.journal.as_ref());
 
-    run(RunSettings {
+    let settings = RunSettings {
         socket,
         journal_path: journal,
         journal_settings,
@@ -506,8 +508,14 @@ async fn main() -> Result<()> {
         safety_settings,
         input_backend_preference,
         xkb_keymap_config,
-    })
-    .await
+    };
+    let inherited_listener = inherited_systemd_listener()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .context("build bounded daemon async runtime")?;
+    runtime.block_on(run(settings, inherited_listener))
 }
 
 #[derive(Debug)]
@@ -526,7 +534,10 @@ struct RunSettings {
     xkb_keymap_config: XkbKeymapConfig,
 }
 
-async fn run(settings: RunSettings) -> Result<()> {
+async fn run(
+    settings: RunSettings,
+    inherited_listener: Option<std::os::unix::net::UnixListener>,
+) -> Result<()> {
     let config_fingerprint = config_fingerprint(&settings);
     let RunSettings {
         socket,
@@ -563,6 +574,7 @@ async fn run(settings: RunSettings) -> Result<()> {
     let screen_backend: Arc<dyn ScreenBackend> =
         Arc::new(RoutedScreenBackend::new(portal_screen_backend));
     let interaction_session_store = interaction::InteractionSessionStore::default();
+    let launched_window_store = launched_window::LaunchedWindowStore::default();
     let activity_tracker = activity::ActivityTracker::default();
     let window_action_queue = WindowActionQueue::default();
     let agent_seat_backend = agent_seat::KwinAgentSeatBackend::default();
@@ -628,17 +640,28 @@ async fn run(settings: RunSettings) -> Result<()> {
         semantic_handle_store,
         screen_backend,
         interaction_session_store,
+        launched_window_store,
         activity_tracker,
         window_action_queue: window_action_queue.clone(),
         agent_seat_backend,
         window_backend,
+        desktop_entry_launcher: Arc::new(SystemdDesktopEntryLauncher),
     };
 
-    prepare_socket_path(&socket)?;
-    let listener = UnixListener::bind(&socket)
-        .with_context(|| format!("bind daemon socket at {}", socket.display()))?;
-    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("set socket permissions on {}", socket.display()))?;
+    let listener = if let Some(listener) = inherited_listener {
+        validate_inherited_listener_path(&listener, &socket)?;
+        listener
+            .set_nonblocking(true)
+            .context("set inherited daemon listener nonblocking")?;
+        UnixListener::from_std(listener).context("adopt inherited daemon listener")?
+    } else {
+        prepare_socket_path(&socket)?;
+        let listener = UnixListener::bind(&socket)
+            .with_context(|| format!("bind daemon socket at {}", socket.display()))?;
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("set socket permissions on {}", socket.display()))?;
+        listener
+    };
     validate_socket_permissions(&socket)?;
 
     runtime.journal.record_lifecycle(
@@ -680,6 +703,39 @@ async fn run(settings: RunSettings) -> Result<()> {
     Ok(())
 }
 
+fn inherited_systemd_listener() -> Result<Option<std::os::unix::net::UnixListener>> {
+    let mut listen_fds = listenfd::ListenFd::from_env();
+    if listen_fds.len() > 1 {
+        bail!(
+            "systemd passed {} listeners; Seatgeist accepts exactly one daemon socket",
+            listen_fds.len()
+        );
+    }
+    listen_fds
+        .take_unix_listener(0)
+        .context("validate inherited systemd daemon listener")
+}
+
+fn validate_inherited_listener_path(
+    listener: &std::os::unix::net::UnixListener,
+    expected: &Path,
+) -> Result<()> {
+    let address = listener
+        .local_addr()
+        .context("read inherited daemon listener address")?;
+    let actual = address
+        .as_pathname()
+        .context("inherited daemon listener is not filesystem-backed")?;
+    if actual != expected {
+        bail!(
+            "inherited daemon listener path {} does not match configured socket {}",
+            actual.display(),
+            expected.display()
+        );
+    }
+    Ok(())
+}
+
 async fn shutdown_signal() -> Result<()> {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("install SIGTERM handler")?;
@@ -709,10 +765,12 @@ struct DaemonRuntime {
     semantic_handle_store: semantic_handle::SemanticHandleStore,
     screen_backend: Arc<dyn ScreenBackend>,
     interaction_session_store: interaction::InteractionSessionStore,
+    launched_window_store: launched_window::LaunchedWindowStore,
     activity_tracker: activity::ActivityTracker,
     window_action_queue: WindowActionQueue,
     agent_seat_backend: agent_seat::KwinAgentSeatBackend,
     window_backend: Arc<dyn WindowBackend>,
+    desktop_entry_launcher: Arc<dyn DesktopEntryLauncher>,
 }
 
 async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()> {
@@ -1763,9 +1821,13 @@ async fn handle_request(
     if let Err(err) = validate_targeted_key_combo(&request, runtime.input_backend_preference) {
         return daemon_error_with_kind(err, ErrorKind::Validation);
     }
-    if let Err(err) =
-        enforce_policy_with_approvals(&runtime.policy, &runtime.approval_store, &request)
-    {
+    let scoped_owned_cleanup = exact_owned_cleanup_authorized(&request, client, runtime).await;
+    if let Err(err) = enforce_policy_with_scoped_cleanup(
+        &runtime.policy,
+        &runtime.approval_store,
+        &request,
+        scoped_owned_cleanup,
+    ) {
         let kind = policy_error_kind(&err);
         return daemon_error_with_kind(err, kind);
     }
@@ -2042,6 +2104,17 @@ async fn execute_request(
                 .renew(&request.session_id)
                 .await
             {
+                return daemon_error_with_kind(err, ErrorKind::TargetLost);
+            }
+            if let Err(err) = runtime
+                .capture_session_store
+                .renew(&request.session_id)
+                .await
+            {
+                let _ = runtime
+                    .interaction_session_store
+                    .clear(&request.session_id)
+                    .await;
                 return daemon_error_with_kind(err, ErrorKind::TargetLost);
             }
             let capture = runtime
@@ -2738,7 +2811,8 @@ async fn execute_request(
                 Err(err) => daemon_error(err),
             }
         }
-        DaemonRequest::LaunchWindow(request) => match launch_window(request, runtime).await {
+        DaemonRequest::LaunchWindow(request) => match launch_window(request, runtime, client).await
+        {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
             Err(err) => daemon_error(err),
         },
@@ -3353,6 +3427,15 @@ fn enforce_policy_with_approvals(
     approval_store: &ApprovalStore,
     request: &DaemonRequest,
 ) -> Result<()> {
+    enforce_policy_with_scoped_cleanup(policy, approval_store, request, false)
+}
+
+fn enforce_policy_with_scoped_cleanup(
+    policy: &PolicyEngine,
+    approval_store: &ApprovalStore,
+    request: &DaemonRequest,
+    scoped_owned_cleanup: bool,
+) -> Result<()> {
     let safety_class = safety_class_for_request(request);
     let decision = policy.decide(&safety_class);
     match decision.level {
@@ -3369,12 +3452,58 @@ fn enforce_policy_with_approvals(
                 );
                 return Ok(());
             }
+            if scoped_owned_cleanup {
+                info!(
+                    method = request.method_name(),
+                    safety_class = ?safety_class,
+                    "prompt policy satisfied by exact self-launched window cleanup lease"
+                );
+                return Ok(());
+            }
             bail!(
                 "policy prompt required for {safety_class:?}, but no matching approval grant is available"
             )
         }
         ToolApprovalLevel::Deny => bail!("policy denied {safety_class:?}: {}", decision.reason),
     }
+}
+
+async fn exact_owned_cleanup_authorized(
+    request: &DaemonRequest,
+    client: Option<&JournalClientContext>,
+    runtime: &DaemonRuntime,
+) -> bool {
+    let DaemonRequest::CloseWindow(request) = request else {
+        return false;
+    };
+    let Some(session_id) = request.session_id.as_deref() else {
+        return false;
+    };
+    if runtime
+        .capture_session_store
+        .require_owner(session_id, client)
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    let Ok(windows) = runtime.window_backend.list_windows().await else {
+        return false;
+    };
+    let Ok(pinned) = runtime
+        .interaction_session_store
+        .resolve(session_id, &windows)
+        .await
+    else {
+        return false;
+    };
+    if pinned.window.id != request.window_id {
+        return false;
+    }
+    runtime
+        .launched_window_store
+        .is_owned_exact(&pinned.window, client)
+        .await
 }
 
 fn enforce_panic_stop(panic_stop: &PanicStopState, request: &DaemonRequest) -> Result<()> {
@@ -4487,11 +4616,22 @@ async fn close_window(
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     if let Some(session_id) = request.session_id.as_deref() {
+        if let Err(err) = runtime
+            .capture_session_store
+            .close(libseatgeist::CaptureSessionRequest {
+                session_id: session_id.to_string(),
+            })
+            .await
+        {
+            warn!(session_id, error = %err, "exact window closed but capture-session cleanup failed");
+        }
         runtime
             .interaction_session_store
             .clear_if_present(session_id)
             .await;
+        let _ = runtime.session_execution_store.clear(session_id).await;
     }
+    runtime.launched_window_store.remove(&target.id).await;
     let active_window = runtime
         .window_backend
         .active_window()
@@ -4575,6 +4715,7 @@ fn normalize_desktop_entry(value: &str) -> Result<String> {
 async fn launch_window(
     request: LaunchWindowRequest,
     runtime: &DaemonRuntime,
+    client: Option<&JournalClientContext>,
 ) -> Result<ActionResult> {
     let desktop_entry = normalize_desktop_entry(&request.desktop_entry)?;
     if request
@@ -4612,30 +4753,39 @@ async fn launch_window(
         )
         .await?;
     let launch_id = ticket.id().to_string();
-    let mut child = match std::process::Command::new("gtk-launch")
-        .arg(&desktop_entry)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+    let launcher_backend = runtime.desktop_entry_launcher.name();
+    let mut child = match runtime
+        .desktop_entry_launcher
+        .launch(&desktop_entry, &launch_id)
     {
         Ok(child) => child,
         Err(err) => {
             runtime
                 .window_action_queue
                 .cancel_launch_window(&launch_id)?;
-            return Err(err).context("start desktop entry through gtk-launch");
+            return Err(err);
         }
     };
-    let launcher_status = tokio::task::spawn_blocking(move || child.wait());
-    if let Ok(joined) = tokio::time::timeout(Duration::from_secs(2), launcher_status).await {
-        let status = joined.context("join gtk-launch status task")??;
-        if !status.success() {
+    let launcher_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(status) = child.try_wait().context("poll desktop launch service")? {
+            if !status.success() {
+                runtime
+                    .window_action_queue
+                    .cancel_launch_window(&launch_id)?;
+                bail!("desktop launch service rejected desktop entry {desktop_entry}");
+            }
+            break;
+        }
+        if tokio::time::Instant::now() >= launcher_deadline {
+            let _ = child.kill();
+            let _ = child.wait();
             runtime
                 .window_action_queue
                 .cancel_launch_window(&launch_id)?;
-            bail!("gtk-launch rejected desktop entry {desktop_entry}");
+            bail!("desktop launch service did not return within 2 seconds");
         }
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
     let outcome = runtime
@@ -4653,6 +4803,11 @@ async fn launch_window(
         .geometry
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("launch confirmation omitted window geometry"))?;
+    runtime
+        .launched_window_store
+        .record(&outcome.window, client)
+        .await
+        .context("record exact launched-window cleanup ownership")?;
     Ok(ActionResult {
         id: Uuid::new_v4(),
         ok: true,
@@ -4670,7 +4825,7 @@ async fn launch_window(
         }),
         screenshot: None,
         message: Some(format!(
-            "launched desktop entry {} window={} position={},{} size={}x{} anchor={:?} activation={:?} focus_preserved={} backend=kwin_script_bridge",
+            "launched desktop entry {} window={} position={},{} size={}x{} anchor={:?} activation={:?} focus_preserved={} backend=kwin_script_bridge launcher={}",
             desktop_entry,
             outcome.window.id,
             geometry.x,
@@ -4680,6 +4835,7 @@ async fn launch_window(
             request.anchor,
             request.activation,
             outcome.focus_preserved,
+            launcher_backend,
         )),
     })
 }
@@ -6532,10 +6688,29 @@ fn classify_error_reason(message: &str, kind: ErrorKind) -> &'static str {
         "capture_frame_missing"
     } else if lower.contains("capture frame invalidated by user input") {
         "capture_frame_invalidated_by_user"
-    } else if lower.contains("no non-sensitive activatable tab matched") {
+    } else if lower.contains("no non-sensitive") && lower.contains(" matched") {
         "semantic_target_not_actionable"
-    } else if lower.contains("launch intent expired before a matching window appeared") {
+    } else if lower.contains("launch intent expired before a matching window appeared")
+        || lower.contains("timed out waiting for the launched window")
+    {
         "launch_no_new_window"
+    } else if lower.contains("desktop launch backend unavailable")
+        || lower.contains("start desktop entry through an isolated user transient service")
+        || lower.contains("poll desktop launch service")
+    {
+        "launch_executor_failed"
+    } else if lower.contains("desktop launch service did not return") {
+        "launch_executor_timeout"
+    } else if lower.contains("desktop launch service rejected desktop entry") {
+        "launch_desktop_entry_rejected"
+    } else if lower.contains("did not arm the launch intent in time") {
+        "launch_bridge_arm_timeout"
+    } else if lower.contains("launch-intent acknowledgement channel closed") {
+        "launch_bridge_ack_lost"
+    } else if lower.contains("launch result channel closed before confirmation") {
+        "launch_confirmation_lost"
+    } else if lower.contains("kwin launch placement failed") {
+        "launch_placement_failed"
     } else if lower.contains("capture_output pointer coordinate")
         && lower.contains("outside preview")
     {
@@ -6544,6 +6719,22 @@ fn classify_error_reason(message: &str, kind: ErrorKind) -> &'static str {
         "capture_transform_invalid"
     } else if lower.contains("invalid at-spi node id") {
         "invalid_accessibility_node_id"
+    } else if lower.contains("at-spi operation deadline exceeded") {
+        "atspi_timeout"
+    } else if lower.contains("at-spi") && lower.contains("returned false") {
+        "atspi_action_rejected"
+    } else if lower.contains("unexpected at-spi")
+        || lower.contains("truncated at-spi")
+        || lower.contains("invalid at-spi")
+        || lower.contains("parse at-spi")
+    {
+        "atspi_protocol_error"
+    } else if lower.contains("at-spi bus advertised an unreachable unix socket")
+        || lower.contains("connect at-spi event bus")
+        || lower.contains("create at-spi registry proxy")
+        || lower.contains("accessibility bus")
+    {
+        "atspi_registry_unreachable"
     } else if lower.contains("clicks must be 1 or 2") {
         "invalid_click_count"
     } else if lower.contains("window_local pointer coordinate") && lower.contains("outside") {
@@ -6562,6 +6753,7 @@ fn classify_error_reason(message: &str, kind: ErrorKind) -> &'static str {
         "agent_target_user_active"
     } else if lower.contains("requested window does not exist")
         || lower.contains("pinned window closed")
+        || lower.contains("exact-window capture target closed")
     {
         "window_not_found"
     } else if lower.contains("pinned window identity changed") {
@@ -6579,8 +6771,8 @@ fn classify_error_reason(message: &str, kind: ErrorKind) -> &'static str {
         "backend_confirmation_incomplete"
     } else if kind == ErrorKind::Validation {
         "validation"
-    } else if lower.contains("at-spi") || lower.contains("accessibility bus") {
-        "atspi_registry_unreachable"
+    } else if lower.contains("at-spi") {
+        "atspi_backend_failed"
     } else {
         kind.as_str()
     }
@@ -6630,7 +6822,7 @@ fn classify_error_message(message: &str) -> ErrorKind {
     {
         ErrorKind::HumanInputPause
     } else if lower.contains("capture frame invalidated by user input")
-        || lower.contains("no non-sensitive activatable tab matched")
+        || (lower.contains("no non-sensitive") && lower.contains(" matched"))
         || lower.contains("launch intent expired before a matching window appeared")
     {
         ErrorKind::Validation
@@ -6684,6 +6876,7 @@ fn classify_error_message(message: &str) -> ErrorKind {
         ErrorKind::Validation
     } else if lower.contains("failed")
         || lower.contains("timed out")
+        || lower.contains("desktop launch service")
         || lower.contains("could not")
         || lower.contains("channel closed")
         || lower.contains("without geometry metadata")
@@ -7282,6 +7475,28 @@ fn compact_client_tool_name(name: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::{collections::VecDeque, os::fd::RawFd};
+
+    #[test]
+    fn inherited_listener_requires_the_configured_filesystem_path() {
+        let root = temp_test_path("inherited-listener");
+        fs::create_dir_all(&root).expect("create inherited listener fixture");
+        let actual = root.join("actual.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&actual)
+            .expect("bind inherited listener fixture");
+
+        validate_inherited_listener_path(&listener, &actual)
+            .expect("matching inherited listener path");
+        let error = validate_inherited_listener_path(&listener, &root.join("other.sock"))
+            .expect_err("mismatched inherited listener path must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match configured socket")
+        );
+
+        drop(listener);
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[derive(Default)]
     struct MockEisSource {
@@ -9560,6 +9775,10 @@ mod tests {
                 ErrorKind::Validation,
             ),
             (
+                "no non-sensitive text field matched name=Address",
+                ErrorKind::Validation,
+            ),
+            (
                 "KWin launch placement failed: launch intent expired before a matching window appeared",
                 ErrorKind::Validation,
             ),
@@ -9686,10 +9905,66 @@ mod tests {
         );
         assert_eq!(
             classify_error_reason(
+                "no non-sensitive focusable text field matched name=Address",
+                ErrorKind::Validation
+            ),
+            "semantic_target_not_actionable"
+        );
+        assert_eq!(
+            classify_error_reason(
                 "KWin launch placement failed: launch intent expired before a matching window appeared",
                 ErrorKind::Validation
             ),
             "launch_no_new_window"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "desktop launch backend unavailable: systemd-run is required",
+                ErrorKind::BackendFailed
+            ),
+            "launch_executor_failed"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "desktop launch service rejected desktop entry org.example.Missing",
+                ErrorKind::BackendFailed
+            ),
+            "launch_desktop_entry_rejected"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "KWin script bridge did not arm the launch intent in time",
+                ErrorKind::BackendFailed
+            ),
+            "launch_bridge_arm_timeout"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "KWin launch result channel closed before confirmation",
+                ErrorKind::BackendFailed
+            ),
+            "launch_confirmation_lost"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "AT-SPI DoAction(0) returned false",
+                ErrorKind::AccessibilityUnavailable
+            ),
+            "atspi_action_rejected"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "backend unavailable: AT-SPI bus advertised an unreachable Unix socket",
+                ErrorKind::AccessibilityUnavailable
+            ),
+            "atspi_registry_unreachable"
+        );
+        assert_eq!(
+            classify_error_reason(
+                "AT-SPI operation deadline exceeded",
+                ErrorKind::AccessibilityUnavailable
+            ),
+            "atspi_timeout"
         );
         assert_eq!(
             classify_error_reason(
@@ -9981,6 +10256,36 @@ height = 40
             err.to_string()
                 .contains("no matching approval grant is available")
         );
+    }
+
+    #[test]
+    fn prompt_policy_accepts_only_prevalidated_self_owned_cleanup() {
+        let request = DaemonRequest::CloseWindow(CloseWindowRequest {
+            window_id: "window-1".to_string(),
+            session_id: Some("session-1".to_string()),
+            guard: None,
+        });
+        let prompt_policy = PolicyEngine::new(PolicyConfig::default());
+        enforce_policy_with_scoped_cleanup(
+            &prompt_policy,
+            &ApprovalStore::default(),
+            &request,
+            true,
+        )
+        .expect("exact self-owned cleanup satisfies prompt policy");
+
+        let deny_policy = PolicyEngine::new(PolicyConfig {
+            default_destructive_actions: ToolApprovalLevel::Deny,
+            ..PolicyConfig::default()
+        });
+        let error = enforce_policy_with_scoped_cleanup(
+            &deny_policy,
+            &ApprovalStore::default(),
+            &request,
+            true,
+        )
+        .expect_err("explicit deny cannot be bypassed by cleanup ownership");
+        assert!(error.to_string().contains("policy denied"));
     }
 
     #[test]

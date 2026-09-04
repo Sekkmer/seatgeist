@@ -81,10 +81,13 @@ five-minute retry provide a fallback if a package transaction replaces the
 header in a way the path watcher misses or Plasma notifications are briefly
 unavailable.
 
-If the exact ABI embedded in the installed plugin no longer matches KWin, the
+If the exact ABI embedded in an installed Seatgeist plugin no longer matches KWin, the
 checker sends one desktop notification per boot with the rebuild command and
 writes the checked ABI fingerprint and notification outcome to
-`~/.local/state/seatgeist/kwin-activity-abi.json`. Every `notify-send` call has
+`~/.local/state/seatgeist/kwin-activity-abi.json`. The check always requires the
+activity plugin and also checks the agent-seat plugin when it is installed, so
+one current plugin cannot mask another stale plugin after a package upgrade.
+Every `notify-send` call has
 a three-second process timeout; a missing or wedged notification service is
 recorded and retried later without delaying login. The check never rebuilds
 code as root, restarts KWin, or dynamically loads the replacement plugin.

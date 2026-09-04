@@ -73,6 +73,12 @@ the sticky interaction binding, and sticky raw input rechecks the capture
 lifecycle before and after acquiring its seat lease. Explicit client close
 remains id-checked and reports `client_closed`.
 
+Direct exact-window captures share the sticky target's bounded 30-minute
+lease. Renew extends both halves only after current window identity and app
+policy revalidation. Status and other capture operations reap an expired
+capture, close its backend, report `lease_expired`, and free its quota slot;
+the capture cannot outlive the authorization used for agent-seat input.
+
 Each opening session is also bound to a trusted daemon-client owner before the
 backend can open the portal. MCP ownership is scoped to the exact Unix peer
 process; verified `seatgeist-cli` ownership is scoped to the CLI tool so later

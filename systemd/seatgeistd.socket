@@ -1,5 +1,7 @@
 [Unit]
 Description=Seatgeist daemon socket
+PartOf=graphical-session.target
+After=graphical-session-pre.target
 
 [Socket]
 ListenStream=%t/seatgeist/seatgeistd.sock
@@ -7,4 +9,4 @@ SocketMode=0600
 DirectoryMode=0700
 
 [Install]
-WantedBy=sockets.target
+WantedBy=graphical-session.target

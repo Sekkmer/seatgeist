@@ -49,6 +49,22 @@ def main() -> None:
         report = module.inspect_abis(header, plugin)
         assert report.status == "rebuild_required"
 
+        header, plugin = write_fixtures(root, "6.8.0", "6.8.0")
+        agent_seat = root / "seatgeistagentseat.so"
+        agent_seat.write_bytes(
+            b"binary org.kde.kwin.PluginFactoryInterface6.7.2 fixture"
+        )
+        report = module.inspect_abis(header, plugin, agent_seat)
+        assert report.status == "rebuild_required"
+        assert report.plugin_abi == "6.8.0"
+        assert report.plugins[1].name == "agent-seat"
+        assert report.plugins[1].status == "rebuild_required"
+        assert "agent-seat ABI 6.7.2" in module.notification_text(report)[1]
+        agent_seat.unlink()
+        report = module.inspect_abis(header, plugin, agent_seat)
+        assert report.status == "current"
+        assert report.plugins[1].status == "not_installed"
+
         plugin.unlink()
         assert module.inspect_abis(header, plugin).status == "missing_plugin"
         plugin.write_bytes(b"not a KWin plugin")
@@ -65,6 +81,7 @@ def main() -> None:
         first = module.run_check(
             header,
             plugin,
+            None,
             state,
             fake_notify,
             check_only=False,
@@ -74,6 +91,7 @@ def main() -> None:
         second = module.run_check(
             header,
             plugin,
+            None,
             state,
             fake_notify,
             check_only=False,
@@ -94,6 +112,7 @@ def main() -> None:
         current = module.run_check(
             header,
             plugin,
+            None,
             upgrade_state,
             fake_notify,
             check_only=False,
@@ -106,6 +125,7 @@ def main() -> None:
         upgraded = module.run_check(
             header,
             plugin,
+            None,
             upgrade_state,
             fake_notify,
             check_only=False,
@@ -125,6 +145,7 @@ def main() -> None:
         timed_out = module.run_check(
             header,
             plugin,
+            None,
             timeout_state,
             hanging_notify,
             check_only=False,
@@ -148,6 +169,7 @@ def main() -> None:
         failed = module.run_check(
             header,
             plugin,
+            None,
             failure_state,
             failing_notify,
             check_only=False,

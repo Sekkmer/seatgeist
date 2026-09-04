@@ -1,5 +1,5 @@
 [Unit]
-Description=Periodically verify the Seatgeist KWin activity plugin ABI
+Description=Periodically verify installed Seatgeist KWin plugin ABIs
 PartOf=graphical-session.target
 
 [Timer]

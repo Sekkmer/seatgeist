@@ -62,6 +62,10 @@ systemctl --user daemon-reload
 systemctl --user enable --now seatgeistd.socket
 ```
 
+The socket is scoped to the graphical session so the daemon inherits Plasma's
+current Wayland and display environment. The daemon consumes systemd's
+inherited Unix listener; it does not attempt to replace the active socket.
+
 Keep the service user-scoped. Do not run the daemon as root just to access uinput; use a narrow udev/group rule or a future portal/libei backend instead.
 
 ## Polkit State

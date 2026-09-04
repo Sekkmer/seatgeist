@@ -1,5 +1,5 @@
 [Unit]
-Description=Watch KWin ABI for Seatgeist plugin rebuilds
+Description=Watch KWin ABI for installed Seatgeist plugin rebuilds
 PartOf=graphical-session.target
 
 [Path]

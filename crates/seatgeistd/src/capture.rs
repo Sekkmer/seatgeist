@@ -16,6 +16,7 @@ use seatgeist_backend::{
     CaptureSource, CapturedFrame, FrameRequest, FrameWaitRequest, ScreenBackend,
 };
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::session_owner::{SessionOwner, SessionOwnerIdentity};
@@ -57,6 +58,7 @@ struct CaptureSessionSlot {
     latest_frame: Option<CaptureFrameResult>,
     latest_frame_user_invalidated: bool,
     direct_exact_window: bool,
+    expires_at: Option<Instant>,
     session: Arc<dyn CaptureSession>,
 }
 
@@ -97,16 +99,22 @@ impl CaptureSessionStore {
         };
         for (session_id, session) in sessions {
             let lifecycle = session.lifecycle().await;
-            let Some(reason) = lifecycle.end_reason() else {
-                continue;
-            };
             let removed = {
                 let mut state = self.state.lock().await;
+                let Some(slot) = state.sessions.get(&session_id) else {
+                    continue;
+                };
+                let reason = lifecycle.end_reason().map(str::to_string).or_else(|| {
+                    slot.expires_at
+                        .is_some_and(|expires_at| expires_at <= Instant::now())
+                        .then(|| "lease_expired".to_string())
+                });
+                let Some(reason) = reason else {
+                    continue;
+                };
                 let removed = state.sessions.remove(&session_id);
                 if let Some(slot) = removed.as_ref() {
-                    state
-                        .last_end_reasons
-                        .insert(slot.owner.identity(), reason.to_string());
+                    state.last_end_reasons.insert(slot.owner.identity(), reason);
                 }
                 removed
             };
@@ -189,6 +197,9 @@ impl CaptureSessionStore {
                 latest_frame: None,
                 latest_frame_user_invalidated: false,
                 direct_exact_window: pending.direct_exact_window,
+                expires_at: pending
+                    .direct_exact_window
+                    .then(|| Instant::now() + crate::interaction::DEFAULT_SESSION_TTL),
                 session,
             },
         );
@@ -264,6 +275,20 @@ impl CaptureSessionStore {
         }
     }
 
+    pub(crate) async fn renew(&self, requested_id: &str) -> Result<()> {
+        self.reap_ended().await;
+        let mut state = self.state.lock().await;
+        let slot = state
+            .sessions
+            .get_mut(requested_id)
+            .ok_or_else(|| anyhow::anyhow!("capture session ended or is not active"))?;
+        let Some(expires_at) = slot.expires_at.as_mut() else {
+            bail!("capture session has no renewable exact-window lease");
+        };
+        *expires_at = Instant::now() + crate::interaction::DEFAULT_SESSION_TTL;
+        Ok(())
+    }
+
     pub(crate) async fn require_owner(
         &self,
         requested_id: &str,
@@ -293,14 +318,21 @@ impl CaptureSessionStore {
             )
         };
         let metadata = session.metadata();
-        let frame = session
+        let frame = match session
             .snapshot(FrameRequest {
                 output: request.output.display().to_string(),
                 max_edge: request.max_edge,
                 timeout_ms: request.timeout_ms,
             })
             .await
-            .map_err(anyhow::Error::msg)?;
+        {
+            Ok(frame) => frame,
+            Err(error) => {
+                return Err(self
+                    .capture_backend_error(&request.session_id, error.to_string())
+                    .await);
+            }
+        };
         let result = capture_frame_result(
             &request.session_id,
             &metadata.backend,
@@ -325,7 +357,7 @@ impl CaptureSessionStore {
         };
         let metadata = session.metadata();
         let timeout_ms = request.timeout_ms;
-        let result = session
+        let result = match session
             .wait_for_frame(FrameWaitRequest {
                 after_revision: request.after_revision,
                 timeout_ms,
@@ -336,7 +368,14 @@ impl CaptureSessionStore {
                 },
             })
             .await
-            .map_err(anyhow::Error::msg)?;
+        {
+            Ok(result) => result,
+            Err(error) => {
+                return Err(self
+                    .capture_backend_error(&request.session_id, error.to_string())
+                    .await);
+            }
+        };
         let frame = capture_frame_result(
             &request.session_id,
             &metadata.backend,
@@ -441,6 +480,23 @@ impl CaptureSessionStore {
         ))
     }
 
+    async fn capture_backend_error(&self, session_id: &str, message: String) -> anyhow::Error {
+        if !capture_target_lost(&message) {
+            return anyhow::Error::msg(message);
+        }
+        let slot = self.state.lock().await.sessions.remove(session_id);
+        if let Some(slot) = slot {
+            let identity = slot.owner.identity();
+            let _ = slot.session.close().await;
+            self.state
+                .lock()
+                .await
+                .last_end_reasons
+                .insert(identity, "target_lost".to_string());
+        }
+        anyhow::anyhow!("interaction target lost: exact-window capture target closed: {message}")
+    }
+
     #[cfg(test)]
     async fn install(&self, session: Box<dyn CaptureSession>, requested_window_id: Option<String>) {
         let session: Arc<dyn CaptureSession> = Arc::from(session);
@@ -455,10 +511,26 @@ impl CaptureSessionStore {
                 latest_frame: None,
                 latest_frame_user_invalidated: false,
                 direct_exact_window: requested_window_id.is_some(),
+                expires_at: requested_window_id
+                    .is_some()
+                    .then(|| Instant::now() + crate::interaction::DEFAULT_SESSION_TTL),
                 session,
             },
         );
     }
+
+    #[cfg(test)]
+    async fn expire_for_test(&self, session_id: &str) {
+        if let Some(slot) = self.state.lock().await.sessions.get_mut(session_id) {
+            slot.expires_at = Some(Instant::now());
+        }
+    }
+}
+
+fn capture_target_lost(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("org.kde.kwin.screenshot2.error.invalidwindow")
+        || lower.contains("invalid window requested")
 }
 
 fn is_direct_exact_window(source: &CaptureSource) -> bool {
@@ -745,6 +817,14 @@ mod tests {
         Mutex as StdMutex,
         atomic::{AtomicBool, Ordering},
     };
+
+    #[test]
+    fn kwin_invalid_window_is_a_target_loss() {
+        assert!(capture_target_lost(
+            "KWin exact-window screenshot failed: org.kde.KWin.ScreenShot2.Error.InvalidWindow: Invalid window requested"
+        ));
+        assert!(!capture_target_lost("PipeWire capture timed out"));
+    }
 
     fn client(tool: &str, pid: u32, process_name: &str) -> libseatgeist::JournalClientContext {
         libseatgeist::JournalClientContext {
@@ -1325,6 +1405,30 @@ mod tests {
             .await
             .expect("portal closure frees the retained-session slot");
         store.fail_open(open_id).await;
+    }
+
+    #[tokio::test]
+    async fn exact_window_capture_expires_with_its_interaction_lease() {
+        let store = CaptureSessionStore::default();
+        let closed = Arc::new(AtomicBool::new(false));
+        store
+            .install(
+                Box::new(MockCaptureSession {
+                    id: "capture-expired".to_string(),
+                    source_type: seatgeist_backend::CaptureSourceType::Window,
+                    closed: Arc::clone(&closed),
+                    portal_ended: Arc::new(AtomicBool::new(false)),
+                }),
+                Some("kwin-window-expired".to_string()),
+            )
+            .await;
+
+        store.expire_for_test("capture-expired").await;
+        let status = store.status_for_owner(&SessionOwner::test_process(1)).await;
+        assert!(!status.active);
+        assert_eq!(status.last_end_reason.as_deref(), Some("lease_expired"));
+        assert!(closed.load(Ordering::SeqCst));
+        assert!(store.require_active("capture-expired").await.is_err());
     }
 
     #[test]
