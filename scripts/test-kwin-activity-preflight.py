@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +43,19 @@ def main() -> None:
     )
     assert module.kwin_abi_from_support_information(support) == "6.7.2"
     assert module.kwin_abi_from_support_information("no version") is None
+
+    with mock.patch.object(module.subprocess, "run", side_effect=subprocess.TimeoutExpired("qdbus6", 2)) as run:
+        assert module.command_lines(["qdbus6"]) == []
+        assert run.call_args.kwargs["timeout"] == 2
+    with mock.patch.object(module, "command_lines", return_value=["4242"]) as command, mock.patch.object(Path, "read_text", return_value=maps) as read:
+        pid, abi, deleted = module.running_kwin()
+        assert (pid, abi, deleted) == (4242, "6.6.5", True)
+        assert "org.freedesktop.DBus.GetConnectionUnixProcessID" in command.call_args.args[0]
+        assert read.call_count == 1  # no cross-session /proc scan
+    for response in [[], ["1", "2"], ["not-a-pid"], ["0"]]:
+        with mock.patch.object(module, "command_lines", return_value=response), mock.patch.object(Path, "iterdir") as scan:
+            assert module.running_kwin() == (None, None, False)
+            scan.assert_not_called()
     print("test-kwin-activity-preflight: ok")
 
 

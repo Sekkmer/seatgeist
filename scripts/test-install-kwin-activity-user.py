@@ -87,6 +87,9 @@ def main() -> None:
         assert f"Unit={module.SERVICE_NAME}" in path_text
         assert "WantedBy=graphical-session.target" in timer_text
         assert f"Unit={module.SERVICE_NAME}" in timer_text
+        assert " --runtime" in service_text
+        assert "TimeoutStartSec=18s" in service_text
+        assert "NoNewPrivileges=yes" in service_text
 
         # Reinstalling the same artifacts is harmless and yields the same
         # exact user-local state.
@@ -123,8 +126,6 @@ def main() -> None:
                 "--user",
                 "disable",
                 module.SERVICE_NAME,
-                module.PATH_NAME,
-                module.TIMER_NAME,
             ],
             [
                 "systemctl",
@@ -135,6 +136,27 @@ def main() -> None:
             ],
         ]
         assert all("--now" not in command for command in commands)
+
+        with mock.patch.object(module.subprocess, "run") as systemctl_run:
+            systemctl_run.return_value.returncode = 0
+            module.manage_units("install", activate_watchers=True)
+            commands = [call.args[0] for call in systemctl_run.call_args_list]
+        assert commands[-1] == ["systemctl", "--user", "start", module.PATH_NAME, module.TIMER_NAME]
+        assert not any("restart" in command or "plasma-kwin_wayland.service" in command or "seatgeistd.service" in command for command in commands)
+
+        # Diagnostic updates must not replace plugin binaries or KWin config,
+        # even if the requested artifact is absent.
+        drop_in.write_text("operator configuration\n")
+        installed.write_bytes(b"operator plugin")
+        subprocess.run([
+            str(SCRIPT), "--watcher-only", "--artifact", str(root / "missing.so"),
+            "--plugin-root", str(plugin_root), "--drop-in", str(drop_in),
+            "--watcher", str(watcher), "--unit-dir", str(unit_dir),
+            "--no-daemon-reload", "--no-systemd-management",
+        ], check=True, stdout=subprocess.DEVNULL)
+        assert drop_in.read_text() == "operator configuration\n"
+        assert installed.read_bytes() == b"operator plugin"
+        assert watcher.read_bytes() == module.DEFAULT_WATCHER_SOURCE.read_bytes()
 
         subprocess.run(
             [

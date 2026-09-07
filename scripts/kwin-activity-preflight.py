@@ -29,8 +29,9 @@ def command_lines(arguments: list[str]) -> list[str]:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
+            timeout=2,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return []
     if completed.returncode != 0:
         return []
@@ -66,18 +67,15 @@ def running_kwin_abi_from_dbus() -> str | None:
 
 
 def running_kwin() -> tuple[int | None, str | None, bool]:
-    candidates: list[int] = []
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            if (entry / "comm").read_text(encoding="utf-8").strip() == "kwin_wayland":
-                candidates.append(int(entry.name))
-        except OSError:
-            continue
-    if not candidates:
+    # Select this session's compositor, never an unrelated user's or nested
+    # compositor merely because it has the lowest PID on the machine.
+    owners = command_lines([
+        "qdbus6", "org.freedesktop.DBus", "/org/freedesktop/DBus",
+        "org.freedesktop.DBus.GetConnectionUnixProcessID", "org.kde.KWin",
+    ])
+    if len(owners) != 1 or not owners[0].isascii() or not owners[0].isdigit() or int(owners[0]) <= 0:
         return None, None, False
-    pid = min(candidates)
+    pid = int(owners[0])
     try:
         maps = Path(f"/proc/{pid}/maps").read_text(encoding="utf-8")
     except OSError:
@@ -164,7 +162,7 @@ def build_report(artifact: Path) -> dict[str, Any]:
     available = dbus_plugins("AvailablePlugins")
     loaded = dbus_plugins("LoadedPlugins")
     abi_matches_running = build_abi is not None and build_abi == running_abi
-    restart_required = running_pid is not None and not abi_matches_running
+    restart_required = running_pid is not None and (not abi_matches_running or running_deleted)
     running_qt_plugin_path = process_environment(running_pid, "QT_PLUGIN_PATH")
     user_path_active = running_qt_plugin_path is not None and str(user_plugin_root) in (
         part for part in running_qt_plugin_path.split(":") if part
@@ -183,11 +181,11 @@ def build_report(artifact: Path) -> dict[str, Any]:
     if restart_required:
         next_actions.append("restart the normal Plasma session to load the installed KWin ABI")
     elif installed and PLUGIN_ID not in available:
-        next_actions.append("refresh KWin plugin discovery after installation")
+        next_actions.append("check KWin plugin paths and use a normal logout/login when ready")
     elif installed and PLUGIN_ID not in loaded:
-        next_actions.append("load seatgeistactivity through org.kde.KWin.Plugins.LoadPlugin")
+        next_actions.append("check plugin enablement and use a normal logout/login; do not hot-load into the active compositor")
     if PLUGIN_ID in loaded:
-        next_actions.append("verify seatgeist.safety_status reports kwin_input_spy_v1 trusted")
+        next_actions.append("run kwin-activity-abi-watch --check-only --runtime to verify daemon registration separately")
 
     return {
         "type": "seatgeist_kwin_activity_preflight",
@@ -218,7 +216,8 @@ def build_report(artifact: Path) -> dict[str, Any]:
             "loaded": PLUGIN_ID in loaded,
         },
         "restart_required": restart_required,
-        "ready": installed and abi_matches_running and PLUGIN_ID in loaded,
+        "ready": installed and abi_matches_running and not running_deleted and PLUGIN_ID in loaded,
+        "daemon_registration_checked": False,
         "next_actions": next_actions,
     }
 

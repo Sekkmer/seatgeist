@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +36,128 @@ def write_fixtures(root: Path, header_abi: str, plugin_abi: str) -> tuple[Path, 
         )
     )
     return header, plugin
+
+
+def check_runtime_regressions(module, root: Path) -> None:
+    header, plugin = write_fixtures(root, "6.8.0", "6.8.0")
+    agent = root / "agent.so"
+    agent.write_bytes(b"org.kde.kwin.PluginFactoryInterface6.8.0")
+    report = module.inspect_abis(header, plugin, agent)
+    support = {"type": "s", "data": ["KWin version: 6.8.0\n"]}
+    loaded = {"type": "as", "data": ["seatgeistactivity", "seatgeistagentseat"]}
+    owner = {"type": "b", "data": [True]}
+    safety = {"type": "safety_status", "data": {
+        "human_input_activity_trusted": True,
+        "human_input_activity_backend": "kwin_input_spy_v2",
+    }}
+    inputs = {"type": "input_backend_status", "data": {
+        "configured_backend": "kwin_agent_seat",
+        "implemented_available_backend": "kwin_agent_seat",
+    }}
+
+    def inspect(responses):
+        with mock.patch.object(module, "probe_json", side_effect=responses) as probe:
+            result = module.inspect_runtime(report, Path("/fixture/cli"))
+            commands = [call.args[0] for call in probe.call_args_list]
+        assert all("--auto-start=no" in command for command in commands if command[0] == "/usr/bin/busctl")
+        assert not any("LoadPlugin" in command or "restart" in command for command in commands)
+        return result, commands
+
+    ready, commands = inspect([support, loaded, owner, safety, inputs])
+    assert ready.status == "ready"
+    assert ready.activity_trusted is True
+    assert len(commands) == 5
+
+    # Rebuilt on-disk plugins do not imply they are loaded in this session.
+    missing, commands = inspect([support, {"type": "as", "data": []}])
+    assert missing.status == "plugins_not_loaded"
+    assert len(commands) == 2  # no CLI call / daemon activation
+    stale, commands = inspect([{"type": "s", "data": ["KWin version: 6.7.0\n"]}])
+    assert stale.status == "session_restart_required"
+    assert len(commands) == 1
+    absent, commands = inspect([support, loaded, {"type": "b", "data": [False]}])
+    assert absent.status == "daemon_unavailable"
+    assert len(commands) == 3
+
+    untrusted = {"type": "safety_status", "data": {
+        "human_input_activity_trusted": False,
+        "human_input_activity_backend": None,
+    }}
+    assert inspect([support, loaded, owner, untrusted, inputs])[0].status == "activity_unregistered"
+    unavailable = {"type": "input_backend_status", "data": {
+        "configured_backend": "kwin_agent_seat", "implemented_available_backend": None,
+    }}
+    assert inspect([support, loaded, owner, safety, unavailable])[0].status == "agent_seat_unavailable"
+    generic_unavailable = {"type": "input_backend_status", "data": {
+        "configured_backend": "portal", "implemented_available_backend": None,
+    }}
+    assert inspect([support, loaded, owner, safety, generic_unavailable])[0].status == "input_backend_unavailable"
+
+    # Fail closed on schema drift, wrong types and timeouts. Never report ready.
+    for responses in [
+        [module.ProbeError("timeout")],
+        [{"type": "s", "data": ["no version"]}],
+        [support, {"type": "as", "data": "seatgeistactivity"}],
+        [support, loaded, {"type": "b", "data": [1]}],
+        [support, loaded, owner, {"type": "unexpected", "data": {}}],
+        [support, loaded, owner, {"type": "safety_status", "data": {}}, inputs],
+        [support, loaded, owner, {"type": "safety_status", "data": {
+            "human_input_activity_trusted": True, "human_input_activity_backend": [],
+        }}, inputs],
+        [support, loaded, owner, safety, {"type": "input_backend_status", "data": {
+            "configured_backend": "", "implemented_available_backend": "",
+        }}],
+    ]:
+        assert inspect(responses)[0].status == "unknown"
+    with mock.patch.object(module.subprocess, "run", side_effect=subprocess.TimeoutExpired("probe", 2)) as run:
+        try:
+            module.probe_json(["probe"])
+            assert False, "timeout must not become a success"
+        except module.ProbeError:
+            pass
+        assert run.call_args.kwargs["timeout"] == 2.0
+    for invalid_json in ["garbage", "[]", "null"]:
+        with mock.patch.object(module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, invalid_json)):
+            try:
+                module.probe_json(["probe"])
+                assert False, "invalid JSON must fail closed"
+            except module.ProbeError:
+                pass
+
+    state = root / "runtime-state.json"
+    state.write_text('{"sentinel":true}')
+    with mock.patch.object(module, "inspect_runtime", return_value=missing), mock.patch.object(module, "send_notification") as notify:
+        result = module.run_check(header, plugin, agent, state, Path("/fake/notify"), check_only=True, runtime_check=True)
+        assert result["status"] == "current"
+        assert result["runtime_ready"] is False
+        assert state.read_text() == '{"sentinel":true}'
+        notify.assert_not_called()
+
+    with mock.patch.object(module, "inspect_runtime", return_value=missing), mock.patch.object(module, "send_notification", return_value=(True, None)) as notify:
+        first = module.run_check(header, plugin, agent, state, Path("/fake/notify"), check_only=False, runtime_check=True, boot_id="runtime-boot")
+        second = module.run_check(header, plugin, agent, state, Path("/fake/notify"), check_only=False, runtime_check=True, boot_id="runtime-boot")
+        assert first["notification_sent"] is True
+        assert second["notification_suppressed"] is True
+        assert notify.call_count == 1
+        assert "but session status" in module.notification_text(report, missing)[1]
+    stored = json.loads(state.read_text())
+    assert stored["report"]["runtime"]["status"] == "plugins_not_loaded"
+    assert stored["report"]["runtime_ready"] is False
+    with mock.patch.object(module, "inspect_runtime", return_value=ready):
+        recovered = module.run_check(header, plugin, agent, state, Path("/fake/notify"), check_only=False, runtime_check=True, boot_id="runtime-boot")
+    assert recovered["runtime_ready"] is True
+    assert json.loads(state.read_text())["notified"] is False
+    # Missing runtime evidence must not reuse a previous healthy snapshot.
+    with mock.patch.object(module, "inspect_runtime", return_value=module.RuntimeReport("unknown")), mock.patch.object(module, "send_notification", return_value=(False, "timeout")):
+        unknown = module.run_check(header, plugin, agent, state, Path("/fake/notify"), check_only=False, runtime_check=True, boot_id="runtime-boot")
+    assert unknown["runtime_ready"] is False
+    assert json.loads(state.read_text())["report"]["runtime_ready"] is False
+
+    state.write_bytes(b"\xff")
+    assert module.read_state(state) == {}
+    for value in ["nan", "inf", "0", "4"]:
+        result = subprocess.run([str(SCRIPT), "--check-only", "--notification-timeout-seconds", value], capture_output=True)
+        assert result.returncode == 2
 
 
 def main() -> None:
@@ -179,6 +303,8 @@ def main() -> None:
         failure_stored = json.loads(failure_state.read_text(encoding="utf-8"))
         assert failure_stored["notified"] is False
         assert failure_stored["last_notification_failure"] == "failed"
+
+        check_runtime_regressions(module, root)
 
     print("test-kwin-activity-abi-watch: ok")
 

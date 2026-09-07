@@ -163,6 +163,16 @@ that release, installed, and running executable hashes match, and rechecks
 retained-session idleness. It does not capture pixels, open a portal session,
 focus a window, or send input.
 
+## KDE Update Readiness
+
+For native-plugin installations, keep the non-blocking compatibility and
+session-readiness monitor enabled. See the [native plugin monitoring and
+recovery runbook](human-input-activity.md) for monitoring-only installation,
+read-only checks, and safe recovery after KDE updates. Matching installed
+plugin versions do not prove they are loaded in the current session. The
+monitor diagnoses this separately and does not automatically rebuild code,
+restart the compositor, or broaden input permissions.
+
 ## Panic-Stop Shortcut
 
 Install the panic-stop helper somewhere KDE's global shortcut runner can execute:

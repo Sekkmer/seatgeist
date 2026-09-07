@@ -69,7 +69,7 @@ def atomic_text(content: str, destination: Path, mode: int) -> None:
 
 def daemon_reload() -> None:
     completed = subprocess.run(
-        ["systemctl", "--user", "daemon-reload"], check=False
+        ["systemctl", "--user", "daemon-reload"], check=False, timeout=10
     )
     if completed.returncode != 0:
         raise RuntimeError("systemctl --user daemon-reload failed")
@@ -79,19 +79,22 @@ def run_systemctl(*arguments: str) -> None:
     completed = subprocess.run(
         ["systemctl", "--user", *arguments],
         check=False,
+        timeout=10,
     )
     if completed.returncode != 0:
         raise RuntimeError(f"systemctl --user {' '.join(arguments)} failed")
 
 
-def manage_units(action: str) -> None:
+def manage_units(action: str, *, activate_watchers: bool = False) -> None:
     if action == "install":
         # The service is path/timer-triggered only. In particular, never leave
         # the checker enabled directly in a graphical boot target.
-        run_systemctl("disable", SERVICE_NAME, PATH_NAME, TIMER_NAME)
-        # Do not use --now: installing the binary plugin is explicitly a
-        # next-login operation and must not disturb the running session.
+        run_systemctl("disable", SERVICE_NAME)
+        # Plugin installation is still a next-login operation. Starting only
+        # the diagnostic triggers is a separate, explicit opt-in.
         run_systemctl("enable", PATH_NAME, TIMER_NAME)
+        if activate_watchers:
+            run_systemctl("start", PATH_NAME, TIMER_NAME)
     elif action == "remove":
         run_systemctl("disable", SERVICE_NAME, PATH_NAME, TIMER_NAME)
     else:
@@ -116,11 +119,17 @@ def main() -> None:
     parser.add_argument("--unit-dir", type=Path, default=DEFAULT_UNIT_DIR)
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument("--remove", action="store_true")
+    parser.add_argument("--watcher-only", action="store_true", help="Update only diagnostic script/units; leave plugins and KWin configuration unchanged")
+    parser.add_argument("--activate-watchers", action="store_true", help="Start only diagnostic path/timer units now, without restarting KWin or Seatgeist")
     parser.add_argument("--no-daemon-reload", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--no-systemd-management", action="store_true", help=argparse.SUPPRESS
     )
     args = parser.parse_args()
+    if args.remove and (args.watcher_only or args.activate_watchers):
+        parser.error("--remove cannot be combined with --watcher-only or --activate-watchers")
+    if args.activate_watchers and (args.no_systemd_management or args.no_daemon_reload):
+        parser.error("--activate-watchers requires systemd management and daemon reload")
 
     plugin = args.plugin_root / "kwin/plugins/seatgeistactivity.so"
     experimental_focus_plugins = (
@@ -146,7 +155,7 @@ def main() -> None:
         args.state.unlink(missing_ok=True)
         action = "removed"
     else:
-        if not args.artifact.is_file():
+        if not args.watcher_only and not args.artifact.is_file():
             raise SystemExit("activity plugin artifact is missing; run make check-kwin-activity-plugin")
         service_template = args.unit_source_dir.joinpath(
             f"{SERVICE_NAME}.in"
@@ -159,25 +168,29 @@ def main() -> None:
             or not timer_source.is_file()
         ):
             raise SystemExit("activity ABI watcher install assets are missing")
-        atomic_copy(args.artifact, plugin, 0o755)
-        for experimental_focus_plugin in experimental_focus_plugins:
-            experimental_focus_plugin.unlink(missing_ok=True)
-        atomic_text(render_drop_in(args.plugin_root), args.drop_in, 0o644)
+        # Render/validate all unit paths before touching the installed plugin.
+        service_text = render_service(service_template, args.watcher)
+        if not args.watcher_only:
+            drop_in_text = render_drop_in(args.plugin_root)
+            atomic_copy(args.artifact, plugin, 0o755)
+            for experimental_focus_plugin in experimental_focus_plugins:
+                experimental_focus_plugin.unlink(missing_ok=True)
+            atomic_text(drop_in_text, args.drop_in, 0o644)
         atomic_copy(args.watcher_source, args.watcher, 0o755)
-        atomic_text(render_service(service_template, args.watcher), service, 0o644)
+        atomic_text(service_text, service, 0o644)
         atomic_copy(path_source, path_unit, 0o644)
         atomic_copy(timer_source, timer, 0o644)
         action = "installed"
     if not args.no_daemon_reload:
         daemon_reload()
     if not args.remove and not args.no_systemd_management:
-        manage_units("install")
+        manage_units("install", activate_watchers=args.activate_watchers)
 
     print(
         json.dumps(
             {
                 "type": "seatgeist_kwin_activity_user_install",
-                "version": 3,
+                "version": 4,
                 "action": action,
                 "plugin": str(plugin),
                 "drop_in": str(args.drop_in),
@@ -186,7 +199,13 @@ def main() -> None:
                 "abi_path": str(path_unit),
                 "abi_timer": str(timer),
                 "compositor_restarted": False,
-                "next_step": "restart the normal Plasma session, then run make kwin-activity-preflight",
+                "plugin_updated": action == "installed" and not args.watcher_only,
+                "watchers_activated": args.activate_watchers,
+                "next_step": (
+                    "inspect the ABI watcher with --check-only --runtime; follow its recovery guidance"
+                    if args.watcher_only else
+                    "restart the normal Plasma session, then run the ABI watcher with --check-only --runtime"
+                ),
             },
             indent=2,
             sort_keys=True,

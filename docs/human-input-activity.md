@@ -82,20 +82,38 @@ header in a way the path watcher misses or Plasma notifications are briefly
 unavailable.
 
 If the exact ABI embedded in an installed Seatgeist plugin no longer matches KWin, the
-checker sends one desktop notification per boot with the rebuild command and
-writes the checked ABI fingerprint and notification outcome to
+checker sends a desktop notification with the rebuild command and
+writes the latest report, checked fingerprint, and notification outcome to
 `~/.local/state/seatgeist/kwin-activity-abi.json`. The check always requires the
 activity plugin and also checks the agent-seat plugin when it is installed, so
 one current plugin cannot mask another stale plugin after a package upgrade.
-Every `notify-send` call has
-a three-second process timeout; a missing or wedged notification service is
-recorded and retried later without delaying login. The check never rebuilds
+The service also checks the running compositor version, loaded plugin IDs,
+trusted activity registration, and configured input backend availability.
+Matching files alone are not a healthy session. An old running compositor
+requires a normal logout/login; unloaded plugins require checking enablement
+and plugin paths before that login. Unavailable, timed-out, or malformed
+diagnostic responses produce `runtime.status=unknown`, never a cached success.
+The JSON top-level `status` describes installed ABI compatibility;
+`runtime_ready` describes the additional load/registration checks, not an
+end-to-end GUI interaction test.
+
+Successful notifications are deduplicated per problem fingerprint per boot.
+Each of at most five diagnostic subprocesses has a two-second timeout, and
+each `notify-send` call has a three-second timeout. The service has an overall
+18-second limit, restrictive file permissions, and no-new-privileges enabled.
+A missing or wedged notification service is recorded and retried later without
+delaying login. The check never rebuilds
 code as root, restarts KWin, or dynamically loads the replacement plugin.
 Inspect it without notifying or writing state with:
 
 ```bash
-~/.local/libexec/seatgeist/kwin-activity-abi-watch --check-only
+~/.local/libexec/seatgeist/kwin-activity-abi-watch --check-only --runtime
 ```
+
+Omit `--runtime` for an installed-files-only check (`runtime_ready=false`).
+Runtime probes use non-activating KWin D-Bus calls and skip CLI requests when
+the daemon's bridge service has no owner. They neither open portal sessions
+nor send input, and never enable a less restricted input fallback.
 
 Wrapping this source build in an AUR package alone would not provide that
 guarantee: pacman can upgrade an official KWin dependency without rebuilding an
@@ -109,6 +127,20 @@ metadata, but it does not start, stop, or reload KWin, Plasma, Seatgeist, or the
 checker units in the active session. Log out and back in normally when ready to
 activate the new binary plugin.
 
+To update monitoring independently of native plugin builds, and explicitly
+start its path/timer triggers in the current session:
+
+```bash
+scripts/install-kwin-activity-user.py --watcher-only --activate-watchers
+systemctl --user is-active seatgeist-kwin-activity-abi.path seatgeist-kwin-activity-abi.timer
+```
+
+This leaves native plugins and the KWin environment drop-in untouched. The
+first timer check occurs after two minutes; run the read-only command above
+for immediate diagnosis. This is detection and recovery guidance, not an
+automatic updater: native plugins still need explicit rebuilding for the
+installed KWin version and activation at a normal Plasma login.
+
 Inspect the built, installed, and currently running compositor ABIs before
 loading it:
 
@@ -116,9 +148,13 @@ loading it:
 make kwin-activity-preflight
 ```
 
-The preflight prefers mapped-library evidence and falls back to KWin's D-Bus
+The preflight selects the compositor owning `org.kde.KWin` on the current
+user's session bus, not an arbitrary process with the same name. It prefers
+mapped-library evidence and falls back to KWin's D-Bus
 support-information version when Linux protects `/proc/<pid>/maps`, as happens
-when the compositor binary carries `CAP_SYS_NICE`.
+when the compositor binary carries `CAP_SYS_NICE`. Deleted mapped binaries or
+libraries require a normal logout/login even if their version string matches.
+Preflight does not check daemon registration; use the runtime watcher for that.
 
 KWin discovers binary plugins from its Qt library paths and exposes dynamic
 `LoadPlugin`/`UnloadPlugin` methods on `/Plugins`. Dynamic loading is safe only

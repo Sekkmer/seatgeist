@@ -1,9 +1,13 @@
 [Unit]
-Description=Check installed Seatgeist KWin plugin ABIs
+Description=Check Seatgeist KWin plugin compatibility and session readiness
 After=graphical-session.target
 PartOf=graphical-session.target
 
 [Service]
 Type=oneshot
-ExecStart=@WATCHER@
-TimeoutStartSec=8s
+ExecStart=@WATCHER@ --runtime
+# Five read-only probes (2s each) plus notification (3s), with shutdown margin.
+TimeoutStartSec=18s
+UMask=0077
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
