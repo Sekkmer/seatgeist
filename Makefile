@@ -26,6 +26,7 @@ check-kwin-agent-seat-plugin:
 	set -euo pipefail
 	cmake -S kwin/seatgeist-agent-seat -B target/kwin-seatgeist-agent-seat -DCMAKE_BUILD_TYPE=RelWithDebInfo
 	cmake --build target/kwin-seatgeist-agent-seat --parallel
+	ctest --test-dir target/kwin-seatgeist-agent-seat --output-on-failure
 
 validate-kwin-bridge:
 	set -euo pipefail

@@ -77,7 +77,7 @@ in `plasma-core.target`, `plasma-workspace.target`, or
 reacts when pacman or an AUR helper changes
 `/usr/include/kwin/config-kwin.h`; this reports a mismatch in the still-running
 session, before logout or reboot. A two-minute initial timer check and
-five-minute retry provide a fallback if a package transaction replaces the
+fifteen-minute retry provide a fallback if a package transaction replaces the
 header in a way the path watcher misses or Plasma notifications are briefly
 unavailable.
 
@@ -89,6 +89,10 @@ activity plugin and also checks the agent-seat plugin when it is installed, so
 one current plugin cannot mask another stale plugin after a package upgrade.
 The service also checks the running compositor version, loaded plugin IDs,
 trusted activity registration, and configured input backend availability.
+New agent-seat plugins also publish a source build fingerprint through their
+verified KWin D-Bus registration. The watcher compares that live identity with
+the installed binary, so an older mapped plugin cannot be mistaken for the
+newly installed file merely because both use the same KWin ABI and plugin ID.
 Matching files alone are not a healthy session. An old running compositor
 requires a normal logout/login; unloaded plugins require checking enablement
 and plugin paths before that login. Unavailable, timed-out, or malformed
@@ -98,9 +102,16 @@ The JSON top-level `status` describes installed ABI compatibility;
 end-to-end GUI interaction test.
 
 Successful notifications are deduplicated per problem fingerprint per boot.
-Each of at most five diagnostic subprocesses has a two-second timeout, and
+Installed ABI/build mismatches notify immediately. Transient runtime failures
+such as a daemon deployment gap require two consecutive checks, and a fresh
+`deployment-in-progress` marker defers them until deployment completes. The
+daemon deployment helper creates and removes that owner-private marker around
+binary replacement and service restart. A current daemon combines activity
+and agent-seat evidence in one `input status` request; an older daemon uses one
+compatibility safety-status fallback. Each bounded diagnostic subprocess has a
+two-second timeout, and
 each `notify-send` call has a three-second timeout. The service has an overall
-18-second limit, restrictive file permissions, and no-new-privileges enabled.
+16-second limit, restrictive file permissions, and no-new-privileges enabled.
 A missing or wedged notification service is recorded and retried later without
 delaying login. The check never rebuilds
 code as root, restarts KWin, or dynamically loads the replacement plugin.
@@ -114,6 +125,16 @@ Omit `--runtime` for an installed-files-only check (`runtime_ready=false`).
 Runtime probes use non-activating KWin D-Bus calls and skip CLI requests when
 the daemon's bridge service has no owner. They neither open portal sessions
 nor send input, and never enable a less restricted input fallback.
+
+Before the first tool request after login, socket activation normally leaves
+the daemon inactive. If its service is loaded and cleanly inactive, and its
+socket is actively listening at the expected path and triggers that service,
+the watcher reports `runtime.status=socket_standby` without a notification.
+It checks both units through a bounded, read-only systemd query; it does not
+connect to the socket. `runtime_ready` remains false because live registration
+has not been checked yet. The first Seatgeist tool request starts the daemon
+normally. Failed services, missing units, inactive listeners, and an active
+daemon without its bridge owner are not classified as standby.
 
 Wrapping this source build in an AUR package alone would not provide that
 guarantee: pacman can upgrade an official KWin dependency without rebuilding an

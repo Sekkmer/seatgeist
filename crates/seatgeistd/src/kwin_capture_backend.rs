@@ -231,7 +231,11 @@ async fn capture_kwin_window(
     let metadata = decode_metadata(&results)?;
     verify_window_id(window_id, metadata.window_id.as_deref())?;
     let rgba = decode_argb32_premultiplied(&bytes, &metadata)?;
-    write_window_png(&rgba, &output, request.max_edge)?;
+    // The pipe payload can be another full native-resolution frame. Release it
+    // before resize/PNG encoding so an 8K capture does not retain both source
+    // representations for the rest of the request.
+    drop(bytes);
+    write_window_png(rgba, &output, request.max_edge)?;
     let (output_width, output_height) = image::image_dimensions(&output)?;
     let logical_width = logical_capture_extent(metadata.width, metadata.scale);
     let logical_height = logical_capture_extent(metadata.height, metadata.scale);
@@ -390,20 +394,19 @@ fn unpremultiply(channel: u8, alpha: u8) -> u8 {
     }
 }
 
-fn write_window_png(image: &RgbaImage, output: &Path, max_edge: Option<u32>) -> anyhow::Result<()> {
+fn write_window_png(image: RgbaImage, output: &Path, max_edge: Option<u32>) -> anyhow::Result<()> {
     let max_edge = max_edge.unwrap_or_else(|| image.width().max(image.height()));
     if max_edge == 0 {
         anyhow::bail!("max_edge must be greater than zero");
     }
-    let dynamic = DynamicImage::ImageRgba8(image.clone());
     let largest = image.width().max(image.height());
     let output_image = if largest > max_edge {
         let scale = f64::from(max_edge) / f64::from(largest);
         let width = (f64::from(image.width()) * scale).round().max(1.0) as u32;
         let height = (f64::from(image.height()) * scale).round().max(1.0) as u32;
-        dynamic.resize_exact(width, height, FilterType::Lanczos3)
+        DynamicImage::ImageRgba8(image).resize_exact(width, height, FilterType::Lanczos3)
     } else {
-        dynamic
+        DynamicImage::ImageRgba8(image)
     };
     output_image.save(output)?;
     Ok(())
@@ -596,5 +599,17 @@ mod tests {
         assert_eq!(logical_capture_extent(1_920, 1.5), 1_280);
         assert_eq!(logical_capture_extent(1_620, 1.5), 1_080);
         assert_eq!(logical_capture_extent(1_279, 1.25), 1_023);
+    }
+
+    #[test]
+    fn native_8k_frame_downsizes_to_the_preview_bound() {
+        let path = std::env::temp_dir().join(format!(
+            "seatgeist-8k-preview-{}.png",
+            Uuid::new_v4().simple()
+        ));
+        let image = RgbaImage::from_pixel(7_680, 4_320, image::Rgba([12, 34, 56, 255]));
+        write_window_png(image, &path, Some(1_600)).expect("8K preview is encoded");
+        assert_eq!(image::image_dimensions(&path).unwrap(), (1_600, 900));
+        std::fs::remove_file(path).ok();
     }
 }

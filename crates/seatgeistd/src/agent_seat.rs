@@ -4,27 +4,35 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
-use libseatgeist::{CoordinateSpace, Point, PointerButton, SeatgeistError, WindowInfo};
+use libseatgeist::{
+    AgentSeatRuntimeStatus, CoordinateSpace, Point, PointerButton, SeatgeistError, WindowInfo,
+};
 use seatgeist_backend::{TargetedInputBackend, TargetedInputContext, TargetedInputDelivery};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, oneshot};
 use uuid::Uuid;
 
-pub(crate) const KWIN_AGENT_SEAT_BACKEND: &str = "kwin_agent_seat_v1";
+#[path = "agent_seat_plan.rs"]
+mod plan;
+
+pub(crate) const KWIN_AGENT_SEAT_BACKEND: &str = "kwin_agent_seat_v2";
+const LEGACY_BACKEND: &str = "kwin_agent_seat_v1";
 const ACTION_TIMEOUT: Duration = Duration::from_secs(3);
 const ACTION_LONG_POLL_TIMEOUT: Duration = Duration::from_secs(2);
 const BACKEND_HEARTBEAT_TTL: Duration = Duration::from_secs(5);
+const BUILD_ID_PREFIX: &str = "SEATGEIST_AGENT_SEAT_BUILD_ID:";
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct KwinAgentSeatBackend {
     registered: Arc<AtomicBool>,
     inner: Arc<Mutex<AgentSeatState>>,
     wake: Arc<Notify>,
+    lanes: Option<crate::interaction::InteractionSessionStore>,
 }
 
 #[derive(Debug, Default)]
@@ -33,6 +41,16 @@ struct AgentSeatState {
     waiters: HashMap<Uuid, oneshot::Sender<AgentSeatActionResult>>,
     last_seen: Option<Instant>,
     caller: Option<String>,
+    backend: Option<String>,
+    build_id: Option<String>,
+    last_delivery: Option<DeliveryValidation>,
+}
+
+#[derive(Debug)]
+struct DeliveryValidation {
+    observed_at: Instant,
+    ok: bool,
+    error_kind: Option<String>,
 }
 
 #[derive(Debug)]
@@ -48,6 +66,21 @@ struct AgentSeatActionResult {
     ok: bool,
     backend: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ExpiringAction<'a, T> {
+    #[serde(flatten)]
+    action: &'a T,
+    expires_at_unix_ms: u128,
+}
+
+fn action_payload<T: Serialize>(action: &T) -> Result<String> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?;
+    Ok(serde_json::to_string(&ExpiringAction {
+        action,
+        expires_at_unix_ms: (now + ACTION_TIMEOUT).as_millis(),
+    })?)
 }
 
 #[derive(Debug, Serialize)]
@@ -114,8 +147,37 @@ struct PointerScrollAction<'a> {
 }
 
 impl KwinAgentSeatBackend {
+    pub(crate) fn with_lanes(lanes: crate::interaction::InteractionSessionStore) -> Self {
+        Self {
+            lanes: Some(lanes),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn register(&self, backend: &str, caller: &str) -> Result<()> {
-        if backend != KWIN_AGENT_SEAT_BACKEND {
+        self.register_identified(backend, None, caller)
+    }
+
+    pub(crate) fn register_with_build_id(
+        &self,
+        backend: &str,
+        build_id: &str,
+        caller: &str,
+    ) -> Result<()> {
+        let build_id = build_id.strip_prefix(BUILD_ID_PREFIX).unwrap_or(build_id);
+        if build_id.len() != 64 || !build_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("invalid KWin agent-seat build id");
+        }
+        self.register_identified(backend, Some(build_id.to_ascii_lowercase()), caller)
+    }
+
+    fn register_identified(
+        &self,
+        backend: &str,
+        build_id: Option<String>,
+        caller: &str,
+    ) -> Result<()> {
+        if backend != KWIN_AGENT_SEAT_BACKEND && backend != LEGACY_BACKEND {
             bail!("unsupported KWin agent-seat backend: {backend}");
         }
         if caller.trim().is_empty() {
@@ -125,10 +187,51 @@ impl KwinAgentSeatBackend {
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("KWin agent-seat queue lock is poisoned"))?;
+        if state.caller.as_deref() != Some(caller)
+            || state.backend.as_deref() != Some(backend)
+            || state.build_id != build_id
+        {
+            // Never transfer old work to a replacement host or wire protocol.
+            state.pending.clear();
+            state.waiters.clear();
+            state.last_delivery = None;
+        }
         state.last_seen = Some(Instant::now());
         state.caller = Some(caller.to_string());
+        state.backend = Some(backend.to_string());
+        state.build_id = build_id;
         self.registered.store(true, Ordering::Release);
         Ok(())
+    }
+
+    pub(crate) fn runtime_status(&self) -> Option<AgentSeatRuntimeStatus> {
+        let state = self.inner.lock().ok()?;
+        let protocol = state.backend.clone()?;
+        let heartbeat_age = state.last_seen?.elapsed();
+        let (delivery_validation, last_delivery_age_ms, last_delivery_error_kind) = state
+            .last_delivery
+            .as_ref()
+            .map(|delivery| {
+                (
+                    if delivery.ok {
+                        "delivery_verified"
+                    } else {
+                        "delivery_failed"
+                    },
+                    Some(duration_millis(delivery.observed_at.elapsed())),
+                    delivery.error_kind.clone(),
+                )
+            })
+            .unwrap_or(("heartbeat_only", None, None));
+        Some(AgentSeatRuntimeStatus {
+            protocol,
+            build_id: state.build_id.clone(),
+            heartbeat_fresh: heartbeat_age <= BACKEND_HEARTBEAT_TTL,
+            heartbeat_age_ms: duration_millis(heartbeat_age),
+            delivery_validation: delivery_validation.to_string(),
+            last_delivery_age_ms,
+            last_delivery_error_kind,
+        })
     }
 
     pub(crate) fn take(&self, caller: &str) -> Result<String> {
@@ -146,12 +249,21 @@ impl KwinAgentSeatBackend {
 
     pub(crate) async fn take_wait(&self, caller: &str) -> Result<String> {
         let notified = self.wake.notified();
-        let payload = self.take(caller)?;
-        if !payload.is_empty() {
-            return Ok(payload);
+        let mut payload = self.take(caller)?;
+        if payload.is_empty() {
+            let _ = tokio::time::timeout(ACTION_LONG_POLL_TIMEOUT, notified).await;
+            payload = self.take(caller)?;
         }
-        let _ = tokio::time::timeout(ACTION_LONG_POLL_TIMEOUT, notified).await;
-        self.take(caller)
+        if !payload.is_empty() {
+            if let Some(lanes) = &self.lanes {
+                // Snapshot at dequeue, not submission: closed/expired owners
+                // cannot retain native seats through stale queued actions.
+                let mut value: serde_json::Value = serde_json::from_str(&payload)?;
+                value["active_lane_ids"] = serde_json::to_value(lanes.active_lane_ids().await)?;
+                payload = serde_json::to_string(&value)?;
+            }
+        }
+        Ok(payload)
     }
 
     pub(crate) fn complete(&self, caller: &str, payload: &str) -> Result<()> {
@@ -162,6 +274,15 @@ impl KwinAgentSeatBackend {
             .lock()
             .map_err(|_| anyhow::anyhow!("KWin agent-seat queue lock is poisoned"))?;
         require_registered_caller(&state, caller)?;
+        state.last_delivery = Some(DeliveryValidation {
+            observed_at: Instant::now(),
+            ok: result.ok,
+            error_kind: result
+                .error
+                .as_deref()
+                .and_then(agent_seat_error_kind)
+                .map(str::to_string),
+        });
         let sender = state
             .waiters
             .remove(&result.id)
@@ -182,19 +303,35 @@ impl KwinAgentSeatBackend {
                 "KWin agent-seat plugin is not registered; install and enable seatgeistagentseat or select another input backend"
             )));
         }
-        let payload = serde_json::to_string(action).map_err(|error| backend_error(error.into()))?;
+        let value = serde_json::to_value(action).map_err(|err| backend_error(err.into()))?;
+        // Plan and validate even when temporarily talking to the old plugin.
+        let events = plan::plan(value.clone()).map_err(backend_error)?;
         let (sender, receiver) = oneshot::channel();
-        {
+        let expected_backend = {
             let mut state = self.inner.lock().map_err(|_| {
                 backend_error(anyhow::anyhow!("KWin agent-seat queue lock is poisoned"))
             })?;
+            let backend = state
+                .backend
+                .clone()
+                .ok_or_else(|| backend_error(anyhow::anyhow!("seat host is not registered")))?;
+            let payload = if backend == KWIN_AGENT_SEAT_BACKEND {
+                action_payload(&serde_json::json!({
+                    "id": id, "action": "events", "protocol": plan::HOST_PROTOCOL,
+                    "lane_id": value["lane_id"], "window_id": window_id, "events": events,
+                }))
+            } else {
+                action_payload(action)
+            }
+            .map_err(backend_error)?;
             state.pending.push_back(PendingAction {
                 id,
                 window_id: window_id.to_string(),
                 payload,
             });
             state.waiters.insert(id, sender);
-        }
+            backend
+        };
         self.wake.notify_one();
         let result = match tokio::time::timeout(ACTION_TIMEOUT, receiver).await {
             Ok(Ok(result)) => result,
@@ -220,8 +357,8 @@ impl KwinAgentSeatBackend {
         let backend = result
             .backend
             .filter(|backend| !backend.trim().is_empty())
-            .unwrap_or_else(|| KWIN_AGENT_SEAT_BACKEND.to_string());
-        if backend != KWIN_AGENT_SEAT_BACKEND {
+            .unwrap_or_else(|| expected_backend.clone());
+        if backend != expected_backend {
             return Err(backend_error(anyhow::anyhow!(
                 "KWin agent-seat completion reported unexpected backend {backend}"
             )));
@@ -266,6 +403,29 @@ impl KwinAgentSeatBackend {
     }
 }
 
+fn duration_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn agent_seat_error_kind(error: &str) -> Option<&'static str> {
+    let error = error.to_ascii_lowercase();
+    if error.contains("bind") || error.contains("input device") {
+        Some("client_binding_unavailable")
+    } else if error.contains("user input") {
+        Some("physical_input_collision")
+    } else if error.contains("target") || error.contains("window") || error.contains("surface") {
+        Some("target_lost")
+    } else if error.contains("expired") || error.contains("deadline") {
+        Some("delivery_timeout")
+    } else if error.contains("lane") || error.contains("quota") {
+        Some("lane_unavailable")
+    } else if error.trim().is_empty() {
+        None
+    } else {
+        Some("backend_rejected")
+    }
+}
+
 fn require_registered_caller(state: &AgentSeatState, caller: &str) -> Result<()> {
     if state.caller.as_deref() == Some(caller) {
         return Ok(());
@@ -276,7 +436,16 @@ fn require_registered_caller(state: &AgentSeatState, caller: &str) -> Result<()>
 #[async_trait]
 impl TargetedInputBackend for KwinAgentSeatBackend {
     fn backend_name(&self) -> &'static str {
-        KWIN_AGENT_SEAT_BACKEND
+        if self
+            .inner
+            .lock()
+            .ok()
+            .is_some_and(|state| state.backend.as_deref() == Some(LEGACY_BACKEND))
+        {
+            LEGACY_BACKEND
+        } else {
+            KWIN_AGENT_SEAT_BACKEND
+        }
     }
 
     fn ready(&self) -> bool {
@@ -492,6 +661,27 @@ fn backend_error(error: anyhow::Error) -> SeatgeistError {
 mod tests {
     use super::*;
 
+    #[test]
+    fn queued_actions_carry_the_original_delivery_deadline() {
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let value: serde_json::Value = serde_json::from_str(
+            &action_payload(&serde_json::json!({"action": "key_combo", "keycodes": [8]})).unwrap(),
+        )
+        .unwrap();
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let deadline = u128::from(value["expires_at_unix_ms"].as_u64().unwrap());
+        assert!(deadline >= before + ACTION_TIMEOUT.as_millis());
+        assert!(deadline <= after + ACTION_TIMEOUT.as_millis());
+        assert_eq!(value["action"], "key_combo");
+        assert_eq!(value["keycodes"], serde_json::json!([8]));
+    }
+
     fn target() -> WindowInfo {
         WindowInfo {
             id: "45837f40-43a8-4be5-b9d7-50d2ff8f79b3".to_string(),
@@ -536,10 +726,17 @@ mod tests {
             .await
             .expect("long-poll queue wakes for the action");
         let request: serde_json::Value = serde_json::from_str(&payload).expect("request is JSON");
-        assert_eq!(request["action"], "key_combo");
+        assert_eq!(request["action"], "events");
+        assert_eq!(request["protocol"], 1);
         assert_eq!(request["lane_id"], context().lane_id);
         assert_eq!(request["window_id"], target().id);
-        assert_eq!(request["keycodes"], serde_json::json!([29, 30]));
+        assert_eq!(
+            request["events"],
+            serde_json::to_value(
+                plan::plan(serde_json::json!({"action":"key_combo","keycodes":[29,30]})).unwrap()
+            )
+            .unwrap()
+        );
         assert!(
             backend
                 .complete(
@@ -568,6 +765,34 @@ mod tests {
             .expect("completion is accepted");
         let delivery = action.await.expect("task joins");
         assert_eq!(delivery.backend, KWIN_AGENT_SEAT_BACKEND);
+        let status = backend.runtime_status().expect("runtime status exists");
+        assert_eq!(status.protocol, KWIN_AGENT_SEAT_BACKEND);
+        assert_eq!(status.delivery_validation, "delivery_verified");
+        assert!(status.heartbeat_fresh);
+    }
+
+    #[test]
+    fn identified_registration_reports_normalized_build_and_rejects_bad_ids() {
+        let backend = KwinAgentSeatBackend::default();
+        let build_id = "A".repeat(64);
+        backend
+            .register_with_build_id(
+                KWIN_AGENT_SEAT_BACKEND,
+                &format!("{BUILD_ID_PREFIX}{build_id}"),
+                "kwin-owner",
+            )
+            .expect("identified backend registers");
+        let status = backend.runtime_status().expect("runtime status exists");
+        assert_eq!(
+            status.build_id.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(status.delivery_validation, "heartbeat_only");
+        assert!(
+            backend
+                .register_with_build_id(KWIN_AGENT_SEAT_BACKEND, "not-a-build", "kwin-owner")
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -595,10 +820,15 @@ mod tests {
         tokio::task::yield_now().await;
         let payload = backend.take("kwin-owner").expect("queue can be read");
         let request: serde_json::Value = serde_json::from_str(&payload).expect("request is JSON");
-        assert_eq!(request["action"], "key_sequence");
+        assert_eq!(request["action"], "events");
         assert_eq!(
-            request["chords"],
-            serde_json::json!([[30], [42, 30], [42, 2]])
+            request["events"],
+            serde_json::to_value(
+                plan::plan(serde_json::json!({"action":"key_sequence",
+                "chords":[[30], [42,30], [42,2]]}))
+                .unwrap()
+            )
+            .unwrap()
         );
         assert!(!payload.contains("aA!"));
         backend
@@ -619,6 +849,102 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message.contains("length=3"))
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_host_is_supported_and_protocol_replacement_drops_old_work() {
+        let backend = KwinAgentSeatBackend::default();
+        backend.register(LEGACY_BACKEND, "kwin-owner").unwrap();
+        assert_eq!(backend.backend_name(), LEGACY_BACKEND);
+        let sender = backend.clone();
+        let action =
+            tokio::spawn(async move { sender.key_combo(&context(), &target(), &[30]).await });
+        let payload = backend.take_wait("kwin-owner").await.unwrap();
+        let request: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(request["action"], "key_combo");
+        assert_eq!(request["keycodes"], serde_json::json!([30]));
+        backend
+            .complete(
+                "kwin-owner",
+                &serde_json::json!({"id":request["id"],"ok":true,
+            "backend":LEGACY_BACKEND})
+                .to_string(),
+            )
+            .unwrap();
+        assert_eq!(action.await.unwrap().unwrap().backend, LEGACY_BACKEND);
+
+        let sender = backend.clone();
+        let old = tokio::spawn(async move { sender.key_combo(&context(), &target(), &[30]).await });
+        tokio::task::yield_now().await;
+        backend
+            .register(KWIN_AGENT_SEAT_BACKEND, "replacement-owner")
+            .unwrap();
+        assert!(
+            old.await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("channel closed")
+        );
+        assert!(backend.take("replacement-owner").unwrap().is_empty());
+        assert!(backend.take("kwin-owner").is_err());
+    }
+
+    #[tokio::test]
+    async fn dequeue_roster_preserves_other_owners_and_excludes_closed_lanes() {
+        let lanes = crate::interaction::InteractionSessionStore::default();
+        lanes
+            .bind(
+                "one".into(),
+                &target(),
+                crate::session_owner::SessionOwner::test_process(101),
+            )
+            .await
+            .unwrap();
+        let mut second = target();
+        second.id = Uuid::new_v4().to_string();
+        lanes
+            .bind(
+                "two".into(),
+                &second,
+                crate::session_owner::SessionOwner::test_process(102),
+            )
+            .await
+            .unwrap();
+        let first_lane = lanes.resolve("one", &[target()]).await.unwrap().lane_id;
+        let second_lane = lanes.resolve("two", &[second]).await.unwrap().lane_id;
+        let backend = KwinAgentSeatBackend::with_lanes(lanes.clone());
+        backend
+            .register(KWIN_AGENT_SEAT_BACKEND, "kwin-owner")
+            .unwrap();
+        let sender = backend.clone();
+        let queued_lane = first_lane.clone();
+        let action = tokio::spawn(async move {
+            sender
+                .key_combo(
+                    &TargetedInputContext {
+                        lane_id: queued_lane,
+                    },
+                    &target(),
+                    &[30],
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        lanes.clear("one").await.unwrap();
+        let request: serde_json::Value =
+            serde_json::from_str(&backend.take_wait("kwin-owner").await.unwrap()).unwrap();
+        assert_eq!(request["lane_id"], first_lane);
+        assert_eq!(request["active_lane_ids"], serde_json::json!([second_lane]));
+        backend
+            .complete(
+                "kwin-owner",
+                &serde_json::json!({"id":request["id"],"ok":false,
+            "error":"agent lane lease is inactive"})
+                .to_string(),
+            )
+            .unwrap();
+        assert!(action.await.unwrap().is_err());
     }
 
     #[tokio::test]

@@ -88,7 +88,7 @@ def main() -> None:
         assert "WantedBy=graphical-session.target" in timer_text
         assert f"Unit={module.SERVICE_NAME}" in timer_text
         assert " --runtime" in service_text
-        assert "TimeoutStartSec=18s" in service_text
+        assert "TimeoutStartSec=16s" in service_text
         assert "NoNewPrivileges=yes" in service_text
 
         # Reinstalling the same artifacts is harmless and yields the same
@@ -118,9 +118,16 @@ def main() -> None:
 
         with mock.patch.object(module.subprocess, "run") as systemctl_run:
             systemctl_run.return_value.returncode = 0
+            systemctl_run.return_value.stdout = "enabled\n"
             module.manage_units("install")
             commands = [call.args[0] for call in systemctl_run.call_args_list]
         assert commands == [
+            [
+                "systemctl",
+                "--user",
+                "is-enabled",
+                module.SERVICE_NAME,
+            ],
             [
                 "systemctl",
                 "--user",
@@ -138,7 +145,31 @@ def main() -> None:
         assert all("--now" not in command for command in commands)
 
         with mock.patch.object(module.subprocess, "run") as systemctl_run:
+            systemctl_run.side_effect = [
+                subprocess.CompletedProcess([], 0, stdout="static\n"),
+                subprocess.CompletedProcess([], 0, stdout=""),
+            ]
+            module.manage_units("install")
+            commands = [call.args[0] for call in systemctl_run.call_args_list]
+        assert commands == [
+            [
+                "systemctl",
+                "--user",
+                "is-enabled",
+                module.SERVICE_NAME,
+            ],
+            [
+                "systemctl",
+                "--user",
+                "enable",
+                module.PATH_NAME,
+                module.TIMER_NAME,
+            ],
+        ]
+
+        with mock.patch.object(module.subprocess, "run") as systemctl_run:
             systemctl_run.return_value.returncode = 0
+            systemctl_run.return_value.stdout = "static\n"
             module.manage_units("install", activate_watchers=True)
             commands = [call.args[0] for call in systemctl_run.call_args_list]
         assert commands[-1] == ["systemctl", "--user", "start", module.PATH_NAME, module.TIMER_NAME]

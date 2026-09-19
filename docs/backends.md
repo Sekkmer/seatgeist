@@ -119,8 +119,16 @@ bulk name prefiltering does not consume that detail budget.
 `at-spi2-registryd` processes through read-only `/proc` metadata. More than one
 is reported as an extra-registry setup hint because it can indicate stale
 accessibility-bus generations after an interrupted desktop session. This is a
-diagnostic only; Seatgeist does not terminate or restart accessibility
-services.
+diagnostic only; status includes bounded process ages and recommends a normal
+logout/login when stale generations remain. Seatgeist does not terminate or
+restart accessibility services.
+
+Readiness distinguishes AT-SPI availability from the quality of its focused
+subtree sample. A single focused textbox is a valid but flat sample; it must
+not disable semantic discovery in unrelated windows. The quality warning stays
+visible, while semantic readiness still applies policy, panic/human-input and
+guard gates. Each actual action must discover and authorize an exact,
+non-sensitive, unambiguous target; backend availability is not target readiness.
 
 Firefox can expose a single button Action entry whose name, description, and
 keybinding are all the placeholder `;;`. Seatgeist maps this to `press` only
@@ -258,9 +266,19 @@ attempting a dynamic load across KWin upgrades. The running compositor exposes
 an exact ABI match; otherwise a normal session restart is required.
 
 `scripts/reload-kwin-integration.py` exposes allowlisted bridge, activity, and
-agent-seat reloads through KWin's `/Scripting` and `/Plugins` APIs. Binary
-reloads fail closed unless the installed factory ABI exactly matches the
-running compositor, and the helper never restarts KWin.
+agent-seat loading through KWin's `/Scripting` and `/Plugins` APIs. Binary
+operations fail closed unless the installed factory ABI exactly matches the
+running compositor, and the helper never restarts KWin. A loaded agent-seat
+plugin cannot be reloaded: removing its `wl_seat` globals can disconnect
+Wayland clients. Qt may also retain the old library mapping after a plugin
+unload, so reinstalling and loading again does not prove that new code is
+running. Activate native agent-seat host updates with a normal logout/login
+after saving work. The v2 host keeps seat globals and bindings alive across
+daemon restarts; action planning now lives in Rust and compatible planner
+updates use the guarded daemon-only deployment helper. Independent MCP
+processes retain exclusive targets and separate lanes, with a four-owner
+quota and no eviction of active owners. See `docs/agent-seat.md` for the wire
+contract, legacy-v1 migration, and concurrent-client/restart regression.
 
 The bridge also exposes exact `close_window` through KWin's script
 `Window.closeWindow()` API. The daemon identifies the target by KWin UUID and

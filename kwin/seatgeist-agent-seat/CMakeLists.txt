@@ -15,6 +15,7 @@ find_path(KWIN_INCLUDE_DIR plugin.h PATH_SUFFIXES kwin REQUIRED)
 find_library(KWIN_LIBRARY NAMES kwin REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
+pkg_check_modules(WAYLAND_SERVER REQUIRED IMPORTED_TARGET wayland-server)
 
 file(READ "${KWIN_INCLUDE_DIR}/config-kwin.h" KWIN_CONFIG_HEADER)
 string(
@@ -33,9 +34,41 @@ configure_file(
     @ONLY
 )
 
+set(SEATGEIST_AGENT_SEAT_BUILD_INPUTS
+    agentseatplugin.cpp
+    agentseatplugin.h
+    seatbindings.cpp
+    seatbindings.h
+    eventbatch.cpp
+    eventbatch.h
+)
+set_property(
+    DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${SEATGEIST_AGENT_SEAT_BUILD_INPUTS}
+)
+set(SEATGEIST_AGENT_SEAT_BUILD_MATERIAL "")
+foreach(BUILD_INPUT IN LISTS SEATGEIST_AGENT_SEAT_BUILD_INPUTS)
+    file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/${BUILD_INPUT}" BUILD_INPUT_SHA256)
+    string(APPEND SEATGEIST_AGENT_SEAT_BUILD_MATERIAL "${BUILD_INPUT}:${BUILD_INPUT_SHA256}\n")
+endforeach()
+string(
+    SHA256 SEATGEIST_AGENT_SEAT_BUILD_ID
+    "${SEATGEIST_AGENT_SEAT_BUILD_MATERIAL}"
+)
+configure_file(
+    agent_seat_build_id.h.in
+    generated/agent_seat_build_id.h
+    @ONLY
+)
+
 add_library(seatgeistagentseat MODULE
     agentseatplugin.cpp
     agentseatplugin.h
+    seatbindings.cpp
+    seatbindings.h
+    eventbatch.cpp
+    eventbatch.h
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/agent_seat_build_id.h
     ${CMAKE_CURRENT_BINARY_DIR}/generated/kwin_plugin_abi.h
     main.cpp
 )
@@ -56,8 +89,26 @@ target_link_libraries(seatgeistagentseat PRIVATE
     KF6::ConfigCore
     KF6::WindowSystem
     PkgConfig::XKBCOMMON
+    PkgConfig::WAYLAND_SERVER
 )
 
 install(TARGETS seatgeistagentseat
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/qt6/plugins/kwin/plugins
 )
+
+include(CTest)
+if(BUILD_TESTING)
+    find_package(Qt6 REQUIRED COMPONENTS Test)
+    pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
+    add_executable(seatbindings_test seatbindings_test.cpp seatbindings.cpp)
+    target_include_directories(seatbindings_test PRIVATE ${KWIN_INCLUDE_DIR})
+    target_link_libraries(seatbindings_test PRIVATE
+        ${KWIN_LIBRARY} Qt6::Core Qt6::Gui Qt6::Test
+        PkgConfig::WAYLAND_SERVER PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON)
+    add_test(NAME seatbindings COMMAND seatbindings_test)
+    add_executable(eventbatch_test eventbatch_test.cpp eventbatch.cpp)
+    target_link_libraries(eventbatch_test PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME eventbatch COMMAND eventbatch_test)
+    add_executable(focus_fixture focus_fixture.cpp)
+    target_link_libraries(focus_fixture PRIVATE Qt6::Widgets PkgConfig::WAYLAND_CLIENT)
+endif()

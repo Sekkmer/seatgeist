@@ -107,9 +107,19 @@ leaving the daemon without `WAYLAND_DISPLAY`, `DISPLAY`, or KDE session
 metadata. `seatgeistd` consumes the inherited systemd Unix listener when
 socket-activated and otherwise safely binds the configured path itself.
 
+Until the first Seatgeist request, an active/listening socket with an inactive
+daemon is expected. The KWin watcher reports this as `socket_standby` without
+a startup warning. A `seatgeist-cli doctor` request starts the daemon and checks
+its health; subsequent watcher checks verify live plugin registration.
+
 The daemon uses four Tokio workers. The shipped service also sets
 `MALLOC_ARENA_MAX=4`; glibc honors this to limit retained per-thread capture
 allocations, while other C libraries may harmlessly ignore it.
+Health reports current/peak resident memory and current resident swap. Native
+window capture releases its raw KWin pipe buffer before preview encoding and
+moves, rather than clones, the decoded RGBA frame into the resize path. The
+unit suite exercises a 7680×4320 frame downscaled to the default 1600-pixel
+preview bound.
 
 For an installation that previously enabled the service under
 `default.target`, stop that direct instance before enabling the socket:
@@ -222,7 +232,16 @@ make reload-kwin-agent-seat
 
 The binary-plugin targets compare the embedded plugin factory ABI with the
 running KWin version before calling KWin's `/Plugins` API. The helper verifies
-the component after loading and refuses a compositor restart request. If the
+the component after loading and refuses a compositor restart request. The
+agent-seat target only loads an absent plugin; it refuses to unload a live
+one, even with no active captures. Removing published `wl_seat` globals caused
+fatal `wl_fixes` protocol errors in connected clients on KWin 6.7.4. Use a
+normal logout/login after saving work to activate native agent-seat updates.
+Once the v2 seat host is loaded, compatible Rust action-planner changes use
+`make deploy-seatgeistd-user` without logout: native seats/client bindings stay
+alive, while retained capture sessions must be closed and reopened around the
+guarded daemon restart. Independent MCP clients must each release their own
+sessions; the deployment helper checks global session activity. If the
 ABI differs, rebuild and use a normal logout/login; never replace
 `plasma-kwin_wayland` in place on a DRM session.
 

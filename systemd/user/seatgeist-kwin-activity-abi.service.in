@@ -6,8 +6,10 @@ PartOf=graphical-session.target
 [Service]
 Type=oneshot
 ExecStart=@WATCHER@ --runtime
-# Five read-only probes (2s each) plus notification (3s), with shutdown margin.
-TimeoutStartSec=18s
+# Three DBus probes and normally one compact CLI probe (2s each), plus a
+# compatibility CLI fallback and notification margin. An absent daemon uses
+# one systemd unit-state query instead of CLI probes to recognize socket standby.
+TimeoutStartSec=16s
 UMask=0077
 NoNewPrivileges=yes
 RestrictSUIDSGID=yes

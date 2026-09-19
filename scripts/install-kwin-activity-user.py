@@ -85,11 +85,24 @@ def run_systemctl(*arguments: str) -> None:
         raise RuntimeError(f"systemctl --user {' '.join(arguments)} failed")
 
 
+def disable_unit_if_enabled(unit: str) -> None:
+    completed = subprocess.run(
+        ["systemctl", "--user", "is-enabled", unit],
+        check=False,
+        timeout=10,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if completed.stdout.strip() in {"enabled", "enabled-runtime"}:
+        run_systemctl("disable", unit)
+
+
 def manage_units(action: str, *, activate_watchers: bool = False) -> None:
     if action == "install":
         # The service is path/timer-triggered only. In particular, never leave
         # the checker enabled directly in a graphical boot target.
-        run_systemctl("disable", SERVICE_NAME)
+        disable_unit_if_enabled(SERVICE_NAME)
         # Plugin installation is still a next-login operation. Starting only
         # the diagnostic triggers is a separate, explicit opt-in.
         run_systemctl("enable", PATH_NAME, TIMER_NAME)

@@ -4,7 +4,7 @@ PartOf=graphical-session.target
 
 [Timer]
 OnActiveSec=2min
-OnUnitInactiveSec=5min
+OnUnitInactiveSec=15min
 AccuracySec=30s
 Unit=seatgeist-kwin-activity-abi.service
 

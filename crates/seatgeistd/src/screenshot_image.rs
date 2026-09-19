@@ -44,6 +44,7 @@ pub(crate) fn write_preview_or_copy(
     let image =
         image::open(source).with_context(|| format!("open screenshot {}", source.display()))?;
     let resized = image.resize(output_width, output_height, FilterType::Lanczos3);
+    drop(image);
     resized
         .save(output)
         .with_context(|| format!("write screenshot preview {}", output.display()))?;
@@ -62,6 +63,7 @@ pub(crate) fn write_tile_preview(
     let image =
         image::open(source).with_context(|| format!("open screenshot {}", source.display()))?;
     let cropped = image.crop_imm(request.x, request.y, request.width, request.height);
+    drop(image);
     let largest_edge = request.width.max(request.height);
     let output_image = if largest_edge > max_edge {
         let scale = f64::from(max_edge) / f64::from(largest_edge);

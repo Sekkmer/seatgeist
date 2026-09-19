@@ -95,7 +95,7 @@ if command == ["capture", "status"]:
     trigger = state / "capture.active-on-call"
     if trigger.exists() and call == int(trigger.read_text()):
         active = True
-    print(json.dumps({"type":"capture_session_status","data":{"active":active}}))
+    print(json.dumps({"type":"capture_session_status","data":{"active":active,"opening":(state / "capture.opening").exists()}}))
 elif command == ["input", "remote-desktop-eis-session-status"]:
     active = (state / "eis.active").exists()
     print(json.dumps({"type":"remote_desktop_eis_session_status","data":{"active":active,"runtime_connected":active}}))
@@ -133,6 +133,8 @@ else:
             str(installed),
             "--proc-root",
             str(proc_root),
+            "--deployment-marker",
+            str(state / "deployment-in-progress"),
             "--timeout-ms",
             "1000",
             "--poll-ms",
@@ -158,6 +160,7 @@ else:
         assert "--user restart seatgeistd.service" in systemctl_calls
         assert "--user show --property MainPID --value seatgeistd.service" in systemctl_calls
         assert int((state / "capture.count").read_text()) == 3
+        assert not (state / "deployment-in-progress").exists()
 
         restart_count = systemctl_calls.count("--user restart")
         (state / "capture.active").touch()
@@ -168,6 +171,13 @@ else:
         assert installed.read_bytes() != release.read_bytes()
         assert (state / "systemctl.log").read_text().count("--user restart") == restart_count
         (state / "capture.active").unlink()
+
+        (state / "capture.opening").touch()
+        opening_refused = invoke([*common, "--skip-build"], state, check=False)
+        assert opening_refused.returncode != 0
+        assert "active retained session(s): capture-opening" in opening_refused.stderr
+        assert (state / "systemctl.log").read_text().count("--user restart") == restart_count
+        (state / "capture.opening").unlink()
 
         (state / "eis.active").touch()
         eis_refused = invoke([*common, "--skip-build"], state, check=False)

@@ -824,6 +824,19 @@ impl Bridge {
             .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
     }
 
+    async fn register_agent_seat_backend_v2(
+        &self,
+        backend: &str,
+        build_id: &str,
+        #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        let caller = verified_kwin_caller(connection, &header).await?;
+        self.agent_seat_backend
+            .register_with_build_id(backend, build_id, &caller)
+            .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
+    }
+
     async fn take_pending_agent_seat_action(
         &self,
         #[zbus(header)] header: zbus::message::Header<'_>,

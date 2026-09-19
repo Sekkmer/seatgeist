@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 #include "agentseatplugin.h"
+#include "seatbindings.h"
+#include <agent_seat_build_id.h>
 
+#include <input.h>
+#include <input_event.h>
+#include <wayland/clientconnection.h>
 #include <wayland/display.h>
 #include <wayland/keyboard.h>
 #include <wayland/seat.h>
+#include <wayland/surface.h>
 #include <wayland_server.h>
 #include <window.h>
 #include <workspace.h>
@@ -16,8 +22,10 @@
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
 #include <QDBusServiceWatcher>
+#include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QSet>
 #include <QTimer>
 #include <QUuid>
 
@@ -34,11 +42,16 @@ namespace
 constexpr auto Service = "org.seatgeist.KWinBridge";
 constexpr auto Path = "/org/seatgeist/KWinBridge1";
 constexpr auto Interface = "org.seatgeist.KWinBridge1";
-constexpr auto Backend = "kwin_agent_seat_v1";
+constexpr auto Backend = "kwin_agent_seat_v2";
+constexpr auto BuildId = SEATGEIST_AGENT_SEAT_BUILD_MARKER;
 constexpr int PollIntervalMs = 5000;
 constexpr int DefaultRepeatRate = 25;
 constexpr int DefaultRepeatDelayMs = 600;
 constexpr int MaxAgentLanes = 4;
+// Well below the daemon's three-second action deadline. This is an upper
+// bound, not a blind startup delay: bound clients dispatch immediately.
+constexpr int BindingTimeoutMs = 1000;
+constexpr int BindingCheckIntervalMs = 10;
 
 QDBusMessage methodCall(const QString &method)
 {
@@ -49,11 +62,6 @@ QDBusMessage methodCall(const QString &method)
         method);
 }
 
-bool finiteNumber(const QJsonValue &value)
-{
-    return value.isDouble() && qIsFinite(value.toDouble());
-}
-
 } // namespace
 
 namespace KWin
@@ -62,9 +70,27 @@ namespace KWin
 SeatgeistAgentSeatPlugin::SeatgeistAgentSeatPlugin()
 {
     m_monotonicClock.start();
+    m_bindings = std::make_unique<SeatBindings>(*waylandServer()->display());
+    m_bindingTimer = new QTimer(this);
+    m_bindingTimer->setInterval(BindingCheckIntervalMs);
+    connect(m_bindingTimer, &QTimer::timeout, this, &SeatgeistAgentSeatPlugin::resumePendingAction);
+    input()->installInputEventSpy(this);
     QString keymapError;
     if (!initializeKeymap(&keymapError)) {
         qWarning("Seatgeist agent seat keymap unavailable: %s", qPrintable(keymapError));
+    } else {
+        // GTK 3 processes deferred wl_seat bindings during display startup
+        // only. Announce the permanent pool before applications connect, not
+        // on their first action; retained seats then survive daemon restarts.
+        for (int index = 0; index < MaxAgentLanes; ++index) {
+            auto lane = std::make_unique<AgentLane>();
+            QString error;
+            if (!initializeLane(*lane, &error)) {
+                qWarning("Seatgeist permanent seat initialization failed: %s", qPrintable(error));
+                break;
+            }
+            m_idleLanes.push_back(std::move(lane));
+        }
     }
 
     m_serviceWatcher = std::make_unique<QDBusServiceWatcher>(
@@ -77,13 +103,12 @@ SeatgeistAgentSeatPlugin::SeatgeistAgentSeatPlugin()
         &QDBusServiceWatcher::serviceOwnerChanged,
         this,
         [this](const QString &, const QString &, const QString &newOwner) {
+            ++m_serviceGeneration;
+            // Never deliver an action authorized by a departed daemon owner.
+            detachDaemon();
             m_serviceAvailable = !newOwner.isEmpty();
             if (!m_serviceAvailable) {
                 m_pollTimer->stop();
-                for (auto &[laneId, lane] : m_lanes) {
-                    Q_UNUSED(laneId)
-                    clearLaneTarget(*lane);
-                }
                 return;
             }
             registerBackend();
@@ -136,14 +161,24 @@ void SeatgeistAgentSeatPlugin::registerBackend()
     if (!m_serviceAvailable) {
         return;
     }
-    auto message = methodCall(QStringLiteral("RegisterAgentSeatBackend"));
+    auto message = methodCall(QStringLiteral("RegisterAgentSeatBackendV2"));
     message << QString::fromLatin1(Backend);
-    QDBusConnection::sessionBus().asyncCall(message);
+    message << QString::fromLatin1(BuildId);
+    auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(message), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, generation = m_serviceGeneration] {
+        QDBusPendingReply<> reply = *watcher;
+        watcher->deleteLater();
+        if (!reply.isError() && generation == m_serviceGeneration) {
+            // The five-second watchdog exceeds the daemon action timeout.
+            // Begin the first pull immediately after registration succeeds.
+            poll();
+        }
+    });
 }
 
 void SeatgeistAgentSeatPlugin::poll()
 {
-    if (!m_serviceAvailable || m_pollInFlight) {
+    if (!m_serviceAvailable || m_pollInFlight || !m_pendingAction.isEmpty()) {
         return;
     }
     m_pollInFlight = true;
@@ -151,6 +186,7 @@ void SeatgeistAgentSeatPlugin::poll()
     auto *watcher = new QDBusPendingCallWatcher(
         QDBusConnection::sessionBus().asyncCall(message),
         this);
+    watcher->setProperty("seatgeistServiceGeneration", QVariant::fromValue(m_serviceGeneration));
     connect(
         watcher,
         &QDBusPendingCallWatcher::finished,
@@ -160,9 +196,13 @@ void SeatgeistAgentSeatPlugin::poll()
 
 void SeatgeistAgentSeatPlugin::handlePendingAction(QDBusPendingCallWatcher *watcher)
 {
-    m_pollInFlight = false;
     QDBusPendingReply<QString> reply = *watcher;
     watcher->deleteLater();
+    if (watcher->property("seatgeistServiceGeneration").toULongLong() != m_serviceGeneration) {
+        QTimer::singleShot(0, this, &SeatgeistAgentSeatPlugin::poll);
+        return;
+    }
+    m_pollInFlight = false;
     if (reply.isError()) {
         return;
     }
@@ -193,30 +233,204 @@ void SeatgeistAgentSeatPlugin::executeAction(const QJsonObject &action)
         complete(id, false, error);
         return;
     }
+    if (!decodeSeatEvents(action, window->clientGeometry().size(), &m_pendingEvents, &error)) {
+        complete(id, false, error);
+        return;
+    }
+    const auto roster = action.value(QStringLiteral("active_lane_ids"));
+    QSet<QString> activeLanes;
+    if (roster.isArray()) {
+        for (const auto value : roster.toArray()) {
+            const auto laneId = value.toString();
+            if (QUuid(laneId).isNull() || activeLanes.contains(laneId)) {
+                complete(id, false, QStringLiteral("invalid active lane roster"));
+                return;
+            }
+            activeLanes.insert(laneId);
+        }
+    }
+    if (activeLanes.size() > MaxAgentLanes
+        || !activeLanes.contains(action.value(QStringLiteral("lane_id")).toString())) {
+        complete(id, false, QStringLiteral("agent lane lease is inactive or exceeds quota"));
+        return;
+    }
+    // Only released/expired owners can be reclaimed. Never evict a live
+    // independent Codex just because its last action was less recent.
+    for (auto it = m_lanes.begin(); it != m_lanes.end();) {
+        if (!activeLanes.contains(it->first)) {
+            clearLaneTarget(*it->second);
+            m_idleLanes.push_back(std::move(it->second));
+            it = m_lanes.erase(it);
+        } else { ++it; }
+    }
     AgentLane *lane = laneFor(action.value(QStringLiteral("lane_id")).toString(), &error);
     if (!lane) {
         complete(id, false, error);
         return;
     }
 
-    const QString kind = action.value(QStringLiteral("action")).toString();
-    bool ok = false;
-    if (kind == QLatin1String("key_combo")) {
-        ok = sendKeyCombo(action, *lane, window, &error);
-    } else if (kind == QLatin1String("key_sequence")) {
-        ok = sendKeySequence(action, *lane, window, &error);
-    } else if (kind == QLatin1String("pointer_move")) {
-        ok = movePointer(action, *lane, window, &error);
-    } else if (kind == QLatin1String("pointer_click")) {
-        ok = clickPointer(action, *lane, window, &error);
-    } else if (kind == QLatin1String("pointer_drag")) {
-        ok = dragPointer(action, *lane, window, &error);
-    } else if (kind == QLatin1String("pointer_scroll")) {
-        ok = scrollPointer(action, *lane, window, &error);
-    } else {
-        error = QStringLiteral("unsupported agent-seat action");
+    if (!m_bindings->available()) {
+        complete(id, false, QStringLiteral("agent-seat binding observation is unavailable"));
+        return;
     }
-    complete(id, ok, error);
+    m_pendingAction = action;
+    m_pendingWindow = window;
+    m_pendingSurface = window->surface();
+    m_pendingCancelled = false;
+    m_bindingDeadlineMs = m_monotonicClock.elapsed() + BindingTimeoutMs;
+    resumePendingAction();
+}
+
+void SeatgeistAgentSeatPlugin::resumePendingAction()
+{
+    if (m_pendingAction.isEmpty()) {
+        return;
+    }
+    const QString laneId = m_pendingAction.value(QStringLiteral("lane_id")).toString();
+    const auto laneIt = m_lanes.find(laneId);
+    Window *window = m_pendingWindow;
+    QString error;
+    if (!m_serviceAvailable || m_pendingCancelled) {
+        error = QStringLiteral("agent target received user input before delivery");
+    } else if (!window || !m_pendingSurface || window->surface() != m_pendingSurface
+               || laneIt == m_lanes.end()) {
+        error = QStringLiteral("agent-seat target was lost before delivery");
+    } else if (!validateClientFocusIsolation(window, &error)) {
+        // A second window may have appeared during the binding wait.
+    } else if (m_monotonicClock.elapsed() >= m_bindingDeadlineMs) {
+        error = QStringLiteral("target did not bind the agent-seat input device before the deadline");
+    } else if (m_pendingAction.contains(QStringLiteral("expires_at_unix_ms"))
+               && m_pendingAction.value(QStringLiteral("expires_at_unix_ms")).toDouble()
+                   <= QDateTime::currentMSecsSinceEpoch()) {
+        error = QStringLiteral("agent-seat action expired before delivery");
+    } else {
+        auto *seat = laneIt->second->seat.get();
+        auto *client = window->surface()->client()->client();
+        const bool keyboard = std::any_of(m_pendingEvents.begin(), m_pendingEvents.end(),
+            [](const auto &event) { return event.kind == SeatEvent::Key; });
+        const bool pointer = std::any_of(m_pendingEvents.begin(), m_pendingEvents.end(),
+            [](const auto &event) { return event.kind != SeatEvent::Key; });
+        const bool ready = (!keyboard || m_bindings->keyboardReady(seat, client))
+            && (!pointer || m_bindings->pointerReady(seat, client));
+        if (!ready) {
+            // Return to KWin's event loop so clients can process the new
+            // global, bind the seat, and create their keyboard/pointer.
+            m_bindingTimer->start();
+            return;
+        }
+    }
+    m_bindingTimer->stop();
+    const QJsonObject action = m_pendingAction;
+    m_pendingAction = {};
+    m_pendingWindow = nullptr;
+    m_pendingSurface = nullptr;
+    m_pendingEvents.clear();
+    if (!error.isEmpty()) {
+        complete(action.value(QStringLiteral("id")).toString(), false, error);
+    } else {
+        dispatchAction(action, *laneIt->second, window);
+    }
+    QTimer::singleShot(0, this, &SeatgeistAgentSeatPlugin::poll);
+}
+
+void SeatgeistAgentSeatPlugin::dispatchAction(const QJsonObject &action, AgentLane &lane, Window *window)
+{
+    QString error;
+    QVector<SeatEvent> events;
+    // Recheck all coordinates after the asynchronous binding wait, before any
+    // event. Resizing the target must not turn a valid drag into partial input.
+    if (!decodeSeatEvents(action, window->clientGeometry().size(), &events, &error)) {
+        complete(action.value("id").toString(), false, error);
+        return;
+    }
+    QPointF position = lane.target == window ? lane.localPointerPosition
+        : QPointF(window->clientGeometry().width() / 2.0, window->clientGeometry().height() / 2.0);
+    if (events.first().kind == SeatEvent::Motion) {
+        position = events.first().position;
+    }
+    if (!bindTarget(lane, window, position, &error)) {
+        complete(action.value("id").toString(), false, error);
+        return;
+    }
+    for (const auto &event : events) {
+        setTimestamp(lane);
+        switch (event.kind) {
+        case SeatEvent::Key:
+            lane.seat->notifyKeyboardKey(event.code,
+                event.pressed ? KeyboardKeyState::Pressed : KeyboardKeyState::Released,
+                waylandServer()->display()->nextSerial());
+            xkb_state_update_key(lane.xkbState, event.code + 8, event.pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
+            updateKeyboardModifiers(lane);
+            break;
+        case SeatEvent::Motion:
+            // The whole batch was checked against the current surface above;
+            // this synchronous loop never processes client/target changes.
+            bindTarget(lane, window, event.position, &error);
+            break;
+        case SeatEvent::Button:
+            lane.seat->notifyPointerButton(event.code,
+                event.pressed ? PointerButtonState::Pressed : PointerButtonState::Released);
+            lane.seat->notifyPointerFrame();
+            break;
+        case SeatEvent::Axis:
+            lane.seat->notifyPointerAxis(event.axis, event.delta, event.deltaV120, PointerAxisSource::Wheel);
+            lane.seat->notifyPointerFrame();
+            break;
+        }
+    }
+    complete(action.value("id").toString(), true);
+}
+
+void SeatgeistAgentSeatPlugin::cancelPendingFor(Window *window)
+{
+    if (window && window == m_pendingWindow) {
+        m_pendingCancelled = true;
+    }
+}
+
+void SeatgeistAgentSeatPlugin::keyboardKey(KeyboardKeyEvent *)
+{
+    cancelPendingFor(workspace()->activeWindow());
+}
+
+void SeatgeistAgentSeatPlugin::pointerMotion(PointerMotionEvent *event)
+{
+    cancelPendingFor(input()->findToplevel(event->position));
+}
+
+void SeatgeistAgentSeatPlugin::pointerButton(PointerButtonEvent *event)
+{
+    cancelPendingFor(input()->findToplevel(event->position));
+}
+
+void SeatgeistAgentSeatPlugin::pointerAxis(PointerAxisEvent *event)
+{
+    cancelPendingFor(input()->findToplevel(event->position));
+}
+
+void SeatgeistAgentSeatPlugin::touchDown(TouchDownEvent *event)
+{
+    auto *window = input()->findToplevel(event->pos);
+    m_touchTargets[event->id] = window;
+    cancelPendingFor(window);
+}
+
+void SeatgeistAgentSeatPlugin::touchMotion(TouchMotionEvent *event)
+{
+    const auto found = m_touchTargets.find(event->id);
+    if (found != m_touchTargets.end()) {
+        cancelPendingFor(found->second);
+    }
+    cancelPendingFor(input()->findToplevel(event->pos));
+}
+
+void SeatgeistAgentSeatPlugin::touchUp(TouchUpEvent *event)
+{
+    const auto found = m_touchTargets.find(event->id);
+    if (found != m_touchTargets.end()) {
+        cancelPendingFor(found->second);
+        m_touchTargets.erase(found);
+    }
 }
 
 Window *SeatgeistAgentSeatPlugin::resolveNativeWaylandWindow(
@@ -237,7 +451,30 @@ Window *SeatgeistAgentSeatPlugin::resolveNativeWaylandWindow(
         *error = QStringLiteral("target is not a native Wayland client window");
         return nullptr;
     }
+    if (!validateClientFocusIsolation(window, error)) {
+        return nullptr;
+    }
     return window;
+}
+
+bool SeatgeistAgentSeatPlugin::validateClientFocusIsolation(Window *window, QString *error) const
+{
+    // Firefox's GTK key callbacks route through process-global gFocusWindow,
+    // not the event's seat/window. Real two-window tests receive another
+    // owner's keys despite correct wl_keyboard delivery. Do not silently
+    // share that client; AT-SPI or a dedicated browser process is required.
+    if (!window->resourceClass().contains(QStringLiteral("firefox"), Qt::CaseInsensitive)) {
+        return true;
+    }
+    for (auto *other : workspace()->windows()) {
+        if (other != window && !other->isInternal() && other->surface()
+            && (other->isNormalWindow() || other->isDialog())
+            && other->surface()->client() == window->surface()->client()) {
+            *error = QStringLiteral("Firefox shared-process window focus is not seat-isolated; use a dedicated Firefox process/profile or exact-window semantic actions");
+            return false;
+        }
+    }
+    return true;
 }
 
 SeatgeistAgentSeatPlugin::AgentLane *SeatgeistAgentSeatPlugin::laneFor(
@@ -251,30 +488,18 @@ SeatgeistAgentSeatPlugin::AgentLane *SeatgeistAgentSeatPlugin::laneFor(
     }
     auto existing = m_lanes.find(laneId);
     if (existing != m_lanes.end()) {
-        existing->second->lastUsedMs = m_monotonicClock.elapsed();
         return existing->second.get();
     }
-    if (m_lanes.size() >= MaxAgentLanes) {
-        auto oldest = std::min_element(
-            m_lanes.begin(),
-            m_lanes.end(),
-            [](const auto &left, const auto &right) {
-                return left.second->lastUsedMs < right.second->lastUsedMs;
-            });
-        clearLaneTarget(*oldest->second);
-        if (oldest->second->xkbState) {
-            xkb_state_unref(oldest->second->xkbState);
-        }
-        m_lanes.erase(oldest);
+    if (!m_idleLanes.empty()) {
+        auto lane = std::move(m_idleLanes.back());
+        m_idleLanes.pop_back();
+        auto *result = lane.get();
+        m_lanes.emplace(laneId, std::move(lane));
+        return result;
     }
-    auto lane = std::make_unique<AgentLane>();
-    if (!initializeLane(*lane, error)) {
-        return nullptr;
-    }
-    lane->lastUsedMs = m_monotonicClock.elapsed();
-    AgentLane *result = lane.get();
-    m_lanes.emplace(laneId, std::move(lane));
-    return result;
+    // Do not silently introduce late globals on partial initialization either.
+    *error = QStringLiteral("no idle permanent agent seat is available");
+    return nullptr;
 }
 
 bool SeatgeistAgentSeatPlugin::initializeLane(AgentLane &lane, QString *error)
@@ -310,6 +535,7 @@ bool SeatgeistAgentSeatPlugin::initializeLane(AgentLane &lane, QString *error)
         *error = QStringLiteral("xkb_state_new failed");
         return false;
     }
+    m_bindings->watch(lane.seat.get());
     return true;
 }
 
@@ -335,262 +561,23 @@ bool SeatgeistAgentSeatPlugin::bindTarget(
     const QPointF globalPosition = client.topLeft() + localPosition;
     setTimestamp(lane);
     lane.seat->setFocusedKeyboardSurface(window->surface());
-    lane.seat->notifyPointerEnter(
-        window->surface(),
-        globalPosition,
-        window->inputTransformation());
+    if (lane.seat->focusedPointerSurface() == window->surface()) {
+        // KWin suppresses enter events for an already-focused surface. Update
+        // its transform and send motion so clicks do not use the old position.
+        lane.seat->setFocusedPointerSurfaceTransformation(window->inputTransformation());
+        lane.seat->notifyPointerMotion(globalPosition);
+    } else {
+        lane.seat->notifyPointerEnter(
+            window->surface(),
+            globalPosition,
+            window->inputTransformation());
+    }
     lane.seat->notifyPointerFrame();
     lane.target = window;
     lane.localPointerPosition = localPosition;
     return true;
 }
 
-bool SeatgeistAgentSeatPlugin::sendKeyCombo(
-    const QJsonObject &action,
-    AgentLane &lane,
-    Window *window,
-    QString *error)
-{
-    if (!lane.xkbState) {
-        *error = QStringLiteral("agent-seat keymap is unavailable");
-        return false;
-    }
-    const QJsonArray keycodes = action.value(QStringLiteral("keycodes")).toArray();
-    if (keycodes.isEmpty() || keycodes.size() > 8) {
-        *error = QStringLiteral("key combo must contain between 1 and 8 keys");
-        return false;
-    }
-    const QPointF position = lane.target == window
-        ? lane.localPointerPosition
-        : QPointF(
-            window->clientGeometry().width() / 2.0,
-            window->clientGeometry().height() / 2.0);
-    if (!bindTarget(lane, window, position, error)) {
-        return false;
-    }
-
-    QList<quint32> codes;
-    for (const QJsonValue &value : keycodes) {
-        const int code = value.toInt(-1);
-        if (code <= 0 || code > KEY_MAX) {
-            *error = QStringLiteral("key combo contains an invalid evdev keycode");
-            return false;
-        }
-        codes.push_back(static_cast<quint32>(code));
-    }
-    for (const quint32 code : codes) {
-        setTimestamp(lane);
-        lane.seat->notifyKeyboardKey(
-            code,
-            KeyboardKeyState::Pressed,
-            waylandServer()->display()->nextSerial());
-        xkb_state_update_key(lane.xkbState, code + 8, XKB_KEY_DOWN);
-        updateKeyboardModifiers(lane);
-    }
-    for (auto it = codes.crbegin(); it != codes.crend(); ++it) {
-        const quint32 code = *it;
-        setTimestamp(lane);
-        lane.seat->notifyKeyboardKey(
-            code,
-            KeyboardKeyState::Released,
-            waylandServer()->display()->nextSerial());
-        xkb_state_update_key(lane.xkbState, code + 8, XKB_KEY_UP);
-        updateKeyboardModifiers(lane);
-    }
-    return true;
-}
-
-bool SeatgeistAgentSeatPlugin::sendKeySequence(
-    const QJsonObject &action,
-    AgentLane &lane,
-    Window *window,
-    QString *error)
-{
-    if (!lane.xkbState) {
-        *error = QStringLiteral("agent-seat keymap is unavailable");
-        return false;
-    }
-    const QJsonArray chords = action.value(QStringLiteral("chords")).toArray();
-    if (chords.isEmpty() || chords.size() > 8192) {
-        *error = QStringLiteral("key sequence must contain between 1 and 8192 chords");
-        return false;
-    }
-    const QPointF position = lane.target == window
-        ? lane.localPointerPosition
-        : QPointF(
-            window->clientGeometry().width() / 2.0,
-            window->clientGeometry().height() / 2.0);
-    if (!bindTarget(lane, window, position, error)) {
-        return false;
-    }
-
-    for (const QJsonValue &chordValue : chords) {
-        const QJsonArray chord = chordValue.toArray();
-        if (chord.isEmpty() || chord.size() > 2) {
-            *error = QStringLiteral("key sequence contains an invalid chord");
-            return false;
-        }
-        QList<quint32> codes;
-        for (const QJsonValue &value : chord) {
-            const int code = value.toInt(-1);
-            if (code <= 0 || code > KEY_MAX) {
-                *error = QStringLiteral("key sequence contains an invalid evdev keycode");
-                return false;
-            }
-            codes.push_back(static_cast<quint32>(code));
-        }
-        for (const quint32 code : codes) {
-            setTimestamp(lane);
-            lane.seat->notifyKeyboardKey(
-                code,
-                KeyboardKeyState::Pressed,
-                waylandServer()->display()->nextSerial());
-            xkb_state_update_key(lane.xkbState, code + 8, XKB_KEY_DOWN);
-            updateKeyboardModifiers(lane);
-        }
-        for (auto it = codes.crbegin(); it != codes.crend(); ++it) {
-            const quint32 code = *it;
-            setTimestamp(lane);
-            lane.seat->notifyKeyboardKey(
-                code,
-                KeyboardKeyState::Released,
-                waylandServer()->display()->nextSerial());
-            xkb_state_update_key(lane.xkbState, code + 8, XKB_KEY_UP);
-            updateKeyboardModifiers(lane);
-        }
-    }
-    return true;
-}
-
-bool SeatgeistAgentSeatPlugin::movePointer(
-    const QJsonObject &action,
-    AgentLane &lane,
-    Window *window,
-    QString *error)
-{
-    if (!finiteNumber(action.value(QStringLiteral("x")))
-        || !finiteNumber(action.value(QStringLiteral("y")))) {
-        *error = QStringLiteral("pointer coordinates must be finite numbers");
-        return false;
-    }
-    return bindTarget(
-        lane,
-        window,
-        QPointF(
-            action.value(QStringLiteral("x")).toDouble(),
-            action.value(QStringLiteral("y")).toDouble()),
-        error);
-}
-
-bool SeatgeistAgentSeatPlugin::clickPointer(
-    const QJsonObject &action,
-    AgentLane &lane,
-    Window *window,
-    QString *error)
-{
-    if (!movePointer(action, lane, window, error)) {
-        return false;
-    }
-    const int button = action.value(QStringLiteral("button")).toInt(-1);
-    const int clicks = action.value(QStringLiteral("clicks")).toInt(0);
-    if ((button != BTN_LEFT && button != BTN_MIDDLE && button != BTN_RIGHT)
-        || clicks < 1 || clicks > 2) {
-        *error = QStringLiteral("invalid pointer button or click count");
-        return false;
-    }
-    for (int click = 0; click < clicks; ++click) {
-        setTimestamp(lane);
-        lane.seat->notifyPointerButton(
-            static_cast<quint32>(button),
-            PointerButtonState::Pressed);
-        lane.seat->notifyPointerFrame();
-        setTimestamp(lane);
-        lane.seat->notifyPointerButton(
-            static_cast<quint32>(button),
-            PointerButtonState::Released);
-        lane.seat->notifyPointerFrame();
-    }
-    return true;
-}
-
-bool SeatgeistAgentSeatPlugin::dragPointer(
-    const QJsonObject &action,
-    AgentLane &lane,
-    Window *window,
-    QString *error)
-{
-    const QJsonValue fromX = action.value(QStringLiteral("from_x"));
-    const QJsonValue fromY = action.value(QStringLiteral("from_y"));
-    const QJsonValue toX = action.value(QStringLiteral("to_x"));
-    const QJsonValue toY = action.value(QStringLiteral("to_y"));
-    const int button = action.value(QStringLiteral("button")).toInt(-1);
-    if (!finiteNumber(fromX) || !finiteNumber(fromY)
-        || !finiteNumber(toX) || !finiteNumber(toY)
-        || (button != BTN_LEFT && button != BTN_MIDDLE && button != BTN_RIGHT)) {
-        *error = QStringLiteral("invalid pointer drag");
-        return false;
-    }
-    if (!bindTarget(lane, window, QPointF(fromX.toDouble(), fromY.toDouble()), error)) {
-        return false;
-    }
-    setTimestamp(lane);
-    lane.seat->notifyPointerButton(
-        static_cast<quint32>(button),
-        PointerButtonState::Pressed);
-    lane.seat->notifyPointerFrame();
-    if (!bindTarget(lane, window, QPointF(toX.toDouble(), toY.toDouble()), error)) {
-        lane.seat->notifyPointerButton(
-            static_cast<quint32>(button),
-            PointerButtonState::Released);
-        lane.seat->notifyPointerFrame();
-        return false;
-    }
-    setTimestamp(lane);
-    lane.seat->notifyPointerButton(
-        static_cast<quint32>(button),
-        PointerButtonState::Released);
-    lane.seat->notifyPointerFrame();
-    return true;
-}
-
-bool SeatgeistAgentSeatPlugin::scrollPointer(
-    const QJsonObject &action,
-    AgentLane &lane,
-    Window *window,
-    QString *error)
-{
-    const int vertical = action.value(QStringLiteral("vertical")).toInt();
-    const int horizontal = action.value(QStringLiteral("horizontal")).toInt();
-    if (vertical == 0 && horizontal == 0) {
-        *error = QStringLiteral("scroll delta must be non-zero");
-        return false;
-    }
-    const QPointF position = lane.target == window
-        ? lane.localPointerPosition
-        : QPointF(
-            window->clientGeometry().width() / 2.0,
-            window->clientGeometry().height() / 2.0);
-    if (!bindTarget(lane, window, position, error)) {
-        return false;
-    }
-    setTimestamp(lane);
-    if (vertical != 0) {
-        lane.seat->notifyPointerAxis(
-            Qt::Vertical,
-            vertical * 15.0,
-            vertical * 120,
-            PointerAxisSource::Wheel);
-    }
-    if (horizontal != 0) {
-        lane.seat->notifyPointerAxis(
-            Qt::Horizontal,
-            horizontal * 15.0,
-            horizontal * 120,
-            PointerAxisSource::Wheel);
-    }
-    lane.seat->notifyPointerFrame();
-    return true;
-}
 
 void SeatgeistAgentSeatPlugin::updateKeyboardModifiers(AgentLane &lane)
 {
@@ -634,19 +621,42 @@ void SeatgeistAgentSeatPlugin::clearLaneTarget(AgentLane &lane)
     lane.seat->notifyPointerLeave();
     lane.seat->notifyPointerFrame();
     lane.target = nullptr;
+    lane.localPointerPosition = {};
+    if (lane.xkbState) {
+        // Balanced batches release depressed keys, but lock/latch state (for
+        // example Caps Lock) must not leak to the next owner of this seat.
+        xkb_state_update_mask(lane.xkbState, 0, 0, 0, 0, 0, 0);
+        updateKeyboardModifiers(lane);
+    }
+}
+
+void SeatgeistAgentSeatPlugin::detachDaemon()
+{
+    m_bindingTimer->stop();
+    m_pendingAction = {};
+    m_pendingEvents.clear();
+    m_pendingWindow = nullptr;
+    m_pendingSurface = nullptr;
+    m_pollInFlight = false;
+    for (auto &[laneId, lane] : m_lanes) {
+        Q_UNUSED(laneId)
+        clearLaneTarget(*lane);
+        m_idleLanes.push_back(std::move(lane));
+    }
+    m_lanes.clear();
 }
 
 void SeatgeistAgentSeatPlugin::clearLanes()
 {
-    for (auto &[laneId, lane] : m_lanes) {
-        Q_UNUSED(laneId)
-        clearLaneTarget(*lane);
+    detachDaemon();
+    for (auto &lane : m_idleLanes) {
+        m_bindings->forget(lane->seat.get());
         if (lane->xkbState) {
             xkb_state_unref(lane->xkbState);
             lane->xkbState = nullptr;
         }
     }
-    m_lanes.clear();
+    m_idleLanes.clear();
 }
 
 } // namespace KWin

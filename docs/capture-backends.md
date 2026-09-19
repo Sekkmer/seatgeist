@@ -88,6 +88,12 @@ gate before capture, focus, or input side effects. Wrong ids and foreign
 clients receive the same `session_owner_mismatch` result so the check is not an
 active-session oracle. Status is deliberately read-only and reports only
 compact owner tool, PID, and scope metadata.
+When a session ends or its exact target disappears, the store retains a bounded
+five-minute owner tombstone containing only the owner and end reason. This lets
+the original owner close the session idempotently and receive `target_lost`,
+`portal_closed`, or the earlier end reason instead of a misleading ownership
+failure. Unknown IDs and foreign owners still receive the identical
+`session_owner_mismatch`, and tombstones are capped at 256 entries.
 
 The daemon keeps execution metadata beside, rather than inside, the backend
 session object. Opening registers the sanitized capture backend and target

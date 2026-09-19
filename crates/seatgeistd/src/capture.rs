@@ -3,6 +3,7 @@ use std::{
     fmt,
     path::PathBuf,
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Result, bail};
@@ -27,6 +28,8 @@ use libseatgeist::WindowCaptureOpenRequest;
 pub(crate) const MAX_CAPTURE_FRAME_TIMEOUT_MS: u64 = 30_000;
 const MAX_CAPTURE_OPEN_TIMEOUT_MS: u64 = 300_000;
 const MAX_EXACT_WINDOW_SESSIONS_PER_OWNER: usize = 4;
+const ENDED_SESSION_TOMBSTONE_TTL: Duration = Duration::from_secs(5 * 60);
+const MAX_ENDED_SESSION_TOMBSTONES: usize = 256;
 
 #[derive(Clone, Default)]
 pub(crate) struct CaptureSessionStore {
@@ -43,7 +46,14 @@ impl fmt::Debug for CaptureSessionStore {
 struct CaptureSessionState {
     pending: HashMap<Uuid, PendingCaptureOpen>,
     sessions: HashMap<String, CaptureSessionSlot>,
+    ended_sessions: HashMap<String, EndedCaptureSession>,
     last_end_reasons: HashMap<SessionOwnerIdentity, String>,
+}
+
+struct EndedCaptureSession {
+    owner: SessionOwner,
+    reason: String,
+    ended_at: Instant,
 }
 
 struct PendingCaptureOpen {
@@ -63,6 +73,42 @@ struct CaptureSessionSlot {
 }
 
 impl CaptureSessionStore {
+    fn remember_ended(
+        state: &mut CaptureSessionState,
+        session_id: String,
+        owner: SessionOwner,
+        reason: String,
+    ) {
+        let now = Instant::now();
+        state
+            .ended_sessions
+            .retain(|_, ended| now.duration_since(ended.ended_at) <= ENDED_SESSION_TOMBSTONE_TTL);
+        if state.ended_sessions.len() >= MAX_ENDED_SESSION_TOMBSTONES
+            && let Some(oldest) = state
+                .ended_sessions
+                .iter()
+                .min_by_key(|(_, ended)| ended.ended_at)
+                .map(|(id, _)| id.clone())
+        {
+            state.ended_sessions.remove(&oldest);
+        }
+        state.ended_sessions.insert(
+            session_id,
+            EndedCaptureSession {
+                owner,
+                reason,
+                ended_at: now,
+            },
+        );
+    }
+
+    fn prune_ended(state: &mut CaptureSessionState) {
+        let now = Instant::now();
+        state
+            .ended_sessions
+            .retain(|_, ended| now.duration_since(ended.ended_at) <= ENDED_SESSION_TOMBSTONE_TTL);
+    }
+
     pub(crate) async fn active_session_ids(&self) -> HashSet<String> {
         self.reap_ended().await;
         self.state.lock().await.sessions.keys().cloned().collect()
@@ -114,7 +160,15 @@ impl CaptureSessionStore {
                 };
                 let removed = state.sessions.remove(&session_id);
                 if let Some(slot) = removed.as_ref() {
-                    state.last_end_reasons.insert(slot.owner.identity(), reason);
+                    state
+                        .last_end_reasons
+                        .insert(slot.owner.identity(), reason.clone());
+                    Self::remember_ended(
+                        &mut state,
+                        session_id.clone(),
+                        slot.owner.clone(),
+                        reason,
+                    );
                 }
                 removed
             };
@@ -131,6 +185,7 @@ impl CaptureSessionStore {
     ) -> Result<Uuid> {
         self.reap_ended().await;
         let mut state = self.state.lock().await;
+        Self::prune_ended(&mut state);
         let owner_identity = owner.identity();
         let direct_exact_window = is_direct_exact_window(&requested_source);
         let owner_pending = state
@@ -189,6 +244,7 @@ impl CaptureSessionStore {
         if state.sessions.contains_key(&session_id) {
             bail!("capture backend returned a duplicate session id");
         }
+        state.ended_sessions.remove(&session_id);
         state.sessions.insert(
             session_id.clone(),
             CaptureSessionSlot {
@@ -258,12 +314,21 @@ impl CaptureSessionStore {
 
     pub(crate) async fn status_for_session(&self, session_id: &str) -> CaptureSessionStatus {
         self.reap_ended().await;
-        let state = self.state.lock().await;
-        state
-            .sessions
-            .get(session_id)
-            .map(|slot| status_from_slot(slot, None))
-            .unwrap_or_else(|| empty_capture_status(false, false, None, None, None))
+        let mut state = self.state.lock().await;
+        Self::prune_ended(&mut state);
+        if let Some(slot) = state.sessions.get(session_id) {
+            return status_from_slot(slot, None);
+        }
+        empty_capture_status(
+            false,
+            false,
+            None,
+            None,
+            state
+                .ended_sessions
+                .get(session_id)
+                .map(|ended| ended.reason.clone()),
+        )
     }
 
     pub(crate) async fn require_active(&self, requested_id: &str) -> Result<()> {
@@ -295,11 +360,15 @@ impl CaptureSessionStore {
         client: Option<&libseatgeist::JournalClientContext>,
     ) -> Result<()> {
         self.reap_ended().await;
-        let state = self.state.lock().await;
-        let Some(slot) = state.sessions.get(requested_id) else {
-            bail!("session owner mismatch");
-        };
-        slot.owner.require_matches(client)
+        let mut state = self.state.lock().await;
+        Self::prune_ended(&mut state);
+        if let Some(slot) = state.sessions.get(requested_id) {
+            return slot.owner.require_matches(client);
+        }
+        if let Some(ended) = state.ended_sessions.get(requested_id) {
+            return ended.owner.require_matches(client);
+        }
+        bail!("session owner mismatch")
     }
 
     pub(crate) async fn snapshot(
@@ -455,22 +524,35 @@ impl CaptureSessionStore {
         &self,
         request: CaptureSessionRequest,
     ) -> Result<CaptureSessionStatus> {
-        let slot = self
-            .state
-            .lock()
-            .await
-            .sessions
-            .remove(&request.session_id)
-            .ok_or_else(|| anyhow::anyhow!("no active capture session with that id"))?;
+        let slot = {
+            let mut state = self.state.lock().await;
+            Self::prune_ended(&mut state);
+            match state.sessions.remove(&request.session_id) {
+                Some(slot) => slot,
+                None => {
+                    if let Some(ended) = state.ended_sessions.get(&request.session_id) {
+                        return Ok(empty_capture_status(
+                            false,
+                            false,
+                            None,
+                            None,
+                            Some(ended.reason.clone()),
+                        ));
+                    }
+                    bail!("no active capture session with that id");
+                }
+            }
+        };
         slot.session.close().await.map_err(anyhow::Error::msg)?;
         let mut state = self.state.lock().await;
-        state.last_end_reasons.insert(
-            slot.owner.identity(),
-            CaptureSessionLifecycle::ClientClosed
-                .end_reason()
-                .expect("client close has an end reason")
-                .to_string(),
-        );
+        let reason = CaptureSessionLifecycle::ClientClosed
+            .end_reason()
+            .expect("client close has an end reason")
+            .to_string();
+        state
+            .last_end_reasons
+            .insert(slot.owner.identity(), reason.clone());
+        Self::remember_ended(&mut state, request.session_id, slot.owner.clone(), reason);
         Ok(empty_capture_status(
             false,
             false,
@@ -487,12 +569,18 @@ impl CaptureSessionStore {
         let slot = self.state.lock().await.sessions.remove(session_id);
         if let Some(slot) = slot {
             let identity = slot.owner.identity();
+            let owner = slot.owner.clone();
             let _ = slot.session.close().await;
-            self.state
-                .lock()
-                .await
+            let mut state = self.state.lock().await;
+            state
                 .last_end_reasons
                 .insert(identity, "target_lost".to_string());
+            Self::remember_ended(
+                &mut state,
+                session_id.to_string(),
+                owner,
+                "target_lost".to_string(),
+            );
         }
         anyhow::anyhow!("interaction target lost: exact-window capture target closed: {message}")
     }
@@ -989,6 +1077,59 @@ mod tests {
         assert!(!status.active);
         assert_eq!(status.last_end_reason.as_deref(), Some("client_closed"));
         assert!(closed.load(Ordering::SeqCst));
+
+        let repeated = store
+            .close(CaptureSessionRequest {
+                session_id: "capture-correct".to_string(),
+            })
+            .await
+            .expect("same-owner cleanup is idempotent through the ended-session tombstone");
+        assert!(!repeated.active);
+        assert_eq!(repeated.last_end_reason.as_deref(), Some("client_closed"));
+    }
+
+    #[tokio::test]
+    async fn ended_session_tombstone_preserves_owner_and_reason() {
+        let store = CaptureSessionStore::default();
+        let portal_ended = Arc::new(AtomicBool::new(false));
+        store
+            .install(
+                Box::new(MockCaptureSession {
+                    id: "capture-ended-owner".to_string(),
+                    source_type: seatgeist_backend::CaptureSourceType::Window,
+                    closed: Arc::new(AtomicBool::new(false)),
+                    portal_ended: Arc::clone(&portal_ended),
+                }),
+                Some("kwin-window-7".to_string()),
+            )
+            .await;
+        portal_ended.store(true, Ordering::SeqCst);
+        let status = store.status_for_session("capture-ended-owner").await;
+        assert!(!status.active);
+        assert_eq!(status.last_end_reason.as_deref(), Some("portal_closed"));
+        store
+            .require_owner(
+                "capture-ended-owner",
+                Some(&client("test-client", 1, "test-client")),
+            )
+            .await
+            .expect("original owner retains cleanup authorization");
+        assert!(
+            store
+                .require_owner(
+                    "capture-ended-owner",
+                    Some(&client("test-client", 2, "test-client")),
+                )
+                .await
+                .is_err()
+        );
+        let repeated = store
+            .close(CaptureSessionRequest {
+                session_id: "capture-ended-owner".to_string(),
+            })
+            .await
+            .expect("ended same-owner session closes idempotently");
+        assert_eq!(repeated.last_end_reason.as_deref(), Some("portal_closed"));
     }
 
     #[tokio::test]

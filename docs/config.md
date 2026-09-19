@@ -84,6 +84,11 @@ readable state fails closed instead of silently weakening capture identity.
 
 `[journal].include_error_details` defaults to `false`. Failed entries normally store only the structured error kind, preventing window titles, target labels, identifiers, or backend diagnostics from being copied into the journal summary. Enable it only for a private, short-lived diagnostic run when full daemon error text is necessary.
 
+The JSONL action journal rotates at 64 MiB and retains one previous segment.
+Tail requests scan backwards in bounded chunks across the current and previous
+segments, so a long-running desktop does not load its complete audit history
+into daemon memory. Journal writes are serialized before rotation and append.
+
 Precedence is:
 
 1. CLI arguments and environment-backed daemon flags.

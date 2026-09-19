@@ -15,6 +15,29 @@ capture-session ownership, rate limiting, and journaling remain in
 pulls actions which the daemon has already authorized and correlates completion
 with the daemon-generated action id.
 
+## Restartable planner, permanent seat host
+
+The `kwin_agent_seat_v2` host is deliberately small: it owns native seat
+lifetimes, real client bindings, target transforms, modifier mechanics, and
+bounded event dispatch. Rust in `seatgeistd` plans chords, text, clicks, drags,
+and scrolls into protocol-1 primitive event batches. The host validates the
+entire batch before input: supported opcodes, bounded counts, balanced
+key/button transitions, surface-local coordinates, and the original deadline.
+There is no remotely loaded native code or live plugin unload.
+
+Ordinary planner fixes now use `make deploy-seatgeistd-user`, after clients
+close their retained sessions. This replaces/restarts only the daemon. On
+daemon owner loss/replacement, the host cancels old queued work and clears
+agent focus, but preserves every `wl_seat` global and client binding. The new
+daemon's sessions get fresh lane IDs backed by the existing idle seats; clients
+must reopen retained captures. A native host or KWin ABI change still needs a
+normal logout/login. Activating this architecture from the old plugin needs
+one such session restart; subsequent compatible planner updates do not.
+
+For rolling deployment the daemon still negotiates `kwin_agent_seat_v1` and
+sends its legacy high-level actions. Host v2 requires the matching new daemon;
+an older daemon rejects registration rather than guessing a wire format.
+
 ## Build and install
 
 The plugin ABI is tied to the installed KWin version. Rebuild it after every
@@ -33,9 +56,24 @@ Plasma session, then explicitly select the backend:
 input = "kwin_agent_seat"
 ```
 
+Never unload a live agent-seat plugin to apply an update. Its `wl_seat`
+globals outlive capture sessions, and removing them can disconnect clients
+with fatal `wl_fixes` protocol errors. The reload helper refuses this operation;
+save work and use a normal logout/login. Loading an absent, ABI-matched plugin
+does not remove any existing seat globals.
+
 Check `seatgeist.input_backend_status`; `implemented_available_backend` must be
 `kwin_agent_seat`. If the plugin is absent, disabled, or ABI-incompatible, the
 daemon refuses the action. To revert:
+
+The nested `agent_seat` status reports the exact registered wire protocol,
+source build fingerprint, heartbeat freshness/age, and the outcome of the most
+recent real delivery. `heartbeat_only` means registration is live but this
+daemon run has not yet observed an end-to-end action; `delivery_verified` and
+`delivery_failed` distinguish actual client delivery from a heartbeat. The ABI
+watcher compares the registered build fingerprint with the installed plugin
+and reports `agent_seat_restart_required` when KWin is still executing an older
+image. Legacy v1 hosts remain accepted, but cannot claim an exact build.
 
 ```bash
 make uninstall-kwin-agent-seat-user
@@ -52,13 +90,29 @@ does not fall back from an explicitly selected agent seat to shared uinput.
   expiring the first session releases the lease. The physical user is never
   locked out.
 - One verified agent owner reuses one virtual seat across its retained windows.
-  At most four owners may hold live agent lanes. The plugin creates seats
-  lazily, retains at most four, and clears the least-recently-used idle lane
-  before replacement.
+  At most four owners may hold live agent lanes. The plugin announces its four
+  permanent seats at compositor startup, before applications connect. GTK 3
+  processes deferred seat bindings only during display startup; creating seats
+  on the first action leaves an already-running Firefox unable to bind them.
+  A dequeue-time daemon roster permits reuse
+  of released/expired lanes only; an idle-but-still-owned lane cannot be
+  evicted by another agent. A fifth owner receives `agent_lane_quota`.
+  Separate `seatgeist-mcp` processes (including independent Codex instances)
+  have process-scoped ownership and cannot use, close, or claim each other's
+  sessions. Manual `seatgeist-cli` invocations intentionally share a tool-scoped
+  owner and are not a substitute for independent MCP connections. Close
+  sessions when finished; abandoned sessions otherwise retain their normal TTL.
 - The target is re-resolved by KWin window UUID, app id, and PID before each
   action. The UUID is the window identity; app id and PID are validation
   attributes, not selectors. This is important for Firefox, where several
   windows commonly share one process.
+- Firefox uses a process-wide keyboard-focus target, so separate Wayland seats
+  alone do not isolate its windows. Raw agent-seat input is refused if another
+  normal window/dialog shares the Firefox target's Wayland client. Use a
+  dedicated Firefox process/profile per agent (one top-level window), or exact
+  semantic targets. This is checked again after the binding wait. The rule is a
+  known-Firefox compatibility guard, not a claim that every other toolkit or
+  Firefox-derived browser is multiseat-safe.
 - Pointer move, click, and drag accept logical `window_local` coordinates. For
   positions read from a retained preview, callers should use `capture_output`
   with the session id and exact frame revision; the daemon maps those pixels
@@ -67,7 +121,22 @@ does not fall back from an explicitly selected agent seat to shared uinput.
   lets `inputTransformation()` apply output scaling. Scroll uses the current
   target's last agent pointer position, or the client-surface center after
   startup or a target switch.
+  Movement within the same surface updates its transform and sends a pointer
+  motion event. Repeating a pointer-enter event alone is insufficient: KWin
+  suppresses it for an already-focused surface, leaving the client's click
+  position unchanged.
 - Keyboard combos and `type_text` are delivered through the owner's agent seat.
+  The plugin waits for the target client to bind the requested seat device
+  before sending the first input event. Compositor keyboard focus alone does
+  not mean a client has created its `wl_keyboard`: sending a key immediately
+  after announcing a new seat can silently drop it. The non-blocking binding
+  wait is capped at one second and fails closed on timeout, target/surface
+  loss, bridge owner change, or same-target input through KWin's ordinary
+  input pipeline. It never activates the physical workspace or sends a
+  sacrificial warm-up key. Already-bound clients dispatch without this wait.
+  Queued actions retain the daemon's original expiry time; the binding wait
+  cannot extend a timed-out request into a later injection. Deploy the matching
+  daemon with this plugin.
   `type_text` currently supports characters present on a fixed US PC-105
   keymap; unmappable Unicode fails before delivery. Same-window physical input
   still enforces the target quiet period and in-flight preemption, but stale
@@ -111,10 +180,35 @@ does not fall back from an explicitly selected agent seat to shared uinput.
 
 KWin's private binary plugin ABI and public-in-this-build server interfaces are
 version-sensitive. The implementation uses `SeatInterface`, `Window::surface`,
-and `Window::inputTransformation`. If those interfaces change or the target
-does not bind the dynamically announced seat, the action fails or produces no
-client event; use the nested compositor backend until the plugin is rebuilt or
-adapted. No X11 emulation fallback is attempted.
+and `Window::inputTransformation`. Binding readiness uses public Wayland server
+resource lifetime callbacks, `SeatInterface::get`, and `PointerInterface::get`.
+Because KWin does not expose keyboard binding readiness, the plugin correlates
+`wl_seat.get_keyboard` with the keymap event sent synchronously by KWin 6.7.4;
+it retains only resource/client/seat identity, never keymap contents or input.
+If that contract changes, or the client ignores the announced
+seat, readiness times out without sending input. Rebuild/adapt the plugin for
+the installed KWin ABI; no X11 emulation fallback is attempted.
+
+`make check-kwin-agent-seat-plugin` builds and runs the isolated native Wayland
+binding and event-batch tests. With the workspace binaries already built, run
+`python scripts/agent-seat-first-input-eval.py` for the full
+private-bus/headless-KWin Qt regression. It checks
+first-key delivery, switching between two windows of the same Qt client,
+simultaneous input from two independent MCP processes, cross-owner refusal,
+released-lane churn, and a daemon-only restart. A live Wayland observer verifies
+that native seat global IDs survive unchanged, with no global removal. Both
+agent targets and the physical-focus sentinel stay alive throughout. It never
+loads/reloads the live plugin or restarts the operator's compositor.
+
+Append `--firefox` to exercise first-key and repeated concurrent input through
+two real MCP processes into two disposable Firefox profiles, including modifier
+isolation and a daemon-only restart with the browsers and MCP clients alive.
+Append `--firefox-shared-client` to verify that two windows in one
+Firefox process are refused before input, with the physical-focus sentinel
+unchanged. Test profiles disable onboarding/splash UI explicitly; DOM load alone
+does not prove the browser's modal startup overlay has disappeared. The native
+Wayland unit test controls late device binding directly; stopping an already
+connected Qt client no longer simulates that condition with startup seats.
 
 The daemon accepts the legacy `kwin_input_spy_v1` contract so a daemon-only
 restart does not disable the currently loaded plugin. In that compatibility
@@ -141,7 +235,9 @@ The plugin watches the bridge's well-known-name owner and stops its timer while
 the daemon is absent, so daemon downtime cannot create an ownerless D-Bus call
 storm. While connected it holds a daemon-side long poll, re-arms immediately
 after a successful response, and retains a five-second timer only as an error
-or stalled-call watchdog. The long-poll heartbeat keeps readiness fresh without
+or stalled-call watchdog. The first pull starts as soon as registration
+succeeds, rather than waiting for that timer and timing out the first action.
+The long-poll heartbeat keeps readiness fresh without
 a 50 ms idle loop, and the plugin resumes automatically when the daemon
 returns. The daemon's default post-action confirmation for this exact-target
 lane is the compositor completion (`delivery_ack`). Delivery-only and explicit

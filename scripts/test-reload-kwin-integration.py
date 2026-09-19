@@ -27,7 +27,12 @@ if args[-1] == "supportInformation":
 elif args[-1].endswith(".AvailablePlugins"):
     print("seatgeistactivity\\nseatgeistagentseat")
 elif args[-1].endswith(".LoadedPlugins"):
-    print("seatgeistactivity\\nseatgeistagentseat")
+    if os.environ.get("AGENT_SEAT_UNLOADED") == "1":
+        with open(os.environ["COMMAND_LOG"], encoding="utf-8") as handle:
+            loaded = ".LoadPlugin seatgeistagentseat" in handle.read()
+        print("seatgeistactivity" + ("\\nseatgeistagentseat" if loaded else ""))
+    else:
+        print("seatgeistactivity\\nseatgeistagentseat")
 elif any(value.endswith(".LoadPlugin") for value in args):
     print("true")
 elif any(value.endswith(".isScriptLoaded") for value in args):
@@ -71,7 +76,7 @@ with tempfile.TemporaryDirectory(prefix="seatgeist-reload-kwin-") as temporary:
     completed = subprocess.run(
         [
             str(HELPER),
-            "agent-seat",
+            "activity",
             "--plugin-root",
             str(plugin_root),
             "--data-home",
@@ -86,7 +91,37 @@ with tempfile.TemporaryDirectory(prefix="seatgeist-reload-kwin-") as temporary:
     assert result["loaded_after"] is True
     assert result["compositor_restarted"] is False
     commands = log.read_text(encoding="utf-8")
-    assert ".UnloadPlugin seatgeistagentseat" in commands
+    assert ".UnloadPlugin seatgeistactivity" in commands
+    assert ".LoadPlugin seatgeistactivity" in commands
+
+# An idle capture does not imply that the plugin's published wl_seat globals
+# are unused. Refuse live removal, including through the preflight path.
+for extra in ([], ["--dry-run"]):
+    with tempfile.TemporaryDirectory(prefix="seatgeist-reload-kwin-") as temporary:
+        env, log, plugin_root, data_home = fixture(Path(temporary))
+        completed = subprocess.run(
+            [str(HELPER), "agent-seat", "--plugin-root", str(plugin_root), *extra],
+            check=False, text=True, capture_output=True, env=env,
+        )
+        assert completed.returncode != 0
+        assert "refusing to unload the live agent-seat plugin" in completed.stderr
+        commands = log.read_text(encoding="utf-8")
+        assert ".UnloadPlugin" not in commands
+        assert ".LoadPlugin " not in commands
+
+# Initial loading remains available when no live agent-seat plugin exists.
+with tempfile.TemporaryDirectory(prefix="seatgeist-reload-kwin-") as temporary:
+    env, log, plugin_root, data_home = fixture(Path(temporary))
+    env["AGENT_SEAT_UNLOADED"] = "1"
+    completed = subprocess.run(
+        [str(HELPER), "agent-seat", "--plugin-root", str(plugin_root)],
+        check=True, text=True, capture_output=True, env=env,
+    )
+    result = json.loads(completed.stdout)
+    assert result["loaded_before"] is False
+    assert result["loaded_after"] is True
+    commands = log.read_text(encoding="utf-8")
+    assert ".UnloadPlugin" not in commands
     assert ".LoadPlugin seatgeistagentseat" in commands
 
 with tempfile.TemporaryDirectory(prefix="seatgeist-reload-kwin-") as temporary:

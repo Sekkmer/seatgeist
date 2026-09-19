@@ -4,10 +4,10 @@ use std::{
     collections::BTreeMap,
     env, fs,
     fs::OpenOptions,
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::{FileTypeExt, PermissionsExt},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -147,6 +147,9 @@ const ACCESSIBILITY_QUALITY_SAMPLE_MAX_NODES: usize = 512;
 const ACCESSIBILITY_QUALITY_TIMEOUT: Duration = Duration::from_millis(1_500);
 const ACCESSIBILITY_TREE_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_PROTOCOL_VERSION: &str = "1";
+const MAX_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
+const JOURNAL_READ_CHUNK_BYTES: usize = 64 * 1024;
+const MAX_JOURNAL_LINE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 struct ActionJournal {
@@ -155,6 +158,7 @@ struct ActionJournal {
     run_id: Uuid,
     build_id: String,
     sequence: Arc<Mutex<u64>>,
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl ActionJournal {
@@ -168,7 +172,16 @@ impl ActionJournal {
             run_id: Uuid::new_v4(),
             build_id,
             sequence: Arc::new(Mutex::new(0)),
+            write_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    fn append(&self, entry: &JournalEntry) -> Result<()> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("journal write lock is poisoned"))?;
+        append_journal_entry(&self.path, entry)
     }
 
     fn record_lifecycle(&self, method: &str, summary: &str) -> Result<()> {
@@ -188,7 +201,7 @@ impl ActionJournal {
             ok: true,
             summary: summary.to_string(),
         };
-        append_journal_entry(&self.path, &entry)
+        self.append(&entry)
     }
 
     fn record(
@@ -215,7 +228,7 @@ impl ActionJournal {
             ok: response.ok(),
             summary: journal_response_summary(response, &self.settings),
         };
-        append_journal_entry(&self.path, &entry)
+        self.append(&entry)
     }
 
     fn tail_filtered(
@@ -269,7 +282,7 @@ impl ActionJournal {
                 session_id, lease_id, window.id, ok
             ),
         };
-        append_journal_entry(&self.path, &entry)
+        self.append(&entry)
     }
 
     fn record_agent_seat_delivery(
@@ -315,7 +328,7 @@ impl ActionJournal {
                 session_id, lane_id, action_id, window.id, backend
             ),
         };
-        append_journal_entry(&self.path, &entry)
+        self.append(&entry)
     }
 
     fn record_post_action_capture_step(
@@ -355,7 +368,7 @@ impl ActionJournal {
                 session_id, action_id, ok
             ),
         };
-        append_journal_entry(&self.path, &entry)
+        self.append(&entry)
     }
 
     fn next_sequence(&self) -> Result<u64> {
@@ -577,7 +590,8 @@ async fn run(
     let launched_window_store = launched_window::LaunchedWindowStore::default();
     let activity_tracker = activity::ActivityTracker::default();
     let window_action_queue = WindowActionQueue::default();
-    let agent_seat_backend = agent_seat::KwinAgentSeatBackend::default();
+    let agent_seat_backend =
+        agent_seat::KwinAgentSeatBackend::with_lanes(interaction_session_store.clone());
     let focus_backend: Arc<dyn interaction::FocusBackend> = Arc::new(interaction::KwinFocusBackend);
     let _kwin_bridge_connection = if kwin_bridge_enabled {
         match start_kwin_bridge(
@@ -1942,9 +1956,10 @@ async fn execute_request(
     match request {
         DaemonRequest::Health => {
             let mut status = runtime.health_status.clone();
-            let (current, peak) = process_resident_memory();
+            let (current, peak, swap) = process_resident_memory();
             status.resident_memory_bytes = current;
             status.resident_memory_peak_bytes = peak;
+            status.resident_swap_bytes = swap;
             DaemonResponse::Health(status)
         }
         DaemonRequest::Capabilities => DaemonResponse::Capabilities(capabilities(
@@ -2011,7 +2026,8 @@ async fn execute_request(
             match input_backend_status(
                 runtime.input_backend_preference,
                 &runtime.portal_eis_session_store,
-                runtime.agent_seat_backend.ready(),
+                &runtime.agent_seat_backend,
+                &runtime.activity_tracker,
                 &runtime.xkb_keymap_config,
             ) {
                 Ok(status) => DaemonResponse::InputBackendStatus(status),
@@ -3009,16 +3025,18 @@ fn health(
         config_fingerprint: Some(config_fingerprint),
         resident_memory_bytes: None,
         resident_memory_peak_bytes: None,
+        resident_swap_bytes: None,
     }
 }
 
-fn process_resident_memory() -> (Option<u64>, Option<u64>) {
+fn process_resident_memory() -> (Option<u64>, Option<u64>, Option<u64>) {
     let Ok(status) = fs::read_to_string("/proc/self/status") else {
-        return (None, None);
+        return (None, None, None);
     };
     (
         proc_status_kib(&status, "VmRSS:"),
         proc_status_kib(&status, "VmHWM:"),
+        proc_status_kib(&status, "VmSwap:"),
     )
 }
 
@@ -3167,7 +3185,8 @@ async fn computer_use_readiness_status(runtime: &DaemonRuntime) -> ComputerUseRe
     let input = match input_backend_status(
         runtime.input_backend_preference,
         &runtime.portal_eis_session_store,
-        runtime.agent_seat_backend.ready(),
+        &runtime.agent_seat_backend,
+        &runtime.activity_tracker,
         &runtime.xkb_keymap_config,
     ) {
         Ok(status) => Some(status),
@@ -3196,9 +3215,40 @@ async fn computer_use_readiness_status(runtime: &DaemonRuntime) -> ComputerUseRe
         issues.push("no executable input backend is available".to_string());
         next_steps.push("check seatgeist.input_backend_status".to_string());
     }
+    if let Some(agent_seat) = input.as_ref().and_then(|status| status.agent_seat.as_ref()) {
+        match agent_seat.delivery_validation.as_str() {
+            "heartbeat_only" => {
+                issues.push(
+                    "agent-seat registration is fresh but has no completed delivery evidence in this daemon run"
+                        .to_string(),
+                );
+                next_steps.push(
+                    "use a guarded disposable target before relying on raw agent-seat input"
+                        .to_string(),
+                );
+            }
+            "delivery_failed" => {
+                issues.push(format!(
+                    "the most recent agent-seat delivery failed ({})",
+                    agent_seat
+                        .last_delivery_error_kind
+                        .as_deref()
+                        .unwrap_or("backend_rejected")
+                ));
+                next_steps.push(
+                    "inspect seatgeist.input_backend_status and the failed input journal entry"
+                        .to_string(),
+                );
+            }
+            _ => {}
+        }
+    }
     if !accessibility.semantic_targeting_reliable {
-        issues.push("accessibility tree is weak or unavailable for semantic targeting".to_string());
-        next_steps.push("check seatgeist.a11y_quality_status".to_string());
+        issues.push("focused accessibility sample is weak or unavailable; target discovery is still required".to_string());
+        next_steps.push(
+            "check seatgeist.a11y_quality_status and find nodes in the intended target window"
+                .to_string(),
+        );
     }
     if clipboard.read_backend.is_none() {
         issues.push("clipboard read backend is unavailable".to_string());
@@ -3245,8 +3295,8 @@ async fn computer_use_readiness_status(runtime: &DaemonRuntime) -> ComputerUseRe
         safety.require_focus_guard,
     );
     let pointer_input_state = keyboard_input_state.clone();
-    let semantic_action_state = action_readiness(
-        accessibility.semantic_targeting_reliable,
+    let semantic_action_state = semantic_action_readiness(
+        &accessibility,
         control_blocked,
         &policy.default_control,
         safety.require_focus_guard,
@@ -3309,6 +3359,19 @@ async fn computer_use_readiness_status(runtime: &DaemonRuntime) -> ComputerUseRe
         issues,
         next_steps,
     }
+}
+
+fn semantic_action_readiness(
+    accessibility: &AccessibilityQualityStatus,
+    blocked: bool,
+    policy: &ToolApprovalLevel,
+    needs_guard: bool,
+) -> ActionReadiness {
+    // A focused textbox can legitimately be the entire sampled subtree. Its
+    // shape says nothing about named discovery in another window. Actual
+    // semantic actions still resolve and authorize the exact non-sensitive
+    // target, reject ambiguity, and apply normal guard/policy checks.
+    action_readiness(accessibility.atspi_available, blocked, policy, needs_guard)
 }
 
 fn action_readiness(
@@ -3404,15 +3467,20 @@ fn desktop_session_setup_hint(status: &DesktopSessionStatus) -> String {
 fn input_backend_status(
     preference: InputBackendPreference,
     portal_eis_session_store: &PortalEisSessionStore,
-    agent_seat_ready: bool,
+    agent_seat_backend: &agent_seat::KwinAgentSeatBackend,
+    activity_tracker: &activity::ActivityTracker,
     xkb_keymap_config: &XkbKeymapConfig,
 ) -> Result<InputBackendStatus> {
     let xkb_keymap = effective_xkb_keymap_resolution(xkb_keymap_config).status;
     let stored_session_active = portal_eis_session_store.active()?;
+    let activity = activity_tracker.status();
     input_diagnostics::status(
         preference,
         stored_session_active,
-        agent_seat_ready,
+        agent_seat_backend.ready(),
+        agent_seat_backend.runtime_status(),
+        activity.backend,
+        Some(activity.trusted),
         xkb_keymap,
     )
 }
@@ -4939,11 +5007,18 @@ async fn accessibility_quality_status() -> AccessibilityQualityStatus {
 fn with_accessibility_registry_diagnostics(
     mut status: AccessibilityQualityStatus,
 ) -> AccessibilityQualityStatus {
-    let count = current_euid()
+    let diagnostics = current_euid()
         .ok()
-        .and_then(|uid| accessibility_registry_process_count(Path::new("/proc"), uid));
-    status.registry_process_count = count;
-    status.extra_registry_process_count = count.map(|count| count.saturating_sub(1));
+        .and_then(|uid| accessibility_registry_process_diagnostics(Path::new("/proc"), uid));
+    status.registry_process_count = diagnostics.as_ref().map(|(count, _)| *count);
+    status.extra_registry_process_count = status
+        .registry_process_count
+        .map(|count| count.saturating_sub(1));
+    status.registry_process_ages_ms = diagnostics
+        .as_ref()
+        .map(|(_, ages)| ages.clone())
+        .unwrap_or_default();
+    status.oldest_registry_age_ms = status.registry_process_ages_ms.first().copied();
     if let Some(extra) = status
         .extra_registry_process_count
         .filter(|extra| *extra > 0)
@@ -4951,13 +5026,47 @@ fn with_accessibility_registry_diagnostics(
         status.setup_hint.push_str(&format!(
             "; detected {extra} extra same-user AT-SPI registry process(es), so stale accessibility bus generations may be present"
         ));
+        if let Some(age_ms) = status.oldest_registry_age_ms {
+            status.setup_hint.push_str(&format!(
+                "; oldest registry age is approximately {} minutes; prefer a normal logout/login when convenient and do not kill registries automatically",
+                age_ms / 60_000
+            ));
+        }
     }
     status
 }
 
-fn accessibility_registry_process_count(proc_root: &Path, uid: u32) -> Option<usize> {
+fn accessibility_registry_process_diagnostics(
+    proc_root: &Path,
+    uid: u32,
+) -> Option<(usize, Vec<u64>)> {
+    static CLOCK_TICKS: OnceLock<Option<u64>> = OnceLock::new();
+    let ticks_per_second = *CLOCK_TICKS.get_or_init(|| {
+        commands::stdout("getconf", &["CLK_TCK"])
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+    });
+    let uptime_seconds = fs::read_to_string(proc_root.join("uptime"))
+        .ok()
+        .and_then(|uptime| uptime.split_whitespace().next()?.parse::<f64>().ok());
+    accessibility_registry_process_diagnostics_with_clock(
+        proc_root,
+        uid,
+        ticks_per_second,
+        uptime_seconds,
+    )
+}
+
+fn accessibility_registry_process_diagnostics_with_clock(
+    proc_root: &Path,
+    uid: u32,
+    ticks_per_second: Option<u64>,
+    uptime_seconds: Option<f64>,
+) -> Option<(usize, Vec<u64>)> {
     let entries = fs::read_dir(proc_root).ok()?;
     let mut count = 0;
+    let mut ages_ms = Vec::new();
     for entry in entries.flatten() {
         if !entry
             .file_name()
@@ -4986,9 +5095,23 @@ fn accessibility_registry_process_count(proc_root: &Path, uid: u32) -> Option<us
         });
         if process_uid == Some(uid) {
             count += 1;
+            if let (Some(ticks_per_second), Some(uptime_seconds)) =
+                (ticks_per_second, uptime_seconds)
+                && let Ok(stat) = fs::read_to_string(process_dir.join("stat"))
+                && let Some(after_comm) = stat.rsplit_once(')').map(|(_, after)| after)
+                && let Some(start_ticks) = after_comm
+                    .split_whitespace()
+                    .nth(19)
+                    .and_then(|value| value.parse::<u64>().ok())
+            {
+                let age_seconds =
+                    (uptime_seconds - start_ticks as f64 / ticks_per_second as f64).max(0.0);
+                ages_ms.push((age_seconds * 1000.0).min(u64::MAX as f64) as u64);
+            }
         }
     }
-    Some(count)
+    ages_ms.sort_unstable_by(|left, right| right.cmp(left));
+    Some((count, ages_ms))
 }
 
 fn accessibility_quality_unavailable_status(
@@ -5006,6 +5129,8 @@ fn accessibility_quality_unavailable_status(
         atspi_available: false,
         registry_process_count: None,
         extra_registry_process_count: None,
+        registry_process_ages_ms: Vec::new(),
+        oldest_registry_age_ms: None,
         target_event_settle_available: false,
         event_backend: "atspi_registry".to_string(),
         target_event_classes: target_event_classes(),
@@ -5038,6 +5163,8 @@ fn accessibility_quality_status_from_sample(
                 atspi_available: true,
                 registry_process_count: None,
                 extra_registry_process_count: None,
+                registry_process_ages_ms: Vec::new(),
+                oldest_registry_age_ms: None,
                 target_event_settle_available: true,
                 event_backend: "atspi_registry".to_string(),
                 target_event_classes: target_event_classes(),
@@ -5067,6 +5194,8 @@ fn accessibility_quality_status_from_sample(
             atspi_available: true,
             registry_process_count: None,
             extra_registry_process_count: None,
+            registry_process_ages_ms: Vec::new(),
+            oldest_registry_age_ms: None,
             target_event_settle_available: true,
             event_backend: "atspi_registry".to_string(),
             target_event_classes: target_event_classes(),
@@ -5116,6 +5245,8 @@ fn accessibility_quality_status_from_sample(
         atspi_available: true,
         registry_process_count: None,
         extra_registry_process_count: None,
+        registry_process_ages_ms: Vec::new(),
+        oldest_registry_age_ms: None,
         target_event_settle_available: true,
         event_backend: "atspi_registry".to_string(),
         target_event_classes: target_event_classes(),
@@ -6900,6 +7031,8 @@ fn append_journal_entry(path: &Path, entry: &JournalEntry) -> Result<()> {
         .with_context(|| format!("set journal dir permissions {}", parent.display()))?;
     validate_dir_permissions(parent)?;
 
+    rotate_journal_if_needed(path, MAX_JOURNAL_BYTES)?;
+
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -6913,39 +7046,116 @@ fn append_journal_entry(path: &Path, entry: &JournalEntry) -> Result<()> {
     Ok(())
 }
 
+fn rotate_journal_if_needed(path: &Path, max_bytes: u64) -> Result<bool> {
+    if fs::metadata(path)
+        .ok()
+        .is_none_or(|metadata| metadata.len() < max_bytes)
+    {
+        return Ok(false);
+    }
+    {
+        let rotated = rotated_journal_path(path);
+        fs::rename(path, &rotated).with_context(|| {
+            format!(
+                "rotate full journal {} to {}",
+                path.display(),
+                rotated.display()
+            )
+        })?;
+    }
+    Ok(true)
+}
+
 fn tail_journal_entries(
     path: &Path,
     limit: usize,
     method_filter: Option<&str>,
     ok: Option<bool>,
 ) -> Result<Vec<JournalEntry>> {
-    let content = match fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err).with_context(|| format!("read journal {}", path.display())),
-    };
-
     let mut entries = Vec::new();
-    for line in content.lines().rev().filter(|line| !line.trim().is_empty()) {
+    for candidate in [path.to_path_buf(), rotated_journal_path(path)] {
+        tail_journal_file_newest_first(&candidate, limit, method_filter, ok, &mut entries)?;
         if entries.len() >= limit {
             break;
         }
-        let entry = serde_json::from_str::<JournalEntry>(line)
-            .with_context(|| format!("parse journal line in {}", path.display()))?;
-        if let Some(method_filter) = method_filter
-            && entry.method != method_filter
-        {
-            continue;
-        }
-        if let Some(ok) = ok
-            && entry.ok != ok
-        {
-            continue;
-        }
-        entries.push(entry);
     }
     entries.reverse();
     Ok(entries)
+}
+
+fn tail_journal_file_newest_first(
+    path: &Path,
+    limit: usize,
+    method_filter: Option<&str>,
+    ok: Option<bool>,
+    entries: &mut Vec<JournalEntry>,
+) -> Result<()> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("open journal {}", path.display())),
+    };
+    let mut position = file
+        .seek(SeekFrom::End(0))
+        .with_context(|| format!("seek journal {}", path.display()))?;
+    let mut suffix = Vec::new();
+    while position > 0 && entries.len() < limit {
+        let read_len = usize::try_from(position.min(JOURNAL_READ_CHUNK_BYTES as u64))?;
+        position -= read_len as u64;
+        file.seek(SeekFrom::Start(position))
+            .with_context(|| format!("seek journal {}", path.display()))?;
+        let mut chunk = vec![0; read_len];
+        file.read_exact(&mut chunk)
+            .with_context(|| format!("read journal {}", path.display()))?;
+        chunk.extend_from_slice(&suffix);
+        let mut end = chunk.len();
+        while let Some(newline) = chunk[..end].iter().rposition(|byte| *byte == b'\n') {
+            if entries.len() >= limit {
+                break;
+            }
+            maybe_push_journal_line(path, &chunk[newline + 1..end], method_filter, ok, entries)?;
+            end = newline;
+        }
+        suffix = chunk[..end].to_vec();
+        if suffix.len() > MAX_JOURNAL_LINE_BYTES {
+            bail!("journal line exceeds {MAX_JOURNAL_LINE_BYTES} bytes");
+        }
+    }
+    if position == 0 && entries.len() < limit {
+        maybe_push_journal_line(path, &suffix, method_filter, ok, entries)?;
+    }
+    Ok(())
+}
+
+fn maybe_push_journal_line(
+    path: &Path,
+    line: &[u8],
+    method_filter: Option<&str>,
+    ok: Option<bool>,
+    entries: &mut Vec<JournalEntry>,
+) -> Result<()> {
+    if line.iter().all(u8::is_ascii_whitespace) {
+        return Ok(());
+    }
+    if line.len() > MAX_JOURNAL_LINE_BYTES {
+        bail!("journal line exceeds {MAX_JOURNAL_LINE_BYTES} bytes");
+    }
+    let line = std::str::from_utf8(line)
+        .with_context(|| format!("journal line is not UTF-8 in {}", path.display()))?;
+    let entry = serde_json::from_str::<JournalEntry>(line)
+        .with_context(|| format!("parse journal line in {}", path.display()))?;
+    if method_filter.is_none_or(|method| entry.method == method)
+        && ok.is_none_or(|expected| entry.ok == expected)
+    {
+        entries.push(entry);
+    }
+    Ok(())
+}
+
+fn rotated_journal_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".1");
+    PathBuf::from(name)
 }
 
 fn summarize_response(response: &DaemonResponse) -> String {
@@ -7855,6 +8065,7 @@ mod tests {
                     config_fingerprint: None,
                     resident_memory_bytes: None,
                     resident_memory_peak_bytes: None,
+                    resident_swap_bytes: None,
                 }),
             )
             .expect("health record appends");
@@ -7969,6 +8180,35 @@ mod tests {
         assert!(entries[0].ok);
 
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn journal_tail_reads_backwards_across_chunks_and_one_rotation() {
+        let path = temp_test_path("journal-reverse-tail").with_extension("jsonl");
+        let journal = ActionJournal::new(path.clone(), JournalSettings::default(), None);
+        journal
+            .record_lifecycle("first", "first")
+            .expect("first record appends");
+        journal
+            .record_lifecycle("large", &"x".repeat(JOURNAL_READ_CHUNK_BYTES + 100))
+            .expect("large record appends");
+        assert!(rotate_journal_if_needed(&path, 1).expect("journal rotates"));
+        journal
+            .record_lifecycle("after_rotation", "after rotation")
+            .expect("new journal record appends");
+
+        let entries = journal
+            .tail_filtered(3, None, None)
+            .expect("tail spans current and rotated journals");
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.method.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "large", "after_rotation"]
+        );
+        fs::remove_file(&path).ok();
+        fs::remove_file(rotated_journal_path(&path)).ok();
     }
 
     #[test]
@@ -12521,13 +12761,13 @@ height = 40
     }
 
     #[test]
-    fn accessibility_registry_process_count_ignores_other_users_and_processes() {
+    fn accessibility_registry_diagnostics_ignore_other_users_and_report_ages() {
         let proc_root = temp_test_private_dir("atspi-proc");
-        for (pid, comm, uid) in [
-            ("101", "at-spi2-registryd\n", 1000),
-            ("102", "at-spi2-registr\n", 1000),
-            ("103", "at-spi2-registryd\n", 1001),
-            ("104", "firefox\n", 1000),
+        for (pid, comm, uid, start_ticks) in [
+            ("101", "at-spi2-registryd\n", 1000, 10_000),
+            ("102", "at-spi2-registr\n", 1000, 20_000),
+            ("103", "at-spi2-registryd\n", 1001, 30_000),
+            ("104", "firefox\n", 1000, 40_000),
         ] {
             let process_dir = proc_root.join(pid);
             fs::create_dir_all(&process_dir).expect("process fixture directory is created");
@@ -12537,13 +12777,25 @@ height = 40
                 format!("Name:\tfixture\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n"),
             )
             .expect("process status fixture is written");
+            fs::write(
+                process_dir.join("stat"),
+                format!(
+                    "{pid} ({}) S {} {start_ticks}\n",
+                    comm.trim(),
+                    vec!["0"; 18].join(" ")
+                ),
+            )
+            .expect("process stat fixture is written");
         }
         fs::create_dir_all(proc_root.join("not-a-pid")).expect("non-pid fixture is created");
 
-        assert_eq!(
-            accessibility_registry_process_count(&proc_root, 1000),
-            Some(2)
+        let diagnostics = accessibility_registry_process_diagnostics_with_clock(
+            &proc_root,
+            1000,
+            Some(100),
+            Some(1_000.0),
         );
+        assert_eq!(diagnostics, Some((2, vec![900_000, 800_000])));
         fs::remove_dir_all(proc_root).ok();
     }
 
@@ -12573,6 +12825,38 @@ height = 40
         assert!(summary.contains("nodes=1"));
         assert!(summary.contains("generic=1"));
         assert!(summary.contains("flat=true"));
+    }
+
+    #[test]
+    fn flat_focused_textbox_does_not_disable_guarded_semantic_discovery() {
+        let mut status = accessibility_quality_status_from_sample(
+            4,
+            512,
+            Ok(Some(text_node("field", "Message"))),
+        );
+        assert!(status.tree_flat);
+        assert!(!status.semantic_targeting_reliable);
+        assert_eq!(
+            semantic_action_readiness(&status, false, &ToolApprovalLevel::Allow, true),
+            ActionReadiness::NeedsGuard
+        );
+        assert_eq!(
+            semantic_action_readiness(&status, true, &ToolApprovalLevel::Allow, true),
+            ActionReadiness::Blocked
+        );
+        assert_eq!(
+            semantic_action_readiness(&status, false, &ToolApprovalLevel::Deny, true),
+            ActionReadiness::Blocked
+        );
+        assert_eq!(
+            semantic_action_readiness(&status, false, &ToolApprovalLevel::Prompt, true),
+            ActionReadiness::NeedsApproval
+        );
+        status.atspi_available = false;
+        assert_eq!(
+            semantic_action_readiness(&status, false, &ToolApprovalLevel::Allow, true),
+            ActionReadiness::Unavailable
+        );
     }
 
     #[test]

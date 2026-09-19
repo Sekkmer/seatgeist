@@ -38,6 +38,8 @@ pub struct HealthStatus {
     pub resident_memory_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resident_memory_peak_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resident_swap_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,7 +216,27 @@ pub struct InputBackendStatus {
     pub configured_backend: String,
     pub preferred_available_backend: Option<String>,
     pub implemented_available_backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_seat: Option<AgentSeatRuntimeStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kwin_activity_backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kwin_activity_trusted: Option<bool>,
     pub setup_hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSeatRuntimeStatus {
+    pub protocol: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_id: Option<String>,
+    pub heartbeat_fresh: bool,
+    pub heartbeat_age_ms: u64,
+    pub delivery_validation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delivery_age_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delivery_error_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -941,6 +963,10 @@ pub struct AccessibilityQualityStatus {
     pub registry_process_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_registry_process_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub registry_process_ages_ms: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_registry_age_ms: Option<u64>,
     #[serde(default)]
     pub target_event_settle_available: bool,
     #[serde(default)]
@@ -2562,11 +2588,23 @@ mod tests {
             configured_backend: "portal_remote_desktop".to_string(),
             preferred_available_backend: Some("portal_remote_desktop".to_string()),
             implemented_available_backend: Some("uinput".to_string()),
+            agent_seat: Some(AgentSeatRuntimeStatus {
+                protocol: "kwin_agent_seat_v2".to_string(),
+                build_id: Some("a".repeat(64)),
+                heartbeat_fresh: true,
+                heartbeat_age_ms: 20,
+                delivery_validation: "delivery_verified".to_string(),
+                last_delivery_age_ms: Some(10),
+                last_delivery_error_kind: None,
+            }),
+            kwin_activity_backend: Some("kwin_input_spy_v2".to_string()),
+            kwin_activity_trusted: Some(true),
             setup_hint: "prefer portal RemoteDesktop/libei before uinput".to_string(),
         });
         let encoded = serde_json::to_string(&response).expect("input backend status serializes");
         assert!(encoded.contains(r#""type":"input_backend_status""#));
         assert!(encoded.contains(r#""configured_backend":"portal_remote_desktop""#));
+        assert!(encoded.contains(r#""delivery_validation":"delivery_verified""#));
         assert!(encoded.contains(r#""preferred_available_backend":"portal_remote_desktop""#));
         assert!(encoded.contains(r#""implemented_available_backend":"uinput""#));
         assert!(encoded.contains(r#""source":"kde_current_layout""#));
@@ -2948,6 +2986,7 @@ mod tests {
             config_fingerprint: None,
             resident_memory_bytes: None,
             resident_memory_peak_bytes: None,
+            resident_swap_bytes: None,
         });
         assert_eq!(health.response_type(), "health");
         assert!(health.ok());
@@ -3130,6 +3169,8 @@ mod tests {
             atspi_available: true,
             registry_process_count: Some(1),
             extra_registry_process_count: Some(0),
+            registry_process_ages_ms: vec![1_000],
+            oldest_registry_age_ms: Some(1_000),
             target_event_settle_available: true,
             event_backend: "atspi_registry".to_string(),
             target_event_classes: vec![

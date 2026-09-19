@@ -644,6 +644,7 @@ fn crop_visible_window(
         ));
     }
     let cropped = image.crop_imm(rect.x, rect.y, rect.width, rect.height);
+    drop(image);
     let output_image = match max_edge {
         Some(0) => {
             return Err(SeatgeistError::InvalidRequest(

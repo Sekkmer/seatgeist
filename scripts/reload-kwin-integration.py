@@ -160,6 +160,12 @@ def reload_binary_plugin(
             f"KWin does not advertise {plugin_id}; refusing to mutate compositor plugins"
         )
     loaded_before = plugin_id in loaded
+    if component == "agent-seat" and loaded_before:
+        raise SystemExit(
+            "refusing to unload the live agent-seat plugin: removing its wl_seat "
+            "globals can disconnect Wayland clients even when no capture session "
+            "is active; save work and use a normal logout/login to activate updates"
+        )
     if dry_run:
         return {
             "component": component,

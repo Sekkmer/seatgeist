@@ -15,6 +15,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOCKET = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "seatgeist/seatgeistd.sock"
+DEFAULT_DEPLOYMENT_MARKER = Path.home() / ".local/state/seatgeist/deployment-in-progress"
 
 
 class DeploymentError(RuntimeError):
@@ -32,6 +33,7 @@ class Config:
     install_path: Path
     service: str
     proc_root: Path
+    deployment_marker: Path
     timeout_ms: int
     poll_ms: int
     skip_build: bool
@@ -90,6 +92,8 @@ def ensure_retained_sessions_idle(config: Config, stage: str) -> None:
     active = []
     if response_active(capture, "capture_session_status"):
         active.append("capture")
+    if capture["data"].get("opening") is True:
+        active.append("capture-opening")
     if response_active(eis, "remote_desktop_eis_session_status"):
         active.append("remote-desktop-eis")
     if active:
@@ -128,6 +132,20 @@ def atomic_install(source: Path, destination: Path) -> None:
         shutil.copyfile(source, temporary_path)
         temporary_path.chmod(0o755)
         os.replace(temporary_path, destination)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def mark_deployment(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="ascii", dir=path.parent, delete=False
+    ) as temporary:
+        temporary.write(f"pid={os.getpid()}\nstarted_at_unix_ms={time.time_ns() // 1_000_000}\n")
+        temporary_path = Path(temporary.name)
+    try:
+        temporary_path.chmod(0o600)
+        os.replace(temporary_path, path)
     finally:
         temporary_path.unlink(missing_ok=True)
 
@@ -262,15 +280,19 @@ def deploy(config: Config) -> dict[str, Any]:
     if not config.cli.is_file():
         raise DeploymentError(f"Seatgeist CLI is missing: {config.cli}")
     ensure_retained_sessions_idle(config, "daemon deployment")
-    atomic_install(config.release_binary, config.install_path)
-    ensure_retained_sessions_idle(config, "daemon restart")
-    restart_service(config)
-    health, daemon_attempts = wait_for_daemon(config)
-    bridge, bridge_attempts = wait_for_bridge(config)
-    pid = service_pid(config)
-    digest = verify_hashes(config, pid)
-    health_data = verify_health_provenance(health, digest)
-    ensure_retained_sessions_idle(config, "post-deployment verification")
+    mark_deployment(config.deployment_marker)
+    try:
+        atomic_install(config.release_binary, config.install_path)
+        ensure_retained_sessions_idle(config, "daemon restart")
+        restart_service(config)
+        health, daemon_attempts = wait_for_daemon(config)
+        bridge, bridge_attempts = wait_for_bridge(config)
+        pid = service_pid(config)
+        digest = verify_hashes(config, pid)
+        health_data = verify_health_provenance(health, digest)
+        ensure_retained_sessions_idle(config, "post-deployment verification")
+    finally:
+        config.deployment_marker.unlink(missing_ok=True)
     return {
         "type": "seatgeist_user_daemon_deployment",
         "version": 1,
@@ -307,6 +329,12 @@ def parse_args(argv: list[str] | None = None) -> Config:
     parser.add_argument("--timeout-ms", type=int, default=10_000)
     parser.add_argument("--poll-ms", type=int, default=100)
     parser.add_argument("--proc-root", type=Path, default=Path("/proc"), help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--deployment-marker",
+        type=Path,
+        default=DEFAULT_DEPLOYMENT_MARKER,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--skip-build", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.timeout_ms <= 0 or args.timeout_ms > 60_000:
@@ -324,6 +352,7 @@ def parse_args(argv: list[str] | None = None) -> Config:
         install_path=args.install_path.resolve(),
         service=args.service,
         proc_root=args.proc_root.resolve(),
+        deployment_marker=args.deployment_marker.resolve(),
         timeout_ms=args.timeout_ms,
         poll_ms=args.poll_ms,
         skip_build=args.skip_build,

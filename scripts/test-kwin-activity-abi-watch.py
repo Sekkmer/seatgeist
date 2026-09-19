@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -41,31 +42,52 @@ def write_fixtures(root: Path, header_abi: str, plugin_abi: str) -> tuple[Path, 
 def check_runtime_regressions(module, root: Path) -> None:
     header, plugin = write_fixtures(root, "6.8.0", "6.8.0")
     agent = root / "agent.so"
-    agent.write_bytes(b"org.kde.kwin.PluginFactoryInterface6.8.0")
+    build_id = "a" * 64
+    agent.write_bytes(
+        b"org.kde.kwin.PluginFactoryInterface6.8.0 "
+        + f"SEATGEIST_AGENT_SEAT_BUILD_ID:{build_id}".encode("ascii")
+    )
     report = module.inspect_abis(header, plugin, agent)
     support = {"type": "s", "data": ["KWin version: 6.8.0\n"]}
     loaded = {"type": "as", "data": ["seatgeistactivity", "seatgeistagentseat"]}
     owner = {"type": "b", "data": [True]}
+    inputs = {"type": "input_backend_status", "data": {
+        "configured_backend": "kwin_agent_seat",
+        "implemented_available_backend": "kwin_agent_seat",
+        "kwin_activity_trusted": True,
+        "kwin_activity_backend": "kwin_input_spy_v2",
+        "agent_seat": {
+            "protocol": "kwin_agent_seat_v2",
+            "build_id": build_id,
+            "heartbeat_fresh": True,
+            "heartbeat_age_ms": 20,
+            "delivery_validation": "delivery_verified",
+        },
+    }}
     safety = {"type": "safety_status", "data": {
         "human_input_activity_trusted": True,
         "human_input_activity_backend": "kwin_input_spy_v2",
     }}
-    inputs = {"type": "input_backend_status", "data": {
-        "configured_backend": "kwin_agent_seat",
-        "implemented_available_backend": "kwin_agent_seat",
-    }}
 
-    def inspect(responses):
-        with mock.patch.object(module, "probe_json", side_effect=responses) as probe:
+    def inspect(responses, *, standby=False):
+        with mock.patch.object(module, "socket_activation_standby", return_value=standby), mock.patch.object(module, "probe_json", side_effect=responses) as probe:
             result = module.inspect_runtime(report, Path("/fixture/cli"))
             commands = [call.args[0] for call in probe.call_args_list]
         assert all("--auto-start=no" in command for command in commands if command[0] == "/usr/bin/busctl")
         assert not any("LoadPlugin" in command or "restart" in command for command in commands)
         return result, commands
 
-    ready, commands = inspect([support, loaded, owner, safety, inputs])
+    ready, commands = inspect([support, loaded, owner, inputs])
     assert ready.status == "ready"
     assert ready.activity_trusted is True
+    assert len(commands) == 4
+    assert ready.agent_seat_build_id == build_id
+    legacy_inputs = {"type": "input_backend_status", "data": {
+        "configured_backend": "kwin_agent_seat",
+        "implemented_available_backend": "kwin_agent_seat",
+    }}
+    legacy_ready, commands = inspect([support, loaded, owner, legacy_inputs, safety])
+    assert legacy_ready.status == "agent_seat_restart_required"
     assert len(commands) == 5
 
     # Rebuilt on-disk plugins do not imply they are loaded in this session.
@@ -78,20 +100,74 @@ def check_runtime_regressions(module, root: Path) -> None:
     absent, commands = inspect([support, loaded, {"type": "b", "data": [False]}])
     assert absent.status == "daemon_unavailable"
     assert len(commands) == 3
+    standby, commands = inspect(
+        [support, loaded, {"type": "b", "data": [False]}], standby=True
+    )
+    assert standby.status == "socket_standby"
+    assert len(commands) == 3  # no CLI request or socket activation
 
-    untrusted = {"type": "safety_status", "data": {
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    idle_units = (
+        "Id=seatgeistd.socket\nTriggers=seatgeistd.service\nLoadState=loaded\n"
+        "ActiveState=active\nSubState=listening\nResult=success\n"
+        f"Listen={runtime_dir}/seatgeist/seatgeistd.sock (Stream)\n\n"
+        "Id=seatgeistd.service\nLoadState=loaded\nActiveState=inactive\n"
+        "SubState=dead\nResult=success\n"
+    )
+    for output, expected in [
+        (idle_units, True),
+        (idle_units.replace("ActiveState=inactive", "ActiveState=failed"), False),
+        (idle_units.replace("Result=success", "Result=exit-code"), False),
+        (idle_units.replace("SubState=listening", "SubState=dead"), False),
+        (idle_units.replace("SubState=dead", "SubState=running"), False),
+        (idle_units.replace("LoadState=loaded", "LoadState=not-found"), False),
+        (idle_units.replace("Triggers=seatgeistd.service", "Triggers=other.service"), False),
+        (idle_units.replace("seatgeistd.sock (Stream)", "wrong.sock (Stream)"), False),
+    ]:
+        with mock.patch.object(module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, output)) as run:
+            assert module.socket_activation_standby() is expected
+            assert run.call_args.args[0][2] == "show"
+            assert run.call_args.kwargs["timeout"] == 2.0
+    for output in ["", "garbage", idle_units.split("\n\n")[0]]:
+        with mock.patch.object(module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, output)):
+            try:
+                module.socket_activation_standby()
+                assert False, "missing unit evidence must not become standby"
+            except module.ProbeError:
+                pass
+    with mock.patch.object(module.subprocess, "run", side_effect=subprocess.TimeoutExpired("systemctl", 2)):
+        try:
+            module.socket_activation_standby()
+            assert False, "socket status timeout must not become standby"
+        except module.ProbeError:
+            pass
+
+    untrusted = {"type": "input_backend_status", "data": {
+        **inputs["data"],
+        "kwin_activity_trusted": False,
+        "kwin_activity_backend": None,
+    }}
+    assert inspect([support, loaded, owner, untrusted, {"type": "safety_status", "data": {
         "human_input_activity_trusted": False,
         "human_input_activity_backend": None,
-    }}
-    assert inspect([support, loaded, owner, untrusted, inputs])[0].status == "activity_unregistered"
+    }}])[0].status == "activity_unregistered"
     unavailable = {"type": "input_backend_status", "data": {
         "configured_backend": "kwin_agent_seat", "implemented_available_backend": None,
+        "kwin_activity_trusted": True, "kwin_activity_backend": "kwin_input_spy_v2",
     }}
-    assert inspect([support, loaded, owner, safety, unavailable])[0].status == "agent_seat_unavailable"
+    assert inspect([support, loaded, owner, unavailable])[0].status == "agent_seat_unavailable"
     generic_unavailable = {"type": "input_backend_status", "data": {
         "configured_backend": "portal", "implemented_available_backend": None,
+        "kwin_activity_trusted": True, "kwin_activity_backend": "kwin_input_spy_v2",
     }}
-    assert inspect([support, loaded, owner, safety, generic_unavailable])[0].status == "input_backend_unavailable"
+    assert inspect([support, loaded, owner, generic_unavailable])[0].status == "input_backend_unavailable"
+
+    stale_build = json.loads(json.dumps(inputs))
+    stale_build["data"]["agent_seat"]["build_id"] = "b" * 64
+    assert inspect([support, loaded, owner, stale_build])[0].status == "agent_seat_restart_required"
+    failed_delivery = json.loads(json.dumps(inputs))
+    failed_delivery["data"]["agent_seat"]["delivery_validation"] = "delivery_failed"
+    assert inspect([support, loaded, owner, failed_delivery])[0].status == "agent_seat_degraded"
 
     # Fail closed on schema drift, wrong types and timeouts. Never report ready.
     for responses in [
@@ -100,12 +176,13 @@ def check_runtime_regressions(module, root: Path) -> None:
         [support, {"type": "as", "data": "seatgeistactivity"}],
         [support, loaded, {"type": "b", "data": [1]}],
         [support, loaded, owner, {"type": "unexpected", "data": {}}],
-        [support, loaded, owner, {"type": "safety_status", "data": {}}, inputs],
-        [support, loaded, owner, {"type": "safety_status", "data": {
+        [support, loaded, owner, {"type": "input_backend_status", "data": {}}, {"type": "safety_status", "data": {}}],
+        [support, loaded, owner, {"type": "input_backend_status", "data": {}}, {"type": "safety_status", "data": {
             "human_input_activity_trusted": True, "human_input_activity_backend": [],
-        }}, inputs],
-        [support, loaded, owner, safety, {"type": "input_backend_status", "data": {
+        }}],
+        [support, loaded, owner, {"type": "input_backend_status", "data": {
             "configured_backend": "", "implemented_available_backend": "",
+            "kwin_activity_trusted": True, "kwin_activity_backend": "kwin_input_spy_v2",
         }}],
     ]:
         assert inspect(responses)[0].status == "unknown"
@@ -148,10 +225,35 @@ def check_runtime_regressions(module, root: Path) -> None:
     assert recovered["runtime_ready"] is True
     assert json.loads(state.read_text())["notified"] is False
     # Missing runtime evidence must not reuse a previous healthy snapshot.
-    with mock.patch.object(module, "inspect_runtime", return_value=module.RuntimeReport("unknown")), mock.patch.object(module, "send_notification", return_value=(False, "timeout")):
+    with mock.patch.object(module, "inspect_runtime", return_value=module.RuntimeReport("unknown")), mock.patch.object(module, "send_notification", return_value=(False, "timeout")) as notify:
         unknown = module.run_check(header, plugin, agent, state, Path("/fake/notify"), check_only=False, runtime_check=True, boot_id="runtime-boot")
     assert unknown["runtime_ready"] is False
+    assert unknown["notification_deferred"] is True
+    assert notify.call_count == 0
+    with mock.patch.object(module, "inspect_runtime", return_value=module.RuntimeReport("unknown")), mock.patch.object(module, "send_notification", return_value=(False, "timeout")) as notify:
+        repeated_unknown = module.run_check(header, plugin, agent, state, Path("/fake/notify"), check_only=False, runtime_check=True, boot_id="runtime-boot")
+    assert repeated_unknown["notification_deferred"] is False
+    assert notify.call_count == 1
     assert json.loads(state.read_text())["report"]["runtime_ready"] is False
+
+    # Idle socket activation clears an old failure without claiming that live
+    # registration was validated or emitting a popup on repeated timer runs.
+    with mock.patch.object(module, "inspect_runtime", return_value=standby), mock.patch.object(module, "send_notification") as notify:
+        for _ in range(3):
+            idle = module.run_check(header, plugin, agent, state, Path("/fake/notify"), check_only=False, runtime_check=True, boot_id="runtime-boot")
+            assert idle["runtime_ready"] is False
+            assert idle["consecutive_failure_count"] == 0
+            assert idle["notification_deferred"] is False
+        notify.assert_not_called()
+    assert json.loads(state.read_text())["notified"] is False
+
+    deployment_marker = root / "deployment-in-progress"
+    deployment_marker.touch()
+    with mock.patch.object(module, "inspect_runtime", return_value=module.RuntimeReport("daemon_unavailable")), mock.patch.object(module, "send_notification") as notify:
+        deployment = module.run_check(header, plugin, agent, root / "deployment-state.json", Path("/fake/notify"), check_only=False, runtime_check=True, boot_id="runtime-boot", deployment_marker=deployment_marker)
+    assert deployment["deployment_in_progress"] is True
+    assert deployment["notification_deferred"] is True
+    notify.assert_not_called()
 
     state.write_bytes(b"\xff")
     assert module.read_state(state) == {}

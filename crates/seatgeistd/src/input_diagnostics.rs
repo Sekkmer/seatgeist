@@ -5,8 +5,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use libseatgeist::{
-    InputBackendStatus, LibeiStatus, RemoteDesktopPortalStatus, UinputStatus, XkbKeymapStatus,
-    current_egid, current_euid,
+    AgentSeatRuntimeStatus, InputBackendStatus, LibeiStatus, RemoteDesktopPortalStatus,
+    UinputStatus, XkbKeymapStatus, current_egid, current_euid,
 };
 
 use crate::{
@@ -52,6 +52,9 @@ pub(crate) fn status(
     preference: InputBackendPreference,
     stored_session_active: bool,
     agent_seat_ready: bool,
+    agent_seat: Option<AgentSeatRuntimeStatus>,
+    kwin_activity_backend: Option<String>,
+    kwin_activity_trusted: Option<bool>,
     xkb_keymap: XkbKeymapStatus,
 ) -> Result<InputBackendStatus> {
     let uinput = uinput_status()?;
@@ -65,7 +68,7 @@ pub(crate) fn status(
         stored_session_active,
         agent_seat_ready,
     );
-    let setup_hint = input_backend_setup_hint(
+    let mut setup_hint = input_backend_setup_hint(
         preference,
         preferred_available_backend.as_deref(),
         implemented_available_backend.as_deref(),
@@ -74,6 +77,23 @@ pub(crate) fn status(
         uinput.available,
         stored_session_active,
     );
+    if matches!(preference, InputBackendPreference::KwinAgentSeat)
+        && let Some(runtime) = agent_seat.as_ref()
+    {
+        match runtime.delivery_validation.as_str() {
+            "heartbeat_only" => setup_hint.push_str(
+                "; registration heartbeat is fresh, but this daemon run has not yet observed a completed end-to-end delivery",
+            ),
+            "delivery_failed" => setup_hint.push_str(&format!(
+                "; the most recent end-to-end delivery failed ({})",
+                runtime
+                    .last_delivery_error_kind
+                    .as_deref()
+                    .unwrap_or("backend_rejected")
+            )),
+            _ => {}
+        }
+    }
 
     Ok(InputBackendStatus {
         uinput_available: uinput.available,
@@ -83,6 +103,9 @@ pub(crate) fn status(
         configured_backend: preference.status_name().to_string(),
         preferred_available_backend,
         implemented_available_backend,
+        agent_seat,
+        kwin_activity_backend,
+        kwin_activity_trusted,
         setup_hint,
     })
 }

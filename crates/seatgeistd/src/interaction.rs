@@ -82,6 +82,17 @@ struct InteractionSession {
 }
 
 impl InteractionSessionStore {
+    pub(crate) async fn active_lane_ids(&self) -> HashSet<String> {
+        let now = tokio::time::Instant::now();
+        self.sessions
+            .lock()
+            .await
+            .values()
+            .filter(|session| session.expires_at > now)
+            .map(|session| session.lane_id.clone())
+            .collect()
+    }
+
     pub async fn retain_active_capture_sessions(&self, active_session_ids: &HashSet<String>) {
         self.sessions
             .lock()

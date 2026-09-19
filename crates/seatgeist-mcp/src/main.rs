@@ -1253,7 +1253,7 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
                 .unwrap_or_else(|| "unknown".to_string())
         ),
         DaemonResponse::InputBackendStatus(status) => format!(
-            "input backends configured={} preferred={} implemented={} portal_remote_desktop={} libei={} uinput={} eis_keymap_source={} eis_keymap_layout={}",
+            "input backends configured={} preferred={} implemented={} portal_remote_desktop={} libei={} uinput={} eis_keymap_source={} eis_keymap_layout={} activity={} agent_protocol={} agent_build={} agent_heartbeat_ms={} agent_delivery={}",
             status.configured_backend,
             status
                 .preferred_available_backend
@@ -1269,7 +1269,30 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status.libei.client_library_available || status.libei.socket_env_present,
             status.uinput_available,
             status.eis_keymap.source,
-            status.eis_keymap.layout.as_deref().unwrap_or("default")
+            status.eis_keymap.layout.as_deref().unwrap_or("default"),
+            if status.kwin_activity_trusted == Some(true) {
+                status.kwin_activity_backend.as_deref().unwrap_or("trusted")
+            } else {
+                "untrusted"
+            },
+            status
+                .agent_seat
+                .as_ref()
+                .map_or("none", |agent| agent.protocol.as_str()),
+            status
+                .agent_seat
+                .as_ref()
+                .and_then(|agent| agent.build_id.as_deref())
+                .map(|build| build.chars().take(12).collect::<String>())
+                .unwrap_or_else(|| "unknown".to_string()),
+            status.agent_seat.as_ref().map_or_else(
+                || "none".to_string(),
+                |agent| agent.heartbeat_age_ms.to_string()
+            ),
+            status
+                .agent_seat
+                .as_ref()
+                .map_or("none", |agent| agent.delivery_validation.as_str())
         ),
         DaemonResponse::RemoteDesktopSessionProbe(status) => format!(
             "remote desktop probe started={} requested={} selected={} clipboard={} transient_closed={}",
@@ -1498,7 +1521,7 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             text.backend
         ),
         DaemonResponse::AccessibilityQualityStatus(status) => format!(
-            "accessibility quality atspi={} registries={} extra_registries={} target_events={} event_backend={} focused={} reliable={} nodes={} named={} actionable={} text={} generic={} flat={} fallback={}",
+            "accessibility quality atspi={} registries={} extra_registries={} oldest_registry_age_ms={} target_events={} event_backend={} focused={} reliable={} nodes={} named={} actionable={} text={} generic={} flat={} fallback={}",
             status.atspi_available,
             status
                 .registry_process_count
@@ -1506,6 +1529,9 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             status
                 .extra_registry_process_count
                 .map_or_else(|| "unknown".to_string(), |count| count.to_string()),
+            status
+                .oldest_registry_age_ms
+                .map_or_else(|| "unknown".to_string(), |age| age.to_string()),
             status.target_event_settle_available,
             status.event_backend,
             status.focused_node_present,
@@ -4047,6 +4073,8 @@ mod tests {
                 atspi_available: true,
                 registry_process_count: Some(2),
                 extra_registry_process_count: Some(1),
+                registry_process_ages_ms: vec![90_000, 1_000],
+                oldest_registry_age_ms: Some(90_000),
                 target_event_settle_available: true,
                 event_backend: "atspi_registry".to_string(),
                 target_event_classes: vec![
@@ -4194,6 +4222,17 @@ mod tests {
                 configured_backend: "portal_remote_desktop".to_string(),
                 preferred_available_backend: Some("portal_remote_desktop".to_string()),
                 implemented_available_backend: Some("uinput".to_string()),
+                agent_seat: Some(libseatgeist::AgentSeatRuntimeStatus {
+                    protocol: "kwin_agent_seat_v2".to_string(),
+                    build_id: Some("a".repeat(64)),
+                    heartbeat_fresh: true,
+                    heartbeat_age_ms: 20,
+                    delivery_validation: "delivery_verified".to_string(),
+                    last_delivery_age_ms: Some(10),
+                    last_delivery_error_kind: None,
+                }),
+                kwin_activity_backend: Some("kwin_input_spy_v2".to_string()),
+                kwin_activity_trusted: Some(true),
                 setup_hint: "portal visible, uinput implemented".to_string(),
             }),
         );
@@ -4202,6 +4241,9 @@ mod tests {
         assert!(input_text.contains("implemented=uinput"));
         assert!(input_text.contains("eis_keymap_source=kde_current_layout"));
         assert!(input_text.contains("eis_keymap_layout=de"));
+        assert!(input_text.contains("activity=kwin_input_spy_v2"));
+        assert!(input_text.contains("agent_protocol=kwin_agent_seat_v2"));
+        assert!(input_text.contains("agent_delivery=delivery_verified"));
 
         let remote_desktop_text = compact_tool_text(
             "seatgeist.remote_desktop_session_probe",
