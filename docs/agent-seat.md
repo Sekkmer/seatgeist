@@ -75,6 +75,21 @@ watcher compares the registered build fingerprint with the installed plugin
 and reports `agent_seat_restart_required` when KWin is still executing an older
 image. Legacy v1 hosts remain accepted, but cannot claim an exact build.
 
+`target_refused` identifies target compatibility/lifecycle refusals (including
+shared-process Firefox, non-native Wayland targets, client seat-binding failure
+and unavailable lanes). `user_interrupted` means physical input preempted the
+target. Neither reports a globally broken backend, nor claims input delivery
+succeeded; the individual action still fails with recovery advice. Actual
+delivery timeouts and other host faults remain `delivery_failed`. Unknown,
+late, closed-receiver and wrong-backend acknowledgements cannot establish
+delivery readiness. Input status retains the last delivery's age and specific
+error category; readiness is not a promise that every target supports multiseat.
+
+The ABI watcher's notification identity excludes heartbeat ages and explanatory
+text. A persistent runtime fault therefore notifies after two checks and is
+deduplicated until recovery or a different fault/build/boot. The complete
+heartbeat observations remain available in the report for diagnosis.
+
 ```bash
 make uninstall-kwin-agent-seat-user
 ```

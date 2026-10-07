@@ -466,6 +466,12 @@ pub struct SetPanicStopRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_target: Option<JournalRequestedTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<JournalFailure>,
     pub sequence: u64,
     pub unix_time_ms: u64,
     pub method: String,
@@ -489,6 +495,13 @@ pub struct JournalEntry {
     pub artifacts: Vec<JournalArtifactContext>,
     pub ok: bool,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalFailure {
+    pub kind: ErrorKind,
+    pub reason_code: Option<String>,
+    pub next_step: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -827,6 +840,8 @@ pub struct CaptureWaitRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureSessionStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_max_edge: Option<u32>,
     pub active: bool,
     pub opening: bool,
     pub session_id: Option<String>,
@@ -1996,6 +2011,7 @@ mod tests {
     #[test]
     fn serializes_retained_capture_response_types() {
         let status = DaemonResponse::CaptureSessionStatus(CaptureSessionStatus {
+            preview_max_edge: Some(1600),
             active: true,
             opening: false,
             session_id: Some("capture-1".to_string()),
@@ -2248,6 +2264,9 @@ mod tests {
         )
         .expect("legacy journal entry parses");
         assert_eq!(entry.safety_class, None);
+        assert_eq!(entry.elapsed_ms, None);
+        assert_eq!(entry.requested_target, None);
+        assert_eq!(entry.failure, None);
         assert_eq!(entry.client, None);
         assert!(!entry.guard_present);
         assert_eq!(entry.active_window_before, None);
@@ -2259,6 +2278,9 @@ mod tests {
     #[test]
     fn serializes_journal_entry_context() {
         let entry = JournalEntry {
+            elapsed_ms: Some(42),
+            requested_target: None,
+            failure: None,
             sequence: 2,
             unix_time_ms: 1001,
             method: "focus_window".to_string(),

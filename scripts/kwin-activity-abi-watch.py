@@ -258,6 +258,7 @@ def inspect_runtime(report: AbiReport, cli: Path) -> RuntimeReport:
                 or isinstance(heartbeat_age_ms, bool)
                 or not isinstance(heartbeat_fresh, bool)
                 or not isinstance(delivery_validation, str)
+                or delivery_validation not in {"heartbeat_only", "delivery_verified", "delivery_failed", "target_refused", "user_interrupted"}
             ):
                 raise ProbeError("invalid_response")
             if not heartbeat_fresh:
@@ -459,6 +460,16 @@ def notification_fingerprint(report: AbiReport, boot_id: str) -> dict[str, objec
     }
 
 
+def runtime_notification_fingerprint(runtime: RuntimeReport) -> dict[str, object]:
+    # Heartbeat ages and explanatory text are observations, not failure identity.
+    # Including them resets the debounce forever and defeats notification dedup.
+    data = asdict(runtime)
+    for field in ("agent_seat_heartbeat_age_ms", "next_step"):
+        data.pop(field, None)
+    data["loaded_plugins"] = sorted(runtime.loaded_plugins)
+    return data
+
+
 def deployment_marker_active(path: Path, now: float | None = None) -> bool:
     try:
         age = (time.time() if now is None else now) - path.stat().st_mtime
@@ -503,7 +514,7 @@ def run_check(
     current_boot = boot_id or read_boot_id()
     fingerprint = notification_fingerprint(report, current_boot)
     if runtime_check:
-        fingerprint["runtime"] = runtime_data
+        fingerprint["runtime"] = runtime_notification_fingerprint(runtime)
     previous = read_state(state_path)
     needs_notification = report.status != "current" or (
         runtime_check and runtime.status not in NON_FAILURE_RUNTIME_STATUSES

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -168,6 +169,13 @@ def check_runtime_regressions(module, root: Path) -> None:
     failed_delivery = json.loads(json.dumps(inputs))
     failed_delivery["data"]["agent_seat"]["delivery_validation"] = "delivery_failed"
     assert inspect([support, loaded, owner, failed_delivery])[0].status == "agent_seat_degraded"
+    for outcome in ("target_refused", "user_interrupted"):
+        failed_delivery["data"]["agent_seat"]["delivery_validation"] = outcome
+        result, _ = inspect([support, loaded, owner, failed_delivery])
+        assert result.status == "ready"
+        assert result.agent_seat_delivery_validation == outcome
+    failed_delivery["data"]["agent_seat"]["delivery_validation"] = "unrecognized"
+    assert inspect([support, loaded, owner, failed_delivery])[0].status == "unknown"
 
     # Fail closed on schema drift, wrong types and timeouts. Never report ready.
     for responses in [
@@ -224,6 +232,21 @@ def check_runtime_regressions(module, root: Path) -> None:
         recovered = module.run_check(header, plugin, agent, state, Path("/fake/notify"), check_only=False, runtime_check=True, boot_id="runtime-boot")
     assert recovered["runtime_ready"] is True
     assert json.loads(state.read_text())["notified"] is False
+
+    # Real heartbeat ages vary on every check: persistent failures must still
+    # notify once after two checks, and remain deduplicated until recovery.
+    degraded = module.RuntimeReport("agent_seat_degraded", agent_seat_heartbeat_age_ms=20)
+    with mock.patch.object(module, "send_notification", return_value=(True, None)) as notify:
+        for index, age in enumerate((20, 140, 780)):
+            with mock.patch.object(module, "inspect_runtime", return_value=replace(degraded, agent_seat_heartbeat_age_ms=age)):
+                result = module.run_check(header, plugin, agent, state, Path("/fake/notify"), check_only=False, runtime_check=True, boot_id="runtime-boot")
+            assert result["consecutive_failure_count"] == index + 1
+            assert result["notification_deferred"] is (index == 0)
+            assert result["notification_sent"] is (index == 1)
+            assert result["notification_suppressed"] is (index == 2)
+        assert notify.call_count == 1
+    with mock.patch.object(module, "inspect_runtime", return_value=ready):
+        module.run_check(header, plugin, agent, state, Path("/fake/notify"), check_only=False, runtime_check=True, boot_id="runtime-boot")
     # Missing runtime evidence must not reuse a previous healthy snapshot.
     with mock.patch.object(module, "inspect_runtime", return_value=module.RuntimeReport("unknown")), mock.patch.object(module, "send_notification", return_value=(False, "timeout")) as notify:
         unknown = module.run_check(header, plugin, agent, state, Path("/fake/notify"), check_only=False, runtime_check=True, boot_id="runtime-boot")

@@ -373,4 +373,31 @@ function assertSnapshot(calls, offset, activeId = "window-1") {
   assert.match(JSON.parse(completion.payload).error, /did not apply/);
 }
 
+// App metadata may arrive after windowAdded. Retry new windows without
+// accepting a pre-existing window whose metadata also changes.
+{
+  const runtime = runBridge({pendingActions: [JSON.stringify({
+    id: "late-browser", action: "launch_window", desktop_entry: "firefox", timeout_ms: 10000,
+  })]});
+  runtime.timers[1].timeout.emit();
+  const existing = runtime.workspace.activeWindow;
+  existing.desktopFileName = "firefox";
+  runtime.timers[1].timeout.emit();
+  assert.equal(runtime.calls.some(call => call.method === "CompleteAction"), false);
+  const added = {internalId: "late-window", caption: "Browser", desktopFileName: "", resourceClass: "", pid: 84,
+    x: 0, y: 0, width: 600, height: 500};
+  runtime.workspace.stackingOrder.push(added);
+  runtime.workspace.windowAdded.emit(added);
+  assert.equal(runtime.timers.length, 2);
+  added.desktopFileName = "org.mozilla.firefox";
+  added.resourceClass = "firefox";
+  runtime.timers[1].timeout.emit();
+  assert.equal(runtime.timers.length, 3);
+  runtime.timers[2].timeout.emit();
+  runtime.timers[3].timeout.emit();
+  const result = JSON.parse(runtime.calls.find(call => call.method === "CompleteAction").payload);
+  assert.equal(result.window_id, "late-window");
+  assert.equal(runtime.workspace.activeWindow, existing);
+}
+
 console.log("test-kwin-bridge: ok");

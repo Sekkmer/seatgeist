@@ -141,7 +141,7 @@ pub(crate) fn window_session_tool() -> Value {
     tool(
         "seatgeist.window_session",
         "Window Session",
-        "Read or wait on the revisioned KWin inventory, or open, inspect, renew, and close one exact window session. Exact opens use KWin screenshots without a chooser; status is the default operation.",
+        "Read or wait on the revisioned KWin inventory, or open, inspect, renew, and close one exact window session. Successful snapshots and session-bound actions keep live exact leases renewed; idle sessions expire after 30 minutes. Status reports preview_max_edge and is the default operation.",
         object_schema(
             vec![
                 (
@@ -187,7 +187,7 @@ pub(crate) fn core_snapshot_schema() -> Value {
             ),
             (
                 "max_edge",
-                json!({"type": "integer", "minimum": 1, "maximum": 2048, "description": "Maximum output edge. The daemon preview bound is used when omitted."}),
+                json!({"type": "integer", "minimum": 1, "maximum": 2048, "description": "Maximum output edge, capped by the daemon's preview_max_edge reported in window_session status. Omit to use that limit."}),
             ),
             (
                 "include_image",

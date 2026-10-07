@@ -233,12 +233,15 @@ function finishLaunchIntent(intent, window) {
 }
 
 function handleLaunchWindowAdded(window) {
-  const app = normalizeDesktopEntry(window.desktopFileName) || normalizeDesktopEntry(window.resourceClass);
-  if (!app || window.specialWindow) {
+  const desktop = normalizeDesktopEntry(window.desktopFileName);
+  const resource = normalizeDesktopEntry(window.resourceClass);
+  if ((!desktop && !resource) || !windowId(window) || window.specialWindow) {
     return;
   }
   for (var i = 0; i < launchIntents.length; i++) {
-    if (launchIntents[i].desktop_entry === app) {
+    if (launchIntents[i].existing_windows.indexOf(window) < 0 &&
+        launchIntents[i].existing_window_ids.indexOf(windowId(window)) < 0 &&
+        (launchIntents[i].desktop_entry === desktop || launchIntents[i].desktop_entry === resource)) {
       const intent = launchIntents.splice(i, 1)[0];
       applyLaunchIntent(intent, window);
       finishLaunchIntent(intent, window);
@@ -252,12 +255,18 @@ function pruneLaunchIntents() {
   const retained = [];
   for (var i = 0; i < launchIntents.length; i++) {
     if (launchIntents[i].expires_at <= now) {
-      completeAction({ id: launchIntents[i].id, ok: false, error: "launch intent expired before a matching window appeared" });
+      completeAction({ id: launchIntents[i].id, ok: false, error: "launch intent expired before a matching window appeared; the application may have reused an existing window or its identity may not match the desktop entry. Inspect inventory; no existing window was adopted." });
     } else {
       retained.push(launchIntents[i]);
     }
   }
   launchIntents = retained;
+  // Some clients publish app identity after windowAdded. Only reconsider
+  // windows absent at arm time; never adopt an existing user-owned window.
+  const windows = workspace.stackingOrder || [];
+  for (var j = 0; j < windows.length && launchIntents.length > 0; j++) {
+    handleLaunchWindowAdded(windows[j]);
+  }
 }
 
 function handleLaunchWindow(action) {
@@ -277,6 +286,8 @@ function handleLaunchWindow(action) {
     margin: Math.max(0, maybeInteger(action.margin) || 0),
     activation: maybeString(action.activation) || "preserve_focus",
     previous_window_id: windowId(workspace.activeWindow),
+    existing_windows: (workspace.stackingOrder || []).slice(),
+    existing_window_ids: (workspace.stackingOrder || []).map(windowId),
     expires_at: Date.now() + timeoutMs,
   });
   callDBus(SERVICE, PATH, INTERFACE, "AcknowledgeAction", action.id);

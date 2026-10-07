@@ -1611,7 +1611,10 @@ fn compact_capture_session_status(status: &libseatgeist::CaptureSessionStatus) -
     let focus = execution.and_then(|execution| execution.focus_lease.as_ref());
     let settle = execution.and_then(|execution| execution.settle.as_ref());
     format!(
-        "capture_session active={} opening={} id={} backend={} source={} occlusion_possible={} requested_source={} requested_id={} owner_tool={} owner_scope={} owner_pid={} restore_ref={} revision={} sticky_target={} target_window={} expires_ms={} end_reason={} capture_exec={} semantic={} raw={} last_method={} last_backend={} last_policy={} focus_policy={} activity_backend={} activity_trusted={} focus_reacquired={} focus_restored={} settle_backend={} settled={}",
+        "capture_session preview_max_edge={} active={} opening={} id={} backend={} source={} occlusion_possible={} requested_source={} requested_id={} owner_tool={} owner_scope={} owner_pid={} restore_ref={} revision={} sticky_target={} target_window={} expires_ms={} end_reason={} capture_exec={} semantic={} raw={} last_method={} last_backend={} last_policy={} focus_policy={} activity_backend={} activity_trusted={} focus_reacquired={} focus_restored={} settle_backend={} settled={}",
+        status
+            .preview_max_edge
+            .map_or_else(|| "unknown".to_string(), |edge| edge.to_string()),
         status.active,
         status.opening,
         status.session_id.as_deref().unwrap_or("none"),
@@ -2250,7 +2253,7 @@ fn expert_tool_definitions() -> Vec<Value> {
         tool(
             "seatgeist.launch_window",
             "Launch Window",
-            "Launch a desktop entry only after KWin arms a one-shot work-area placement intent. Can preserve the current focus while anchoring and optionally sizing the new window.",
+            "Launch a desktop entry after KWin arms a one-shot placement intent, preserving user focus. Existing browser processes may reuse a window; launch_no_new_window requires inventory inspection, not repeated relaunches. Only a newly identified exact window is returned or owned.",
             object_schema(
                 with_guard_properties(vec![
                     (
@@ -3603,6 +3606,7 @@ mod tests {
     #[test]
     fn capture_status_reports_only_the_opaque_restore_reference() {
         let response = DaemonResponse::CaptureSessionStatus(CaptureSessionStatus {
+            preview_max_edge: Some(1600),
             active: true,
             opening: false,
             session_id: Some("capture-1".to_string()),

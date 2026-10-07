@@ -333,9 +333,19 @@ impl CaptureSessionStore {
 
     pub(crate) async fn require_active(&self, requested_id: &str) -> Result<()> {
         self.reap_ended().await;
-        if self.state.lock().await.sessions.contains_key(requested_id) {
+        let state = self.state.lock().await;
+        if state.sessions.contains_key(requested_id) {
             Ok(())
         } else {
+            if state
+                .ended_sessions
+                .get(requested_id)
+                .is_some_and(|ended| ended.reason == "lease_expired")
+            {
+                bail!(
+                    "interaction target lost: capture lease expired; capture session ended or is not active"
+                );
+            }
             bail!("interaction target lost: capture session ended or is not active")
         }
     }
@@ -352,6 +362,23 @@ impl CaptureSessionStore {
         };
         *expires_at = Instant::now() + crate::interaction::DEFAULT_SESSION_TTL;
         Ok(())
+    }
+
+    pub(crate) async fn needs_use_renewal(&self, session_id: &str) -> bool {
+        // Coalesce activity renewals: querying the compositor and validating
+        // identity after every remote-desktop keystroke is needlessly costly.
+        // This is only a scheduling hint; renew still checks the live lease.
+        let state = self.state.lock().await;
+        state
+            .sessions
+            .get(session_id)
+            .and_then(|slot| slot.expires_at)
+            .is_some_and(|expires| {
+                let now = Instant::now();
+                expires > now
+                    && expires.duration_since(now)
+                        <= crate::interaction::DEFAULT_SESSION_TTL - Duration::from_secs(60)
+            })
     }
 
     pub(crate) async fn require_owner(
@@ -375,7 +402,7 @@ impl CaptureSessionStore {
         &self,
         request: CaptureSnapshotRequest,
     ) -> Result<CaptureFrameResult> {
-        self.reap_ended().await;
+        self.require_active(&request.session_id).await?;
         let session = {
             let state = self.state.lock().await;
             Arc::clone(
@@ -413,7 +440,7 @@ impl CaptureSessionStore {
     }
 
     pub(crate) async fn wait(&self, request: CaptureWaitRequest) -> Result<CaptureWaitResult> {
-        self.reap_ended().await;
+        self.require_active(&request.session_id).await?;
         let session = {
             let state = self.state.lock().await;
             Arc::clone(
@@ -636,6 +663,7 @@ fn status_from_slot(
 ) -> CaptureSessionStatus {
     let metadata = slot.session.metadata();
     CaptureSessionStatus {
+        preview_max_edge: None,
         active: true,
         opening: false,
         session_id: Some(metadata.id),
@@ -676,6 +704,7 @@ fn empty_capture_status(
 ) -> CaptureSessionStatus {
     CaptureSessionStatus {
         active,
+        preview_max_edge: None,
         opening,
         session_id: None,
         backend: None,
@@ -819,12 +848,14 @@ pub(crate) fn normalize_capture_frame_request(
         );
     }
     let requested_max_edge = max_edge.unwrap_or(preview_max_edge);
-    if requested_max_edge == 0 || requested_max_edge > preview_max_edge {
+    if requested_max_edge == 0 || preview_max_edge == 0 {
         bail!(
             "capture frame max_edge must be between 1 and the configured preview bound ({preview_max_edge})"
         );
     }
-    *max_edge = Some(requested_max_edge);
+    // max_edge is an upper bound, not a request to bypass the safety cap.
+    // A valid larger bound can safely yield a smaller image.
+    *max_edge = Some(requested_max_edge.min(preview_max_edge));
     Ok(())
 }
 
@@ -1570,6 +1601,49 @@ mod tests {
         assert_eq!(status.last_end_reason.as_deref(), Some("lease_expired"));
         assert!(closed.load(Ordering::SeqCst));
         assert!(store.require_active("capture-expired").await.is_err());
+        assert!(
+            store
+                .require_active("capture-expired")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("capture lease expired")
+        );
+        assert!(store.renew("capture-expired").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn use_renewal_is_coalesced_and_never_revives_expired_leases() {
+        let store = CaptureSessionStore::default();
+        store
+            .install(
+                Box::new(MockCaptureSession {
+                    id: "coalesced".to_string(),
+                    source_type: seatgeist_backend::CaptureSourceType::Window,
+                    closed: Arc::new(AtomicBool::new(false)),
+                    portal_ended: Arc::new(AtomicBool::new(false)),
+                }),
+                Some("window-1".to_string()),
+            )
+            .await;
+        assert!(!store.needs_use_renewal("coalesced").await);
+        store
+            .state
+            .lock()
+            .await
+            .sessions
+            .get_mut("coalesced")
+            .unwrap()
+            .expires_at = Some(
+            Instant::now() + crate::interaction::DEFAULT_SESSION_TTL - Duration::from_secs(61),
+        );
+        assert!(store.needs_use_renewal("coalesced").await);
+        store.renew("coalesced").await.unwrap();
+        assert!(!store.needs_use_renewal("coalesced").await);
+        store.expire_for_test("coalesced").await;
+        assert!(!store.needs_use_renewal("coalesced").await);
+        assert!(store.renew("coalesced").await.is_err());
+        assert!(!store.needs_use_renewal("missing").await);
     }
 
     #[test]
@@ -1579,10 +1653,11 @@ mod tests {
             .expect("default retained frame is bounded");
         assert_eq!(default_edge, Some(1600));
 
-        let mut too_large = Some(1601);
-        let error = normalize_capture_frame_request(&mut too_large, 1_500, 1600)
-            .expect_err("frame larger than safety preview is rejected");
-        assert!(error.to_string().contains("configured preview bound"));
+        let mut too_large = Some(2048);
+        normalize_capture_frame_request(&mut too_large, 1_500, 1600)
+            .expect("larger upper bound is capped rather than rejected");
+        assert_eq!(too_large, Some(1600));
+        assert!(normalize_capture_frame_request(&mut Some(0), 1500, 1600).is_err());
 
         let mut valid_edge = Some(800);
         let error = normalize_capture_frame_request(

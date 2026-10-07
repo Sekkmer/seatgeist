@@ -215,6 +215,10 @@ impl KwinAgentSeatBackend {
                 (
                     if delivery.ok {
                         "delivery_verified"
+                    } else if delivery.error_kind.as_deref() == Some("physical_input_collision") {
+                        "user_interrupted"
+                    } else if delivery.error_kind.as_deref().is_some_and(target_refusal) {
+                        "target_refused"
                     } else {
                         "delivery_failed"
                     },
@@ -274,7 +278,21 @@ impl KwinAgentSeatBackend {
             .lock()
             .map_err(|_| anyhow::anyhow!("KWin agent-seat queue lock is poisoned"))?;
         require_registered_caller(&state, caller)?;
-        state.last_delivery = Some(DeliveryValidation {
+        if result
+            .backend
+            .as_ref()
+            .is_some_and(|backend| Some(backend) != state.backend.as_ref())
+        {
+            bail!("KWin agent-seat completion reported unexpected backend");
+        }
+        let sender = state
+            .waiters
+            .remove(&result.id)
+            .ok_or_else(|| anyhow::anyhow!("unknown KWin agent-seat action id"))?;
+        if sender.is_closed() {
+            bail!("KWin agent-seat action receiver closed");
+        }
+        let delivery = DeliveryValidation {
             observed_at: Instant::now(),
             ok: result.ok,
             error_kind: result
@@ -282,14 +300,14 @@ impl KwinAgentSeatBackend {
                 .as_deref()
                 .and_then(agent_seat_error_kind)
                 .map(str::to_string),
-        });
-        let sender = state
-            .waiters
-            .remove(&result.id)
-            .ok_or_else(|| anyhow::anyhow!("unknown KWin agent-seat action id"))?;
+        };
+        // Late, unknown or malformed acknowledgements must not turn readiness
+        // green. Only a completion accepted by a live request counts.
         sender
             .send(result)
-            .map_err(|_| anyhow::anyhow!("KWin agent-seat action receiver closed"))
+            .map_err(|_| anyhow::anyhow!("KWin agent-seat action receiver closed"))?;
+        state.last_delivery = Some(delivery);
+        Ok(())
     }
 
     async fn submit<T: Serialize>(
@@ -343,6 +361,13 @@ impl KwinAgentSeatBackend {
             }
             Err(_) => {
                 self.remove(id);
+                if let Ok(mut state) = self.inner.lock() {
+                    state.last_delivery = Some(DeliveryValidation {
+                        observed_at: Instant::now(),
+                        ok: false,
+                        error_kind: Some("delivery_timeout".to_string()),
+                    });
+                }
                 return Err(backend_error(anyhow::anyhow!(
                     "KWin agent-seat plugin did not complete action {id} in time"
                 )));
@@ -409,8 +434,14 @@ fn duration_millis(duration: Duration) -> u64 {
 
 fn agent_seat_error_kind(error: &str) -> Option<&'static str> {
     let error = error.to_ascii_lowercase();
-    if error.contains("bind") || error.contains("input device") {
+    if error.contains("firefox shared-process") {
+        Some("firefox_shared_process")
+    } else if error.contains("not a native wayland") {
+        Some("native_wayland_required")
+    } else if error.contains("target did not bind") {
         Some("client_binding_unavailable")
+    } else if error.contains("bind") || error.contains("input device") {
+        Some("seat_binding_failed")
     } else if error.contains("user input") {
         Some("physical_input_collision")
     } else if error.contains("target") || error.contains("window") || error.contains("surface") {
@@ -424,6 +455,17 @@ fn agent_seat_error_kind(error: &str) -> Option<&'static str> {
     } else {
         Some("backend_rejected")
     }
+}
+
+fn target_refusal(kind: &str) -> bool {
+    matches!(
+        kind,
+        "firefox_shared_process"
+            | "native_wayland_required"
+            | "client_binding_unavailable"
+            | "target_lost"
+            | "lane_unavailable"
+    )
 }
 
 fn require_registered_caller(state: &AgentSeatState, caller: &str) -> Result<()> {
@@ -792,6 +834,115 @@ mod tests {
             backend
                 .register_with_build_id(KWIN_AGENT_SEAT_BACKEND, "not-a-build", "kwin-owner")
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn closed_receiver_and_wrong_backend_cannot_verify_delivery() {
+        let backend = KwinAgentSeatBackend::default();
+        backend
+            .register(KWIN_AGENT_SEAT_BACKEND, "kwin-owner")
+            .unwrap();
+        let id = Uuid::new_v4();
+        let (sender, receiver) = oneshot::channel();
+        backend.inner.lock().unwrap().waiters.insert(id, sender);
+        assert!(
+            backend
+                .complete(
+                    "kwin-owner",
+                    &serde_json::json!({
+                        "id": id, "ok": true, "backend": "wrong-backend",
+                    })
+                    .to_string()
+                )
+                .is_err()
+        );
+        assert_eq!(
+            backend.runtime_status().unwrap().delivery_validation,
+            "heartbeat_only"
+        );
+        drop(receiver);
+        assert!(
+            backend
+                .complete(
+                    "kwin-owner",
+                    &serde_json::json!({
+                        "id": id, "ok": true, "backend": KWIN_AGENT_SEAT_BACKEND,
+                    })
+                    .to_string()
+                )
+                .is_err()
+        );
+        assert_eq!(
+            backend.runtime_status().unwrap().delivery_validation,
+            "heartbeat_only"
+        );
+    }
+
+    #[test]
+    fn target_refusals_are_not_backend_failures_and_unknown_acks_do_not_change_health() {
+        let backend = KwinAgentSeatBackend::default();
+        backend
+            .register(KWIN_AGENT_SEAT_BACKEND, "kwin-owner")
+            .unwrap();
+        for (error, expected) in [
+            (
+                "Firefox shared-process window focus is not seat-isolated",
+                "target_refused",
+            ),
+            (
+                "target is not a native Wayland client window",
+                "target_refused",
+            ),
+            (
+                "target did not bind the agent-seat input device before the deadline",
+                "target_refused",
+            ),
+            (
+                "agent target received user input before delivery",
+                "user_interrupted",
+            ),
+            (
+                "agent-seat action expired before delivery",
+                "delivery_failed",
+            ),
+            (
+                "agent-seat binding observation is unavailable",
+                "delivery_failed",
+            ),
+        ] {
+            let id = Uuid::new_v4();
+            let (sender, receiver) = oneshot::channel();
+            backend.inner.lock().unwrap().waiters.insert(id, sender);
+            backend
+                .complete(
+                    "kwin-owner",
+                    &serde_json::json!({
+                        "id": id, "ok": false, "backend": KWIN_AGENT_SEAT_BACKEND, "error": error,
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+            assert!(!receiver.blocking_recv().unwrap().ok);
+            assert_eq!(
+                backend.runtime_status().unwrap().delivery_validation,
+                expected
+            );
+        }
+        assert!(
+            backend
+                .complete(
+                    "kwin-owner",
+                    &serde_json::json!({
+                        "id": Uuid::new_v4(), "ok": true, "backend": KWIN_AGENT_SEAT_BACKEND,
+                    })
+                    .to_string()
+                )
+                .is_err()
+        );
+        assert_eq!(
+            backend.runtime_status().unwrap().delivery_validation,
+            "delivery_failed"
         );
     }
 

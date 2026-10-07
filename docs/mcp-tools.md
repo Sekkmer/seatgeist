@@ -21,7 +21,13 @@ chooser or ScreenCast stream. `status` is side-effect free and reports the
 sticky target identity and expiry. `renew` requires the active opaque session id, revalidates the pinned
 KWin id/app/PID and app policy, and extends the bounded interaction-target and
 exact-window capture leases together; it neither opens a portal dialog nor sends
-input. An unrenewed exact-window capture is closed when its 30-minute target
+input. Successful owner-checked snapshots, waits and session-bound control
+actions also renew the same live exact-window capture/target leases after
+revalidating the original UUID/app/PID and app policy. Automatic renewal is
+coalesced to at most once per minute to avoid extra compositor inventory queries
+on every keystroke; idle expiry is consequently within one minute of the
+30-minute bound. Status polling and failed
+actions do not renew leases. A capture idle for 30 minutes is closed when its target
 lease expires, so abandoned agent sessions cannot consume capture quota or
 block a safe daemon deployment indefinitely. `close` requires the active opaque session id and clears both capture
 and target state.
@@ -35,6 +41,34 @@ diagnostic state, not reusable authorization: every next control request still
 runs current policy, panic-stop, activity, target, focus, and rate checks.
 Status, snapshot, wait, and renew do not replace the last control-action
 summary.
+
+Session status reports `preview_max_edge`. A positive retained-capture
+`max_edge` is an upper bound: requests above the configured preview cap are
+downscaled to that cap, never allowed to bypass it. Zero and invalid frame
+timeouts remain errors. `capture_lease_expired` and `capture_session_inactive`
+include recovery advice: inspect inventory/status and explicitly reopen the
+original exact window if authorized. Expiry never automatically substitutes a
+different window, resurrects a session, or opens a portal chooser.
+
+`launch_window` requires a newly identified window. The KWin bridge retries
+app metadata that arrives after `windowAdded`, but excludes windows present
+when the intent was armed, by both object and UUID. Browser applications may
+reuse an existing window or tab instead of creating a new one; in that case
+`launch_no_new_window` asks the agent to inspect inventory, not repeatedly
+relaunch, claim ownership of, or close an existing user window. This does not
+promise automatic isolated browser profiles or isolate every browser toolkit.
+
+The journal records request `elapsed_ms`, privacy-bounded retained-capture
+`requested_target` metadata (opaque session/window IDs, requested bounds and
+timeouts), and structured `failure` information with a reason code and static
+`next_step`. It does not include screenshot filenames, revisions, browser
+content, or full error messages in these new fields. Existing control metadata
+and privacy settings are unchanged. Older journal entries omit the new optional
+fields. Stable reasons include `firefox_shared_process`,
+`native_wayland_required`, `client_binding_unavailable`,
+`capture_max_edge_invalid`, `capture_timeout_invalid` and
+`capture_lease_expired`; these distinguish unsupported targets and bad requests
+from actual backend failures without enabling private error logging.
 
 `seatgeist.snapshot` and `seatgeist.wait` use repeated compositor-side KWin
 exact-window screenshots and require the session id. They return content

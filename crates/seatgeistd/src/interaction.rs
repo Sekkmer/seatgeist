@@ -169,6 +169,9 @@ impl InteractionSessionStore {
         let active = sessions
             .get_mut(session_id)
             .ok_or_else(|| anyhow::anyhow!("interaction target lost: no bound sticky session"))?;
+        if active.expires_at <= tokio::time::Instant::now() {
+            bail!("interaction target lost: capture lease expired");
+        }
         active.expires_at = tokio::time::Instant::now() + DEFAULT_SESSION_TTL;
         Ok(())
     }
@@ -1035,6 +1038,40 @@ mod tests {
         assert_eq!(status.owner_tool.as_deref(), Some("test-client"));
         assert_eq!(status.owner_pid, Some(1));
         assert_eq!(status.owner_scope.as_deref(), Some("process"));
+    }
+
+    #[tokio::test]
+    async fn renewal_cannot_resurrect_an_expired_interaction() {
+        let store = InteractionSessionStore::default();
+        store
+            .bind(
+                "expired".to_string(),
+                &window("window-1", 42),
+                SessionOwner::test_process(1),
+            )
+            .await
+            .unwrap();
+        store
+            .sessions
+            .lock()
+            .await
+            .get_mut("expired")
+            .unwrap()
+            .expires_at = tokio::time::Instant::now();
+        assert!(
+            store
+                .renew("expired")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("lease expired")
+        );
+        assert!(
+            store
+                .resolve("expired", &[window("window-1", 42)])
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

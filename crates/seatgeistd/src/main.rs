@@ -186,6 +186,9 @@ impl ActionJournal {
 
     fn record_lifecycle(&self, method: &str, summary: &str) -> Result<()> {
         let entry = JournalEntry {
+            elapsed_ms: None,
+            requested_target: None,
+            failure: None,
             sequence: self.next_sequence()?,
             unix_time_ms: unix_time_ms()?,
             method: method.to_string(),
@@ -213,6 +216,23 @@ impl ActionJournal {
         let control = finalize_journal_control_context(context.control, response);
         let artifacts = journal_artifacts_for_response(response, &self.settings);
         let entry = JournalEntry {
+            elapsed_ms: context
+                .started_at
+                .map(|started| started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
+            requested_target: context.requested_target,
+            failure: match response {
+                DaemonResponse::Error {
+                    kind, reason_code, ..
+                } => Some(libseatgeist::JournalFailure {
+                    kind: *kind,
+                    reason_code: reason_code.clone(),
+                    next_step: reason_code
+                        .as_deref()
+                        .and_then(error_recovery_hint)
+                        .map(str::to_string),
+                }),
+                _ => None,
+            },
             sequence: self.next_sequence()?,
             unix_time_ms: unix_time_ms()?,
             method: method.to_string(),
@@ -259,6 +279,9 @@ impl ActionJournal {
             target.add("pid", pid.to_string());
         }
         let entry = JournalEntry {
+            elapsed_ms: None,
+            requested_target: None,
+            failure: None,
             sequence: self.next_sequence()?,
             unix_time_ms: unix_time_ms()?,
             method: method.to_string(),
@@ -305,6 +328,9 @@ impl ActionJournal {
             target.add("pid", pid.to_string());
         }
         let entry = JournalEntry {
+            elapsed_ms: None,
+            requested_target: None,
+            failure: None,
             sequence: self.next_sequence()?,
             unix_time_ms: unix_time_ms()?,
             method: "agent_seat_delivery".to_string(),
@@ -345,6 +371,9 @@ impl ActionJournal {
             target.add("window_id", window_id);
         }
         let entry = JournalEntry {
+            elapsed_ms: None,
+            requested_target: None,
+            failure: None,
             sequence: self.next_sequence()?,
             unix_time_ms: unix_time_ms()?,
             method: method.to_string(),
@@ -383,6 +412,8 @@ impl ActionJournal {
 
 #[derive(Debug, Clone)]
 struct JournalContext {
+    started_at: Option<Instant>,
+    requested_target: Option<JournalRequestedTarget>,
     client: Option<JournalClientContext>,
     safety_class: SafetyClass,
     guard_present: bool,
@@ -1135,6 +1166,18 @@ fn journal_context_for_request(
         runtime.input_backend_preference,
     );
     JournalContext {
+        started_at: Some(Instant::now()),
+        requested_target: match request {
+            DaemonRequest::WindowCaptureOpen(_)
+            | DaemonRequest::CaptureOpen(_)
+            | DaemonRequest::CaptureSnapshot(_)
+            | DaemonRequest::CaptureWait(_)
+            | DaemonRequest::CaptureSessionRenew(_)
+            | DaemonRequest::CaptureSessionClose(_) => {
+                journal_requested_target_for_request(request)
+            }
+            _ => None,
+        },
         client,
         safety_class,
         guard_present: active_window_guard_for_request(request).is_some()
@@ -1928,8 +1971,43 @@ async fn handle_request(
     let safety_class = safety_class_for_request(&request);
     let backend = journal_backend_for_request(&request, runtime.input_backend_preference);
     let backend_role = session_backend_role_for_request(&request);
+    let keeps_session_alive = matches!(
+        request,
+        DaemonRequest::CaptureSnapshot(_) | DaemonRequest::CaptureWait(_)
+    ) || (is_control_safety_class(&safety_class)
+        && !matches!(request, DaemonRequest::CloseWindow(_)));
     let response = execute_request(request, runtime, response_options, client).await;
     let mut response = finish_post_action(response, prepared_post_action, runtime).await;
+    if keeps_session_alive && response.ok() {
+        for session_id in &session_ids {
+            if !runtime
+                .capture_session_store
+                .needs_use_renewal(session_id)
+                .await
+            {
+                continue;
+            }
+            // Successful, owner-checked use extends only the same live exact
+            // target. Status polling, refusals and expired leases do not.
+            if let Err(err) = renew_used_exact_session(
+                session_id,
+                client,
+                &runtime.capture_session_store,
+                &runtime.interaction_session_store,
+                runtime.window_backend.as_ref(),
+                &runtime.app_policy,
+            )
+            .await
+            {
+                let kind = classify_error_message(&format_error_chain(&err));
+                warn!(
+                    session_id,
+                    reason = classify_error_reason(&format_error_chain(&err), kind),
+                    "session use succeeded but lease was not extended"
+                );
+            }
+        }
+    }
     if let Some(backend_role) = backend_role {
         record_session_execution_response(
             &session_ids,
@@ -3745,6 +3823,7 @@ async fn attach_session_execution_status(response: &mut DaemonResponse, runtime:
     let DaemonResponse::CaptureSessionStatus(status) = response else {
         return;
     };
+    status.preview_max_edge = Some(runtime.safety_settings.preview_max_edge);
     let Some(session_id) = status.session_id.as_deref() else {
         status.execution = None;
         return;
@@ -3754,6 +3833,35 @@ async fn attach_session_execution_status(response: &mut DaemonResponse, runtime:
         .status(session_id)
         .await
         .map(Box::new);
+}
+
+async fn renew_used_exact_session(
+    session_id: &str,
+    client: Option<&JournalClientContext>,
+    captures: &CaptureSessionStore,
+    interactions: &interaction::InteractionSessionStore,
+    windows_backend: &dyn WindowBackend,
+    app_policy: &AppPolicy,
+) -> Result<()> {
+    captures.require_owner(session_id, client).await?;
+    captures.require_active(session_id).await?;
+    let capture = captures.status_for_session(session_id).await;
+    if capture.requested_window_id.is_none() {
+        return Ok(()); // chooser sessions have no exact-window lease
+    }
+    let windows = windows_backend
+        .list_windows()
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let target = interactions.resolve(session_id, &windows).await?;
+    enforce_app_policy_for_app(
+        app_policy,
+        target.window.app_id.as_deref(),
+        "pinned interaction target",
+    )?;
+    captures.renew(session_id).await?;
+    interactions.renew(session_id).await?;
+    Ok(())
 }
 
 fn enforce_control_rate_limit(limiter: &ControlRateLimiter, request: &DaemonRequest) -> Result<()> {
@@ -6775,25 +6883,87 @@ fn format_error_chain(err: &Error) -> String {
 fn daemon_error(err: Error) -> DaemonResponse {
     let message = format_error_chain(&err);
     let kind = classify_error_message(&message);
-    DaemonResponse::Error {
-        kind,
-        reason_code: Some(classify_error_reason(&message, kind).to_string()),
-        message,
-    }
+    error_response(message, kind)
 }
 
 fn daemon_error_with_kind(err: Error, kind: ErrorKind) -> DaemonResponse {
     let message = format_error_chain(&err);
+    error_response(message, kind)
+}
+
+fn error_response(mut message: String, kind: ErrorKind) -> DaemonResponse {
+    let reason = classify_error_reason(&message, kind);
+    if let Some(hint) = error_recovery_hint(reason) {
+        message.push_str("; next step: ");
+        message.push_str(hint);
+    }
     DaemonResponse::Error {
         kind,
-        reason_code: Some(classify_error_reason(&message, kind).to_string()),
+        reason_code: Some(reason.to_string()),
         message,
     }
 }
 
+fn error_recovery_hint(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+        "firefox_shared_process" => {
+            "Use a dedicated Firefox process/profile or exact-window semantic actions; do not focus another user's Firefox window."
+        }
+        "native_wayland_required" => {
+            "Use a native Wayland application or exact-window semantic actions; shared-seat input is not a safe automatic fallback."
+        }
+        "client_binding_unavailable" => {
+            "This client did not bind the independent seat. Inspect target compatibility; do not retry by stealing user focus."
+        }
+        "launch_no_new_window" => {
+            "Inspect window inventory: the application may have reused a window or published a different app id. Do not claim or close an existing user window, or repeatedly relaunch it."
+        }
+        "capture_session_inactive" | "capture_lease_expired" => {
+            "Inspect window_session status and inventory, then explicitly reopen the original exact window if still authorized. Never substitute another window."
+        }
+        "capture_frame_missing"
+        | "capture_revision_stale"
+        | "capture_frame_invalidated_by_user" => {
+            "Acquire a fresh snapshot from the same session before preview-coordinate input."
+        }
+        "capture_max_edge_invalid" => {
+            "Use a positive max_edge or omit it; the daemon caps the output at its configured preview limit."
+        }
+        "capture_timeout_invalid" => "Use a frame timeout between 1 and 30000 milliseconds.",
+        "capture_coordinate_out_of_bounds" | "pointer_coordinate_out_of_bounds" => {
+            "Use coordinates inside the current snapshot in the declared coordinate space; do not apply desktop scaling twice."
+        }
+        "agent_target_user_active" => {
+            "Wait for physical input on the target window to become quiet, then acquire a fresh snapshot; user input takes precedence."
+        }
+        "agent_seat_timeout" | "agent_seat_unavailable" => {
+            "Inspect input_backend_status and the journal before retrying; no focus-stealing fallback was selected."
+        }
+        "semantic_target_not_actionable" => {
+            "Inspect the exact target's accessibility tree; a remote desktop may require retained-window pixel input instead."
+        }
+        "session_owner_mismatch" => {
+            "Use a session opened by this MCP process; do not reuse another agent's session id."
+        }
+        _ => return None,
+    })
+}
+
 fn classify_error_reason(message: &str, kind: ErrorKind) -> &'static str {
     let lower = message.to_ascii_lowercase();
-    if lower.contains("protected application") {
+    if lower.contains("firefox shared-process") {
+        "firefox_shared_process"
+    } else if lower.contains("not a native wayland") {
+        "native_wayland_required"
+    } else if lower.contains("target did not bind the agent-seat input device") {
+        "client_binding_unavailable"
+    } else if lower.contains("capture lease expired") {
+        "capture_lease_expired"
+    } else if lower.contains("capture frame max_edge") {
+        "capture_max_edge_invalid"
+    } else if lower.contains("capture frame timeout_ms") {
+        "capture_timeout_invalid"
+    } else if lower.contains("protected application") {
         "protected_application"
     } else if lower.contains("did not allow control of application") {
         "application_not_allowlisted"
@@ -6880,6 +7050,7 @@ fn classify_error_reason(message: &str, kind: ErrorKind) -> &'static str {
         "agent_lane_quota"
     } else if lower.contains("agent target user active")
         || lower.contains("agent target received physical user input")
+        || lower.contains("agent target received user input")
     {
         "agent_target_user_active"
     } else if lower.contains("requested window does not exist")
@@ -6922,7 +7093,14 @@ fn policy_error_kind(err: &Error) -> ErrorKind {
 
 fn classify_error_message(message: &str) -> ErrorKind {
     let lower = message.to_ascii_lowercase();
-    if lower.contains("app policy") {
+    if lower.contains("firefox shared-process")
+        || lower.contains("not a native wayland")
+        || lower.contains("target did not bind the agent-seat input device")
+    {
+        ErrorKind::BackendUnavailable
+    } else if lower.contains("capture lease expired") {
+        ErrorKind::TargetLost
+    } else if lower.contains("app policy") {
         ErrorKind::AppDenied
     } else if lower.contains("policy prompt required") {
         ErrorKind::PolicyPromptRequired
@@ -6950,6 +7128,7 @@ fn classify_error_message(message: &str) -> ErrorKind {
     } else if lower.contains("human input activity")
         || lower.contains("agent target user active")
         || lower.contains("agent target received physical user input")
+        || lower.contains("agent target received user input")
     {
         ErrorKind::HumanInputPause
     } else if lower.contains("capture frame invalidated by user input")
@@ -8042,6 +8221,8 @@ mod tests {
             .record(
                 "health",
                 JournalContext {
+                    started_at: None,
+                    requested_target: None,
                     client: Some(JournalClientContext {
                         tool: Some("seatgeist-cli".to_string()),
                         pid: Some(1111),
@@ -8073,6 +8254,8 @@ mod tests {
             .record(
                 "focus_window",
                 JournalContext {
+                    started_at: None,
+                    requested_target: None,
                     client: Some(JournalClientContext {
                         tool: Some("seatgeist-mcp".to_string()),
                         pid: Some(2222),
@@ -8219,6 +8402,8 @@ mod tests {
             message: "target Secret Project window uuid-123 disappeared".to_string(),
         };
         let context = || JournalContext {
+            started_at: None,
+            requested_target: None,
             client: None,
             safety_class: SafetyClass::ControlSemantic,
             guard_present: true,
@@ -8262,6 +8447,101 @@ mod tests {
     }
 
     #[test]
+    fn capture_failures_journal_safe_target_timing_and_recovery_not_private_details() {
+        let request = DaemonRequest::CaptureSnapshot(libseatgeist::CaptureSnapshotRequest {
+            session_id: "owned-session".to_string(),
+            output: PathBuf::from("/tmp/private-project-name.png"),
+            max_edge: Some(0),
+            timeout_ms: 1500,
+        });
+        let response = daemon_error_with_kind(
+            anyhow::anyhow!("capture frame max_edge must be positive; private-project-name"),
+            ErrorKind::Validation,
+        );
+        let path = temp_test_path("safe-capture-failure").with_extension("jsonl");
+        let journal = ActionJournal::new(path.clone(), JournalSettings::default(), None);
+        journal
+            .record(
+                request.method_name(),
+                JournalContext {
+                    started_at: Some(Instant::now()),
+                    requested_target: journal_requested_target_for_request(&request),
+                    client: None,
+                    safety_class: SafetyClass::Observe,
+                    guard_present: false,
+                    active_window_before: None,
+                    active_window_after: None,
+                    control: None,
+                },
+                &response,
+            )
+            .unwrap();
+        let entries = journal.tail_filtered(1, None, None).unwrap();
+        let entry = &entries[0];
+        assert!(entry.elapsed_ms.is_some());
+        assert_eq!(
+            entry.requested_target.as_ref().unwrap().fields["session_id"],
+            "owned-session"
+        );
+        let failure = entry.failure.as_ref().unwrap();
+        assert_eq!(
+            failure.reason_code.as_deref(),
+            Some("capture_max_edge_invalid")
+        );
+        assert!(
+            failure
+                .next_step
+                .as_deref()
+                .unwrap()
+                .contains("positive max_edge")
+        );
+        assert!(
+            !serde_json::to_string(entry)
+                .unwrap()
+                .contains("private-project-name")
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn browser_target_errors_and_capture_expiry_have_specific_recovery() {
+        for (message, expected, kind) in [
+            (
+                "KWin agent-seat action failed: Firefox shared-process window focus is not seat-isolated",
+                "firefox_shared_process",
+                ErrorKind::BackendUnavailable,
+            ),
+            (
+                "KWin agent-seat action failed: target is not a native Wayland client window",
+                "native_wayland_required",
+                ErrorKind::BackendUnavailable,
+            ),
+            (
+                "KWin agent-seat action failed: agent target received user input before delivery",
+                "agent_target_user_active",
+                ErrorKind::HumanInputPause,
+            ),
+            (
+                "interaction target lost: capture lease expired",
+                "capture_lease_expired",
+                ErrorKind::TargetLost,
+            ),
+        ] {
+            let DaemonResponse::Error {
+                kind: actual,
+                reason_code,
+                message,
+            } = daemon_error(anyhow::anyhow!(message))
+            else {
+                panic!("expected error")
+            };
+            assert_eq!(actual, kind);
+            assert_eq!(reason_code.as_deref(), Some(expected));
+            assert!(message.contains("next step:"));
+        }
+    }
+
+    #[test]
     fn actionable_readiness_prioritizes_policy_then_guard() {
         assert_eq!(
             action_readiness(true, false, &ToolApprovalLevel::Prompt, true),
@@ -8290,6 +8570,8 @@ mod tests {
             .record(
                 "screenshot",
                 JournalContext {
+                    started_at: None,
+                    requested_target: None,
                     client: None,
                     safety_class: SafetyClass::Observe,
                     guard_present: false,
@@ -8317,6 +8599,8 @@ mod tests {
             .record(
                 "screenshot",
                 JournalContext {
+                    started_at: None,
+                    requested_target: None,
                     client: None,
                     safety_class: SafetyClass::Observe,
                     guard_present: false,
@@ -9690,6 +9974,104 @@ mod tests {
             pid: Some(pid),
             process_name: Some(process_name.to_string()),
         }
+    }
+
+    #[tokio::test]
+    async fn successful_use_renews_only_the_same_live_owned_exact_window() {
+        let captures = CaptureSessionStore::default();
+        let interactions = interaction::InteractionSessionStore::default();
+        let owner = test_client("seatgeist-mcp", 100, "seatgeist-mcp");
+        let intruder = test_client("seatgeist-mcp", 101, "seatgeist-mcp");
+        let window = WindowInfo {
+            id: "window-1".to_string(),
+            title: "private title".to_string(),
+            app_id: Some("firefox".to_string()),
+            pid: Some(42),
+            geometry: None,
+            monitor_id: None,
+        };
+        let backend =
+            seatgeist_testkit::MockWindowBackend::new(vec![window.clone()], Some(window.clone()));
+        let policy = AppPolicy::default();
+        let status = capture_open(
+            CaptureOpenRequest {
+                source: CaptureSourceKind::Window,
+                requested_source_id: Some(window.id.clone()),
+                parent_window: String::new(),
+                timeout_ms: 30000,
+            },
+            SessionOwner::from_client(Some(&owner)).unwrap(),
+            &captures,
+            &seatgeist_testkit::MockScreenBackend::default(),
+            DEFAULT_PREVIEW_MAX_EDGE,
+        )
+        .await
+        .unwrap();
+        let id = status.session_id.unwrap();
+        interactions
+            .bind(
+                id.clone(),
+                &window,
+                SessionOwner::from_client(Some(&owner)).unwrap(),
+            )
+            .await
+            .unwrap();
+        renew_used_exact_session(
+            &id,
+            Some(&owner),
+            &captures,
+            &interactions,
+            &backend,
+            &policy,
+        )
+        .await
+        .unwrap();
+        assert!(interactions.status(&id).await.expires_in_ms.unwrap() > 1_799_000);
+        assert!(
+            renew_used_exact_session(
+                &id,
+                Some(&intruder),
+                &captures,
+                &interactions,
+                &backend,
+                &policy
+            )
+            .await
+            .is_err()
+        );
+        let mut changed = window;
+        changed.pid = Some(43);
+        let reopened = seatgeist_testkit::MockWindowBackend::new(vec![changed], None);
+        assert!(
+            renew_used_exact_session(
+                &id,
+                Some(&owner),
+                &captures,
+                &interactions,
+                &reopened,
+                &policy
+            )
+            .await
+            .is_err()
+        );
+        captures
+            .close(libseatgeist::CaptureSessionRequest {
+                session_id: id.clone(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            renew_used_exact_session(
+                &id,
+                Some(&owner),
+                &captures,
+                &interactions,
+                &backend,
+                &policy
+            )
+            .await
+            .is_err()
+        );
     }
 
     #[tokio::test]
