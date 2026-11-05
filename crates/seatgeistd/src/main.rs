@@ -11,6 +11,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod accessibility_snapshot;
 mod activity;
 mod agent_seat;
 mod capture;
@@ -22,6 +23,7 @@ mod commands;
 mod compatibility_capture_backend;
 mod config;
 mod desktop_launch;
+mod disposition;
 mod eis_key_combo;
 mod input_actions;
 mod input_diagnostics;
@@ -224,6 +226,7 @@ impl ActionJournal {
                 DaemonResponse::Error {
                     kind, reason_code, ..
                 } => Some(libseatgeist::JournalFailure {
+                    disposition: response.disposition(),
                     kind: *kind,
                     reason_code: reason_code.clone(),
                     next_step: reason_code
@@ -683,6 +686,7 @@ async fn run(
         capture_session_store,
         session_execution_store,
         semantic_handle_store,
+        accessibility_snapshot_store: accessibility_snapshot::SnapshotStore::default(),
         screen_backend,
         interaction_session_store,
         launched_window_store,
@@ -808,6 +812,7 @@ struct DaemonRuntime {
     capture_session_store: CaptureSessionStore,
     session_execution_store: session_execution::SessionExecutionStore,
     semantic_handle_store: semantic_handle::SemanticHandleStore,
+    accessibility_snapshot_store: accessibility_snapshot::SnapshotStore,
     screen_backend: Arc<dyn ScreenBackend>,
     interaction_session_store: interaction::InteractionSessionStore,
     launched_window_store: launched_window::LaunchedWindowStore,
@@ -830,8 +835,11 @@ async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()>
         bail!("empty request");
     }
 
-    let (request, request_client, response_options) = parse_daemon_request_line(&line)?;
+    let (mut request, request_client, response_options) = parse_daemon_request_line(&line)?;
     let client = merge_client_context(peer_client, request_client);
+    // Include the effective ref target/destructive class in the journal. The
+    // dispatcher repeats owner/expiry resolution before applying policy.
+    let _ = prepare_accessibility_ref_request(&mut request, client.as_ref(), &runtime);
     let method = request.method_name();
     let mut journal_context = journal_context_for_request(&request, &runtime, client.clone());
     let response = handle_request(
@@ -1180,7 +1188,8 @@ fn journal_context_for_request(
         },
         client,
         safety_class,
-        guard_present: active_window_guard_for_request(request).is_some()
+        guard_present: target_window_guard_for_request(request).is_some()
+            || active_window_guard_for_request(request).is_some()
             || interaction_session_id_for_request(request).is_some(),
         active_window_before,
         active_window_after: None,
@@ -1431,6 +1440,17 @@ fn journal_requested_target_for_request(request: &DaemonRequest) -> Option<Journ
             let mut target = journal_target("page_zoom");
             target.add("operation", format!("{:?}", request.operation));
             target.add("steps", request.steps.to_string());
+            target
+        }
+        DaemonRequest::AccessibilityRefAction(request) => {
+            let mut target = journal_target("accessibility_ref_action");
+            target.add("ref_id", &request.ref_id);
+            target.add("action", request.action.as_str());
+            if let Some(text) = &request.text {
+                target.add("text_chars", text.chars().count().to_string());
+            }
+            target.add_bool("destructive", request.destructive);
+            add_target_guard_to_journal(&mut target, request.target_guard.as_ref());
             target
         }
         DaemonRequest::AccessibilityInvoke(request) => {
@@ -1867,11 +1887,50 @@ fn sha256_file(path: &Path) -> Result<String> {
 }
 
 async fn handle_request(
-    mut request: DaemonRequest,
+    request: DaemonRequest,
     response_options: Option<&DaemonResponseOptions>,
     client: Option<&JournalClientContext>,
     runtime: &DaemonRuntime,
 ) -> DaemonResponse {
+    let control = !request.is_read_only();
+    let mut dispatch_started = false;
+    let mut response = handle_request_inner(
+        request,
+        response_options,
+        client,
+        runtime,
+        &mut dispatch_started,
+    )
+    .await;
+    disposition::annotate(&mut response, control, dispatch_started);
+    response
+}
+
+fn prepare_accessibility_ref_request(
+    request: &mut DaemonRequest,
+    client: Option<&JournalClientContext>,
+    runtime: &DaemonRuntime,
+) -> Result<()> {
+    if let DaemonRequest::AccessibilityRefAction(action) = request {
+        let resolved = runtime
+            .accessibility_snapshot_store
+            .resolve(&action.ref_id, client)?;
+        action.target_guard = Some(resolved.guard());
+        action.destructive |= destructive_label(resolved.name());
+    }
+    Ok(())
+}
+
+async fn handle_request_inner(
+    mut request: DaemonRequest,
+    response_options: Option<&DaemonResponseOptions>,
+    client: Option<&JournalClientContext>,
+    runtime: &DaemonRuntime,
+    dispatch_started: &mut bool,
+) -> DaemonResponse {
+    if let Err(error) = prepare_accessibility_ref_request(&mut request, client, runtime) {
+        return accessibility_snapshot::refusal(error);
+    }
     if let Err(err) = validate_post_action_response_options(&request, response_options) {
         return daemon_error_with_kind(err, ErrorKind::Validation);
     }
@@ -1976,6 +2035,7 @@ async fn handle_request(
         DaemonRequest::CaptureSnapshot(_) | DaemonRequest::CaptureWait(_)
     ) || (is_control_safety_class(&safety_class)
         && !matches!(request, DaemonRequest::CloseWindow(_)));
+    *dispatch_started = true;
     let response = execute_request(request, runtime, response_options, client).await;
     let mut response = finish_post_action(response, prepared_post_action, runtime).await;
     if keeps_session_alive && response.ok() {
@@ -2451,6 +2511,12 @@ async fn execute_request(
                 Ok(tree) => DaemonResponse::AccessibilityTree(tree),
                 Err(err) => daemon_error(err),
             }
+        }
+        DaemonRequest::AccessibilitySnapshot(request) => {
+            accessibility_snapshot::snapshot(request, client, runtime).await
+        }
+        DaemonRequest::AccessibilityRefAction(request) => {
+            accessibility_snapshot::act(request, client, runtime, post_action).await
         }
         DaemonRequest::AccessibilityFind(request) => match accessibility_find(request) {
             Ok(matches) => DaemonResponse::AccessibilityMatches(matches),
@@ -4169,6 +4235,7 @@ fn target_window_guard_for_request(
     request: &DaemonRequest,
 ) -> Option<&libseatgeist::TargetWindowGuard> {
     match request {
+        DaemonRequest::AccessibilityRefAction(request) => request.target_guard.as_ref(),
         DaemonRequest::ClickButton(request) => request.target_guard.as_ref(),
         DaemonRequest::SetTextField(request) => request.target_guard.as_ref(),
         DaemonRequest::FocusTextField(request) => request.target_guard.as_ref(),
@@ -4245,7 +4312,8 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::CaptureWait(_)
         | DaemonRequest::FocusedAccessibilityTree(_)
         | DaemonRequest::AccessibilityFind(_)
-        | DaemonRequest::AccessibilityTextAttributes(_) => SafetyClass::Observe,
+        | DaemonRequest::AccessibilityTextAttributes(_)
+        | DaemonRequest::AccessibilitySnapshot(_) => SafetyClass::Observe,
         DaemonRequest::Observe(request) => {
             if request
                 .screenshot
@@ -4300,6 +4368,13 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::AccessibilityPasteText(_)
         | DaemonRequest::AccessibilitySetCaret(_)
         | DaemonRequest::AccessibilitySetSelection(_) => SafetyClass::ControlSemantic,
+        DaemonRequest::AccessibilityRefAction(request) => {
+            if request.destructive {
+                SafetyClass::DestructiveAction
+            } else {
+                SafetyClass::ControlSemantic
+            }
+        }
         DaemonRequest::AccessibilityInvoke(request) => {
             if request.destructive {
                 SafetyClass::DestructiveAction
@@ -4717,6 +4792,7 @@ async fn focus_window(
         .await
         .map_err(anyhow::Error::msg)?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
@@ -4814,6 +4890,7 @@ async fn close_window(
         .await
         .map_err(anyhow::Error::msg)?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: Some(Observation {
@@ -4854,6 +4931,7 @@ async fn move_window(
         .await
         .map_err(anyhow::Error::msg)?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
@@ -4985,6 +5063,7 @@ async fn launch_window(
         .await
         .context("record exact launched-window cleanup ownership")?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: Some(Observation {
@@ -5034,6 +5113,7 @@ async fn resize_window(
         .await
         .map_err(anyhow::Error::msg)?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
@@ -5448,6 +5528,7 @@ fn accessibility_invoke(request: AccessibilityInvokeRequest) -> Result<ActionRes
     seatgeist_atspi::invoke(&request.node_id, request.action.clone())
         .map_err(|err| anyhow::anyhow!(err))?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
@@ -5468,6 +5549,7 @@ fn accessibility_set_text(request: AccessibilitySetTextRequest) -> Result<Action
     seatgeist_atspi::set_text(&request.node_id, &request.text)
         .map_err(|err| anyhow::anyhow!(err))?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
@@ -5491,6 +5573,7 @@ fn accessibility_insert_text(request: AccessibilityInsertTextRequest) -> Result<
     seatgeist_atspi::insert_text(&request.node_id, request.offset, &request.text)
         .map_err(|err| anyhow::anyhow!(err))?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
@@ -5518,6 +5601,7 @@ fn accessibility_delete_text(request: AccessibilityDeleteTextRequest) -> Result<
     seatgeist_atspi::delete_text(&request.node_id, request.start_offset, request.end_offset)
         .map_err(|err| anyhow::anyhow!(err))?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
@@ -5543,6 +5627,7 @@ fn accessibility_copy_text(request: AccessibilityCopyTextRequest) -> Result<Acti
     seatgeist_atspi::copy_text(&request.node_id, request.start_offset, request.end_offset)
         .map_err(|err| anyhow::anyhow!(err))?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
@@ -5568,6 +5653,7 @@ fn accessibility_cut_text(request: AccessibilityCutTextRequest) -> Result<Action
     seatgeist_atspi::cut_text(&request.node_id, request.start_offset, request.end_offset)
         .map_err(|err| anyhow::anyhow!(err))?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
@@ -5590,6 +5676,7 @@ fn accessibility_paste_text(request: AccessibilityPasteTextRequest) -> Result<Ac
     seatgeist_atspi::paste_text(&request.node_id, request.offset)
         .map_err(|err| anyhow::anyhow!(err))?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
@@ -5612,6 +5699,7 @@ fn accessibility_set_caret(request: AccessibilitySetCaretRequest) -> Result<Acti
     seatgeist_atspi::set_caret(&request.node_id, request.offset)
         .map_err(|err| anyhow::anyhow!(err))?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
@@ -5645,6 +5733,7 @@ fn accessibility_set_selection(request: AccessibilitySetSelectionRequest) -> Res
     )
     .map_err(|err| anyhow::anyhow!(err))?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
@@ -5678,6 +5767,7 @@ async fn semantic_action_result(
     prepared: Option<semantic_settle::PreparedSemanticSettle>,
 ) -> ActionResult {
     ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: match prepared {
@@ -6000,6 +6090,7 @@ async fn toggle_check(
                 })
             });
         return Ok(ActionResult {
+            disposition: None,
             id: Uuid::new_v4(),
             ok: true,
             observation,
@@ -6898,6 +6989,7 @@ fn error_response(mut message: String, kind: ErrorKind) -> DaemonResponse {
         message.push_str(hint);
     }
     DaemonResponse::Error {
+        disposition: None,
         kind,
         reason_code: Some(reason.to_string()),
         message,
@@ -7685,6 +7777,10 @@ fn summarize_response(response: &DaemonResponse) -> String {
             node.children.len()
         ),
         DaemonResponse::AccessibilityTree(None) => "no focused accessibility node".to_string(),
+        DaemonResponse::AccessibilitySnapshot(snapshot) => format!(
+            "accessibility snapshot nodes={} refs={} complete={}",
+            snapshot.nodes_observed, snapshot.ref_count, snapshot.complete
+        ),
         DaemonResponse::AccessibilityMatches(matches) => {
             format!("{} accessibility matches", matches.len())
         }
@@ -7724,6 +7820,7 @@ fn summarize_response(response: &DaemonResponse) -> String {
             kind,
             reason_code,
             message,
+            ..
         } => format!(
             "error kind={kind:?} reason={}: {message}",
             reason_code.as_deref().unwrap_or("unspecified")
@@ -8287,6 +8384,7 @@ mod tests {
                     }),
                 },
                 &DaemonResponse::Action(Box::new(ActionResult {
+                    disposition: None,
                     id: Uuid::nil(),
                     ok: true,
                     observation: None,
@@ -8397,6 +8495,7 @@ mod tests {
     #[test]
     fn journal_redacts_error_details_unless_privately_enabled() {
         let response = DaemonResponse::Error {
+            disposition: None,
             kind: ErrorKind::TargetMismatch,
             reason_code: Some("window_identity_changed".to_string()),
             message: "target Secret Project window uuid-123 disappeared".to_string(),
@@ -8528,6 +8627,7 @@ mod tests {
             ),
         ] {
             let DaemonResponse::Error {
+                disposition: None,
                 kind: actual,
                 reason_code,
                 message,
@@ -8628,6 +8728,7 @@ mod tests {
         action_screenshot.path = artifact_path.clone();
         let action_artifacts = journal_artifacts_for_response(
             &DaemonResponse::Action(Box::new(ActionResult {
+                disposition: None,
                 id: Uuid::nil(),
                 ok: true,
                 observation: None,
@@ -9150,6 +9251,7 @@ mod tests {
     fn action_settle_summary_excludes_observation_content() {
         let sensitive_value = "do-not-journal-this-value";
         let summary = summarize_response(&DaemonResponse::Action(Box::new(ActionResult {
+            disposition: None,
             id: Uuid::nil(),
             ok: true,
             observation: Some(Observation {
@@ -9216,6 +9318,7 @@ mod tests {
             .await;
         let sensitive_value = "do-not-persist-this-input";
         let response = DaemonResponse::Action(Box::new(ActionResult {
+            disposition: None,
             id: Uuid::nil(),
             ok: true,
             observation: Some(Observation {

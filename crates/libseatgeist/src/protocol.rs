@@ -1,3 +1,7 @@
+use crate::{
+    AccessibilityRefActionRequest, AccessibilitySnapshot, AccessibilitySnapshotRequest,
+    ActionDisposition,
+};
 use std::{collections::BTreeMap, fmt, path::PathBuf, str::FromStr};
 
 use serde::{Deserialize, Serialize};
@@ -499,6 +503,8 @@ pub struct JournalEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalFailure {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<ActionDisposition>,
     pub kind: ErrorKind,
     pub reason_code: Option<String>,
     pub next_step: Option<String>,
@@ -1529,6 +1535,8 @@ pub enum DaemonRequest {
     AccessibilityQualityStatus,
     FocusedAccessibilityTree(FocusedAccessibilityTreeRequest),
     AccessibilityFind(AccessibilityFindRequest),
+    AccessibilitySnapshot(AccessibilitySnapshotRequest),
+    AccessibilityRefAction(AccessibilityRefActionRequest),
     AccessibilityTextAttributes(AccessibilityTextAttributesRequest),
     AccessibilityInvoke(AccessibilityInvokeRequest),
     AccessibilitySetText(AccessibilitySetTextRequest),
@@ -1606,6 +1614,8 @@ impl DaemonRequest {
             Self::AccessibilityQualityStatus => "accessibility_quality_status",
             Self::FocusedAccessibilityTree(_) => "focused_accessibility_tree",
             Self::AccessibilityFind(_) => "accessibility_find",
+            Self::AccessibilitySnapshot(_) => "accessibility_snapshot",
+            Self::AccessibilityRefAction(_) => "accessibility_ref_action",
             Self::AccessibilityTextAttributes(_) => "accessibility_text_attributes",
             Self::AccessibilityInvoke(_) => "accessibility_invoke",
             Self::AccessibilitySetText(_) => "accessibility_set_text",
@@ -1641,10 +1651,50 @@ impl DaemonRequest {
         }
     }
 
+    /// Only operations with no application input, portal prompt or external
+    /// lifecycle effect qualify for safe retry after losing their response.
+    /// Returning a non-Action response does not make an operation read-only.
+    pub fn is_read_only(&self) -> bool {
+        match self {
+            Self::Observe(request) => request.screenshot.is_none(),
+            Self::Health
+            | Self::Capabilities
+            | Self::PolicyStatus
+            | Self::SafetyStatus
+            | Self::DesktopSessionStatus
+            | Self::ComputerUseReadiness
+            | Self::PanicStopStatus
+            | Self::KwinBridgeStatus
+            | Self::UinputStatus
+            | Self::InputBackendStatus
+            | Self::RemoteDesktopEisSessionStatus
+            | Self::CaptureBackendStatus
+            | Self::CaptureSessionStatus
+            | Self::PointerCalibration
+            | Self::ListMonitors
+            | Self::ListWindows
+            | Self::ActiveWindow
+            | Self::WindowInventory
+            | Self::WindowInventoryWait(_)
+            | Self::ClipboardBackendStatus
+            | Self::ClipboardGet(_)
+            | Self::AccessibilityQualityStatus
+            | Self::FocusedAccessibilityTree(_)
+            | Self::AccessibilityFind(_)
+            | Self::AccessibilityTextAttributes(_)
+            | Self::AccessibilitySnapshot(_)
+            | Self::CaptureSnapshot(_)
+            | Self::CaptureWait(_)
+            | Self::JournalTail(_) => true,
+            _ => false,
+        }
+    }
+
     pub fn returns_action(&self) -> bool {
         matches!(
             self,
             Self::ClipboardSet(_)
+                | Self::AccessibilityRefAction(_)
                 | Self::AccessibilityInvoke(_)
                 | Self::AccessibilitySetText(_)
                 | Self::AccessibilityInsertText(_)
@@ -1713,10 +1763,13 @@ pub enum DaemonResponse {
     AccessibilityQualityStatus(AccessibilityQualityStatus),
     AccessibilityTree(Option<AccessibilityNode>),
     AccessibilityMatches(Vec<AccessibilityNode>),
+    AccessibilitySnapshot(Box<AccessibilitySnapshot>),
     AccessibilityTextAttributes(AccessibilityTextAttributes),
     Journal(Vec<JournalEntry>),
     Action(Box<ActionResult>),
     Error {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        disposition: Option<ActionDisposition>,
         kind: ErrorKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason_code: Option<String>,
@@ -1725,6 +1778,14 @@ pub enum DaemonResponse {
 }
 
 impl DaemonResponse {
+    pub fn disposition(&self) -> Option<crate::ActionDisposition> {
+        match self {
+            Self::Error { disposition, .. } => *disposition,
+            Self::Action(action) => action.disposition,
+            _ => None,
+        }
+    }
+
     pub fn response_type(&self) -> &'static str {
         match self {
             Self::Health(_) => "health",
@@ -1758,6 +1819,7 @@ impl DaemonResponse {
             Self::AccessibilityQualityStatus(_) => "accessibility_quality_status",
             Self::AccessibilityTree(_) => "accessibility_tree",
             Self::AccessibilityMatches(_) => "accessibility_matches",
+            Self::AccessibilitySnapshot(_) => "accessibility_snapshot",
             Self::AccessibilityTextAttributes(_) => "accessibility_text_attributes",
             Self::Journal(_) => "journal",
             Self::Action(_) => "action",
@@ -1834,6 +1896,8 @@ pub struct ActionRequest {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<ActionDisposition>,
     pub id: Uuid,
     pub ok: bool,
     pub observation: Option<Observation>,
@@ -3014,6 +3078,7 @@ mod tests {
         assert!(health.ok());
 
         let unconfirmed_action = DaemonResponse::Action(Box::new(ActionResult {
+            disposition: None,
             id: Uuid::nil(),
             ok: false,
             observation: None,
@@ -3024,6 +3089,7 @@ mod tests {
         assert!(!unconfirmed_action.ok());
 
         let error = DaemonResponse::Error {
+            disposition: None,
             kind: ErrorKind::PolicyDenied,
             reason_code: Some("policy_denied".to_string()),
             message: "denied".to_string(),

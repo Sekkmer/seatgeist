@@ -347,3 +347,77 @@ args = ["--stdio"]
 The plugin bundle points at `plugin/.mcp.json` through `.codex-plugin/plugin.json`, so an installed plugin can provide the same MCP server config. The `seatgeist-mcp` binary must be on `PATH` for the current initial config.
 
 The plugin bundle is validated by `make validate-plugin`, and the validator is included in `make verify`.
+
+### Accessibility snapshots, refs, and skeletons
+
+Use `seatgeist.snapshot` with `format=accessibility` and an exact `window_id`
+from KWin inventory to read a structured tree without capture, a portal prompt,
+or physical focus changes. Image mode remains the default and still requires
+an owned retained `session_id`. Expert mode provides `seatgeist.a11y_snapshot`;
+the CLI equivalent is `seatgeist-cli atspi snapshot --window-id <UUID>`.
+
+Start with `skeleton=true`, optionally `interactive_only=true` and `compact=true`.
+A skeleton reads only three child levels. Cut containers expose
+`children_count`, `subtree_truncated`, and a ref. Drill using the same snapshot
+operation with `root_ref=<full-ref>` instead of `window_id`. This reads that
+region and preserves the original namespace and expiry. Filtering removes
+uninteresting leaves; compaction removes unnamed single-child wrappers while
+preserving cut regions. `complete=false` describes depth/node limits or failed
+branches; a partial tree is never proof that an element does not exist.
+
+Each node has a qualified ref such as `@sg1:<snapshot-uuid>:e4`. Bare `@e4` is
+invalid. Refs are bound to the authenticated MCP process (including its process
+generation) or the explicitly tool-scoped CLI owner. They expire after five
+minutes without renewal, and each owner retains at most eight snapshots within
+a global limit of 32; oldest snapshots can be evicted. Each snapshot holds at
+most 4096 refs and 2 MiB of retained node metadata. Reads accept depth 0..32 and
+max_nodes 1..4096, with bounded AT-SPI operations. Sensitive values are redacted;
+sensitive nodes cannot be acted on through refs.
+
+Use core `seatgeist.act` with `action=invoke_ref`, `ref_id=<full-ref>`, and
+`ref_action=press|select|focus|set_text`. `set_text` additionally requires `text`;
+other actions reject it. Expert mode exposes `seatgeist.a11y_ref_action`. The CLI
+is `seatgeist-cli atspi ref-action --ref-id <ref> --action press`. Destructive
+operations still require `destructive=true` and the normal policy approval;
+known destructive labels are classified automatically from stored identity.
+
+A ref is a locator plus identity evidence, never an input lease or saved policy
+approval. Every action revalidates the KWin UUID/app/PID and process generation,
+the original AT-SPI window ancestry, the exact accessible path/role/name, current
+capability, sensitivity, and application policy. Title drift is accepted only
+when the current AT-SPI and KWin windows still correlate. Resolution repeats
+after subscription setup and before dispatch. A missing or changed node fails
+closed; there is no name/geometry search for a replacement and no raw-input
+fallback. AT-SPI does not provide an atomic compare-and-invoke or a universal
+object generation token: identity checks minimize, but cannot eliminate, an
+application-side change between the last read and invocation. Missing
+`EditableText` and unsupported extra Wayland seats remain application/backend
+limitations; refs do not add those capabilities.
+
+### Delivery and retry advice
+
+Action and error responses include a `disposition` with independent `delivery`
+and `retry` fields. Older responses without it remain readable. MCP compact
+text includes both fields; failure journal metadata preserves the disposition.
+
+- `delivery=not_delivered`: the request was refused before input, or a specific
+  backend refusal establishes that nothing was sent.
+- `delivery=delivered`: dispatch succeeded. Read settle confirmation separately;
+  delivery does not establish the intended UI effect.
+- `delivery=unknown`: a dispatch-time failure may have followed a side effect.
+  Transport errors and timeouts alone never prove non-delivery.
+- `retry=safe`: a failed read can be repeated without duplicating input.
+- `retry=after_change`: fix the guard, capability, policy, or target condition;
+  stale/expired refs require fresh observation and a new decision.
+- `retry=observe`: inspect the actual target before deciding again. This is also
+  returned after successful dispatch; it never authorizes repeating that action.
+
+No retry field causes automatic replay, backend substitution, or policy bypass.
+
+CLI and MCP share a one-shot Unix transport with 360-second socket read/write
+limits (covering existing five-minute portal/capture opens plus grace). A
+connection failure before writing is `not_delivered`. EOF, malformed responses,
+write failures, or read timeouts after an action write attempt are
+`unknown/observe`; the daemon may still be running that request. The client
+returns structured advice and never reconnects or repeats the request. These
+socket limits are not cancellation or a promise of a total execution deadline.

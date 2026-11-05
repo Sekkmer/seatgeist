@@ -12,6 +12,7 @@ use std::{
 mod cache;
 mod events;
 mod roles;
+pub mod snapshot;
 
 pub use events::AtspiEventBackend;
 

@@ -287,3 +287,16 @@ is a KWin scripting API whose availability can vary by compositor version, the
 bridge advertises a separate `window_close_supported` capability. Missing API,
 missing capability, or lost bridge acknowledgement fails closed; Seatgeist
 does not substitute `Alt+F4`, `Ctrl+W`, or another keyboard shortcut.
+
+Accessibility snapshot refs are a daemon-owned layer over the AT-SPI snapshot
+reader trait and the existing KWin `WindowBackend`. They discover application
+frames by the exact KWin PID, require an unambiguous KWin/app/window correlation,
+and retain both the KWin UUID and the original AT-SPI window ancestry. Linux
+boot ID plus `/proc/<pid>/stat` start time guards process reuse; copied client
+metadata cannot grant ownership. Bounded skeleton reads carry child counts and
+partial-observation metadata instead of fetching the full tree for presentation.
+The store retains immutable identity evidence, with a fixed expiry, owner/global
+quotas, and a byte/ref budget. Ref actions repeat live checks and pass the same
+central policy, panic-stop, rate, app-policy, and journal dispatcher as other
+semantic actions. There is no new compositor plugin, injected shared-seat path,
+or replacement-node search. See `docs/mcp-tools.md` for the wire/API contract.

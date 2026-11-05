@@ -26,6 +26,7 @@ pub(crate) fn type_text(
     let mut backend = input_execution::backend(input_backend_preference, portal_eis_session_store)?;
     backend.type_text(&request.text)?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
@@ -203,6 +204,7 @@ pub(crate) async fn agent_scroll_pointer(
 
 fn agent_result(delivery: TargetedInputDelivery, message: String) -> ActionResult {
     ActionResult {
+        disposition: None,
         id: delivery.action_id,
         ok: true,
         observation: None,
@@ -261,6 +263,7 @@ pub(crate) fn key_combo(
     )?;
     let key_count = backend.key_combo(&request.combo)?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
@@ -317,6 +320,7 @@ pub(crate) async fn page_zoom(
         backend.key_combo(combo)?;
     }
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
@@ -355,6 +359,7 @@ pub(crate) async fn move_pointer(
     let mut backend = input_execution::backend(input_backend_preference, portal_eis_session_store)?;
     backend.move_pointer(point, bounds)?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
@@ -388,6 +393,7 @@ pub(crate) async fn click_pointer(
     let mut backend = input_execution::backend(input_backend_preference, portal_eis_session_store)?;
     backend.click_pointer(point, bounds, request.button, request.clicks)?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
@@ -424,6 +430,7 @@ pub(crate) async fn drag_pointer(
     let mut backend = input_execution::backend(input_backend_preference, portal_eis_session_store)?;
     backend.drag_pointer(from, to, bounds, request.button, request.duration_ms)?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,
@@ -453,6 +460,7 @@ pub(crate) async fn scroll_pointer(
     let mut backend = input_execution::backend(input_backend_preference, portal_eis_session_store)?;
     backend.scroll_pointer(request.vertical, request.horizontal, bounds)?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,

@@ -162,6 +162,7 @@ pub(super) async fn set_text(text: &str) -> Result<ActionResult> {
         .await
         .map_err(|err| anyhow::anyhow!(err))?;
     Ok(ActionResult {
+        disposition: None,
         id: Uuid::new_v4(),
         ok: true,
         observation: None,

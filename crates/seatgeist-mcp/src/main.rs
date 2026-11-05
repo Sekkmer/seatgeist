@@ -1,8 +1,8 @@
+mod accessibility_snapshot;
 use std::{
     fs::{self, OpenOptions},
-    io::{self, BufRead, BufReader, Read, Write},
+    io::{self, BufRead, Read, Write},
     os::unix::fs::OpenOptionsExt,
-    os::unix::net::UnixStream,
     path::PathBuf,
 };
 
@@ -232,23 +232,8 @@ impl McpServer {
         request: DaemonRequest,
         response_options: Option<DaemonResponseOptions>,
     ) -> Result<DaemonResponse> {
-        let mut stream = UnixStream::connect(&self.socket)
-            .with_context(|| format!("connect to daemon socket {}", self.socket.display()))?;
-        let request_line = serde_json::to_string(&request_envelope(request, response_options))
-            .context("serialize daemon request")?;
-        stream
-            .write_all(request_line.as_bytes())
-            .context("write daemon request")?;
-        stream
-            .write_all(b"\n")
-            .context("write daemon request newline")?;
-
-        let mut reader = BufReader::new(stream);
-        let mut response_line = String::new();
-        reader
-            .read_line(&mut response_line)
-            .context("read daemon response")?;
-        serde_json::from_str(&response_line).context("parse daemon response")
+        libseatgeist::transport::send(&self.socket, &request_envelope(request, response_options))
+            .context("serialize daemon request")
     }
 }
 
@@ -291,7 +276,7 @@ impl JsonRpcResponse {
 fn initialize_result(profile: ToolProfile) -> Value {
     let instructions = match profile {
         ToolProfile::Core => {
-            "Seatgeist core mode exposes six bounded tools. Call computer_status once when needed, open one window_session for retained capture and sticky raw control, snapshot for one native image, act for exactly one policy-gated action plus its settled observation, wait for bounded visual change, and panic_stop for emergency state."
+            "Seatgeist core mode exposes six bounded tools. Call computer_status once when needed, open one window_session for retained capture and sticky raw control, snapshot for one retained image or format=accessibility with an exact window_id and skeleton/drill refs, act for exactly one policy-gated action (including invoke_ref) plus its settled observation, wait for bounded visual change, and panic_stop for emergency state."
         }
         ToolProfile::Expert | ToolProfile::All => SERVER_INSTRUCTIONS,
     };
@@ -314,7 +299,32 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
     match name {
         "seatgeist.computer_status" => Ok(DaemonRequest::ComputerUseReadiness),
         "seatgeist.window_session" => capture::window_session_request(arguments),
-        "seatgeist.snapshot" => capture::core_snapshot_request(arguments),
+        "seatgeist.snapshot" => match optional_string(arguments, "format")?
+            .as_deref()
+            .unwrap_or("image")
+        {
+            "image" => {
+                if [
+                    "window_id",
+                    "root_ref",
+                    "skeleton",
+                    "depth",
+                    "max_nodes",
+                    "interactive_only",
+                    "compact",
+                ]
+                .iter()
+                .any(|key| arguments.get(key).is_some())
+                {
+                    bail!("accessibility options require format=accessibility");
+                }
+                capture::core_snapshot_request(arguments)
+            }
+            "accessibility" => accessibility_snapshot::snapshot(arguments),
+            _ => bail!("snapshot format must be image or accessibility"),
+        },
+        "seatgeist.a11y_snapshot" => accessibility_snapshot::snapshot(arguments),
+        "seatgeist.a11y_ref_action" => accessibility_snapshot::action(arguments),
         "seatgeist.wait" => capture::core_wait_request(arguments),
         "seatgeist.panic_stop" => match optional_bool(arguments, "enabled")? {
             Some(enabled) => Ok(DaemonRequest::SetPanicStop(SetPanicStopRequest { enabled })),
@@ -816,6 +826,7 @@ fn facade_action_tool(action: &str) -> Result<&'static str> {
         "set_text_field" => Ok("seatgeist.set_text_field"),
         "focus_text_field" => Ok("seatgeist.focus_text_field"),
         "select_menu" => Ok("seatgeist.select_menu"),
+        "invoke_ref" => Ok("seatgeist.a11y_ref_action"),
         "activate_tab" => Ok("seatgeist.activate_tab"),
         "activate_link" => Ok("seatgeist.activate_link"),
         "toggle_check" => Ok("seatgeist.toggle_check"),
@@ -1107,6 +1118,20 @@ fn is_auto_runtime_screenshot(path: &std::path::Path, default_dir: &std::path::P
 }
 
 fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
+    let text = compact_tool_text_inner(tool_name, response);
+    match response.disposition() {
+        Some(disposition) => {
+            let value = serde_json::to_value(disposition).unwrap_or_default();
+            format!(
+                "{text} delivery={} retry={}",
+                value["delivery"].as_str().unwrap_or("unknown"),
+                value["retry"].as_str().unwrap_or("observe")
+            )
+        }
+        None => text,
+    }
+}
+fn compact_tool_text_inner(tool_name: &str, response: &DaemonResponse) -> String {
     match response {
         DaemonResponse::Health(status) => {
             let build = status
@@ -1551,6 +1576,14 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             node.children.len()
         ),
         DaemonResponse::AccessibilityTree(None) => "no focused accessibility node".to_string(),
+        DaemonResponse::AccessibilitySnapshot(snapshot) => format!(
+            "accessibility snapshot={} nodes={} refs={} complete={} expires_in_ms={}",
+            snapshot.snapshot_id,
+            snapshot.nodes_observed,
+            snapshot.ref_count,
+            snapshot.complete,
+            snapshot.expires_in_ms
+        ),
         DaemonResponse::AccessibilityMatches(matches) => {
             format!("{} accessibility matches", matches.len())
         }
@@ -1591,6 +1624,7 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
             kind,
             reason_code,
             message,
+            ..
         } => {
             let reason = reason_code.as_deref().unwrap_or("unspecified");
             if *kind == libseatgeist::ErrorKind::AppDenied {
@@ -1708,8 +1742,17 @@ fn core_tool_definitions() -> Vec<Value> {
         tool(
             "seatgeist.snapshot",
             "Snapshot",
-            "Capture one bounded image from the required retained window session and attach it as native MCP image content without another chooser. Whole-desktop compatibility capture is expert-only.",
-            capture::core_snapshot_schema(),
+            "Capture a bounded retained image (default, requires session_id), or format=accessibility for exact KWin-window skeleton/ref observations (requires window_id or root_ref). Neither changes physical focus.",
+            {
+                let mut schema = capture::core_snapshot_schema();
+                schema["properties"]["format"] = json!({"type":"string","enum":["image","accessibility"],"description":"Defaults to image (requires session_id). Accessibility requires exact window_id or root_ref and returns a bounded tree with refs."});
+                for (key, value) in accessibility_snapshot::properties() {
+                    schema["properties"][key] = value;
+                }
+                schema["required"] = json!([]);
+                schema["allOf"] = json!([{"if":{"properties":{"format":{"const":"accessibility"}},"required":["format"]},"then":{"oneOf":[{"required":["window_id"],"not":{"required":["root_ref"]}},{"required":["root_ref"],"not":{"required":["window_id"]}}]},"else":{"required":["session_id"]}}]);
+                schema
+            },
         ),
         tool(
             "seatgeist.act",
@@ -1743,7 +1786,15 @@ fn facade_act_schema() -> Value {
         with_semantic_guard_properties(vec![
             (
                 "action",
-                json!({"type": "string", "enum": ["close_window", "move_window", "launch_window", "resize_window", "page_zoom", "type_text", "key_combo", "click_pointer", "scroll_pointer", "click_button", "set_text_field", "focus_text_field", "select_menu", "activate_tab", "activate_link", "toggle_check", "set_value", "select_item"], "description": "One logical action to execute. close_window requires the exact retained session and KWin window id."}),
+                json!({"type": "string", "enum": ["close_window", "move_window", "launch_window", "resize_window", "page_zoom", "type_text", "key_combo", "click_pointer", "scroll_pointer", "click_button", "set_text_field", "focus_text_field", "select_menu", "activate_tab", "activate_link", "toggle_check", "set_value", "select_item", "invoke_ref"], "description": "One logical action to execute. close_window requires the exact retained session and KWin window id."}),
+            ),
+            (
+                "ref_id",
+                json!({"type":"string","description":"Full snapshot-qualified ref for action=invoke_ref."}),
+            ),
+            (
+                "ref_action",
+                json!({"type":"string","enum":["press","select","focus","set_text"]}),
             ),
             ("window_id", json!({"type": "string"})),
             ("desktop_entry", json!({"type": "string"})),
@@ -1826,7 +1877,7 @@ fn facade_act_schema() -> Value {
 }
 
 fn expert_tool_definitions() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         tool(
             "seatgeist.health",
             "Daemon Health",
@@ -3090,7 +3141,9 @@ fn expert_tool_definitions() -> Vec<Value> {
                 vec![],
             ),
         ),
-    ]
+    ];
+    tools.extend(accessibility_snapshot::tools());
+    tools
 }
 
 fn tool(name: &str, title: &str, description: &str, input_schema: Value) -> Value {
@@ -3697,6 +3750,7 @@ mod tests {
     #[test]
     fn action_compact_text_reports_target_event_settle_provenance() {
         let response = DaemonResponse::Action(Box::new(libseatgeist::ActionResult {
+            disposition: None,
             id: "00000000-0000-0000-0000-000000000000"
                 .parse()
                 .expect("nil action id parses"),
@@ -3742,6 +3796,7 @@ mod tests {
     #[test]
     fn user_preempted_agent_delivery_is_an_explicit_tool_error() {
         let response = DaemonResponse::Action(Box::new(libseatgeist::ActionResult {
+            disposition: None,
             id: "00000000-0000-0000-0000-000000000000"
                 .parse()
                 .expect("nil action id parses"),
@@ -3852,6 +3907,7 @@ mod tests {
         let mut screenshot = sample_screenshot_info("portal_screencast_pipewire");
         screenshot.path = path.clone();
         let response = DaemonResponse::Action(Box::new(libseatgeist::ActionResult {
+            disposition: None,
             id: "00000000-0000-0000-0000-000000000000"
                 .parse()
                 .expect("nil action id parses"),
@@ -4759,7 +4815,25 @@ mod tests {
                 .iter()
                 .find(|tool| tool["name"] == name)
                 .expect("core capture tool exists")["inputSchema"];
-            assert_eq!(schema["required"], json!(["session_id"]));
+            if name == "seatgeist.snapshot" {
+                assert_eq!(
+                    schema["allOf"][0]["else"]["required"],
+                    json!(["session_id"])
+                );
+                assert_eq!(
+                    schema["allOf"][0]["if"]["properties"]["format"]["const"],
+                    "accessibility"
+                );
+                assert_eq!(
+                    schema["allOf"][0]["then"]["oneOf"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    2
+                );
+            } else {
+                assert_eq!(schema["required"], json!(["session_id"]));
+            }
         }
         let snapshot_schema = &tools
             .iter()
@@ -6354,6 +6428,7 @@ mod tests {
     #[test]
     fn daemon_errors_become_tool_errors() {
         let response = DaemonResponse::Error {
+            disposition: None,
             kind: libseatgeist::ErrorKind::PolicyDenied,
             reason_code: Some("policy_denied".to_string()),
             message: "policy denied".to_string(),
@@ -6370,6 +6445,7 @@ mod tests {
     #[test]
     fn protected_application_denial_is_explicit_and_non_retryable() {
         let response = DaemonResponse::Error {
+            disposition: None,
             kind: libseatgeist::ErrorKind::AppDenied,
             reason_code: Some("protected_application".to_string()),
             message: "app policy denied control of protected application \
@@ -6390,6 +6466,7 @@ mod tests {
     #[test]
     fn unconfirmed_actions_become_tool_errors_without_losing_action_metadata() {
         let response = DaemonResponse::Action(Box::new(libseatgeist::ActionResult {
+            disposition: None,
             id: "00000000-0000-0000-0000-000000000000"
                 .parse()
                 .expect("nil action id parses"),

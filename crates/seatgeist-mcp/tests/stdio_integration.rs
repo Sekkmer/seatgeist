@@ -503,6 +503,7 @@ fn mcp_core_profile_exposes_only_the_bounded_facade() -> Result<()> {
                     "arguments": {}
                 }
             }),
+            json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"seatgeist.act","arguments":{"action":"invoke_ref","ref_id":"@e1","ref_action":"press"}}}),
         ],
     )?;
 
@@ -521,7 +522,14 @@ fn mcp_core_profile_exposes_only_the_bounded_facade() -> Result<()> {
             .iter()
             .find(|tool| tool["name"] == name)
             .context("core retained capture tool exists")?;
-        assert_eq!(tool["inputSchema"]["required"], json!(["session_id"]));
+        if name == "seatgeist.snapshot" {
+            assert_eq!(
+                tool["inputSchema"]["allOf"][0]["else"]["required"],
+                json!(["session_id"])
+            );
+        } else {
+            assert_eq!(tool["inputSchema"]["required"], json!(["session_id"]));
+        }
     }
     assert!(
         !tools
@@ -557,6 +565,11 @@ fn mcp_core_profile_exposes_only_the_bounded_facade() -> Result<()> {
                 .contains("argument 'session_id' is required")
         );
     }
+    let refusal = &responses[6]["result"]["structuredContent"];
+    assert_eq!(refusal["type"], "error");
+    assert_eq!(refusal["data"]["reason_code"], "accessibility_ref_invalid");
+    assert_eq!(refusal["data"]["disposition"]["delivery"], "not_delivered");
+    assert_eq!(refusal["data"]["disposition"]["retry"], "after_change");
     Ok(())
 }
 

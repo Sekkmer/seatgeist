@@ -33,9 +33,8 @@ use libseatgeist::{
     WindowPlacementAnchor, default_approval_file_path, default_screenshot_output_path,
     default_socket_path,
 };
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixStream;
 use target::TargetGuardArgs;
 
 const CLIENT_TOOL_NAME: &str = "seatgeist-cli";
@@ -522,6 +521,37 @@ enum InputCommand {
 
 #[derive(Debug, Subcommand)]
 enum AtspiCommand {
+    /// Bounded exact-KWin accessibility tree; skeletons can be drilled by ref.
+    Snapshot {
+        #[arg(
+            long,
+            conflicts_with = "root_ref",
+            required_unless_present = "root_ref"
+        )]
+        window_id: Option<String>,
+        #[arg(long)]
+        root_ref: Option<String>,
+        #[arg(long)]
+        skeleton: bool,
+        #[arg(long, default_value_t = 8)]
+        depth: usize,
+        #[arg(long, default_value_t = 256)]
+        max_nodes: usize,
+        #[arg(long)]
+        interactive_only: bool,
+        #[arg(long)]
+        compact: bool,
+    },
+    RefAction {
+        #[arg(long)]
+        ref_id: String,
+        #[arg(long)]
+        action: AccessibilityAction,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        destructive: bool,
+    },
     QualityStatus,
     Tree {
         #[arg(long)]
@@ -1436,6 +1466,47 @@ fn main() -> Result<()> {
             }),
         )?,
         Command::Atspi {
+            command:
+                AtspiCommand::Snapshot {
+                    window_id,
+                    root_ref,
+                    skeleton,
+                    depth,
+                    max_nodes,
+                    interactive_only,
+                    compact,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::AccessibilitySnapshot(libseatgeist::AccessibilitySnapshotRequest {
+                window_id,
+                root_ref,
+                skeleton,
+                depth,
+                max_nodes,
+                interactive_only,
+                compact,
+            }),
+        )?,
+        Command::Atspi {
+            command:
+                AtspiCommand::RefAction {
+                    ref_id,
+                    action,
+                    text,
+                    destructive,
+                },
+        } => print_daemon_response(
+            &socket,
+            DaemonRequest::AccessibilityRefAction(libseatgeist::AccessibilityRefActionRequest {
+                ref_id,
+                action,
+                text,
+                destructive,
+                target_guard: None,
+            }),
+        )?,
+        Command::Atspi {
             command: AtspiCommand::QualityStatus,
         } => print_daemon_response(&socket, DaemonRequest::AccessibilityQualityStatus)?,
         Command::Atspi {
@@ -2102,6 +2173,7 @@ fn print_daemon_response(socket: &PathBuf, request: DaemonRequest) -> Result<()>
             kind,
             reason_code,
             message,
+            ..
         } => {
             bail!(
                 "daemon returned {kind:?} error reason={}: {message}",
@@ -2553,6 +2625,7 @@ fn known_response_types() -> &'static [&'static str] {
         "accessibility_quality_status",
         "accessibility_tree",
         "accessibility_matches",
+        "accessibility_snapshot",
         "accessibility_text_attributes",
         "journal",
         "action",
@@ -2571,21 +2644,8 @@ fn trace_step_context(index: usize, step: &libseatgeist::TraceStep) -> String {
 }
 
 fn send_request(socket: &PathBuf, request: DaemonRequest) -> Result<DaemonResponse> {
-    let mut stream =
-        UnixStream::connect(socket).with_context(|| format!("connect to {}", socket.display()))?;
-    let request_line =
-        serde_json::to_string(&request_envelope(request)).context("serialize daemon request")?;
-    stream
-        .write_all(request_line.as_bytes())
-        .context("write request")?;
-    stream.write_all(b"\n").context("write request newline")?;
-
-    let mut reader = BufReader::new(stream);
-    let mut response_line = String::new();
-    reader
-        .read_line(&mut response_line)
-        .context("read daemon response")?;
-    serde_json::from_str(&response_line).context("parse daemon response")
+    libseatgeist::transport::send(socket, &request_envelope(request))
+        .context("serialize daemon request")
 }
 
 fn request_envelope(request: DaemonRequest) -> DaemonRequestEnvelope {

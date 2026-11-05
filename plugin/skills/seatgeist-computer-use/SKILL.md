@@ -145,3 +145,18 @@ Useful control tools:
 - `seatgeist.move_pointer`, `seatgeist.click_pointer`, `seatgeist.drag_pointer`, and `seatgeist.scroll_pointer` only after semantic routes are unavailable.
 - `seatgeist.wait_for_change` to confirm bounded visual changes without repeatedly dumping screenshots; omit `output` unless a task-specific artifact path is needed.
 - `seatgeist.journal_tail` to inspect compact action history when debugging a run.
+
+For accessibility-first work, core `snapshot` also accepts
+`format=accessibility`, an exact KWin `window_id` from inventory, and
+`skeleton=true`. It returns structured nodes with snapshot-qualified refs and
+cut-region counts without opening a capture. Drill with `root_ref=<full-ref>`
+instead of `window_id`; preserve the full `@sg1:...:eN` ref. Use core `act` with
+`action=invoke_ref`, `ref_id`, and `ref_action=press|select|focus|set_text` (`text`
+is required only for set_text). These actions revalidate the exact window and
+node through daemon policy; they never choose another node or use raw input as
+a fallback. Refs are owner-bound, bounded, and expire after five minutes. A
+stale, expired, ambiguous, or unavailable target needs fresh observation and a
+new decision. Read `disposition.delivery` and `disposition.retry` separately
+from settle confirmation: `unknown`/`observe` means input may already have
+landed. Never replay merely because the response timed out. Image snapshots
+retain their existing required session_id and image-coordinate rules.
