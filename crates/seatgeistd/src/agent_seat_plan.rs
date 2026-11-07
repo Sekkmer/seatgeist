@@ -144,9 +144,11 @@ pub(super) fn plan(value: serde_json::Value) -> Result<Vec<Event>> {
             for (axis, detents) in [("vertical", vertical), ("horizontal", horizontal)] {
                 if detents != 0 {
                     let delta_v120 = detents
-                        .checked_mul(120)
+                        .checked_mul(-120)
                         .ok_or_else(|| anyhow::anyhow!("agent-seat scroll overflow"))?;
-                    let delta = f64::from(detents) * 15.0;
+                    // Wayland surface axes increase down/right; the public API
+                    // accepts positive up/left wheel detents.
+                    let delta = -f64::from(detents) * 15.0;
                     if delta.abs() > 1_000_000.0 {
                         bail!("agent-seat scroll exceeds host bound");
                     }
@@ -232,16 +234,41 @@ mod tests {
             vec![
                 Event::Axis {
                     axis: "vertical",
-                    delta: -30.0,
-                    delta_v120: -240
+                    delta: 30.0,
+                    delta_v120: 240
                 },
                 Event::Axis {
                     axis: "horizontal",
-                    delta: 15.0,
-                    delta_v120: 120
+                    delta: -15.0,
+                    delta_v120: -120
                 },
             ]
         );
+    }
+
+    #[test]
+    fn advertised_scroll_directions_map_to_wayland_surface_axes() {
+        // The public API promises positive up/left, while Wayland axes grow
+        // down/right. Check both signs and single-axis requests independently.
+        for (axis, vertical, horizontal) in [
+            ("vertical", 1, 0),
+            ("vertical", -1, 0),
+            ("horizontal", 0, 1),
+            ("horizontal", 0, -1),
+        ] {
+            let detents = if vertical != 0 { vertical } else { horizontal };
+            assert_eq!(
+                plan(
+                    json!({"action":"pointer_scroll","vertical":vertical,"horizontal":horizontal})
+                )
+                .unwrap(),
+                vec![Event::Axis {
+                    axis,
+                    delta: -f64::from(detents) * 15.0,
+                    delta_v120: -detents * 120,
+                }]
+            );
+        }
     }
 
     #[test]
@@ -251,6 +278,7 @@ mod tests {
             json!({"action":"key_sequence","chords":[[30],[0]]}),
             json!({"action":"pointer_drag","from_x":1,"from_y":2,"to_x":-1,"to_y":4,"button":272}),
             json!({"action":"pointer_scroll","vertical":2147483647,"horizontal":0}),
+            json!({"action":"pointer_scroll","vertical":-2147483648_i64,"horizontal":0}),
             json!({"action":"pointer_scroll","vertical":0,"horizontal":0}),
             json!({"action":"pointer_click","x":1,"y":2,"button":272,"clicks":0}),
         ] {
