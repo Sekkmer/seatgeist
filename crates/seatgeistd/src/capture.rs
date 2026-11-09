@@ -899,6 +899,14 @@ fn capture_frame_result(
     frame: CapturedFrame,
 ) -> CaptureFrameResult {
     let screenshot = frame.screenshot;
+    let (space, width, height) = frame
+        .window_local_extent
+        .map(|(width, height)| (CoordinateSpace::WindowLocal, width, height))
+        .unwrap_or((
+            CoordinateSpace::PhysicalPixel,
+            screenshot.source_width,
+            screenshot.source_height,
+        ));
     CaptureFrameResult {
         session_id: session_id.to_string(),
         screenshot: ScreenshotInfo {
@@ -910,16 +918,16 @@ fn capture_frame_result(
             output_width: screenshot.width,
             output_height: screenshot.height,
             transform: ScreenshotTransform {
-                source_coordinate_space: CoordinateSpace::PhysicalPixel,
+                source_coordinate_space: space,
                 output_coordinate_space: CoordinateSpace::CaptureOutput,
-                source_extent_width: Some(screenshot.source_width),
-                source_extent_height: Some(screenshot.source_height),
+                source_extent_width: Some(width),
+                source_extent_height: Some(height),
                 source_origin_x: 0,
                 source_origin_y: 0,
-                scale_x: f64::from(screenshot.width) / f64::from(screenshot.source_width.max(1)),
-                scale_y: f64::from(screenshot.height) / f64::from(screenshot.source_height.max(1)),
+                scale_x: f64::from(screenshot.width) / f64::from(width.max(1)),
+                scale_y: f64::from(screenshot.height) / f64::from(height.max(1)),
             },
-            coordinate_space: CoordinateSpace::PhysicalPixel,
+            coordinate_space: space,
             monitors: Vec::new(),
         },
         revision: frame.revision,
@@ -1035,6 +1043,7 @@ mod tests {
             request: FrameRequest,
         ) -> seatgeist_backend::Result<CapturedFrame> {
             Ok(CapturedFrame {
+                window_local_extent: None,
                 screenshot: seatgeist_backend::Screenshot {
                     path: request.output,
                     source_width: 1280,
@@ -1669,3 +1678,7 @@ mod tests {
         assert!(error.to_string().contains("timeout_ms"));
     }
 }
+
+#[cfg(test)]
+#[path = "client_capture_transform_tests.rs"]
+mod client_capture_transform_tests;

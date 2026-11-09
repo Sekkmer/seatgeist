@@ -93,6 +93,7 @@ impl MockScreenBackend {
         Self::with_frames(
             monitors,
             vec![CapturedFrame {
+                window_local_extent: None,
                 screenshot,
                 revision: "mock-frame-1".to_string(),
                 sequence: 1,
@@ -841,6 +842,7 @@ mod tests {
     #[tokio::test]
     async fn mock_screen_retains_capture_session_and_advances_frames() -> Result<()> {
         let first = CapturedFrame {
+            window_local_extent: None,
             screenshot: Screenshot {
                 path: "mock-frame-1.png".to_string(),
                 source_width: 1600,
@@ -854,6 +856,7 @@ mod tests {
             damage_present: false,
         };
         let second = CapturedFrame {
+            window_local_extent: None,
             screenshot: Screenshot {
                 path: "mock-frame-2.png".to_string(),
                 source_width: 1600,

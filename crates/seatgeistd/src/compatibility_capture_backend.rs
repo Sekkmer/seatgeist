@@ -303,6 +303,22 @@ impl CaptureSession for OneShotCaptureSession {
         })?;
         let sequence = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
         Ok(CapturedFrame {
+            window_local_extent: if info.backend == "kwin_screenshot2_window" {
+                Some((
+                    info.transform.source_extent_width.ok_or_else(|| {
+                        SeatgeistError::BackendUnavailable(
+                            "exact capture omitted client width".into(),
+                        )
+                    })?,
+                    info.transform.source_extent_height.ok_or_else(|| {
+                        SeatgeistError::BackendUnavailable(
+                            "exact capture omitted client height".into(),
+                        )
+                    })?,
+                ))
+            } else {
+                None
+            },
             screenshot: Screenshot {
                 path: info.path.display().to_string(),
                 source_width: info.source_width,

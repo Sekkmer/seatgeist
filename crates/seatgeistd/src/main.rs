@@ -3046,7 +3046,13 @@ async fn protect_retained_capture_frame(
     if status.source_type.as_deref() == Some("window") && status.requested_window_id.is_some() {
         // Exact window sessions were app-authorized before opening and produce
         // window-local pixels rather than a composed desktop.
-        annotate_exact_window_capture_transform(&status, frame, runtime).await?;
+        annotate_exact_window_capture_transform(
+            &status,
+            frame,
+            runtime.window_backend.as_ref(),
+            runtime.screen_backend.as_ref(),
+        )
+        .await?;
         return Ok(());
     }
     if status.source_type.as_deref() == Some("window") {
@@ -3071,17 +3077,49 @@ async fn protect_retained_capture_frame(
     Ok(())
 }
 
+fn preserve_authoritative_client_transform(
+    frame: &libseatgeist::CaptureFrameResult,
+) -> Result<bool> {
+    if frame.screenshot.backend != "kwin_screenshot2_window" {
+        return Ok(false);
+    }
+    let screenshot = &frame.screenshot;
+    let transform = &screenshot.transform;
+    let valid_extent = transform.source_extent_width.is_some_and(|value| value > 0)
+        && transform
+            .source_extent_height
+            .is_some_and(|value| value > 0);
+    if screenshot.output_width == 0
+        || screenshot.output_height == 0
+        || screenshot.coordinate_space != CoordinateSpace::WindowLocal
+        || transform.source_coordinate_space != CoordinateSpace::WindowLocal
+        || transform.output_coordinate_space != CoordinateSpace::CaptureOutput
+        || !valid_extent
+        || transform.source_origin_x != 0
+        || transform.source_origin_y != 0
+        || !transform.scale_x.is_finite()
+        || transform.scale_x <= 0.0
+        || !transform.scale_y.is_finite()
+        || transform.scale_y <= 0.0
+    {
+        bail!("exact KWin capture omitted a valid authoritative client transform");
+    }
+    // ScreenShot2 metadata describes the client image, whereas bridge geometry
+    // includes decorations. Monitor discovery must not replace this transform.
+    Ok(true)
+}
+
 async fn annotate_exact_window_capture_transform(
     status: &libseatgeist::CaptureSessionStatus,
     frame: &mut libseatgeist::CaptureFrameResult,
-    runtime: &DaemonRuntime,
+    window_backend: &dyn WindowBackend,
+    screen_backend: &dyn ScreenBackend,
 ) -> Result<()> {
     let window_id = status
         .requested_window_id
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("exact capture status omitted its requested window id"))?;
-    let windows = runtime
-        .window_backend
+    let windows = window_backend
         .list_windows()
         .await
         .map_err(anyhow::Error::msg)
@@ -3090,6 +3128,9 @@ async fn annotate_exact_window_capture_transform(
         .iter()
         .find(|window| window.id == window_id)
         .ok_or_else(|| anyhow::anyhow!("requested window does not exist"))?;
+    if preserve_authoritative_client_transform(frame)? {
+        return Ok(());
+    }
     let geometry = window
         .geometry
         .as_ref()
@@ -3100,11 +3141,7 @@ async fn annotate_exact_window_capture_transform(
     {
         bail!("exact capture window has invalid logical geometry");
     }
-    let monitors = runtime
-        .screen_backend
-        .list_monitors()
-        .await
-        .unwrap_or_default();
+    let monitors = screen_backend.list_monitors().await.unwrap_or_default();
     let monitor_scale = window
         .monitor_id
         .as_deref()

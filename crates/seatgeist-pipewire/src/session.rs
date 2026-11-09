@@ -267,6 +267,7 @@ impl<S: FrameSource> PipeWireCaptureSession<S> {
         write_private_png(Path::new(&request.output), &encoded.png)
             .map_err(pipewire_backend_error)?;
         let frame = CapturedFrame {
+            window_local_extent: None,
             screenshot: Screenshot {
                 path: request.output.clone(),
                 source_width: encoded.source_width,

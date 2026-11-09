@@ -208,7 +208,9 @@ When a pointer coordinate was measured on that preview, pass
 `coordinate_space="capture_output"`, the frame's `session_id`, and its exact
 `capture_revision`. The daemon rejects stale revisions and maps the point
 atomically, including fractional-DPI and preview downscaling; do not copy
-preview pixels into `window_local`.
+preview pixels into `window_local`. Exact KWin window captures retain the logical
+client extent from ScreenShot2 metadata, even when monitor discovery is
+unavailable; server-side decorations never enlarge the pointer extent.
 
 Capture status includes an optional compact `last_end_reason`. Portal-driven
 `Session.Closed` is reported as `portal_closed`; explicit id-checked close is

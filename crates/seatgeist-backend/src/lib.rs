@@ -116,6 +116,9 @@ pub struct FrameWaitRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedFrame {
+    /// Authoritative logical client extent from an exact-window capture backend.
+    /// Native source pixel dimensions remain in `screenshot`.
+    pub window_local_extent: Option<(u32, u32)>,
     pub screenshot: Screenshot,
     pub revision: String,
     pub sequence: u64,
