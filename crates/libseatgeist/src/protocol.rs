@@ -23,6 +23,9 @@ pub const DEFAULT_POST_ACTION_SETTLE_INTERVAL_MS: u64 = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthStatus {
+    /// Prevent clients from silently degrading a modified drag on an older daemon.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub atomic_shift_drag_supported: bool,
     pub service: String,
     pub version: String,
     pub status: String,
@@ -1196,8 +1199,29 @@ pub struct ClickPointerRequest {
     pub session_id: Option<String>,
 }
 
+/// Modifiers supported by one balanced, exact-target pointer drag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DragModifier {
+    Shift,
+}
+
+impl FromStr for DragModifier {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "shift" => Ok(Self::Shift),
+            _ => Err("drag modifier must be shift".to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DragPointerRequest {
+    /// Empty for an ordinary drag; at most one Shift for a native atomic drag.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<DragModifier>,
     pub from: Point,
     pub to: Point,
     pub button: PointerButton,
@@ -1908,6 +1932,21 @@ pub struct ActionResult {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn drag_modifiers_preserve_legacy_wire_default() {
+        let legacy = serde_json::json!({"method":"drag_pointer",
+            "from":{"x":1.0,"y":2.0,"space":"window_local"},
+            "to":{"x":3.0,"y":4.0,"space":"window_local"},"button":"left","duration_ms":250});
+        let request: super::DaemonRequest = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap(), legacy);
+        let mut modified = legacy;
+        modified["modifiers"] = serde_json::json!(["shift"]);
+        let request: super::DaemonRequest = serde_json::from_value(modified.clone()).unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap(), modified);
+        modified["modifiers"] = serde_json::json!(["ctrl"]);
+        assert!(serde_json::from_value::<super::DaemonRequest>(modified).is_err());
+    }
+
     use super::*;
 
     #[test]
@@ -2541,6 +2580,7 @@ mod tests {
         assert!(encoded.contains(r#""expected_window_id":"current-window""#));
 
         let drag_pointer = DaemonRequest::DragPointer(DragPointerRequest {
+            modifiers: Vec::new(),
             from: Point {
                 x: 100.0,
                 y: 200.0,
@@ -3061,6 +3101,7 @@ mod tests {
     #[test]
     fn daemon_response_reports_stable_type_and_ok_state() {
         let health = DaemonResponse::Health(HealthStatus {
+            atomic_shift_drag_supported: false,
             service: "seatgeistd".to_string(),
             version: "0.1.0".to_string(),
             status: "ok".to_string(),

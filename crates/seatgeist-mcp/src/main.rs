@@ -232,6 +232,12 @@ impl McpServer {
         request: DaemonRequest,
         response_options: Option<DaemonResponseOptions>,
     ) -> Result<DaemonResponse> {
+        if matches!(&request, DaemonRequest::DragPointer(drag) if !drag.modifiers.is_empty()) {
+            match self.send_daemon_request(DaemonRequest::Health, None)? {
+                DaemonResponse::Health(health) if health.atomic_shift_drag_supported => {}
+                _ => bail!("daemon does not support atomic Shift drag; no input sent"),
+            }
+        }
         libseatgeist::transport::send(&self.socket, &request_envelope(request, response_options))
             .context("serialize daemon request")
     }
@@ -293,6 +299,18 @@ fn initialize_result(profile: ToolProfile) -> Value {
         },
         "instructions": instructions
     })
+}
+
+fn drag_modifiers(arguments: &Value) -> Result<Vec<libseatgeist::DragModifier>> {
+    let modifiers: Vec<libseatgeist::DragModifier> = arguments
+        .get("modifiers")
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()?
+        .unwrap_or_default();
+    if modifiers.len() > 1 {
+        bail!("drag modifiers must be empty or contain Shift once");
+    }
+    Ok(modifiers)
 }
 
 fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonRequest> {
@@ -615,6 +633,7 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
         "seatgeist.drag_pointer" => {
             let coordinate_space = required_coordinate_space(arguments, "coordinate_space")?;
             Ok(DaemonRequest::DragPointer(DragPointerRequest {
+                modifiers: drag_modifiers(arguments)?,
                 from: Point {
                     x: required_f64(arguments, "from_x")?,
                     y: required_f64(arguments, "from_y")?,
@@ -2498,7 +2517,7 @@ fn expert_tool_definitions() -> Vec<Value> {
         tool(
             "seatgeist.drag_pointer",
             "Drag Pointer",
-            "Drag between explicit coordinates. Use capture_output with session_id and capture_revision when both endpoints were measured on a retained screenshot preview.",
+            "Drag between explicit coordinates. Optional Shift requires an exact session and keyboard plus pointer authorization on the native v2 agent seat; one atomic balanced batch, not a timed hold. Use capture_output with session_id and capture_revision for retained screenshot coordinates.",
             object_schema(
                 with_raw_guard_properties(vec![
                     (
@@ -2530,8 +2549,12 @@ fn expert_tool_definitions() -> Vec<Value> {
                         json!({"type": "string", "enum": ["left", "middle", "right"], "description": "Pointer button to hold during the drag. Defaults to left."}),
                     ),
                     (
+                        "modifiers",
+                        json!({"type": "array", "items": {"type": "string", "enum": ["shift"]}, "maxItems": 1, "uniqueItems": true, "default": [], "description": "Hold Shift only within one atomic native v2 agent-seat drag. Requires an exact session and both keyboard/pointer authorization. Other backends refuse."}),
+                    ),
+                    (
                         "duration_ms",
-                        json!({"type": "integer", "minimum": 0, "maximum": 10000, "description": "Approximate drag duration in milliseconds. Defaults to 250."}),
+                        json!({"type": "integer", "minimum": 0, "maximum": 10000, "description": "Requested duration, default 250. Native agent-seat drags are atomic: no timed hold or interpolation is promised."}),
                     ),
                 ]),
                 vec!["from_x", "from_y", "to_x", "to_y", "coordinate_space"],
@@ -3551,6 +3574,85 @@ fn i64_to_i32(value: i64) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shift_drag_refuses_legacy_daemon_before_sending_input() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            os::unix::net::UnixListener,
+        };
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("sg-shift-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let socket = dir.join("bus");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["request"]["method"], "health");
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({"type":"health","data":{
+                "service":"seatgeistd","version":"old","status":"ok"}})
+            )
+            .unwrap();
+            listener
+        });
+        let request = libseatgeist::DaemonRequest::DragPointer(
+            serde_json::from_value(serde_json::json!({
+                "from":{"x":1,"y":2,"space":"window_local"},
+                "to":{"x":3,"y":4,"space":"window_local"},
+                "button":"left","duration_ms":250,"modifiers":["shift"],"session_id":"capture-1"
+            }))
+            .unwrap(),
+        );
+        let error = super::McpServer {
+            socket: socket.clone(),
+            tool_profile: super::ToolProfile::All,
+            readiness_cache: Default::default(),
+        }
+        .send_daemon_request(request, None)
+        .unwrap_err();
+        assert!(error.to_string().contains("no input sent"));
+        let listener = server.join().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err(), "no drag sent to the old daemon");
+        drop(listener);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn drag_shift_parser_and_advertised_contract_agree() {
+        let base = serde_json::json!({"from_x":1,"from_y":2,"to_x":3,"to_y":4,
+            "coordinate_space":"capture_output","session_id":"capture-1","capture_revision":"rev-1"});
+        let mut modified = base.clone();
+        modified["modifiers"] = serde_json::json!(["shift"]);
+        let libseatgeist::DaemonRequest::DragPointer(request) =
+            super::daemon_request_for_tool("seatgeist.drag_pointer", &modified).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(request.modifiers, [libseatgeist::DragModifier::Shift]);
+        assert_eq!(request.session_id.as_deref(), Some("capture-1"));
+        assert_eq!(request.capture_revision.as_deref(), Some("rev-1"));
+        for invalid in [
+            serde_json::json!(["ctrl"]),
+            serde_json::json!(["shift", "shift"]),
+            serde_json::json!("shift"),
+            serde_json::json!(null),
+        ] {
+            modified["modifiers"] = invalid;
+            assert!(super::daemon_request_for_tool("seatgeist.drag_pointer", &modified).is_err());
+        }
+    }
+
     use super::*;
     use libseatgeist::{
         AccessibilityQualityStatus, CaptureBackendStatus, CaptureSessionStatus,
@@ -5530,6 +5632,7 @@ mod tests {
         assert_eq!(
             drag_pointer,
             DaemonRequest::DragPointer(DragPointerRequest {
+                modifiers: Vec::new(),
                 from: Point {
                     x: 100.0,
                     y: 200.0,

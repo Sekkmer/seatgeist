@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use libseatgeist::{
     AccessibilityAction, AccessibilityFindRequest, AccessibilityNode, AccessibilityTextAttributes,
-    MonitorInfo, Point, PointerButton, SeatgeistError, WindowGeometry, WindowId, WindowInfo,
+    DragModifier, MonitorInfo, Point, PointerButton, SeatgeistError, WindowGeometry, WindowId,
+    WindowInfo,
 };
 use std::time::Duration;
 use uuid::Uuid;
@@ -229,6 +230,25 @@ pub trait TargetedInputBackend: std::fmt::Debug + Send + Sync {
         to: Point,
         button: PointerButton,
     ) -> Result<TargetedInputDelivery>;
+    /// Backends must refuse modified drags before delivery unless they support
+    /// one balanced keyboard/pointer batch on the same exact target and lane.
+    async fn drag_with_modifiers(
+        &self,
+        context: &TargetedInputContext,
+        target: &WindowInfo,
+        from: Point,
+        to: Point,
+        button: PointerButton,
+        modifiers: &[DragModifier],
+    ) -> Result<TargetedInputDelivery> {
+        if !modifiers.is_empty() {
+            return Err(SeatgeistError::BackendUnavailable(
+                "atomic modified drag is unsupported by this targeted input backend".to_string(),
+            ));
+        }
+        self.drag(context, target, from, to, button).await
+    }
+
     async fn scroll(
         &self,
         context: &TargetedInputContext,

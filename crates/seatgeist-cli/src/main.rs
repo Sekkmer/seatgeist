@@ -468,6 +468,9 @@ enum InputCommand {
         coordinate_space: CoordinateSpace,
         #[arg(long, default_value = "left")]
         button: PointerButton,
+        /// Atomic Shift drag on an exact native agent-seat session (no timed hold).
+        #[arg(long = "modifier", value_parser = ["shift"], num_args = 1)]
+        modifiers: Vec<String>,
         #[arg(long, default_value_t = 250)]
         duration_ms: u64,
         #[arg(long)]
@@ -1370,6 +1373,7 @@ fn main() -> Result<()> {
                     coordinate_space,
                     button,
                     duration_ms,
+                    modifiers,
                     expected_active_window,
                     expected_active_app,
                     active_title_contains,
@@ -1377,6 +1381,11 @@ fn main() -> Result<()> {
         } => print_daemon_response(
             &socket,
             DaemonRequest::DragPointer(DragPointerRequest {
+                modifiers: modifiers
+                    .iter()
+                    .map(|value| value.parse())
+                    .collect::<Result<_, _>>()
+                    .map_err(anyhow::Error::msg)?,
                 from: Point {
                     x: from_x,
                     y: from_y,
@@ -2644,6 +2653,12 @@ fn trace_step_context(index: usize, step: &libseatgeist::TraceStep) -> String {
 }
 
 fn send_request(socket: &PathBuf, request: DaemonRequest) -> Result<DaemonResponse> {
+    if matches!(&request, DaemonRequest::DragPointer(drag) if !drag.modifiers.is_empty()) {
+        match send_request(socket, DaemonRequest::Health)? {
+            DaemonResponse::Health(health) if health.atomic_shift_drag_supported => {}
+            _ => bail!("daemon does not support atomic Shift drag; no input sent"),
+        }
+    }
     libseatgeist::transport::send(socket, &request_envelope(request))
         .context("serialize daemon request")
 }
@@ -2668,9 +2683,137 @@ fn screenshot_output_or_default(output: Option<PathBuf>, kind: &str) -> Result<P
 
 #[cfg(test)]
 mod output_tests {
+    #[test]
+    fn shift_drag_refuses_legacy_daemon_before_sending_input() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            os::unix::net::UnixListener,
+        };
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("sg-shift-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let socket = dir.join("bus");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["request"]["method"], "health");
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({"type":"health","data":{
+                "service":"seatgeistd","version":"old","status":"ok"}})
+            )
+            .unwrap();
+            listener
+        });
+        let request = libseatgeist::DaemonRequest::DragPointer(
+            serde_json::from_value(serde_json::json!({
+                "from":{"x":1,"y":2,"space":"window_local"},
+                "to":{"x":3,"y":4,"space":"window_local"},
+                "button":"left","duration_ms":250,"modifiers":["shift"],"session_id":"capture-1"
+            }))
+            .unwrap(),
+        );
+        let error = super::send_request(&socket, request).unwrap_err();
+        assert!(error.to_string().contains("no input sent"));
+        let listener = server.join().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err(), "no drag sent to the old daemon");
+        drop(listener);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     use std::io::{self, Write};
 
     use super::write_line_ignoring_broken_pipe;
+
+    #[test]
+    fn shift_drag_refuses_legacy_daemon_before_sending_input() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            os::unix::net::UnixListener,
+        };
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("sg-shift-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let socket = dir.join("bus");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["request"]["method"], "health");
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({"type":"health","data":{
+                "service":"seatgeistd","version":"old","status":"ok"}})
+            )
+            .unwrap();
+            listener
+        });
+        let request = libseatgeist::DaemonRequest::DragPointer(
+            serde_json::from_value(serde_json::json!({
+                "from":{"x":1,"y":2,"space":"window_local"},
+                "to":{"x":3,"y":4,"space":"window_local"},
+                "button":"left","duration_ms":250,"modifiers":["shift"],"session_id":"capture-1"
+            }))
+            .unwrap(),
+        );
+        let error = super::send_request(&socket, request).unwrap_err();
+        assert!(error.to_string().contains("no input sent"));
+        let listener = server.join().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err(), "no drag sent to the old daemon");
+        drop(listener);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn drag_accepts_only_supported_modifier_flag() {
+        use clap::Parser;
+        let base = [
+            "seatgeist-cli",
+            "input",
+            "drag-pointer",
+            "--from-x",
+            "1",
+            "--from-y",
+            "2",
+            "--to-x",
+            "3",
+            "--to-y",
+            "4",
+            "--coordinate-space",
+            "window-local",
+            "--session-id",
+            "capture-1",
+        ];
+        for modifier in [None, Some("shift"), Some("ctrl")] {
+            let mut args = base.to_vec();
+            if let Some(value) = modifier {
+                args.extend(["--modifier", value]);
+            }
+            assert_eq!(
+                super::Cli::try_parse_from(args).is_ok(),
+                modifier != Some("ctrl")
+            );
+        }
+    }
 
     struct BrokenPipeWriter;
 

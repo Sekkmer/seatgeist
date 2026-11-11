@@ -423,3 +423,37 @@ write failures, or read timeouts after an action write attempt are
 `unknown/observe`; the daemon may still be running that request. The client
 returns structured advice and never reconnects or repeats the request. These
 socket limits are not cancellation or a promise of a total execution deadline.
+
+### Atomic Shift drag on the native agent seat
+
+The expert `seatgeist.drag_pointer` tool accepts optional `modifiers: ["shift"]`
+(default `[]`). This requires an owned exact `session_id`, the native v2 agent-seat
+host, a daemon advertising `health.atomic_shift_drag_supported`, and both `ControlPointer` and `ControlKeyboard` authorization before delivery.
+The same target, lane, coordinate/frame validation, user-interference checks,
+policy and journal apply to the whole gesture. Unknown or duplicate modifiers,
+legacy hosts and other input backends refuse before any event.
+
+The host executes one balanced batch: Shift down, motion to the start, button down,
+motion to the end, button up, Shift up. The host validates the entire batch and
+current target bounds before delivery, and updates the seat's keyboard modifiers
+for each key event. No physical-user focus changes or held-key API are involved.
+`duration_ms` remains accepted/validated, but native drags are atomic: it does not
+promise elapsed hold time or pointer interpolation. A timeout still means unknown
+delivery; observe the same target before deciding anything further, without replay.
+
+If a running MCP caller retains old tool metadata, the supported CLI uses the same
+daemon policy, ownership, frame and journal path:
+
+```sh
+seatgeist-cli input drag-pointer --session-id "$session" \
+  --capture-revision "$revision" --coordinate-space capture-output \
+  --from-x 100 --from-y 120 --to-x 180 --to-y 160 --modifier shift
+```
+
+Use coordinates and revision from that session's actual retained frame. The CLI
+flag grants no capture permission and does not substitute another capture backend.
+Session ownership still applies: a CLI invocation cannot use a process-owned MCP
+session. Where local capture policy admits only an approved MCP binary, qualify
+and approve the successor MCP executable through the existing grant workflow,
+then reconnect that connector and open a fresh session. Do not use the CLI to
+bypass that requirement or transfer an existing MCP lease.

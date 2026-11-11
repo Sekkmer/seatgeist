@@ -1561,6 +1561,10 @@ fn journal_requested_target_for_request(request: &DaemonRequest) -> Option<Journ
             target.add_point("to", &request.to);
             target.add("button", format!("{:?}", request.button));
             target.add("duration_ms", request.duration_ms.to_string());
+            if !request.modifiers.is_empty() {
+                target.add("modifiers", "shift");
+                target.add("required_safety_classes", "ControlPointer,ControlKeyboard");
+            }
             if let Some(session_id) = request.session_id.as_deref() {
                 target.add("session_id", session_id);
             }
@@ -1935,6 +1939,9 @@ async fn handle_request_inner(
         return daemon_error_with_kind(err, ErrorKind::Validation);
     }
     if let Err(err) = validate_targeted_key_combo(&request, runtime.input_backend_preference) {
+        return daemon_error_with_kind(err, ErrorKind::Validation);
+    }
+    if let Err(err) = validate_modified_drag(&request, runtime.input_backend_preference) {
         return daemon_error_with_kind(err, ErrorKind::Validation);
     }
     let scoped_owned_cleanup = exact_owned_cleanup_authorized(&request, client, runtime).await;
@@ -3193,6 +3200,7 @@ fn health(
     binary_sha256: Option<String>,
 ) -> HealthStatus {
     HealthStatus {
+        atomic_shift_drag_supported: true,
         service: "seatgeistd".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         status: "ok".to_string(),
@@ -3685,16 +3693,40 @@ fn enforce_policy_with_scoped_cleanup(
     request: &DaemonRequest,
     scoped_owned_cleanup: bool,
 ) -> Result<()> {
-    let safety_class = safety_class_for_request(request);
+    for safety_class in required_safety_classes(request) {
+        enforce_safety_class(
+            policy,
+            approval_store,
+            request.method_name(),
+            safety_class,
+            scoped_owned_cleanup,
+        )?;
+    }
+    Ok(())
+}
+
+fn required_safety_classes(request: &DaemonRequest) -> Vec<SafetyClass> {
+    let mut classes = vec![safety_class_for_request(request)];
+    if matches!(request, DaemonRequest::DragPointer(request) if !request.modifiers.is_empty()) {
+        classes.push(SafetyClass::ControlKeyboard);
+    }
+    classes
+}
+
+fn enforce_safety_class(
+    policy: &PolicyEngine,
+    approval_store: &ApprovalStore,
+    method: &str,
+    safety_class: SafetyClass,
+    scoped_owned_cleanup: bool,
+) -> Result<()> {
     let decision = policy.decide(&safety_class);
     match decision.level {
         ToolApprovalLevel::Allow => Ok(()),
         ToolApprovalLevel::Prompt => {
-            if let Some(reason) =
-                approval_store.matching_prompt_approval(&safety_class, request.method_name())?
-            {
+            if let Some(reason) = approval_store.matching_prompt_approval(&safety_class, method)? {
                 info!(
-                    method = request.method_name(),
+                    method = method,
                     safety_class = ?safety_class,
                     reason = %reason,
                     "prompt policy satisfied by approval file"
@@ -3703,7 +3735,7 @@ fn enforce_policy_with_scoped_cleanup(
             }
             if scoped_owned_cleanup {
                 info!(
-                    method = request.method_name(),
+                    method = method,
                     safety_class = ?safety_class,
                     "prompt policy satisfied by exact self-launched window cleanup lease"
                 );
@@ -4552,6 +4584,23 @@ fn enforce_mcp_focus_isolation(
         }
         _ => Ok(()),
     }
+}
+
+fn validate_modified_drag(
+    request: &DaemonRequest,
+    preference: InputBackendPreference,
+) -> Result<()> {
+    if let DaemonRequest::DragPointer(request) = request
+        && !request.modifiers.is_empty()
+    {
+        if request.modifiers.len() != 1 {
+            bail!("drag modifiers must be empty or contain Shift once");
+        }
+        if preference != InputBackendPreference::KwinAgentSeat || request.session_id.is_none() {
+            bail!("atomic modified drag requires the kwin_agent_seat backend and an exact session");
+        }
+    }
+    Ok(())
 }
 
 fn validate_targeted_key_combo(
@@ -8369,6 +8418,7 @@ mod tests {
                     control: None,
                 },
                 &DaemonResponse::Health(HealthStatus {
+                    atomic_shift_drag_supported: false,
                     service: "seatgeistd".to_string(),
                     version: "0.1.0".to_string(),
                     status: "ok".to_string(),
@@ -12403,6 +12453,79 @@ height = 40
     }
 
     #[test]
+    fn shift_drag_requires_both_pointer_and_keyboard_grants() {
+        let mut request = DaemonRequest::DragPointer(DragPointerRequest {
+            modifiers: vec![libseatgeist::DragModifier::Shift],
+            from: Point {
+                x: 1.0,
+                y: 2.0,
+                space: CoordinateSpace::WindowLocal,
+            },
+            to: Point {
+                x: 3.0,
+                y: 4.0,
+                space: CoordinateSpace::WindowLocal,
+            },
+            button: PointerButton::Left,
+            duration_ms: 250,
+            capture_revision: None,
+            guard: None,
+            session_id: Some("capture-1".into()),
+        });
+        assert_eq!(
+            required_safety_classes(&request),
+            vec![SafetyClass::ControlPointer, SafetyClass::ControlKeyboard]
+        );
+        assert!(validate_modified_drag(&request, InputBackendPreference::KwinAgentSeat).is_ok());
+        assert!(validate_modified_drag(&request, InputBackendPreference::Uinput).is_err());
+        let path = temp_test_path("shift-drag-approvals");
+        let store = ApprovalStore::new(Some(path.clone()));
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let expiry = unix_time_ms().unwrap() + 60_000;
+        write_test_approval_grant(&path, SafetyClass::ControlPointer, "drag_pointer", expiry);
+        assert!(
+            enforce_policy_with_approvals(&policy, &store, &request)
+                .unwrap_err()
+                .to_string()
+                .contains("ControlKeyboard")
+        );
+        let pointer_grant = fs::read_to_string(&path).unwrap();
+        write_test_approval_grant(&path, SafetyClass::ControlKeyboard, "drag_pointer", expiry);
+        assert!(
+            enforce_policy_with_approvals(&policy, &store, &request)
+                .unwrap_err()
+                .to_string()
+                .contains("ControlPointer")
+        );
+        fs::write(
+            &path,
+            format!("{}{}", pointer_grant, fs::read_to_string(&path).unwrap()),
+        )
+        .unwrap();
+        assert!(enforce_policy_with_approvals(&policy, &store, &request).is_ok());
+        let DaemonRequest::DragPointer(drag) = &mut request else {
+            unreachable!()
+        };
+        drag.session_id = None;
+        assert!(validate_modified_drag(&request, InputBackendPreference::KwinAgentSeat).is_err());
+        let DaemonRequest::DragPointer(drag) = &mut request else {
+            unreachable!()
+        };
+        drag.modifiers.push(libseatgeist::DragModifier::Shift);
+        assert!(validate_modified_drag(&request, InputBackendPreference::KwinAgentSeat).is_err());
+        let DaemonRequest::DragPointer(drag) = &mut request else {
+            unreachable!()
+        };
+        drag.modifiers.clear();
+        assert_eq!(
+            required_safety_classes(&request),
+            vec![SafetyClass::ControlPointer]
+        );
+        assert!(validate_modified_drag(&request, InputBackendPreference::Uinput).is_ok());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn pointer_input_is_control_pointer_policy() {
         let policy = PolicyEngine::new(PolicyConfig::default());
         let err = enforce_policy(
@@ -12434,6 +12557,7 @@ height = 40
         let err = enforce_policy(
             &policy,
             &DaemonRequest::DragPointer(DragPointerRequest {
+                modifiers: Vec::new(),
                 from: physical_point(100.0, 200.0),
                 to: physical_point(300.0, 400.0),
                 button: PointerButton::Left,

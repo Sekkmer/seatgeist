@@ -1,6 +1,7 @@
 //! Changeable action planning for the permanent native seat host.
 //! The host consumes only balanced, bounded primitive event batches.
 use anyhow::{Result, bail};
+use libseatgeist::DragModifier;
 use serde::{Deserialize, Serialize};
 
 pub(super) const HOST_PROTOCOL: u32 = 1;
@@ -49,6 +50,8 @@ enum Action {
         clicks: u8,
     },
     PointerDrag {
+        #[serde(default)]
+        modifiers: Vec<DragModifier>,
         from_x: f64,
         from_y: f64,
         to_x: f64,
@@ -124,18 +127,34 @@ pub(super) fn plan(value: serde_json::Value) -> Result<Vec<Event>> {
             }
         }
         Action::PointerDrag {
+            modifiers,
             from_x,
             from_y,
             to_x,
             to_y,
             button: code,
         } => {
+            if modifiers.len() > 1 {
+                bail!("drag modifiers must be empty or contain Shift once");
+            }
+            if !modifiers.is_empty() {
+                events.push(Event::Key {
+                    code: 42,
+                    pressed: true,
+                });
+            }
             events.extend([
                 motion(from_x, from_y)?,
                 button(code, true)?,
                 motion(to_x, to_y)?,
                 button(code, false)?,
             ]);
+            if !modifiers.is_empty() {
+                events.push(Event::Key {
+                    code: 42,
+                    pressed: false,
+                });
+            }
         }
         Action::PointerScroll {
             vertical,
@@ -244,6 +263,39 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn shift_drag_is_one_balanced_batch_and_rejects_invalid_modifiers() {
+        let base = json!({"action":"pointer_drag","from_x":1,"from_y":2,
+            "to_x":3,"to_y":4,"button":272});
+        let plain = plan(base.clone()).unwrap();
+        let mut modified = base.clone();
+        modified["modifiers"] = json!(["shift"]);
+        let mut expected = vec![Event::Key {
+            code: 42,
+            pressed: true,
+        }];
+        expected.extend(plain.clone());
+        expected.push(Event::Key {
+            code: 42,
+            pressed: false,
+        });
+        assert_eq!(plan(modified.clone()).unwrap(), expected);
+        modified["modifiers"] = json!([]);
+        assert_eq!(plan(modified.clone()).unwrap(), plain);
+        for invalid in [
+            json!(["ctrl"]),
+            json!(["shift", "shift"]),
+            json!("shift"),
+            json!(null),
+        ] {
+            modified["modifiers"] = invalid;
+            assert!(plan(modified.clone()).is_err());
+        }
+        modified["modifiers"] = json!(["shift"]);
+        modified["to_x"] = json!(-1);
+        assert!(plan(modified).is_err());
     }
 
     #[test]

@@ -10,7 +10,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use libseatgeist::{
-    AgentSeatRuntimeStatus, CoordinateSpace, Point, PointerButton, SeatgeistError, WindowInfo,
+    AgentSeatRuntimeStatus, CoordinateSpace, DragModifier, Point, PointerButton, SeatgeistError,
+    WindowInfo,
 };
 use seatgeist_backend::{TargetedInputBackend, TargetedInputContext, TargetedInputDelivery};
 use serde::{Deserialize, Serialize};
@@ -125,6 +126,7 @@ struct PointerClickAction<'a> {
 
 #[derive(Debug, Serialize)]
 struct PointerDragAction<'a> {
+    modifiers: &'a [DragModifier],
     id: Uuid,
     action: &'static str,
     lane_id: &'a str,
@@ -333,6 +335,16 @@ impl KwinAgentSeatBackend {
                 .backend
                 .clone()
                 .ok_or_else(|| backend_error(anyhow::anyhow!("seat host is not registered")))?;
+            if backend != KWIN_AGENT_SEAT_BACKEND
+                && value
+                    .get("modifiers")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|modifiers| !modifiers.is_empty())
+            {
+                return Err(backend_error(anyhow::anyhow!(
+                    "atomic modified drag requires the v2 balanced event host"
+                )));
+            }
             let payload = if backend == KWIN_AGENT_SEAT_BACKEND {
                 action_payload(&serde_json::json!({
                     "id": id, "action": "events", "protocol": plan::HOST_PROTOCOL,
@@ -619,6 +631,19 @@ impl TargetedInputBackend for KwinAgentSeatBackend {
         to: Point,
         button: PointerButton,
     ) -> seatgeist_backend::Result<TargetedInputDelivery> {
+        self.drag_with_modifiers(context, target, from, to, button, &[])
+            .await
+    }
+
+    async fn drag_with_modifiers(
+        &self,
+        context: &TargetedInputContext,
+        target: &WindowInfo,
+        from: Point,
+        to: Point,
+        button: PointerButton,
+        modifiers: &[DragModifier],
+    ) -> seatgeist_backend::Result<TargetedInputDelivery> {
         validate_context(context)?;
         validate_window_local(from)?;
         validate_window_local(to)?;
@@ -627,6 +652,7 @@ impl TargetedInputBackend for KwinAgentSeatBackend {
             id,
             &target.id,
             &PointerDragAction {
+                modifiers,
                 id,
                 action: "pointer_drag",
                 lane_id: &context.lane_id,
@@ -944,6 +970,115 @@ mod tests {
             backend.runtime_status().unwrap().delivery_validation,
             "delivery_failed"
         );
+    }
+
+    fn drag_target() -> WindowInfo {
+        let mut window = target();
+        window.geometry = Some(libseatgeist::WindowGeometry {
+            space: CoordinateSpace::LogicalPixel,
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        });
+        window
+    }
+
+    fn shift_drag_request() -> libseatgeist::DragPointerRequest {
+        libseatgeist::DragPointerRequest {
+            modifiers: vec![DragModifier::Shift],
+            from: Point {
+                x: 1.0,
+                y: 2.0,
+                space: CoordinateSpace::WindowLocal,
+            },
+            to: Point {
+                x: 3.0,
+                y: 4.0,
+                space: CoordinateSpace::WindowLocal,
+            },
+            button: PointerButton::Left,
+            duration_ms: 250,
+            capture_revision: None,
+            guard: None,
+            session_id: Some("capture-1".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn shift_drag_queues_once_on_exact_lane_and_completes_once() {
+        let backend = KwinAgentSeatBackend::default();
+        backend
+            .register(KWIN_AGENT_SEAT_BACKEND, "kwin-owner")
+            .unwrap();
+        let sender = backend.clone();
+        let action = tokio::spawn(async move {
+            crate::input_actions::agent_drag_pointer(
+                shift_drag_request(),
+                &context(),
+                &drag_target(),
+                &sender,
+            )
+            .await
+        });
+        let payload = backend.take_wait("kwin-owner").await.unwrap();
+        let request: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(request["action"], "events");
+        assert_eq!(request["lane_id"], context().lane_id);
+        assert_eq!(request["window_id"], target().id);
+        assert_eq!(
+            request["events"],
+            serde_json::json!([
+                {"op":"key","code":42,"pressed":true},
+                {"op":"motion","x":1.0,"y":2.0},
+                {"op":"button","code":272,"pressed":true},
+                {"op":"motion","x":3.0,"y":4.0},
+                {"op":"button","code":272,"pressed":false},
+                {"op":"key","code":42,"pressed":false}
+            ])
+        );
+        assert!(backend.take("kwin-owner").unwrap().is_empty());
+        let completion =
+            serde_json::json!({"id":request["id"],"ok":true,"backend":KWIN_AGENT_SEAT_BACKEND})
+                .to_string();
+        backend.complete("kwin-owner", &completion).unwrap();
+        assert!(action.await.unwrap().unwrap().ok);
+        assert!(backend.complete("kwin-owner", &completion).is_err());
+    }
+
+    #[tokio::test]
+    async fn refused_shift_drags_never_enter_host_queue() {
+        let backend = KwinAgentSeatBackend::default();
+        backend.register(LEGACY_BACKEND, "kwin-owner").unwrap();
+        assert!(
+            crate::input_actions::agent_drag_pointer(
+                shift_drag_request(),
+                &context(),
+                &drag_target(),
+                &backend
+            )
+            .await
+            .is_err()
+        );
+        assert!(backend.take("kwin-owner").unwrap().is_empty());
+        backend
+            .register(KWIN_AGENT_SEAT_BACKEND, "kwin-owner")
+            .unwrap();
+        let mut bad = shift_drag_request();
+        bad.modifiers.push(DragModifier::Shift);
+        assert!(
+            crate::input_actions::agent_drag_pointer(bad, &context(), &drag_target(), &backend)
+                .await
+                .is_err()
+        );
+        let mut bad = shift_drag_request();
+        bad.to.x = -1.0;
+        assert!(
+            crate::input_actions::agent_drag_pointer(bad, &context(), &drag_target(), &backend)
+                .await
+                .is_err()
+        );
+        assert!(backend.take("kwin-owner").unwrap().is_empty());
     }
 
     #[tokio::test]

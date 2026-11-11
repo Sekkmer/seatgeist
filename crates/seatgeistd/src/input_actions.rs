@@ -161,17 +161,28 @@ pub(crate) async fn agent_drag_pointer(
     backend: &dyn TargetedInputBackend,
 ) -> Result<ActionResult> {
     validate_drag(request.duration_ms, request.from.space, request.to.space)?;
+    if request.modifiers.len() > 1 {
+        bail!("drag modifiers must be empty or contain Shift once");
+    }
     validate_agent_point(target, request.from)?;
     validate_agent_point(target, request.to)?;
     let delivery = backend
-        .drag(context, target, request.from, request.to, request.button)
+        .drag_with_modifiers(
+            context,
+            target,
+            request.from,
+            request.to,
+            request.button,
+            &request.modifiers,
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     Ok(agent_result(
         delivery,
         format!(
-            "dragged pointer button={:?} from={:.0},{:.0} to={:.0},{:.0} duration_ms={} space=WindowLocal target_window={} routing=independent",
+            "dragged pointer button={:?} modifiers={:?} from={:.0},{:.0} to={:.0},{:.0} requested_duration_ms={} timing=atomic space=WindowLocal target_window={} routing=independent",
             request.button,
+            request.modifiers,
             request.from.x,
             request.from.y,
             request.to.x,
@@ -417,6 +428,9 @@ pub(crate) async fn drag_pointer(
     input_backend_preference: InputBackendPreference,
     portal_eis_session_store: &PortalEisSessionStore,
 ) -> Result<ActionResult> {
+    if !request.modifiers.is_empty() {
+        bail!("atomic modified drag requires the kwin_agent_seat backend and an exact session");
+    }
     validate_drag(request.duration_ms, request.from.space, request.to.space)?;
     let context = pointer_coordinates::ResolutionContext::load(
         request.from.space,
