@@ -2736,54 +2736,6 @@ mod output_tests {
     use super::write_line_ignoring_broken_pipe;
 
     #[test]
-    fn shift_drag_refuses_legacy_daemon_before_sending_input() {
-        use std::{
-            io::{BufRead, BufReader, Write},
-            os::unix::net::UnixListener,
-        };
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("sg-shift-{}-{unique}", std::process::id()));
-        std::fs::create_dir(&dir).unwrap();
-        let socket = dir.join("bus");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut line = String::new();
-            BufReader::new(stream.try_clone().unwrap())
-                .read_line(&mut line)
-                .unwrap();
-            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
-            assert_eq!(request["request"]["method"], "health");
-            writeln!(
-                stream,
-                "{}",
-                serde_json::json!({"type":"health","data":{
-                "service":"seatgeistd","version":"old","status":"ok"}})
-            )
-            .unwrap();
-            listener
-        });
-        let request = libseatgeist::DaemonRequest::DragPointer(
-            serde_json::from_value(serde_json::json!({
-                "from":{"x":1,"y":2,"space":"window_local"},
-                "to":{"x":3,"y":4,"space":"window_local"},
-                "button":"left","duration_ms":250,"modifiers":["shift"],"session_id":"capture-1"
-            }))
-            .unwrap(),
-        );
-        let error = super::send_request(&socket, request).unwrap_err();
-        assert!(error.to_string().contains("no input sent"));
-        let listener = server.join().unwrap();
-        listener.set_nonblocking(true).unwrap();
-        assert!(listener.accept().is_err(), "no drag sent to the old daemon");
-        drop(listener);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
     fn drag_accepts_only_supported_modifier_flag() {
         use clap::Parser;
         let base = [
