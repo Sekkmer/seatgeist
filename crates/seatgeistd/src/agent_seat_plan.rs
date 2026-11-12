@@ -19,6 +19,10 @@ pub(super) enum Event {
         x: f64,
         y: f64,
     },
+    RelativeMotion {
+        dx: f64,
+        dy: f64,
+    },
     Button {
         code: u32,
         pressed: bool,
@@ -42,6 +46,10 @@ enum Action {
     PointerMove {
         x: f64,
         y: f64,
+    },
+    RelativePointer {
+        dx: f64,
+        dy: f64,
     },
     PointerClick {
         #[serde(default)]
@@ -135,6 +143,16 @@ pub(super) fn plan(value: serde_json::Value) -> Result<Vec<Event>> {
             }
         }
         Action::PointerMove { x, y } => events.push(motion(x, y)?),
+        Action::RelativePointer { dx, dy } => {
+            libseatgeist::RelativePointerRequest {
+                dx,
+                dy,
+                session_id: "validated-lane".into(),
+            }
+            .validate()
+            .map_err(anyhow::Error::msg)?;
+            events.push(Event::RelativeMotion { dx, dy });
+        }
         Action::PointerClick {
             modifiers,
             x,
@@ -204,6 +222,23 @@ pub(super) fn plan(value: serde_json::Value) -> Result<Vec<Event>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn relative_pointer_plans_only_one_delta_and_keeps_absolute_semantics() {
+        assert_eq!(
+            plan(serde_json::json!({"action":"relative_pointer","dx":8.5,"dy":-3})).unwrap(),
+            vec![Event::RelativeMotion { dx: 8.5, dy: -3. }]
+        );
+        assert_eq!(
+            plan(serde_json::json!({"action":"pointer_move","x":8.5,"y":3})).unwrap(),
+            vec![Event::Motion { x: 8.5, y: 3. }]
+        );
+        for (dx, dy) in [(0., 0.), (4097., 0.)] {
+            assert!(
+                plan(serde_json::json!({"action":"relative_pointer","dx":dx,"dy":dy})).is_err()
+            );
+        }
+    }
 
     #[test]
     fn camera_pointer_gestures_are_balanced_in_one_batch() {

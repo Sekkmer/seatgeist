@@ -45,6 +45,7 @@ struct AgentSeatState {
     backend: Option<String>,
     build_id: Option<String>,
     last_delivery: Option<DeliveryValidation>,
+    relative_pointer_supported: bool,
 }
 
 #[derive(Debug)]
@@ -158,7 +159,7 @@ impl KwinAgentSeatBackend {
     }
 
     pub(crate) fn register(&self, backend: &str, caller: &str) -> Result<()> {
-        self.register_identified(backend, None, caller)
+        self.register_identified(backend, None, caller, false)
     }
 
     pub(crate) fn register_with_build_id(
@@ -171,7 +172,24 @@ impl KwinAgentSeatBackend {
         if build_id.len() != 64 || !build_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             bail!("invalid KWin agent-seat build id");
         }
-        self.register_identified(backend, Some(build_id.to_ascii_lowercase()), caller)
+        self.register_identified(backend, Some(build_id.to_ascii_lowercase()), caller, false)
+    }
+
+    pub(crate) fn register_with_capabilities(
+        &self,
+        backend: &str,
+        build_id: &str,
+        capabilities: &str,
+        caller: &str,
+    ) -> Result<()> {
+        let build_id = build_id.strip_prefix(BUILD_ID_PREFIX).unwrap_or(build_id);
+        if build_id.len() != 64 || !build_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("invalid KWin agent-seat build id");
+        }
+        if backend != KWIN_AGENT_SEAT_BACKEND || capabilities != "relative_pointer_v1" {
+            bail!("unsupported agent-seat capabilities");
+        }
+        self.register_identified(backend, Some(build_id.to_ascii_lowercase()), caller, true)
     }
 
     fn register_identified(
@@ -179,6 +197,7 @@ impl KwinAgentSeatBackend {
         backend: &str,
         build_id: Option<String>,
         caller: &str,
+        relative_pointer_supported: bool,
     ) -> Result<()> {
         if backend != KWIN_AGENT_SEAT_BACKEND && backend != LEGACY_BACKEND {
             bail!("unsupported KWin agent-seat backend: {backend}");
@@ -193,6 +212,7 @@ impl KwinAgentSeatBackend {
         if state.caller.as_deref() != Some(caller)
             || state.backend.as_deref() != Some(backend)
             || state.build_id != build_id
+            || state.relative_pointer_supported != relative_pointer_supported
         {
             // Never transfer old work to a replacement host or wire protocol.
             state.pending.clear();
@@ -203,6 +223,7 @@ impl KwinAgentSeatBackend {
         state.caller = Some(caller.to_string());
         state.backend = Some(backend.to_string());
         state.build_id = build_id;
+        state.relative_pointer_supported = relative_pointer_supported;
         self.registered.store(true, Ordering::Release);
         Ok(())
     }
@@ -231,6 +252,7 @@ impl KwinAgentSeatBackend {
             })
             .unwrap_or(("heartbeat_only", None, None));
         Some(AgentSeatRuntimeStatus {
+            relative_pointer_supported: state.relative_pointer_supported,
             protocol,
             build_id: state.build_id.clone(),
             heartbeat_fresh: heartbeat_age <= BACKEND_HEARTBEAT_TTL,
@@ -344,6 +366,11 @@ impl KwinAgentSeatBackend {
             {
                 return Err(backend_error(anyhow::anyhow!(
                     "atomic modified pointer action requires the v2 balanced event host"
+                )));
+            }
+            if value["action"] == "relative_pointer" && !state.relative_pointer_supported {
+                return Err(backend_error(anyhow::anyhow!(
+                    "registered native host does not support relative_pointer_v1; no input queued"
                 )));
             }
             let payload = if backend == KWIN_AGENT_SEAT_BACKEND {
@@ -596,6 +623,32 @@ impl TargetedInputBackend for KwinAgentSeatBackend {
         .await
     }
 
+    async fn relative_pointer(
+        &self,
+        context: &TargetedInputContext,
+        target: &WindowInfo,
+        dx: f64,
+        dy: f64,
+    ) -> seatgeist_backend::Result<TargetedInputDelivery> {
+        validate_context(context)?;
+        let request = libseatgeist::RelativePointerRequest {
+            dx,
+            dy,
+            session_id: context.lane_id.clone(),
+        };
+        request
+            .validate()
+            .map_err(|e| backend_error(anyhow::anyhow!(e)))?;
+        let id = Uuid::new_v4();
+        self.submit(
+            id,
+            &target.id,
+            &serde_json::json!({"id":id, "action":"relative_pointer",
+            "lane_id":context.lane_id,"window_id":target.id,"dx":dx,"dy":dy}),
+        )
+        .await
+    }
+
     async fn click(
         &self,
         context: &TargetedInputContext,
@@ -743,6 +796,73 @@ fn backend_error(error: anyhow::Error) -> SeatgeistError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn relative_pointer_refuses_old_hosts_and_delivers_one_exact_lane_delta() {
+        let backend = KwinAgentSeatBackend::default();
+        for protocol in [LEGACY_BACKEND, KWIN_AGENT_SEAT_BACKEND] {
+            backend.register(protocol, "kwin-owner").unwrap();
+            assert!(
+                backend
+                    .relative_pointer(&context(), &target(), 8.5, -3.)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("does not support relative_pointer_v1")
+            );
+            assert!(backend.take("kwin-owner").unwrap().is_empty());
+            assert!(!backend.runtime_status().unwrap().relative_pointer_supported);
+        }
+        let build = "a".repeat(64);
+        backend
+            .register_with_capabilities(
+                KWIN_AGENT_SEAT_BACKEND,
+                &build,
+                "relative_pointer_v1",
+                "kwin-owner",
+            )
+            .unwrap();
+        assert!(backend.runtime_status().unwrap().relative_pointer_supported);
+        assert!(
+            backend
+                .relative_pointer(&context(), &target(), 4097., 0.)
+                .await
+                .is_err()
+        );
+        assert!(backend.take("kwin-owner").unwrap().is_empty());
+        let sender = backend.clone();
+        let action = tokio::spawn(async move {
+            sender
+                .relative_pointer(&context(), &target(), 8.5, -3.)
+                .await
+        });
+        let payload: serde_json::Value =
+            serde_json::from_str(&backend.take_wait("kwin-owner").await.unwrap()).unwrap();
+        assert_eq!(payload["lane_id"], context().lane_id);
+        assert_eq!(payload["window_id"], target().id);
+        assert_eq!(
+            payload["events"],
+            serde_json::json!([{"op":"relative_motion","dx":8.5,"dy":-3.}])
+        );
+        assert!(payload["expires_at_unix_ms"].as_u64().is_some());
+        assert!(backend.take("kwin-owner").unwrap().is_empty());
+        backend.complete("kwin-owner",&serde_json::json!({"id":payload["id"],"ok":true,"backend":KWIN_AGENT_SEAT_BACKEND}).to_string()).unwrap();
+        assert!(action.await.unwrap().is_ok());
+        assert!(backend.complete("kwin-owner",&serde_json::json!({"id":payload["id"],"ok":true,"backend":KWIN_AGENT_SEAT_BACKEND}).to_string()).is_err());
+        // Losing the capability is a host replacement: discard already queued work.
+        let sender = backend.clone();
+        let old =
+            tokio::spawn(
+                async move { sender.relative_pointer(&context(), &target(), 1., 1.).await },
+            );
+        tokio::task::yield_now().await;
+        backend
+            .register_with_build_id(KWIN_AGENT_SEAT_BACKEND, &build, "kwin-owner")
+            .unwrap();
+        assert!(old.await.unwrap().is_err());
+        assert!(backend.take("kwin-owner").unwrap().is_empty());
+        assert!(!backend.runtime_status().unwrap().relative_pointer_supported);
+    }
 
     #[test]
     fn queued_actions_carry_the_original_delivery_deadline() {

@@ -100,7 +100,18 @@ include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
     pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
-    add_executable(seatbindings_test seatbindings_test.cpp seatbindings.cpp)
+    enable_language(C)
+    find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
+    foreach(PROTOCOL relative-pointer pointer-constraints)
+        set(PROTOCOL_XML "${CMAKE_CURRENT_SOURCE_DIR}/test-protocols/${PROTOCOL}-unstable-v1.xml")
+        add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${PROTOCOL}-client.h" "${CMAKE_CURRENT_BINARY_DIR}/${PROTOCOL}-code.c"
+            COMMAND ${WAYLAND_SCANNER} client-header ${PROTOCOL_XML} "${CMAKE_CURRENT_BINARY_DIR}/${PROTOCOL}-client.h"
+            COMMAND ${WAYLAND_SCANNER} private-code ${PROTOCOL_XML} "${CMAKE_CURRENT_BINARY_DIR}/${PROTOCOL}-code.c"
+            DEPENDS ${PROTOCOL_XML} VERBATIM)
+        list(APPEND POINTER_TEST_PROTOCOLS "${CMAKE_CURRENT_BINARY_DIR}/${PROTOCOL}-client.h" "${CMAKE_CURRENT_BINARY_DIR}/${PROTOCOL}-code.c")
+    endforeach()
+    add_executable(seatbindings_test seatbindings_test.cpp seatbindings.cpp ${POINTER_TEST_PROTOCOLS})
+    target_include_directories(seatbindings_test PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
     target_include_directories(seatbindings_test PRIVATE ${KWIN_INCLUDE_DIR})
     target_link_libraries(seatbindings_test PRIVATE
         ${KWIN_LIBRARY} Qt6::Core Qt6::Gui Qt6::Test

@@ -9,6 +9,7 @@
 #include <wayland/clientconnection.h>
 #include <wayland/display.h>
 #include <wayland/keyboard.h>
+#include <wayland/pointerconstraints_v1.h>
 #include <wayland/seat.h>
 #include <wayland/surface.h>
 #include <wayland_server.h>
@@ -161,9 +162,10 @@ void SeatgeistAgentSeatPlugin::registerBackend()
     if (!m_serviceAvailable) {
         return;
     }
-    auto message = methodCall(QStringLiteral("RegisterAgentSeatBackendV2"));
+    auto message = methodCall(QStringLiteral("RegisterAgentSeatBackendV3"));
     message << QString::fromLatin1(Backend);
     message << QString::fromLatin1(BuildId);
+    message << QStringLiteral("relative_pointer_v1");
     auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(message), this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, generation = m_serviceGeneration] {
         QDBusPendingReply<> reply = *watcher;
@@ -310,7 +312,19 @@ void SeatgeistAgentSeatPlugin::resumePendingAction()
             [](const auto &event) { return event.kind == SeatEvent::Key; });
         const bool pointer = std::any_of(m_pendingEvents.begin(), m_pendingEvents.end(),
             [](const auto &event) { return event.kind != SeatEvent::Key; });
-        const bool ready = (!keyboard || m_bindings->keyboardReady(seat, client))
+        const bool relative = std::any_of(m_pendingEvents.begin(), m_pendingEvents.end(),
+            [](const auto &event) { return event.kind == SeatEvent::RelativeMotion; });
+        // Relative delivery never enters, warps, or focuses a new target. The
+        // client must already have acquired its lock on this exact agent seat.
+        if (relative && (laneIt->second->target != window
+            || !m_bindings->lockedPointerReady(seat, client, window->surface()))) {
+            complete(m_pendingAction.value("id").toString(), false, QStringLiteral("relative pointer requires an active lock on the same agent seat/client/target"));
+            m_bindingTimer->stop();
+            m_pendingAction = {}; m_pendingWindow = nullptr; m_pendingSurface = nullptr; m_pendingEvents.clear();
+            QTimer::singleShot(0, this, &SeatgeistAgentSeatPlugin::poll);
+            return;
+        }
+        const bool ready = (!relative || m_bindings->relativePointerReady(seat, client)) && (!keyboard || m_bindings->keyboardReady(seat, client))
             && (!pointer || m_bindings->pointerReady(seat, client));
         if (!ready) {
             // Return to KWin's event loop so clients can process the new
@@ -343,6 +357,18 @@ void SeatgeistAgentSeatPlugin::dispatchAction(const QJsonObject &action, AgentLa
         complete(action.value("id").toString(), false, error);
         return;
     }
+    if (events.first().kind == SeatEvent::RelativeMotion) {
+        auto *client = window->surface()->client()->client();
+        const auto timestamp = std::chrono::microseconds(m_monotonicClock.nsecsElapsed() / 1000);
+        if (lane.target != window || !m_bindings->deliverRelativePointer(lane.seat.get(), client, window->surface(), events.first().position, timestamp)) {
+            complete(action.value("id").toString(), false, QStringLiteral("relative pointer binding or active lock was lost before delivery"));
+            return;
+        }
+        // Successful delivery is one relative protocol event, without a warp
+        // or a change to the physical seat. It does not prove app consumption.
+        complete(action.value("id").toString(), true);
+        return;
+    }
     QPointF position = lane.target == window ? lane.localPointerPosition
         : QPointF(window->clientGeometry().width() / 2.0, window->clientGeometry().height() / 2.0);
     if (events.first().kind == SeatEvent::Motion) {
@@ -362,6 +388,8 @@ void SeatgeistAgentSeatPlugin::dispatchAction(const QJsonObject &action, AgentLa
             xkb_state_update_key(lane.xkbState, event.code + 8, event.pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
             updateKeyboardModifiers(lane);
             break;
+        case SeatEvent::RelativeMotion:
+            Q_UNREACHABLE(); // decoder requires a standalone relative event
         case SeatEvent::Motion:
             // The whole batch was checked against the current surface above;
             // this synchronous loop never processes client/target changes.

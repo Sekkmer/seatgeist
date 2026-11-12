@@ -111,6 +111,26 @@ pub(crate) async fn agent_key_combo(
     ))
 }
 
+pub(crate) async fn agent_relative_pointer(
+    request: libseatgeist::RelativePointerRequest,
+    context: &TargetedInputContext,
+    target: &WindowInfo,
+    backend: &dyn TargetedInputBackend,
+) -> Result<ActionResult> {
+    request.validate().map_err(anyhow::Error::msg)?;
+    let delivery = backend
+        .relative_pointer(context, target, request.dx, request.dy)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    Ok(agent_result(
+        delivery,
+        format!(
+            "relative pointer dx={} dy={} target_window={} routing=independent locked=true",
+            request.dx, request.dy, target.id
+        ),
+    ))
+}
+
 pub(crate) async fn agent_move_pointer(
     request: MovePointerRequest,
     context: &TargetedInputContext,

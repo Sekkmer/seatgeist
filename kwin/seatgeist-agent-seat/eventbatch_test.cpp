@@ -7,6 +7,23 @@ class EventBatchTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void finiteRelativeMotionIsStandalone()
+    {
+        QJsonObject relative{{"op","relative_motion"},{"dx",8.5},{"dy",-3}};
+        QJsonObject action{{"action","events"},{"protocol",1},{"expires_at_unix_ms",1000},{"events",QJsonArray{relative}}};
+        QVector<KWin::SeatEvent> events; QString error;
+        QVERIFY(KWin::decodeSeatEvents(action, QSizeF(10,10), &events, &error));
+        QCOMPARE(events.size(), 1); QCOMPARE(events[0].kind, KWin::SeatEvent::RelativeMotion);
+        QCOMPARE(events[0].position, QPointF(8.5,-3));
+        for (const QJsonArray bad : { QJsonArray{relative,relative},
+                 QJsonArray{relative,QJsonObject{{"op","motion"},{"x",1},{"y",1}}},
+                 QJsonArray{QJsonObject{{"op","relative_motion"},{"dx",4097},{"dy",0}}},
+                 QJsonArray{QJsonObject{{"op","relative_motion"},{"dx",0},{"dy",0}}},
+                 QJsonArray{QJsonObject{{"op","relative_motion"},{"dx","8"},{"dy",0}}} }) {
+            action["events"] = bad;
+            QVERIFY(!KWin::decodeSeatEvents(action, QSizeF(10,10), &events, &error)); QVERIFY(events.isEmpty());
+        }
+    }
     void wholeBatchValidation()
     {
         const QJsonObject down{{"op", "key"}, {"code", 30}, {"pressed", true}};

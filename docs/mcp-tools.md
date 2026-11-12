@@ -462,3 +462,34 @@ session. Where local capture policy admits only an approved MCP binary, qualify
 and approve the successor MCP executable through the existing grant workflow,
 then reconnect that connector and open a fresh session. Do not use the CLI to
 bypass that requirement or transfer an existing MCP lease.
+
+### Locked relative pointer motion
+
+Expert MCP `seatgeist.relative_pointer` takes required `session_id`, `dx`, `dy`.
+CLI: `seatgeist-cli input relative-pointer --session-id <owned-session> --dx 8.5 --dy -3`.
+This sends exactly one finite nonzero delta, each component bounded to +/-4096
+compositor logical units. Synthetic accelerated and unaccelerated vectors are
+identical; there is no device acceleration, interpolation or timed hold.
+
+The policy engine requires ControlPointer for `relative_pointer`; the action and
+delta are journaled. The exact session/owner/target/lane, expiry, target policy
+and physical-interference guards still apply. Only the native independent seat
+backend supports it. It requires that seat's existing exact target focus, a live
+relative-pointer subscription on the same seat/client, and an already active
+pointer lock requested on that same seat/client/target. A primary-seat lock is
+insufficient. This call does not acquire or activate a lock, focus a target,
+change its absolute position, or move the physical cursor. Missing/inactive locks
+and bindings refuse before relative delivery. A compositor acknowledgement is
+not proof that the application consumed the event; uncertain delivery requires
+observation, without replay.
+
+Daemon health `relative_pointer_supported` identifies this request contract.
+Native runtime `agent_seat.relative_pointer_supported` requires an authenticated
+V3 host capability registration `relative_pointer_v1`; older hosts are refused
+before queueing. Native host event protocol 1 adds the standalone
+`relative_motion {dx,dy}` opcode. KWin 6.8 uses the separate
+`SeatInterface::relativePointerMotion` API because `notifyPointerMotion` does
+not synthesize relative events and suppresses absolute motion under an active
+lock. Other backends fail closed; absolute `move_pointer` remains unchanged.
+Deploy a qualified matching daemon/native plugin pair at an owned safe boundary;
+MCP refresh alone cannot add native support. No primary-seat/portal fallback.

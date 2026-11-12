@@ -26,12 +26,12 @@ use libseatgeist::{
     FocusTextFieldRequest, FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest,
     KeyComboRequest, LaunchWindowRequest, MovePointerRequest, MoveWindowRequest, ObserveRequest,
     PageZoomOperation, PageZoomRequest, Point, PointerButton, PortalScreenshotTarget,
-    RemoteDesktopPersistMode, RemoteDesktopSessionProbeRequest, ReplayTrace, ResizeWindowRequest,
-    SafetyClass, ScreenshotRequest, ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest,
-    SelectMenuRequest, SetPanicStopRequest, SetTextFieldRequest, SetValueRequest,
-    ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest, WindowActivationMode,
-    WindowPlacementAnchor, default_approval_file_path, default_screenshot_output_path,
-    default_socket_path,
+    RelativePointerRequest, RemoteDesktopPersistMode, RemoteDesktopSessionProbeRequest,
+    ReplayTrace, ResizeWindowRequest, SafetyClass, ScreenshotRequest, ScreenshotTileRequest,
+    ScrollPointerRequest, SelectItemRequest, SelectMenuRequest, SetPanicStopRequest,
+    SetTextFieldRequest, SetValueRequest, ToggleCheckRequest, TypeTextRequest,
+    WaitForChangeRequest, WindowActivationMode, WindowPlacementAnchor, default_approval_file_path,
+    default_screenshot_output_path, default_socket_path,
 };
 use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -411,6 +411,14 @@ enum InputCommand {
     },
     RemoteDesktopEisSessionStatus,
     RemoteDesktopEisStop,
+    RelativePointer {
+        #[arg(long)]
+        session_id: String,
+        #[arg(long, allow_hyphen_values = true)]
+        dx: f64,
+        #[arg(long, allow_hyphen_values = true)]
+        dy: f64,
+    },
     MovePointer {
         #[arg(long)]
         session_id: Option<String>,
@@ -1301,6 +1309,13 @@ fn main() -> Result<()> {
         Command::Input {
             command: InputCommand::RemoteDesktopEisStop,
         } => print_daemon_response(&socket, DaemonRequest::RemoteDesktopEisStop)?,
+        Command::Input {
+            command: InputCommand::RelativePointer { session_id, dx, dy },
+        } => {
+            let request = RelativePointerRequest { session_id, dx, dy };
+            request.validate().map_err(anyhow::Error::msg)?;
+            print_daemon_response(&socket, DaemonRequest::RelativePointer(request))?;
+        }
         Command::Input {
             command:
                 InputCommand::MovePointer {
@@ -2661,6 +2676,13 @@ fn trace_step_context(index: usize, step: &libseatgeist::TraceStep) -> String {
 }
 
 fn send_request(socket: &PathBuf, request: DaemonRequest) -> Result<DaemonResponse> {
+    if let DaemonRequest::RelativePointer(r) = &request {
+        r.validate().map_err(anyhow::Error::msg)?;
+        match send_request(socket, DaemonRequest::Health)? {
+            DaemonResponse::Health(h) if h.relative_pointer_supported => {}
+            _ => bail!("daemon does not support relative pointer; no input sent"),
+        }
+    }
     let camera_modifiers = match &request {
         DaemonRequest::ClickPointer(r) => !r.modifiers.is_empty(),
         DaemonRequest::DragPointer(r) => r

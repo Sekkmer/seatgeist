@@ -28,12 +28,13 @@ use libseatgeist::{
     FocusWindowRequest, FocusedAccessibilityTreeRequest, JournalTailRequest, KeyComboRequest,
     LaunchWindowRequest, MovePointerRequest, MoveWindowRequest, ObserveRequest, PageZoomOperation,
     PageZoomRequest, Point, PointerButton, PortalScreenshotTarget, PostActionImageOptions,
-    PostActionOptions, RemoteDesktopPersistMode, RemoteDesktopSessionProbeRequest,
-    ResizeWindowRequest, ScreenshotInfo, ScreenshotRequest, ScreenshotTileRequest,
-    ScrollPointerRequest, SelectItemRequest, SelectMenuRequest, SetPanicStopRequest,
-    SetTextFieldRequest, SetValueRequest, TargetWindowGuard, ToggleCheckRequest, TypeTextRequest,
-    WaitForChangeRequest, WindowActivationMode, WindowPlacementAnchor, default_screenshot_dir_path,
-    default_screenshot_output_path, default_socket_path,
+    PostActionOptions, RelativePointerRequest, RemoteDesktopPersistMode,
+    RemoteDesktopSessionProbeRequest, ResizeWindowRequest, ScreenshotInfo, ScreenshotRequest,
+    ScreenshotTileRequest, ScrollPointerRequest, SelectItemRequest, SelectMenuRequest,
+    SetPanicStopRequest, SetTextFieldRequest, SetValueRequest, TargetWindowGuard,
+    ToggleCheckRequest, TypeTextRequest, WaitForChangeRequest, WindowActivationMode,
+    WindowPlacementAnchor, default_screenshot_dir_path, default_screenshot_output_path,
+    default_socket_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -232,6 +233,13 @@ impl McpServer {
         request: DaemonRequest,
         response_options: Option<DaemonResponseOptions>,
     ) -> Result<DaemonResponse> {
+        if let DaemonRequest::RelativePointer(r) = &request {
+            r.validate().map_err(anyhow::Error::msg)?;
+            match self.send_daemon_request(DaemonRequest::Health, None)? {
+                DaemonResponse::Health(h) if h.relative_pointer_supported => {}
+                _ => bail!("daemon does not support relative pointer; no input sent"),
+            }
+        }
         let camera_modifiers = match &request {
             DaemonRequest::ClickPointer(r) => !r.modifiers.is_empty(),
             DaemonRequest::DragPointer(r) => r
@@ -617,6 +625,12 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
             guard: active_window_guard(arguments)?,
             session_id: optional_string(arguments, "session_id")?,
         })),
+        "seatgeist.relative_pointer" => {
+            let request: RelativePointerRequest = serde_json::from_value(arguments.clone())
+                .context("relative pointer requires only dx, dy and session_id")?;
+            request.validate().map_err(anyhow::Error::msg)?;
+            Ok(DaemonRequest::RelativePointer(request))
+        }
         "seatgeist.move_pointer" => Ok(DaemonRequest::MovePointer(MovePointerRequest {
             point: Point {
                 x: required_f64(arguments, "x")?,
@@ -2468,6 +2482,25 @@ fn expert_tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "seatgeist.relative_pointer",
+            "Relative Pointer",
+            "Send one finite synthetic relative motion to the exact session's previously focused independent native seat. Requires an active lock and relative-pointer subscription on that same seat/client. Does not move the physical cursor; no absolute fallback. Deltas are compositor logical units, without acceleration.",
+            object_schema(
+                vec![
+                    (
+                        "dx",
+                        json!({"type":"number","minimum":-4096,"maximum":4096}),
+                    ),
+                    (
+                        "dy",
+                        json!({"type":"number","minimum":-4096,"maximum":4096}),
+                    ),
+                    ("session_id", json!({"type":"string","minLength":1})),
+                ],
+                vec!["dx", "dy", "session_id"],
+            ),
+        ),
+        tool(
             "seatgeist.move_pointer",
             "Move Pointer",
             "Move the pointer to an explicit coordinate. For coordinates read from an attached retained-session preview, use capture_output with that frame's session_id and revision so Seatgeist applies preview downscaling and desktop DPI safely.",
@@ -3592,6 +3625,73 @@ fn i64_to_i32(value: i64) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn relative_pointer_parser_schema_and_old_daemon_refusal() {
+        let args = json!({"dx":8.5,"dy":-3,"session_id":"capture-1"});
+        let request = daemon_request_for_tool("seatgeist.relative_pointer", &args).unwrap();
+        assert!(matches!(request, DaemonRequest::RelativePointer(_)));
+        for invalid in [
+            json!({"dx":0,"dy":0,"session_id":"capture-1"}),
+            json!({"dx":4097,"dy":0,"session_id":"capture-1"}),
+            json!({"dx":1,"dy":2}),
+            json!({"dx":1,"dy":2,"session_id":" "}),
+            json!({"dx":1,"dy":2,"session_id":"s","x":8}),
+        ] {
+            assert!(daemon_request_for_tool("seatgeist.relative_pointer", &invalid).is_err());
+        }
+        let tools = tool_definitions(ToolProfile::All);
+        let tool = tools
+            .iter()
+            .find(|t| t["name"] == "seatgeist.relative_pointer")
+            .unwrap();
+        assert_eq!(
+            tool["inputSchema"]["required"],
+            json!(["dx", "dy", "session_id"])
+        );
+        assert_eq!(tool["inputSchema"]["properties"]["dx"]["maximum"], 4096);
+        use std::{
+            io::{BufRead, BufReader, Write},
+            os::unix::net::UnixListener,
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "sg-relative-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let socket = dir.join("bus");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&line).unwrap()["request"]["method"],
+                "health"
+            );
+            writeln!(stream,"{}",json!({"type":"health","data":{"service":"seatgeistd","version":"old","status":"ok"}})).unwrap();
+            listener
+        });
+        let error = McpServer {
+            socket,
+            tool_profile: ToolProfile::All,
+            readiness_cache: Default::default(),
+        }
+        .send_daemon_request(request, None)
+        .unwrap_err();
+        assert!(error.to_string().contains("no input sent"));
+        let listener = server.join().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err());
+        drop(listener);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn camera_modifier_schema_and_parser_agree() {
         for tool in ["seatgeist.click_pointer", "seatgeist.drag_pointer"] {
             let mut args = serde_json::json!({"x":1,"y":2,"from_x":1,"from_y":2,"to_x":3,"to_y":4,"button":"left","coordinate_space":"capture_output","session_id":"capture-1","capture_revision":"rev-1"});
@@ -4483,6 +4583,7 @@ mod tests {
                 preferred_available_backend: Some("portal_remote_desktop".to_string()),
                 implemented_available_backend: Some("uinput".to_string()),
                 agent_seat: Some(libseatgeist::AgentSeatRuntimeStatus {
+                    relative_pointer_supported: false,
                     protocol: "kwin_agent_seat_v2".to_string(),
                     build_id: Some("a".repeat(64)),
                     heartbeat_fresh: true,

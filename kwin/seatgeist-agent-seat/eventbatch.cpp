@@ -65,6 +65,19 @@ bool decodeSeatEvents(const QJsonObject &action, const QSizeF &targetSize,
             }
             if (event.pressed) { pressed.insert(event.code); }
             else { pressed.remove(event.code); }
+        } else if (op == QLatin1String("relative_motion")) {
+            // One finite relative event only: never mix lock-dependent motion
+            // with focus changes or a partially deliverable keyboard batch.
+            const auto dx = object.value("dx");
+            const auto dy = object.value("dy");
+            if (array.size() != 1 || !dx.isDouble() || !dy.isDouble()
+                || !std::isfinite(dx.toDouble()) || !std::isfinite(dy.toDouble())
+                || std::abs(dx.toDouble()) > 4096 || std::abs(dy.toDouble()) > 4096
+                || (dx.toDouble() == 0 && dy.toDouble() == 0)) {
+                return fail("invalid finite relative pointer delta");
+            }
+            event.kind = SeatEvent::RelativeMotion;
+            event.position = QPointF(dx.toDouble(), dy.toDouble());
         } else if (op == QLatin1String("motion")) {
             event.kind = SeatEvent::Motion;
             const auto x = object.value("x");

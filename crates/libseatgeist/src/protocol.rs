@@ -28,6 +28,8 @@ pub struct HealthStatus {
     pub atomic_shift_drag_supported: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub atomic_pointer_modifiers_supported: bool,
+    #[serde(default)]
+    pub relative_pointer_supported: bool,
     pub service: String,
     pub version: String,
     pub status: String,
@@ -236,6 +238,8 @@ pub struct InputBackendStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSeatRuntimeStatus {
+    #[serde(default)]
+    pub relative_pointer_supported: bool,
     pub protocol: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_id: Option<String>,
@@ -1178,6 +1182,33 @@ pub struct KeyComboRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelativePointerRequest {
+    pub dx: f64,
+    pub dy: f64,
+    pub session_id: String,
+}
+
+impl RelativePointerRequest {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.session_id.trim().is_empty() {
+            return Err("relative pointer requires an exact interaction session");
+        }
+        if !self.dx.is_finite()
+            || !self.dy.is_finite()
+            || self.dx.abs() > 4096.0
+            || self.dy.abs() > 4096.0
+            || (self.dx == 0.0 && self.dy == 0.0)
+        {
+            return Err(
+                "relative pointer requires a nonzero finite delta within +/-4096 logical units",
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MovePointerRequest {
     pub point: Point,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1610,6 +1641,7 @@ pub enum DaemonRequest {
     TypeText(TypeTextRequest),
     KeyCombo(KeyComboRequest),
     MovePointer(MovePointerRequest),
+    RelativePointer(RelativePointerRequest),
     ClickPointer(ClickPointerRequest),
     DragPointer(DragPointerRequest),
     ScrollPointer(ScrollPointerRequest),
@@ -1689,6 +1721,7 @@ impl DaemonRequest {
             Self::TypeText(_) => "type_text",
             Self::KeyCombo(_) => "key_combo",
             Self::MovePointer(_) => "move_pointer",
+            Self::RelativePointer(_) => "relative_pointer",
             Self::ClickPointer(_) => "click_pointer",
             Self::DragPointer(_) => "drag_pointer",
             Self::ScrollPointer(_) => "scroll_pointer",
@@ -1767,6 +1800,7 @@ impl DaemonRequest {
                 | Self::TypeText(_)
                 | Self::KeyCombo(_)
                 | Self::MovePointer(_)
+                | Self::RelativePointer(_)
                 | Self::ClickPointer(_)
                 | Self::DragPointer(_)
                 | Self::ScrollPointer(_)
@@ -1968,6 +2002,59 @@ pub struct ActionResult {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn relative_pointer_contract_is_finite_explicit_and_session_bound() {
+        let r = RelativePointerRequest {
+            dx: -4096.0,
+            dy: 2.5,
+            session_id: "owned".into(),
+        };
+        assert!(r.validate().is_ok());
+        let request = DaemonRequest::RelativePointer(r.clone());
+        assert_eq!(request.method_name(), "relative_pointer");
+        assert!(request.returns_action());
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"method":"relative_pointer","dx":-4096.0,"dy":2.5,"session_id":"owned"})
+        );
+        assert_eq!(
+            serde_json::from_value::<DaemonRequest>(wire).unwrap(),
+            request
+        );
+        for (dx, dy) in [
+            (0., 0.),
+            (4096.1, 0.),
+            (0., -4097.),
+            (f64::NAN, 1.),
+            (1., f64::INFINITY),
+        ] {
+            assert!(
+                RelativePointerRequest {
+                    dx,
+                    dy,
+                    ..r.clone()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        assert!(
+            RelativePointerRequest {
+                session_id: " ".into(),
+                ..r
+            }
+            .validate()
+            .is_err()
+        );
+        for value in [
+            serde_json::json!({"dx":1,"dy":2}),
+            serde_json::json!({"dx":1,"dy":2,"session_id":"owned","coordinate_space":"physical_pixel"}),
+        ] {
+            assert!(serde_json::from_value::<RelativePointerRequest>(value).is_err());
+        }
+    }
+
     #[test]
     fn camera_click_modifiers_preserve_plain_wire_default() {
         let plain = serde_json::json!({"method":"click_pointer", "point":{"x":1,"y":2,"space":"window_local"},"button":"left","clicks":1});
@@ -2775,6 +2862,7 @@ mod tests {
             preferred_available_backend: Some("portal_remote_desktop".to_string()),
             implemented_available_backend: Some("uinput".to_string()),
             agent_seat: Some(AgentSeatRuntimeStatus {
+                relative_pointer_supported: false,
                 protocol: "kwin_agent_seat_v2".to_string(),
                 build_id: Some("a".repeat(64)),
                 heartbeat_fresh: true,
@@ -3163,6 +3251,7 @@ mod tests {
         let health = DaemonResponse::Health(HealthStatus {
             atomic_shift_drag_supported: false,
             atomic_pointer_modifiers_supported: false,
+            relative_pointer_supported: false,
             service: "seatgeistd".to_string(),
             version: "0.1.0".to_string(),
             status: "ok".to_string(),

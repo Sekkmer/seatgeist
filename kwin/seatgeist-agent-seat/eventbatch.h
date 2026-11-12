@@ -10,7 +10,7 @@
 namespace KWin
 {
 struct SeatEvent {
-    enum Kind { Key, Motion, Button, Axis } kind;
+    enum Kind { Key, Motion, RelativeMotion, Button, Axis } kind;
     quint32 code = 0;
     bool pressed = false;
     QPointF position;

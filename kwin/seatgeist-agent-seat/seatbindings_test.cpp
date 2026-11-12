@@ -7,6 +7,10 @@
 #include <wayland/keyboard.h>
 #include <wayland/seat.h>
 #include <wayland/surface.h>
+#include <wayland/relativepointer_v1.h>
+#include <wayland/pointerconstraints_v1.h>
+#include "relative-pointer-client.h"
+#include "pointer-constraints-client.h"
 
 #include <QCoreApplication>
 #include <QTest>
@@ -36,6 +40,13 @@ struct Client {
     std::vector<wl_pointer *> pointers;
     std::vector<uint32_t> keys;
     int enters = 0;
+    int motions = 0;
+    zwp_relative_pointer_manager_v1 *relativeManager = nullptr;
+    zwp_pointer_constraints_v1 *constraints = nullptr;
+    zwp_relative_pointer_v1 *relative = nullptr;
+    zwp_locked_pointer_v1 *locked = nullptr;
+    std::vector<QPointF> deltas, unaccelerated;
+
 
     explicit Client(KWin::Display &server)
     {
@@ -57,6 +68,10 @@ struct Client {
                     };
                     wl_seat_add_listener(seat, &seatListener, nullptr);
                     self.seats.push_back(seat);
+                } else if (std::strcmp(interface, "zwp_relative_pointer_manager_v1") == 0) {
+                    self.relativeManager = static_cast<zwp_relative_pointer_manager_v1 *>(wl_registry_bind(registry, name, &zwp_relative_pointer_manager_v1_interface, 1));
+                } else if (std::strcmp(interface, "zwp_pointer_constraints_v1") == 0) {
+                    self.constraints = static_cast<zwp_pointer_constraints_v1 *>(wl_registry_bind(registry, name, &zwp_pointer_constraints_v1_interface, 1));
                 } else if (std::strcmp(interface, "wl_compositor") == 0) {
                     self.compositor = static_cast<wl_compositor *>(wl_registry_bind(registry, name, &wl_compositor_interface, 1));
                     self.surface = wl_compositor_create_surface(self.compositor);
@@ -69,6 +84,10 @@ struct Client {
 
     ~Client()
     {
+        if (locked) { zwp_locked_pointer_v1_destroy(locked); }
+        if (relative) { zwp_relative_pointer_v1_destroy(relative); }
+        if (constraints) { zwp_pointer_constraints_v1_destroy(constraints); }
+        if (relativeManager) { zwp_relative_pointer_manager_v1_destroy(relativeManager); }
         for (auto *keyboard : keyboards) {
             wl_keyboard_destroy(keyboard);
         }
@@ -102,6 +121,46 @@ struct Client {
             }
             wl_display_dispatch_pending(display);
         }
+    }
+
+    void bindPointer(size_t index)
+    {
+        auto *pointer = wl_seat_get_pointer(seats.at(index));
+        static const wl_pointer_listener listener{
+            .enter = [](void *, wl_pointer *, uint32_t, wl_surface *, wl_fixed_t, wl_fixed_t) {},
+            .leave = [](void *, wl_pointer *, uint32_t, wl_surface *) {},
+            .motion = [](void *data, wl_pointer *, uint32_t, wl_fixed_t, wl_fixed_t) { ++static_cast<Client *>(data)->motions; },
+            .button = [](void *, wl_pointer *, uint32_t, uint32_t, uint32_t, uint32_t) {},
+            .axis = [](void *, wl_pointer *, uint32_t, uint32_t, wl_fixed_t) {},
+            .frame = [](void *, wl_pointer *) {},
+            .axis_source = [](void *, wl_pointer *, uint32_t) {},
+            .axis_stop = [](void *, wl_pointer *, uint32_t, uint32_t) {},
+            .axis_discrete = [](void *, wl_pointer *, uint32_t, int32_t) {},
+            .axis_value120 = [](void *, wl_pointer *, uint32_t, int32_t) {},
+            .axis_relative_direction = [](void *, wl_pointer *, uint32_t, uint32_t) {},
+        };
+        wl_pointer_add_listener(pointer, &listener, this);
+        pointers.push_back(pointer);
+    }
+
+    void bindRelative(size_t index)
+    {
+        relative = zwp_relative_pointer_manager_v1_get_relative_pointer(relativeManager, pointers.at(index));
+        static const zwp_relative_pointer_v1_listener listener{
+            [](void *data, zwp_relative_pointer_v1 *, uint32_t, uint32_t, wl_fixed_t dx, wl_fixed_t dy, wl_fixed_t ux, wl_fixed_t uy) {
+                auto &client = *static_cast<Client *>(data);
+                client.deltas.emplace_back(wl_fixed_to_double(dx), wl_fixed_to_double(dy));
+                client.unaccelerated.emplace_back(wl_fixed_to_double(ux), wl_fixed_to_double(uy));
+            },
+        };
+        zwp_relative_pointer_v1_add_listener(relative, &listener, this);
+    }
+
+    void lock(size_t pointerIndex)
+    {
+        locked = zwp_pointer_constraints_v1_lock_pointer(constraints, surface, pointers.at(pointerIndex), nullptr, ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT);
+        static const zwp_locked_pointer_v1_listener listener{ [](void *, zwp_locked_pointer_v1 *) {}, [](void *, zwp_locked_pointer_v1 *) {} };
+        zwp_locked_pointer_v1_add_listener(locked, &listener, this);
     }
 
     void bindKeyboard(size_t index)
@@ -146,6 +205,90 @@ class SeatBindingsTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void relativeDeliveryRequiresExactLiveBindingsAndLock()
+    {
+        KWin::Display display;
+        CompositorInterface compositor(&display);
+        RelativePointerManagerV1Interface relativeManager(&display);
+        PointerConstraintsV1Interface constraints(&display);
+        std::vector<SurfaceInterface *> surfaces;
+        connect(&compositor, &CompositorInterface::surfaceCreated, this, [&](auto *surface) { surfaces.push_back(surface); });
+        SeatInterface primary(&display, QStringLiteral("primary"));
+        SeatInterface agent(&display, QStringLiteral("agent"));
+        primary.setHasPointer(true); agent.setHasPointer(true);
+        SeatBindings bindings(display); bindings.watch(&agent);
+        Client client(display), other(display);
+        client.pump(display); other.pump(display);
+        QCOMPARE(surfaces.size(), size_t(2));
+        auto *surface = surfaces[0];
+        client.bindPointer(0); client.bindPointer(1); client.pump(display);
+        primary.notifyPointerEnter(surfaces[1], QPointF(12, 13));
+        agent.notifyPointerEnter(surface, QPointF(30, 40));
+        client.pump(display);
+        const auto physicalPosition = primary.pointerPos();
+        const auto agentPosition = agent.pointerPos();
+        const auto time = std::chrono::microseconds(1000000);
+        QVERIFY(!bindings.deliverRelativePointer(&agent, client.serverClient, surface, QPointF(8,-3), time));
+        client.bindRelative(0); client.lock(0); client.pump(display);
+        surface->lockedPointer()->setLocked(true);
+        // A primary-seat relative subscription/active lock is insufficient.
+        QVERIFY(!bindings.relativePointerReady(&agent, client.serverClient));
+        QVERIFY(!bindings.lockedPointerReady(&agent, client.serverClient, surface));
+        QVERIFY(!bindings.deliverRelativePointer(&agent, client.serverClient, surface, QPointF(8,-3), time));
+        zwp_locked_pointer_v1_destroy(client.locked); client.locked = nullptr;
+        zwp_relative_pointer_v1_destroy(client.relative); client.relative = nullptr;
+        client.pump(display);
+        client.bindRelative(1); client.lock(1); client.pump(display);
+        QVERIFY(bindings.relativePointerReady(&agent, client.serverClient));
+        QVERIFY(!bindings.relativePointerReady(&agent, other.serverClient));
+        QVERIFY(!bindings.lockedPointerReady(&agent, client.serverClient, surface)); // requested, inactive
+        QVERIFY(!bindings.deliverRelativePointer(&agent, client.serverClient, surface, QPointF(8,-3), time));
+        surface->lockedPointer()->setLocked(true);
+        QVERIFY(bindings.lockedPointerReady(&agent, client.serverClient, surface));
+        QVERIFY(!bindings.deliverRelativePointer(&agent, other.serverClient, surface, QPointF(8,-3), time));
+        QVERIFY(!bindings.deliverRelativePointer(&agent, client.serverClient, surfaces[1], QPointF(8,-3), time));
+        QVERIFY(!bindings.deliverRelativePointer(&agent, client.serverClient, surface, QPointF(4097,0), time));
+        QVERIFY(!bindings.deliverRelativePointer(&agent, client.serverClient, surface, QPointF(0,0), time));
+        client.pump(display);
+        QVERIFY(client.deltas.empty());
+        const int before = client.motions;
+        agent.notifyPointerMotion(QPointF(80,90));
+        client.pump(display);
+        QCOMPARE(client.motions, before); // actual KWin locked absolute suppression
+        QVERIFY(client.deltas.empty()); // absolute motion is not relative motion
+        const auto stableAgentPosition = agent.pointerPos();
+        QVERIFY(bindings.deliverRelativePointer(&agent, client.serverClient, surface, QPointF(8,-3), time));
+        client.pump(display);
+        QCOMPARE(client.deltas, std::vector<QPointF>{QPointF(8,-3)});
+        QCOMPARE(client.unaccelerated, client.deltas);
+        QCOMPARE(primary.pointerPos(), physicalPosition);
+        QCOMPARE(agent.pointerPos(), stableAgentPosition); // no absolute warp
+        zwp_relative_pointer_v1_destroy(client.relative); client.relative = nullptr;
+        client.pump(display);
+        QVERIFY(!bindings.relativePointerReady(&agent, client.serverClient));
+        QVERIFY(!bindings.deliverRelativePointer(&agent, client.serverClient, surface, QPointF(8,-3), time));
+        client.bindRelative(1); // reused protocol IDs must require new live binding
+        QVERIFY(!bindings.relativePointerReady(&agent, client.serverClient));
+        client.pump(display);
+        QVERIFY(bindings.relativePointerReady(&agent, client.serverClient));
+        surface->lockedPointer()->setLocked(false);
+        QVERIFY(!bindings.deliverRelativePointer(&agent, client.serverClient, surface, QPointF(8,-3), time));
+        surface->lockedPointer()->setLocked(true);
+        zwp_locked_pointer_v1_destroy(client.locked); client.locked = nullptr;
+        client.pump(display);
+        QVERIFY(!bindings.lockedPointerReady(&agent, client.serverClient, surface));
+        client.lock(1); client.pump(display); surface->lockedPointer()->setLocked(true);
+        QVERIFY(bindings.lockedPointerReady(&agent, client.serverClient, surface));
+        wl_pointer_release(client.pointers.back()); client.pointers.pop_back(); client.pump(display);
+        QVERIFY(!bindings.relativePointerReady(&agent, client.serverClient));
+        QVERIFY(!bindings.lockedPointerReady(&agent, client.serverClient, surface));
+        client.pump(display);
+        QCOMPARE(client.deltas.size(), size_t(1));
+        bindings.forget(&agent);
+        QVERIFY(!bindings.relativePointerReady(&agent, client.serverClient));
+        Q_UNUSED(agentPosition)
+    }
+
     void firstKeyWaitsForActualBinding()
     {
         KWin::Display display;

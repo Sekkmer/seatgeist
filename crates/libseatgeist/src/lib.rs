@@ -29,7 +29,7 @@ pub use protocol::{
     MovePointerRequest, MoveWindowRequest, ObserveRequest, PageZoomOperation, PageZoomRequest,
     PanicStopStatus, PointerCalibrationPoint, PointerCalibrationStatus, PointerMonitorCalibration,
     PointerPhysicalBounds, PolicyStatus, PortalScreenshotTarget, PostActionImageOptions,
-    PostActionOptions, RemoteDesktopEisProbe, RemoteDesktopEisProbeRequest,
+    PostActionOptions, RelativePointerRequest, RemoteDesktopEisProbe, RemoteDesktopEisProbeRequest,
     RemoteDesktopEisSessionStatus, RemoteDesktopEisStartRequest, RemoteDesktopPersistMode,
     RemoteDesktopPortalStatus, RemoteDesktopSessionProbe, RemoteDesktopSessionProbeRequest,
     ReplayTrace, ResizeWindowRequest, SafetyStatus, ScreenshotInfo, ScreenshotPortalStatus,

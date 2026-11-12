@@ -214,6 +214,18 @@ pub trait TargetedInputBackend: std::fmt::Debug + Send + Sync {
         target: &WindowInfo,
         point: Point,
     ) -> Result<TargetedInputDelivery>;
+    /// Finite relative motion on a previously bound, locked exact agent seat.
+    async fn relative_pointer(
+        &self,
+        _context: &TargetedInputContext,
+        _target: &WindowInfo,
+        _dx: f64,
+        _dy: f64,
+    ) -> Result<TargetedInputDelivery> {
+        Err(SeatgeistError::BackendUnavailable(
+            "relative pointer is unsupported by this targeted backend".into(),
+        ))
+    }
     async fn click(
         &self,
         context: &TargetedInputContext,

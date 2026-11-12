@@ -15,6 +15,56 @@ use libseatgeist::{
 };
 use std::os::unix::fs::PermissionsExt;
 
+#[test]
+fn relative_pointer_cli_refuses_older_daemon_before_input() -> Result<()> {
+    use std::{
+        io::{BufRead, BufReader, Write},
+        os::unix::net::UnixListener,
+    };
+    let root = unique_temp_dir();
+    fs::create_dir_all(&root)?;
+    let socket = root.join("old.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let child = Command::new(env!("CARGO_BIN_EXE_seatgeist-cli"))
+        .arg("--socket")
+        .arg(&socket)
+        .args([
+            "input",
+            "relative-pointer",
+            "--session-id",
+            "owned",
+            "--dx",
+            "8.5",
+            "--dy",
+            "-3",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let (mut stream, _) = listener.accept()?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut line = String::new();
+    BufReader::new(stream.try_clone()?).read_line(&mut line)?;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&line)?["request"]["method"],
+        "health"
+    );
+    writeln!(
+        stream,
+        "{}",
+        r#"{"type":"health","data":{"service":"seatgeistd","version":"old","status":"ok"}}"#
+    )?;
+    let output = child.wait_with_output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no input sent"));
+    listener.set_nonblocking(true)?;
+    assert!(matches!(listener.accept(),Err(e) if e.kind()==std::io::ErrorKind::WouldBlock));
+    drop(stream);
+    drop(listener);
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
 struct DaemonFixture {
     child: Child,
     socket: PathBuf,
