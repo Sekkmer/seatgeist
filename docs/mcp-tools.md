@@ -424,17 +424,20 @@ write failures, or read timeouts after an action write attempt are
 returns structured advice and never reconnects or repeats the request. These
 socket limits are not cancellation or a promise of a total execution deadline.
 
-### Atomic Shift drag on the native agent seat
+### Atomic pointer modifiers on the native agent seat
 
-The expert `seatgeist.drag_pointer` tool accepts optional `modifiers: ["shift"]`
-(default `[]`). This requires an owned exact `session_id`, the native v2 agent-seat
-host, a daemon advertising `health.atomic_shift_drag_supported`, and both `ControlPointer` and `ControlKeyboard` authorization before delivery.
+The expert `seatgeist.click_pointer` and `seatgeist.drag_pointer` tools accept
+optional `modifiers` (default `[]`): unique `"shift"`, `"ctrl"`, and `"alt"`.
+Camera examples are `["alt"]`, `["ctrl", "alt"]`, and `["ctrl", "alt", "shift"]`. This requires an owned exact `session_id`, the native v2 agent-seat
+host, a daemon advertising `health.atomic_pointer_modifiers_supported` (the earlier
+Shift-only drag remains compatible with `health.atomic_shift_drag_supported`), and both `ControlPointer` and `ControlKeyboard` authorization before delivery.
 The same target, lane, coordinate/frame validation, user-interference checks,
 policy and journal apply to the whole gesture. Unknown or duplicate modifiers,
 legacy hosts and other input backends refuse before any event.
 
-The host executes one balanced batch: Shift down, motion to the start, button down,
-motion to the end, button up, Shift up. The host validates the entire batch and
+The host executes one balanced batch: modifiers down (Ctrl, Alt, Shift order),
+motion to the start, button down, optional drag motion, button up, then modifiers
+up in reverse order. Double-click keeps both clicks inside the same modifier batch. The host validates the entire batch and
 current target bounds before delivery, and updates the seat's keyboard modifiers
 for each key event. No physical-user focus changes or held-key API are involved.
 `duration_ms` remains accepted/validated, but native drags are atomic: it does not
@@ -447,9 +450,11 @@ daemon policy, ownership, frame and journal path:
 ```sh
 seatgeist-cli input drag-pointer --session-id "$session" \
   --capture-revision "$revision" --coordinate-space capture-output \
-  --from-x 100 --from-y 120 --to-x 180 --to-y 160 --modifier shift
+  --from-x 100 --from-y 120 --to-x 180 --to-y 160 \
+  --modifier ctrl --modifier alt --modifier shift
 ```
 
+`input click-pointer` accepts the same repeatable `--modifier` flags.
 Use coordinates and revision from that session's actual retained frame. The CLI
 flag grants no capture permission and does not substitute another capture backend.
 Session ownership still applies: a CLI invocation cannot use a process-owned MCP

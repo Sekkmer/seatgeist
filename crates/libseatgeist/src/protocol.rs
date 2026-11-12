@@ -26,6 +26,8 @@ pub struct HealthStatus {
     /// Prevent clients from silently degrading a modified drag on an older daemon.
     #[serde(default, skip_serializing_if = "is_false")]
     pub atomic_shift_drag_supported: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub atomic_pointer_modifiers_supported: bool,
     pub service: String,
     pub version: String,
     pub status: String,
@@ -1188,6 +1190,8 @@ pub struct MovePointerRequest {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClickPointerRequest {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<DragModifier>,
     pub point: Point,
     pub button: PointerButton,
     pub clicks: u8,
@@ -1199,11 +1203,13 @@ pub struct ClickPointerRequest {
     pub session_id: Option<String>,
 }
 
-/// Modifiers supported by one balanced, exact-target pointer drag.
+/// Modifiers supported by one balanced, exact-target pointer click or drag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DragModifier {
     Shift,
+    Ctrl,
+    Alt,
 }
 
 impl FromStr for DragModifier {
@@ -1212,14 +1218,44 @@ impl FromStr for DragModifier {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "shift" => Ok(Self::Shift),
-            _ => Err("drag modifier must be shift".to_string()),
+            "ctrl" => Ok(Self::Ctrl),
+            "alt" => Ok(Self::Alt),
+            _ => Err("pointer modifier must be shift, ctrl or alt".to_string()),
         }
+    }
+}
+
+impl DragModifier {
+    pub fn keycode(self) -> u16 {
+        match self {
+            Self::Shift => 42,
+            Self::Ctrl => 29,
+            Self::Alt => 56,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shift => "shift",
+            Self::Ctrl => "ctrl",
+            Self::Alt => "alt",
+        }
+    }
+    pub fn validate(modifiers: &[Self]) -> Result<(), String> {
+        if modifiers.len() > 3
+            || modifiers
+                .iter()
+                .enumerate()
+                .any(|(i, item)| modifiers[..i].contains(item))
+        {
+            return Err("pointer modifiers must be unique shift, ctrl or alt".into());
+        }
+        Ok(())
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DragPointerRequest {
-    /// Empty for an ordinary drag; at most one Shift for a native atomic drag.
+    /// Empty for an ordinary drag; unique Shift/Ctrl/Alt for a native atomic drag.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modifiers: Vec<DragModifier>,
     pub from: Point,
@@ -1933,6 +1969,29 @@ pub struct ActionResult {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn camera_click_modifiers_preserve_plain_wire_default() {
+        let plain = serde_json::json!({"method":"click_pointer", "point":{"x":1,"y":2,"space":"window_local"},"button":"left","clicks":1});
+        let request: super::DaemonRequest = serde_json::from_value(plain).unwrap();
+        assert!(
+            serde_json::to_value(request)
+                .unwrap()
+                .get("modifiers")
+                .is_none()
+        );
+        for modifiers in [
+            serde_json::json!(["alt"]),
+            serde_json::json!(["ctrl", "alt"]),
+            serde_json::json!(["ctrl", "alt", "shift"]),
+        ] {
+            let request: super::DaemonRequest = serde_json::from_value(serde_json::json!({"method":"click_pointer","point":{"x":1,"y":2,"space":"window_local"},"button":"left","clicks":1,"modifiers":modifiers})).unwrap();
+            assert_eq!(
+                serde_json::to_value(request).unwrap()["modifiers"],
+                modifiers
+            );
+        }
+    }
+
+    #[test]
     fn drag_modifiers_preserve_legacy_wire_default() {
         let legacy = serde_json::json!({"method":"drag_pointer",
             "from":{"x":1.0,"y":2.0,"space":"window_local"},
@@ -1943,7 +2002,7 @@ mod tests {
         modified["modifiers"] = serde_json::json!(["shift"]);
         let request: super::DaemonRequest = serde_json::from_value(modified.clone()).unwrap();
         assert_eq!(serde_json::to_value(request).unwrap(), modified);
-        modified["modifiers"] = serde_json::json!(["ctrl"]);
+        modified["modifiers"] = serde_json::json!(["meta"]);
         assert!(serde_json::from_value::<super::DaemonRequest>(modified).is_err());
     }
 
@@ -2556,6 +2615,7 @@ mod tests {
         assert!(encoded.contains(r#""space":"physical_pixel""#));
 
         let click_pointer = DaemonRequest::ClickPointer(ClickPointerRequest {
+            modifiers: Vec::new(),
             point: Point {
                 x: 100.0,
                 y: 200.0,
@@ -3102,6 +3162,7 @@ mod tests {
     fn daemon_response_reports_stable_type_and_ok_state() {
         let health = DaemonResponse::Health(HealthStatus {
             atomic_shift_drag_supported: false,
+            atomic_pointer_modifiers_supported: false,
             service: "seatgeistd".to_string(),
             version: "0.1.0".to_string(),
             status: "ok".to_string(),

@@ -138,18 +138,26 @@ pub(crate) async fn agent_click_pointer(
     target: &WindowInfo,
     backend: &dyn TargetedInputBackend,
 ) -> Result<ActionResult> {
+    libseatgeist::DragModifier::validate(&request.modifiers).map_err(anyhow::Error::msg)?;
     validate_clicks(request.clicks)?;
     validate_agent_point(target, request.point)?;
     let point = request.point;
     let delivery = backend
-        .click(context, target, point, request.button, request.clicks)
+        .click_with_modifiers(
+            context,
+            target,
+            point,
+            request.button,
+            request.clicks,
+            &request.modifiers,
+        )
         .await
         .map_err(anyhow::Error::msg)?;
     Ok(agent_result(
         delivery,
         format!(
-            "clicked pointer button={:?} clicks={} x={:.0} y={:.0} space=WindowLocal target_window={} routing=independent",
-            request.button, request.clicks, point.x, point.y, target.id
+            "clicked pointer button={:?} clicks={} modifiers={:?} x={:.0} y={:.0} space=WindowLocal target_window={} routing=independent",
+            request.button, request.clicks, request.modifiers, point.x, point.y, target.id
         ),
     ))
 }
@@ -161,9 +169,7 @@ pub(crate) async fn agent_drag_pointer(
     backend: &dyn TargetedInputBackend,
 ) -> Result<ActionResult> {
     validate_drag(request.duration_ms, request.from.space, request.to.space)?;
-    if request.modifiers.len() > 1 {
-        bail!("drag modifiers must be empty or contain Shift once");
-    }
+    libseatgeist::DragModifier::validate(&request.modifiers).map_err(anyhow::Error::msg)?;
     validate_agent_point(target, request.from)?;
     validate_agent_point(target, request.to)?;
     let delivery = backend
@@ -392,6 +398,10 @@ pub(crate) async fn click_pointer(
     input_backend_preference: InputBackendPreference,
     portal_eis_session_store: &PortalEisSessionStore,
 ) -> Result<ActionResult> {
+    if !request.modifiers.is_empty() {
+        bail!("atomic modified click requires the kwin_agent_seat backend and an exact session");
+    }
+
     validate_clicks(request.clicks)?;
     let context = pointer_coordinates::ResolutionContext::load(
         request.point.space,

@@ -114,6 +114,7 @@ struct PointerMoveAction<'a> {
 
 #[derive(Debug, Serialize)]
 struct PointerClickAction<'a> {
+    modifiers: &'a [DragModifier],
     id: Uuid,
     action: &'static str,
     lane_id: &'a str,
@@ -342,7 +343,7 @@ impl KwinAgentSeatBackend {
                     .is_some_and(|modifiers| !modifiers.is_empty())
             {
                 return Err(backend_error(anyhow::anyhow!(
-                    "atomic modified drag requires the v2 balanced event host"
+                    "atomic modified pointer action requires the v2 balanced event host"
                 )));
             }
             let payload = if backend == KWIN_AGENT_SEAT_BACKEND {
@@ -603,6 +604,19 @@ impl TargetedInputBackend for KwinAgentSeatBackend {
         button: PointerButton,
         clicks: u8,
     ) -> seatgeist_backend::Result<TargetedInputDelivery> {
+        self.click_with_modifiers(context, target, point, button, clicks, &[])
+            .await
+    }
+
+    async fn click_with_modifiers(
+        &self,
+        context: &TargetedInputContext,
+        target: &WindowInfo,
+        point: Point,
+        button: PointerButton,
+        clicks: u8,
+        modifiers: &[DragModifier],
+    ) -> seatgeist_backend::Result<TargetedInputDelivery> {
         validate_context(context)?;
         validate_window_local(point)?;
         let id = Uuid::new_v4();
@@ -610,6 +624,7 @@ impl TargetedInputBackend for KwinAgentSeatBackend {
             id,
             &target.id,
             &PointerClickAction {
+                modifiers,
                 id,
                 action: "pointer_click",
                 lane_id: &context.lane_id,
@@ -1002,6 +1017,61 @@ mod tests {
             capture_revision: None,
             guard: None,
             session_id: Some("capture-1".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn camera_click_is_one_exact_lane_batch_and_legacy_refuses() {
+        for modifiers in [
+            vec![DragModifier::Alt],
+            vec![DragModifier::Ctrl, DragModifier::Alt],
+            vec![DragModifier::Ctrl, DragModifier::Alt, DragModifier::Shift],
+        ] {
+            let backend = KwinAgentSeatBackend::default();
+            let request:libseatgeist::ClickPointerRequest = serde_json::from_value(serde_json::json!({"point":{"x":1,"y":2,"space":"window_local"},"button":"left","clicks":1,"session_id":"capture-1","modifiers":modifiers})).unwrap();
+            backend.register(LEGACY_BACKEND, "kwin-owner").unwrap();
+            assert!(
+                crate::input_actions::agent_click_pointer(
+                    request.clone(),
+                    &context(),
+                    &drag_target(),
+                    &backend
+                )
+                .await
+                .is_err()
+            );
+            assert!(backend.take("kwin-owner").unwrap().is_empty());
+            backend
+                .register(KWIN_AGENT_SEAT_BACKEND, "kwin-owner")
+                .unwrap();
+            let sender = backend.clone();
+            let task = tokio::spawn(async move {
+                crate::input_actions::agent_click_pointer(
+                    request,
+                    &context(),
+                    &drag_target(),
+                    &sender,
+                )
+                .await
+            });
+            let payload = backend.take_wait("kwin-owner").await.unwrap();
+            let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(value["action"], "events");
+            assert_eq!(value["lane_id"], context().lane_id);
+            assert_eq!(value["window_id"], target().id);
+            let events = value["events"].as_array().unwrap();
+            assert_eq!(events.len(), 3 + 2 * modifiers.len());
+            assert_eq!(
+                events[modifiers.len() + 1],
+                serde_json::json!({"op":"button","code":272,"pressed":true})
+            );
+            assert!(backend.take("kwin-owner").unwrap().is_empty());
+            let completion =
+                serde_json::json!({"id":value["id"],"ok":true,"backend":KWIN_AGENT_SEAT_BACKEND})
+                    .to_string();
+            backend.complete("kwin-owner", &completion).unwrap();
+            assert!(task.await.unwrap().unwrap().ok);
+            assert!(backend.complete("kwin-owner", &completion).is_err());
         }
     }
 

@@ -1550,6 +1550,18 @@ fn journal_requested_target_for_request(request: &DaemonRequest) -> Option<Journ
             let mut target = journal_point_target("pointer_click", &request.point);
             target.add("button", format!("{:?}", request.button));
             target.add("clicks", request.clicks.to_string());
+            if !request.modifiers.is_empty() {
+                target.add(
+                    "modifiers",
+                    request
+                        .modifiers
+                        .iter()
+                        .map(|m| m.as_str())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+                target.add("required_safety_classes", "ControlPointer,ControlKeyboard");
+            }
             if let Some(session_id) = request.session_id.as_deref() {
                 target.add("session_id", session_id);
             }
@@ -1562,7 +1574,15 @@ fn journal_requested_target_for_request(request: &DaemonRequest) -> Option<Journ
             target.add("button", format!("{:?}", request.button));
             target.add("duration_ms", request.duration_ms.to_string());
             if !request.modifiers.is_empty() {
-                target.add("modifiers", "shift");
+                target.add(
+                    "modifiers",
+                    request
+                        .modifiers
+                        .iter()
+                        .map(|m| m.as_str())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
                 target.add("required_safety_classes", "ControlPointer,ControlKeyboard");
             }
             if let Some(session_id) = request.session_id.as_deref() {
@@ -3201,6 +3221,7 @@ fn health(
 ) -> HealthStatus {
     HealthStatus {
         atomic_shift_drag_supported: true,
+        atomic_pointer_modifiers_supported: true,
         service: "seatgeistd".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         status: "ok".to_string(),
@@ -3707,7 +3728,7 @@ fn enforce_policy_with_scoped_cleanup(
 
 fn required_safety_classes(request: &DaemonRequest) -> Vec<SafetyClass> {
     let mut classes = vec![safety_class_for_request(request)];
-    if matches!(request, DaemonRequest::DragPointer(request) if !request.modifiers.is_empty()) {
+    if !pointer_modifiers(request).is_empty() {
         classes.push(SafetyClass::ControlKeyboard);
     }
     classes
@@ -4586,19 +4607,27 @@ fn enforce_mcp_focus_isolation(
     }
 }
 
+fn pointer_modifiers(request: &DaemonRequest) -> &[libseatgeist::DragModifier] {
+    match request {
+        DaemonRequest::ClickPointer(r) => &r.modifiers,
+        DaemonRequest::DragPointer(r) => &r.modifiers,
+        _ => &[],
+    }
+}
+
 fn validate_modified_drag(
     request: &DaemonRequest,
     preference: InputBackendPreference,
 ) -> Result<()> {
-    if let DaemonRequest::DragPointer(request) = request
-        && !request.modifiers.is_empty()
+    let modifiers = pointer_modifiers(request);
+    libseatgeist::DragModifier::validate(modifiers).map_err(anyhow::Error::msg)?;
+    if !modifiers.is_empty()
+        && (preference != InputBackendPreference::KwinAgentSeat
+            || interaction_session_id_for_request(request).is_none_or(|id| id.trim().is_empty()))
     {
-        if request.modifiers.len() != 1 {
-            bail!("drag modifiers must be empty or contain Shift once");
-        }
-        if preference != InputBackendPreference::KwinAgentSeat || request.session_id.is_none() {
-            bail!("atomic modified drag requires the kwin_agent_seat backend and an exact session");
-        }
+        bail!(
+            "atomic modified pointer action requires the kwin_agent_seat backend and an exact session"
+        );
     }
     Ok(())
 }
@@ -8049,6 +8078,67 @@ mod tests {
     use std::{collections::VecDeque, os::fd::RawFd};
 
     #[test]
+    fn camera_pointer_gestures_require_both_policies_and_exact_native_session() {
+        let path = temp_test_path("camera-pointer-approvals");
+        let store = ApprovalStore::new(Some(path.clone()));
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        for method in ["click_pointer", "drag_pointer"] {
+            for modifiers in [
+                serde_json::json!(["alt"]),
+                serde_json::json!(["ctrl", "alt"]),
+                serde_json::json!(["ctrl", "alt", "shift"]),
+            ] {
+                let mut value = serde_json::json!({"method":method,"point":{"x":1,"y":2,"space":"window_local"},"from":{"x":1,"y":2,"space":"window_local"},"to":{"x":3,"y":4,"space":"window_local"},"button":"left","clicks":1,"duration_ms":250,"session_id":"capture-1","modifiers":modifiers});
+                let request: DaemonRequest = serde_json::from_value(value.clone()).unwrap();
+                assert_eq!(
+                    required_safety_classes(&request),
+                    vec![SafetyClass::ControlPointer, SafetyClass::ControlKeyboard]
+                );
+                assert!(
+                    validate_modified_drag(&request, InputBackendPreference::KwinAgentSeat).is_ok()
+                );
+                assert!(validate_modified_drag(&request, InputBackendPreference::Uinput).is_err());
+                let expiry = unix_time_ms().unwrap() + 60000;
+                write_test_approval_grant(&path, SafetyClass::ControlPointer, method, expiry);
+                assert!(
+                    enforce_policy_with_approvals(&policy, &store, &request)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("ControlKeyboard")
+                );
+                let pointer_grant = fs::read_to_string(&path).unwrap();
+                write_test_approval_grant(&path, SafetyClass::ControlKeyboard, method, expiry);
+                assert!(
+                    enforce_policy_with_approvals(&policy, &store, &request)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("ControlPointer")
+                );
+                fs::write(
+                    &path,
+                    format!("{}{}", pointer_grant, fs::read_to_string(&path).unwrap()),
+                )
+                .unwrap();
+                assert!(enforce_policy_with_approvals(&policy, &store, &request).is_ok());
+                value["session_id"] = serde_json::Value::Null;
+                let request: DaemonRequest = serde_json::from_value(value.clone()).unwrap();
+                assert!(
+                    validate_modified_drag(&request, InputBackendPreference::KwinAgentSeat)
+                        .is_err()
+                );
+                value["session_id"] = serde_json::json!("capture-1");
+                value["modifiers"] = serde_json::json!(["alt", "alt"]);
+                let request: DaemonRequest = serde_json::from_value(value).unwrap();
+                assert!(
+                    validate_modified_drag(&request, InputBackendPreference::KwinAgentSeat)
+                        .is_err()
+                );
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn inherited_listener_requires_the_configured_filesystem_path() {
         let root = temp_test_path("inherited-listener");
         fs::create_dir_all(&root).expect("create inherited listener fixture");
@@ -8419,6 +8509,7 @@ mod tests {
                 },
                 &DaemonResponse::Health(HealthStatus {
                     atomic_shift_drag_supported: false,
+                    atomic_pointer_modifiers_supported: false,
                     service: "seatgeistd".to_string(),
                     version: "0.1.0".to_string(),
                     status: "ok".to_string(),
@@ -10402,6 +10493,7 @@ mod tests {
         let err = enforce_required_focus_guard(
             &settings,
             &DaemonRequest::ClickPointer(ClickPointerRequest {
+                modifiers: Vec::new(),
                 point: Point {
                     x: 10.0,
                     y: 20.0,
@@ -10420,6 +10512,7 @@ mod tests {
         enforce_required_focus_guard(
             &settings,
             &DaemonRequest::ClickPointer(ClickPointerRequest {
+                modifiers: Vec::new(),
                 point: Point {
                     x: 10.0,
                     y: 20.0,
@@ -12543,6 +12636,7 @@ height = 40
         let err = enforce_policy(
             &policy,
             &DaemonRequest::ClickPointer(ClickPointerRequest {
+                modifiers: Vec::new(),
                 point: physical_point(100.0, 200.0),
                 button: PointerButton::Left,
                 clicks: 1,
@@ -12611,6 +12705,7 @@ height = 40
         let err = enforce_panic_stop(
             &panic_stop,
             &DaemonRequest::ClickPointer(ClickPointerRequest {
+                modifiers: Vec::new(),
                 point: physical_point(100.0, 200.0),
                 button: PointerButton::Left,
                 clicks: 1,

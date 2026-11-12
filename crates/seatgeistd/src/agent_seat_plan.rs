@@ -44,6 +44,8 @@ enum Action {
         y: f64,
     },
     PointerClick {
+        #[serde(default)]
+        modifiers: Vec<DragModifier>,
         x: f64,
         y: f64,
         button: u32,
@@ -98,6 +100,28 @@ fn button(code: u32, pressed: bool) -> Result<Event> {
     Ok(Event::Button { code, pressed })
 }
 
+fn modifier_keys(events: &mut Vec<Event>, modifiers: &[DragModifier], pressed: bool) -> Result<()> {
+    DragModifier::validate(modifiers).map_err(anyhow::Error::msg)?;
+    // Stable press order and reverse release regardless of caller array order.
+    let ordered = [DragModifier::Ctrl, DragModifier::Alt, DragModifier::Shift];
+    let keys: Vec<_> = ordered
+        .into_iter()
+        .filter(|m| modifiers.contains(m))
+        .collect();
+    if pressed {
+        events.extend(keys.iter().map(|m| Event::Key {
+            code: m.keycode(),
+            pressed: true,
+        }));
+    } else {
+        events.extend(keys.iter().rev().map(|m| Event::Key {
+            code: m.keycode(),
+            pressed: false,
+        }));
+    }
+    Ok(())
+}
+
 pub(super) fn plan(value: serde_json::Value) -> Result<Vec<Event>> {
     let mut events = Vec::new();
     match serde_json::from_value::<Action>(value)? {
@@ -112,6 +136,7 @@ pub(super) fn plan(value: serde_json::Value) -> Result<Vec<Event>> {
         }
         Action::PointerMove { x, y } => events.push(motion(x, y)?),
         Action::PointerClick {
+            modifiers,
             x,
             y,
             button: code,
@@ -120,11 +145,13 @@ pub(super) fn plan(value: serde_json::Value) -> Result<Vec<Event>> {
             if !(1..=2).contains(&clicks) {
                 bail!("invalid agent-seat click count");
             }
+            modifier_keys(&mut events, &modifiers, true)?;
             events.push(motion(x, y)?);
             for _ in 0..clicks {
                 events.push(button(code, true)?);
                 events.push(button(code, false)?);
             }
+            modifier_keys(&mut events, &modifiers, false)?;
         }
         Action::PointerDrag {
             modifiers,
@@ -134,27 +161,14 @@ pub(super) fn plan(value: serde_json::Value) -> Result<Vec<Event>> {
             to_y,
             button: code,
         } => {
-            if modifiers.len() > 1 {
-                bail!("drag modifiers must be empty or contain Shift once");
-            }
-            if !modifiers.is_empty() {
-                events.push(Event::Key {
-                    code: 42,
-                    pressed: true,
-                });
-            }
+            modifier_keys(&mut events, &modifiers, true)?;
             events.extend([
                 motion(from_x, from_y)?,
                 button(code, true)?,
                 motion(to_x, to_y)?,
                 button(code, false)?,
             ]);
-            if !modifiers.is_empty() {
-                events.push(Event::Key {
-                    code: 42,
-                    pressed: false,
-                });
-            }
+            modifier_keys(&mut events, &modifiers, false)?;
         }
         Action::PointerScroll {
             vertical,
@@ -190,6 +204,42 @@ pub(super) fn plan(value: serde_json::Value) -> Result<Vec<Event>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn camera_pointer_gestures_are_balanced_in_one_batch() {
+        for (modifiers, codes) in [
+            (json!(["alt"]), vec![56]),
+            (json!(["ctrl", "alt"]), vec![29, 56]),
+            (json!(["shift", "alt", "ctrl"]), vec![29, 56, 42]),
+        ] {
+            for base in [
+                json!({"action":"pointer_click","x":1,"y":2,"button":272,"clicks":2}),
+                json!({"action":"pointer_drag","from_x":1,"from_y":2,"to_x":3,"to_y":4,"button":272}),
+            ] {
+                let plain = plan(base.clone()).unwrap();
+                let mut modified = base;
+                modified["modifiers"] = modifiers.clone();
+                let mut expected: Vec<_> = codes
+                    .iter()
+                    .map(|&code| Event::Key {
+                        code,
+                        pressed: true,
+                    })
+                    .collect();
+                expected.extend(plain);
+                expected.extend(codes.iter().rev().map(|&code| Event::Key {
+                    code,
+                    pressed: false,
+                }));
+                assert_eq!(plan(modified.clone()).unwrap(), expected);
+                modified["modifiers"] = json!(["alt", "ctrl", "alt"]);
+                assert!(plan(modified.clone()).is_err());
+                modified["modifiers"] = modifiers.clone();
+                modified["button"] = json!(1);
+                assert!(plan(modified).is_err());
+            }
+        }
+    }
 
     #[test]
     fn chords_release_in_reverse_order() {
@@ -285,7 +335,7 @@ mod tests {
         modified["modifiers"] = json!([]);
         assert_eq!(plan(modified.clone()).unwrap(), plain);
         for invalid in [
-            json!(["ctrl"]),
+            json!(["meta"]),
             json!(["shift", "shift"]),
             json!("shift"),
             json!(null),

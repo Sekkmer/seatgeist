@@ -444,6 +444,8 @@ enum InputCommand {
         button: PointerButton,
         #[arg(long, default_value_t = 1)]
         clicks: u8,
+        #[arg(long = "modifier", value_parser = ["shift", "ctrl", "alt"], num_args = 1)]
+        modifiers: Vec<String>,
         #[arg(long)]
         expected_active_window: Option<String>,
         #[arg(long)]
@@ -468,8 +470,8 @@ enum InputCommand {
         coordinate_space: CoordinateSpace,
         #[arg(long, default_value = "left")]
         button: PointerButton,
-        /// Atomic Shift drag on an exact native agent-seat session (no timed hold).
-        #[arg(long = "modifier", value_parser = ["shift"], num_args = 1)]
+        /// Atomic modifiers on an exact native agent-seat session (no timed hold).
+        #[arg(long = "modifier", value_parser = ["shift", "ctrl", "alt"], num_args = 1)]
         modifiers: Vec<String>,
         #[arg(long, default_value_t = 250)]
         duration_ms: u64,
@@ -1338,6 +1340,7 @@ fn main() -> Result<()> {
                     coordinate_space,
                     button,
                     clicks,
+                    modifiers,
                     expected_active_window,
                     expected_active_app,
                     active_title_contains,
@@ -1345,6 +1348,11 @@ fn main() -> Result<()> {
         } => print_daemon_response(
             &socket,
             DaemonRequest::ClickPointer(ClickPointerRequest {
+                modifiers: modifiers
+                    .iter()
+                    .map(|value| value.parse())
+                    .collect::<Result<_, _>>()
+                    .map_err(anyhow::Error::msg)?,
                 point: Point {
                     x,
                     y,
@@ -2653,6 +2661,20 @@ fn trace_step_context(index: usize, step: &libseatgeist::TraceStep) -> String {
 }
 
 fn send_request(socket: &PathBuf, request: DaemonRequest) -> Result<DaemonResponse> {
+    let camera_modifiers = match &request {
+        DaemonRequest::ClickPointer(r) => !r.modifiers.is_empty(),
+        DaemonRequest::DragPointer(r) => r
+            .modifiers
+            .iter()
+            .any(|m| *m != libseatgeist::DragModifier::Shift),
+        _ => false,
+    };
+    if camera_modifiers {
+        match send_request(socket, DaemonRequest::Health)? {
+            DaemonResponse::Health(health) if health.atomic_pointer_modifiers_supported => {}
+            _ => bail!("daemon does not support atomic pointer modifiers; no input sent"),
+        }
+    }
     if matches!(&request, DaemonRequest::DragPointer(drag) if !drag.modifiers.is_empty()) {
         match send_request(socket, DaemonRequest::Health)? {
             DaemonResponse::Health(health) if health.atomic_shift_drag_supported => {}
@@ -2683,6 +2705,54 @@ fn screenshot_output_or_default(output: Option<PathBuf>, kind: &str) -> Result<P
 
 #[cfg(test)]
 mod output_tests {
+    #[test]
+    fn camera_click_refuses_shift_only_daemon_before_input() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            os::unix::net::UnixListener,
+        };
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("sg-shift-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let socket = dir.join("bus");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["request"]["method"], "health");
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({"type":"health","data":{
+                "service":"seatgeistd","version":"old","status":"ok","atomic_shift_drag_supported":true}})
+            )
+            .unwrap();
+            listener
+        });
+        let request = libseatgeist::DaemonRequest::ClickPointer(
+            serde_json::from_value(serde_json::json!({
+                "point":{"x":1,"y":2,"space":"window_local"},
+
+                "button":"left","clicks":1,"modifiers":["ctrl","alt","shift"],"session_id":"capture-1"
+            }))
+            .unwrap(),
+        );
+        let error = super::send_request(&socket, request).unwrap_err();
+        assert!(error.to_string().contains("no input sent"));
+        let listener = server.join().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err(), "no drag sent to the old daemon");
+        drop(listener);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn shift_drag_refuses_legacy_daemon_before_sending_input() {
         use std::{
@@ -2755,14 +2825,14 @@ mod output_tests {
             "--session-id",
             "capture-1",
         ];
-        for modifier in [None, Some("shift"), Some("ctrl")] {
+        for modifier in [None, Some("shift"), Some("ctrl"), Some("alt"), Some("meta")] {
             let mut args = base.to_vec();
             if let Some(value) = modifier {
                 args.extend(["--modifier", value]);
             }
             assert_eq!(
                 super::Cli::try_parse_from(args).is_ok(),
-                modifier != Some("ctrl")
+                modifier != Some("meta")
             );
         }
     }

@@ -222,6 +222,23 @@ pub trait TargetedInputBackend: std::fmt::Debug + Send + Sync {
         button: PointerButton,
         clicks: u8,
     ) -> Result<TargetedInputDelivery>;
+    /// One balanced batch on the same exact target and lane; no persistent hold.
+    async fn click_with_modifiers(
+        &self,
+        context: &TargetedInputContext,
+        target: &WindowInfo,
+        point: Point,
+        button: PointerButton,
+        clicks: u8,
+        modifiers: &[DragModifier],
+    ) -> Result<TargetedInputDelivery> {
+        if !modifiers.is_empty() {
+            return Err(SeatgeistError::BackendUnavailable(
+                "atomic modified click is unsupported by this targeted input backend".into(),
+            ));
+        }
+        self.click(context, target, point, button, clicks).await
+    }
     async fn drag(
         &self,
         context: &TargetedInputContext,
