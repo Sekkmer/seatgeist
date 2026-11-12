@@ -851,6 +851,35 @@ impl Bridge {
             .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
     }
 
+    async fn check_alt_point_click_action(
+        &self,
+        id: &str,
+        session_id: &str,
+        lane_id: &str,
+        window_id: &str,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<bool> {
+        let caller = message_sender(&header)?;
+        let id = Uuid::parse_str(id).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        if self
+            .window_list_state
+            .update_age_ms()
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?
+            .is_none_or(|age| age > SNAPSHOT_STALE_AFTER.as_millis() as u64)
+        {
+            return Ok(false);
+        }
+        let windows = self
+            .window_list_state
+            .snapshot()
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?
+            .unwrap_or_default();
+        self.agent_seat_backend
+            .check_alt_point_click(&caller, id, session_id, lane_id, window_id, &windows)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
     async fn take_pending_agent_seat_action(
         &self,
         #[zbus(header)] header: zbus::message::Header<'_>,

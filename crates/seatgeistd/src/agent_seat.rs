@@ -46,8 +46,17 @@ struct AgentSeatState {
     build_id: Option<String>,
     last_delivery: Option<DeliveryValidation>,
     relative_pointer_supported: bool,
+    alt_point_click_supported: bool,
+    staged_clicks: HashMap<Uuid, StagedClick>,
 }
 
+#[derive(Debug, Clone)]
+struct StagedClick {
+    session_id: String,
+    lane_id: String,
+    window_id: String,
+    expires: Instant,
+}
 #[derive(Debug)]
 struct DeliveryValidation {
     observed_at: Instant,
@@ -159,7 +168,7 @@ impl KwinAgentSeatBackend {
     }
 
     pub(crate) fn register(&self, backend: &str, caller: &str) -> Result<()> {
-        self.register_identified(backend, None, caller, false)
+        self.register_identified(backend, None, caller, false, false)
     }
 
     pub(crate) fn register_with_build_id(
@@ -172,7 +181,13 @@ impl KwinAgentSeatBackend {
         if build_id.len() != 64 || !build_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             bail!("invalid KWin agent-seat build id");
         }
-        self.register_identified(backend, Some(build_id.to_ascii_lowercase()), caller, false)
+        self.register_identified(
+            backend,
+            Some(build_id.to_ascii_lowercase()),
+            caller,
+            false,
+            false,
+        )
     }
 
     pub(crate) fn register_with_capabilities(
@@ -186,10 +201,27 @@ impl KwinAgentSeatBackend {
         if build_id.len() != 64 || !build_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             bail!("invalid KWin agent-seat build id");
         }
-        if backend != KWIN_AGENT_SEAT_BACKEND || capabilities != "relative_pointer_v1" {
+        let capabilities = capabilities.split(',').collect::<Vec<_>>();
+        if backend != KWIN_AGENT_SEAT_BACKEND
+            || capabilities.is_empty()
+            || capabilities
+                .iter()
+                .any(|c| !matches!(*c, "relative_pointer_v1" | "alt_point_click_v1"))
+            || capabilities
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != capabilities.len()
+        {
             bail!("unsupported agent-seat capabilities");
         }
-        self.register_identified(backend, Some(build_id.to_ascii_lowercase()), caller, true)
+        self.register_identified(
+            backend,
+            Some(build_id.to_ascii_lowercase()),
+            caller,
+            capabilities.contains(&"relative_pointer_v1"),
+            capabilities.contains(&"alt_point_click_v1"),
+        )
     }
 
     fn register_identified(
@@ -198,6 +230,7 @@ impl KwinAgentSeatBackend {
         build_id: Option<String>,
         caller: &str,
         relative_pointer_supported: bool,
+        alt_point_click_supported: bool,
     ) -> Result<()> {
         if backend != KWIN_AGENT_SEAT_BACKEND && backend != LEGACY_BACKEND {
             bail!("unsupported KWin agent-seat backend: {backend}");
@@ -213,8 +246,10 @@ impl KwinAgentSeatBackend {
             || state.backend.as_deref() != Some(backend)
             || state.build_id != build_id
             || state.relative_pointer_supported != relative_pointer_supported
+            || state.alt_point_click_supported != alt_point_click_supported
         {
             // Never transfer old work to a replacement host or wire protocol.
+            state.staged_clicks.clear();
             state.pending.clear();
             state.waiters.clear();
             state.last_delivery = None;
@@ -224,6 +259,7 @@ impl KwinAgentSeatBackend {
         state.backend = Some(backend.to_string());
         state.build_id = build_id;
         state.relative_pointer_supported = relative_pointer_supported;
+        state.alt_point_click_supported = alt_point_click_supported;
         self.registered.store(true, Ordering::Release);
         Ok(())
     }
@@ -253,6 +289,7 @@ impl KwinAgentSeatBackend {
             .unwrap_or(("heartbeat_only", None, None));
         Some(AgentSeatRuntimeStatus {
             relative_pointer_supported: state.relative_pointer_supported,
+            alt_point_click_supported: state.alt_point_click_supported,
             protocol,
             build_id: state.build_id.clone(),
             heartbeat_fresh: heartbeat_age <= BACKEND_HEARTBEAT_TTL,
@@ -317,6 +354,7 @@ impl KwinAgentSeatBackend {
         if sender.is_closed() {
             bail!("KWin agent-seat action receiver closed");
         }
+        state.staged_clicks.remove(&result.id);
         let delivery = DeliveryValidation {
             observed_at: Instant::now(),
             ok: result.ok,
@@ -373,11 +411,22 @@ impl KwinAgentSeatBackend {
                     "registered native host does not support relative_pointer_v1; no input queued"
                 )));
             }
+            if value["action"] == "alt_point_click" && !state.alt_point_click_supported {
+                return Err(backend_error(anyhow::anyhow!(
+                    "registered host does not support alt_point_click_v1; no input queued"
+                )));
+            }
             let payload = if backend == KWIN_AGENT_SEAT_BACKEND {
-                action_payload(&serde_json::json!({
+                let mut batch = serde_json::json!({
                     "id": id, "action": "events", "protocol": plan::HOST_PROTOCOL,
                     "lane_id": value["lane_id"], "window_id": window_id, "events": events,
-                }))
+                });
+                if value["action"] == "alt_point_click" {
+                    batch["session_id"] = value["session_id"].clone();
+                    batch["expected_app_id"] = value["expected_app_id"].clone();
+                    batch["expected_pid"] = value["expected_pid"].clone();
+                }
+                action_payload(&batch)
             } else {
                 action_payload(action)
             }
@@ -387,6 +436,17 @@ impl KwinAgentSeatBackend {
                 window_id: window_id.to_string(),
                 payload,
             });
+            if value["action"] == "alt_point_click" {
+                state.staged_clicks.insert(
+                    id,
+                    StagedClick {
+                        session_id: value["session_id"].as_str().unwrap_or("").into(),
+                        lane_id: value["lane_id"].as_str().unwrap_or("").into(),
+                        window_id: window_id.into(),
+                        expires: Instant::now() + ACTION_TIMEOUT,
+                    },
+                );
+            }
             state.waiters.insert(id, sender);
             backend
         };
@@ -434,8 +494,65 @@ impl KwinAgentSeatBackend {
         })
     }
 
+    pub(crate) async fn check_alt_point_click(
+        &self,
+        caller: &str,
+        id: Uuid,
+        session_id: &str,
+        lane_id: &str,
+        window_id: &str,
+        windows: &[WindowInfo],
+    ) -> Result<bool> {
+        {
+            let state = self
+                .inner
+                .lock()
+                .map_err(|_| anyhow::anyhow!("agent-seat lock poisoned"))?;
+            require_registered_caller(&state, caller)?;
+            let Some(staged) = state.staged_clicks.get(&id) else {
+                return Ok(false);
+            };
+            if staged.session_id != session_id
+                || staged.lane_id != lane_id
+                || staged.window_id != window_id
+                || staged.expires <= Instant::now()
+                || state
+                    .waiters
+                    .get(&id)
+                    .is_none_or(|sender| sender.is_closed())
+            {
+                return Ok(false);
+            }
+        }
+        let Some(lanes) = &self.lanes else {
+            return Ok(false);
+        };
+        if !lanes
+            .resolve(session_id, windows)
+            .await
+            .is_ok_and(|target| target.lane_id == lane_id && target.window.id == window_id)
+        {
+            return Ok(false);
+        }
+        let state = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("agent-seat lock poisoned"))?;
+        require_registered_caller(&state, caller)?;
+        Ok(state.staged_clicks.get(&id).is_some_and(|staged| {
+            staged.session_id == session_id
+                && staged.lane_id == lane_id
+                && staged.window_id == window_id
+                && staged.expires > Instant::now()
+        }) && state
+            .waiters
+            .get(&id)
+            .is_some_and(|sender| !sender.is_closed()))
+    }
+
     fn remove(&self, id: Uuid) {
         if let Ok(mut state) = self.inner.lock() {
+            state.staged_clicks.remove(&id);
             state.pending.retain(|action| action.id != id);
             state.waiters.remove(&id);
         }
@@ -445,14 +562,24 @@ impl KwinAgentSeatBackend {
         let Ok(mut state) = self.inner.lock() else {
             return 0;
         };
-        let cancelled = state
+        let mut cancelled = state
             .pending
             .iter()
             .filter(|action| action.window_id == window_id)
             .map(|action| action.id)
             .collect::<Vec<_>>();
+        cancelled.extend(
+            state
+                .staged_clicks
+                .iter()
+                .filter(|(_, c)| c.window_id == window_id)
+                .map(|(id, _)| *id),
+        );
+        cancelled.sort();
+        cancelled.dedup();
         state.pending.retain(|action| action.window_id != window_id);
         for id in &cancelled {
+            state.staged_clicks.remove(id);
             if let Some(sender) = state.waiters.remove(id) {
                 let _ = sender.send(AgentSeatActionResult {
                     id: *id,
@@ -623,6 +750,23 @@ impl TargetedInputBackend for KwinAgentSeatBackend {
         .await
     }
 
+    async fn alt_point_click(
+        &self,
+        context: &TargetedInputContext,
+        target: &WindowInfo,
+        point: Point,
+        session_id: &str,
+    ) -> seatgeist_backend::Result<TargetedInputDelivery> {
+        validate_context(context)?;
+        validate_window_local(point)?;
+        if session_id.trim().is_empty() {
+            return Err(backend_error(anyhow::anyhow!(
+                "Alt-point click requires exact session"
+            )));
+        }
+        let id = Uuid::new_v4();
+        self.submit(id,&target.id,&serde_json::json!({"id":id,"action":"alt_point_click","session_id":session_id,"lane_id":context.lane_id,"window_id":target.id,"expected_app_id":target.app_id,"expected_pid":target.pid,"x":point.x,"y":point.y})).await
+    }
     async fn relative_pointer(
         &self,
         context: &TargetedInputContext,
@@ -796,6 +940,160 @@ fn backend_error(error: anyhow::Error) -> SeatgeistError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn alt_point_click_refuses_old_host_and_rechecks_live_action_session_and_target() {
+        let lanes = crate::interaction::InteractionSessionStore::default();
+        lanes
+            .bind(
+                "owned".into(),
+                &target(),
+                crate::session_owner::SessionOwner::test_process(101),
+            )
+            .await
+            .unwrap();
+        let ctx = TargetedInputContext {
+            lane_id: lanes.resolve("owned", &[target()]).await.unwrap().lane_id,
+        };
+        let backend = KwinAgentSeatBackend::with_lanes(lanes.clone());
+        backend
+            .register_with_capabilities(
+                KWIN_AGENT_SEAT_BACKEND,
+                &"a".repeat(64),
+                "relative_pointer_v1",
+                "kwin-owner",
+            )
+            .unwrap();
+        let point = Point {
+            x: 196.,
+            y: 116.,
+            space: CoordinateSpace::WindowLocal,
+        };
+        assert!(
+            backend
+                .alt_point_click(&ctx, &target(), point, "owned")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("no input queued")
+        );
+        assert!(backend.take("kwin-owner").unwrap().is_empty());
+        backend
+            .register_with_capabilities(
+                KWIN_AGENT_SEAT_BACKEND,
+                &"a".repeat(64),
+                "relative_pointer_v1,alt_point_click_v1",
+                "kwin-owner",
+            )
+            .unwrap();
+        assert!(
+            backend.runtime_status().unwrap().relative_pointer_supported
+                && backend.runtime_status().unwrap().alt_point_click_supported
+        );
+        let sender = backend.clone();
+        let c = ctx.clone();
+        let action =
+            tokio::spawn(
+                async move { sender.alt_point_click(&c, &target(), point, "owned").await },
+            );
+        let payload: serde_json::Value =
+            serde_json::from_str(&backend.take_wait("kwin-owner").await.unwrap()).unwrap();
+        let id = Uuid::parse_str(payload["id"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["session_id"], "owned");
+        assert_eq!(
+            payload["events"],
+            serde_json::json!([{"op":"alt_point_click","x":196.,"y":116.}])
+        );
+        assert!(
+            backend
+                .check_alt_point_click(
+                    "foreign",
+                    id,
+                    "owned",
+                    &ctx.lane_id,
+                    &target().id,
+                    &[target()]
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            !backend
+                .check_alt_point_click(
+                    "kwin-owner",
+                    id,
+                    "wrong",
+                    &ctx.lane_id,
+                    &target().id,
+                    &[target()]
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            backend
+                .check_alt_point_click(
+                    "kwin-owner",
+                    id,
+                    "owned",
+                    &ctx.lane_id,
+                    &target().id,
+                    &[target()]
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            !backend
+                .check_alt_point_click("kwin-owner", id, "owned", &ctx.lane_id, &target().id, &[])
+                .await
+                .unwrap()
+        );
+        let mut changed = target();
+        changed.pid = Some(999);
+        assert!(
+            !backend
+                .check_alt_point_click(
+                    "kwin-owner",
+                    id,
+                    "owned",
+                    &ctx.lane_id,
+                    &target().id,
+                    &[changed]
+                )
+                .await
+                .unwrap()
+        );
+        lanes.clear("owned").await.unwrap();
+        assert!(
+            !backend
+                .check_alt_point_click(
+                    "kwin-owner",
+                    id,
+                    "owned",
+                    &ctx.lane_id,
+                    &target().id,
+                    &[target()]
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(backend.cancel_pending_for_target(&target().id), 1);
+        assert!(action.await.unwrap().is_err());
+        assert!(
+            !backend
+                .check_alt_point_click(
+                    "kwin-owner",
+                    id,
+                    "owned",
+                    &ctx.lane_id,
+                    &target().id,
+                    &[target()]
+                )
+                .await
+                .unwrap()
+        );
+    }
 
     #[tokio::test]
     async fn relative_pointer_refuses_old_hosts_and_delivers_one_exact_lane_delta() {

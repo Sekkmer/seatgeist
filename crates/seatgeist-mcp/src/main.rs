@@ -18,9 +18,9 @@ use libseatgeist::{
     AccessibilityInvokeRequest, AccessibilityPasteTextRequest, AccessibilitySetCaretRequest,
     AccessibilitySetSelectionRequest, AccessibilitySetTextRequest,
     AccessibilityTextAttributesRequest, ActionSettleCondition, ActivateLinkRequest,
-    ActivateTabRequest, ActiveWindowGuard, ClickButtonRequest, ClickPointerRequest,
-    ClipboardGetRequest, ClipboardSetRequest, CloseWindowRequest, CoordinateSpace,
-    DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_POST_ACTION_SETTLE_INTERVAL_MS,
+    ActivateTabRequest, ActiveWindowGuard, AltPointClickRequest, ClickButtonRequest,
+    ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest, CloseWindowRequest,
+    CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES, DEFAULT_POST_ACTION_SETTLE_INTERVAL_MS,
     DEFAULT_POST_ACTION_SETTLE_TIMEOUT_MS, DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS,
     DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS, DEFAULT_WAIT_FOR_CHANGE_THRESHOLD,
     DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonClientIdentity, DaemonRequest, DaemonRequestEnvelope,
@@ -233,6 +233,13 @@ impl McpServer {
         request: DaemonRequest,
         response_options: Option<DaemonResponseOptions>,
     ) -> Result<DaemonResponse> {
+        if let DaemonRequest::AltPointClick(r) = &request {
+            r.validate().map_err(anyhow::Error::msg)?;
+            match self.send_daemon_request(DaemonRequest::Health, None)? {
+                DaemonResponse::Health(h) if h.alt_point_click_supported => {}
+                _ => bail!("daemon does not support Alt-point click; no input sent"),
+            }
+        }
         if let DaemonRequest::RelativePointer(r) = &request {
             r.validate().map_err(anyhow::Error::msg)?;
             match self.send_daemon_request(DaemonRequest::Health, None)? {
@@ -625,6 +632,36 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
             guard: active_window_guard(arguments)?,
             session_id: optional_string(arguments, "session_id")?,
         })),
+        "seatgeist.alt_point_click" => {
+            for key in arguments
+                .as_object()
+                .ok_or_else(|| anyhow!("Alt-point click arguments must be an object"))?
+                .keys()
+            {
+                if ![
+                    "x",
+                    "y",
+                    "coordinate_space",
+                    "session_id",
+                    "capture_revision",
+                ]
+                .contains(&key.as_str())
+                {
+                    bail!("unsupported Alt-point click argument {key}")
+                }
+            }
+            let r = AltPointClickRequest {
+                point: Point {
+                    x: required_f64(arguments, "x")?,
+                    y: required_f64(arguments, "y")?,
+                    space: required_coordinate_space(arguments, "coordinate_space")?,
+                },
+                session_id: required_string(arguments, "session_id")?,
+                capture_revision: optional_string(arguments, "capture_revision")?,
+            };
+            r.validate().map_err(anyhow::Error::msg)?;
+            Ok(DaemonRequest::AltPointClick(r))
+        }
         "seatgeist.relative_pointer" => {
             let request: RelativePointerRequest = serde_json::from_value(arguments.clone())
                 .context("relative pointer requires only dx, dy and session_id")?;
@@ -2482,6 +2519,24 @@ fn expert_tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "seatgeist.alt_point_click",
+            "Alt Point Click",
+            "Bounded exact-session left click: Alt down, yield until the same client destroys its active same-seat pointer lock, revalidate, move/click, Alt up. Requires keyboard and pointer approval; timeout/cancel releases Alt without clicking. No persistent held key or physical-seat fallback.",
+            object_schema(
+                vec![
+                    ("x", json!({"type":"number","minimum":0})),
+                    ("y", json!({"type":"number","minimum":0})),
+                    (
+                        "coordinate_space",
+                        json!({"type":"string","enum":["window_local","capture_output"]}),
+                    ),
+                    ("session_id", json!({"type":"string","minLength":1})),
+                    ("capture_revision", json!({"type":"string"})),
+                ],
+                vec!["x", "y", "coordinate_space", "session_id"],
+            ),
+        ),
+        tool(
             "seatgeist.relative_pointer",
             "Relative Pointer",
             "Send one finite synthetic relative motion to the exact session's previously focused independent native seat. Requires an active lock and relative-pointer subscription on that same seat/client. Does not move the physical cursor; no absolute fallback. Deltas are compositor logical units, without acceleration.",
@@ -3625,6 +3680,31 @@ fn i64_to_i32(value: i64) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn alt_point_click_parser_and_schema_preserve_the_specialized_contract() {
+        let args = json!({"x":196,"y":116,"coordinate_space":"window_local","session_id":"owned"});
+        assert!(matches!(
+            daemon_request_for_tool("seatgeist.alt_point_click", &args).unwrap(),
+            DaemonRequest::AltPointClick(_)
+        ));
+        for value in [
+            json!({"x":1,"y":2,"coordinate_space":"physical_pixel","session_id":"owned"}),
+            json!({"x":1,"y":2,"coordinate_space":"window_local"}),
+            json!({"x":1,"y":2,"coordinate_space":"window_local","session_id":"owned","hold_ms":50}),
+        ] {
+            assert!(daemon_request_for_tool("seatgeist.alt_point_click", &value).is_err());
+        }
+        let tools = tool_definitions(ToolProfile::All);
+        let tool = tools
+            .iter()
+            .find(|t| t["name"] == "seatgeist.alt_point_click")
+            .unwrap();
+        assert_eq!(
+            tool["inputSchema"]["required"],
+            json!(["x", "y", "coordinate_space", "session_id"])
+        );
+    }
+
+    #[test]
     fn relative_pointer_parser_schema_and_old_daemon_refusal() {
         let args = json!({"dx":8.5,"dy":-3,"session_id":"capture-1"});
         let request = daemon_request_for_tool("seatgeist.relative_pointer", &args).unwrap();
@@ -4584,6 +4664,7 @@ mod tests {
                 implemented_available_backend: Some("uinput".to_string()),
                 agent_seat: Some(libseatgeist::AgentSeatRuntimeStatus {
                     relative_pointer_supported: false,
+                    alt_point_click_supported: false,
                     protocol: "kwin_agent_seat_v2".to_string(),
                     build_id: Some("a".repeat(64)),
                     heartbeat_fresh: true,

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 #include "seatbindings.h"
+#include "altpointclick.h"
 
 #include <wayland/clientconnection.h>
 #include <wayland/compositor.h>
@@ -41,6 +42,9 @@ struct Client {
     std::vector<uint32_t> keys;
     int enters = 0;
     int motions = 0;
+    bool unlockOnAlt = false;
+    std::vector<uint32_t> releases, buttons;
+    QPointF lastMotion;
     zwp_relative_pointer_manager_v1 *relativeManager = nullptr;
     zwp_pointer_constraints_v1 *constraints = nullptr;
     zwp_relative_pointer_v1 *relative = nullptr;
@@ -129,8 +133,8 @@ struct Client {
         static const wl_pointer_listener listener{
             .enter = [](void *, wl_pointer *, uint32_t, wl_surface *, wl_fixed_t, wl_fixed_t) {},
             .leave = [](void *, wl_pointer *, uint32_t, wl_surface *) {},
-            .motion = [](void *data, wl_pointer *, uint32_t, wl_fixed_t, wl_fixed_t) { ++static_cast<Client *>(data)->motions; },
-            .button = [](void *, wl_pointer *, uint32_t, uint32_t, uint32_t, uint32_t) {},
+            .motion = [](void *data, wl_pointer *, uint32_t, wl_fixed_t x, wl_fixed_t y) { auto &c=*static_cast<Client *>(data); ++c.motions; c.lastMotion=QPointF(wl_fixed_to_double(x),wl_fixed_to_double(y)); },
+            .button = [](void *data, wl_pointer *, uint32_t, uint32_t, uint32_t, uint32_t state) { static_cast<Client *>(data)->buttons.push_back(state); },
             .axis = [](void *, wl_pointer *, uint32_t, uint32_t, wl_fixed_t) {},
             .frame = [](void *, wl_pointer *) {},
             .axis_source = [](void *, wl_pointer *, uint32_t) {},
@@ -171,9 +175,13 @@ struct Client {
             [](void *data, wl_keyboard *, uint32_t, wl_surface *, wl_array *) { ++static_cast<Client *>(data)->enters; },
             [](void *, wl_keyboard *, uint32_t, wl_surface *) {},
             [](void *data, wl_keyboard *, uint32_t, uint32_t, uint32_t key, uint32_t state) {
+                auto &client=*static_cast<Client *>(data);
                 if (state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-                    static_cast<Client *>(data)->keys.push_back(key);
-                }
+                    client.keys.push_back(key);
+                    if (key == 56 && client.unlockOnAlt && client.locked) {
+                        zwp_locked_pointer_v1_destroy(client.locked); client.locked=nullptr;
+                    }
+                } else { client.releases.push_back(key); }
             },
             [](void *, wl_keyboard *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {},
             [](void *, wl_keyboard *, int32_t, int32_t) {},
@@ -205,6 +213,64 @@ class SeatBindingsTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void altPointClickWaitsForActualUnlockAndBalancesEveryExit()
+    {
+        for (int scenario=0; scenario<11; ++scenario) {
+            KWin::Display display;
+            CompositorInterface compositor(&display);
+            PointerConstraintsV1Interface constraints(&display);
+            SurfaceInterface *surface=nullptr;
+            connect(&compositor,&CompositorInterface::surfaceCreated,this,[&](auto *s){surface=s;});
+            SeatInterface primary(&display,QStringLiteral("primary"));
+            SeatInterface agent(&display,QStringLiteral("agent"));
+            primary.setHasPointer(true); agent.setHasPointer(true); agent.setHasKeyboard(true); keymap(agent);
+            SeatBindings bindings(display);bindings.watch(&agent);
+            Client client(display);client.pump(display);
+            client.bindPointer(1);client.bindKeyboard(1);client.pump(display);
+            agent.setFocusedKeyboardSurface(surface);agent.notifyPointerEnter(surface,QPointF(10,10));
+            client.lock(0);client.pump(display);
+            if (scenario!=8) { surface->lockedPointer()->setLocked(true); }
+            const auto physical=primary.pointerPos();
+            bool targetValid=true;int downs=0,ups=0,authorizations=0,clicks=0,completions=0;bool success=false;
+            client.unlockOnAlt = scenario==0 || scenario==4 || scenario==5 || scenario==6;
+            AltPointClick::Hooks hooks;
+            hooks.valid=[&]{return targetValid;};
+            hooks.alt=[&](bool down){if(down)++downs;else++ups;agent.notifyKeyboardKey(56,down?KeyboardKeyState::Pressed:KeyboardKeyState::Released,display.nextSerial());};
+            hooks.authorize=[&]{++authorizations;};
+            hooks.click=[&]{++clicks;agent.notifyPointerMotion(QPointF(196,116));agent.notifyPointerButton(0x110,PointerButtonState::Pressed);agent.notifyPointerButton(0x110,PointerButtonState::Released);agent.notifyPointerFrame();return true;};
+            hooks.finished=[&](bool ok,const QString &){++completions;success=ok;};
+            {
+                AltPointClick gesture(bindings,&agent,surface,std::move(hooks));
+                gesture.start(0);gesture.tick(1);
+                QCOMPARE(clicks,0);QCOMPARE(authorizations,0); // cannot service unlock synchronously
+                client.pump(display); // actual keyboard callback sends lock destroy; server processes it
+                if (scenario==0) {
+                    QVERIFY(!surface->lockedPointer());gesture.tick(2);
+                    QCOMPARE(authorizations,1);QCOMPARE(clicks,0); // wait for async daemon revalidation
+                    gesture.authorized(true,3);QVERIFY(success);
+                } else if (scenario==1) { gesture.tick(1000); } // no client unlock
+                else if (scenario==2) { targetValid=false;gesture.tick(2); }
+                else if (scenario==3) { gesture.cancel();gesture.cancel();gesture.authorized(true,3); }
+                else if (scenario==4) {gesture.tick(2);gesture.authorized(false,3);}
+                else if (scenario==5) {gesture.tick(2);gesture.tick(1000);gesture.authorized(true,1001);}
+                else if (scenario==6) {gesture.tick(2);targetValid=false;gesture.authorized(true,3);}
+                else if (scenario==7) {
+                    surface->lockedPointer()->setLocked(false);gesture.tick(2);
+                    QCOMPARE(authorizations,0);gesture.tick(1000); // server-only unlock is not client confirmation
+                }
+                else if (scenario==9) { wl_surface_destroy(client.surface);client.surface=nullptr;client.pump(display);gesture.tick(2); }
+                // scenario8 refuses before Alt down; scenario10 destructor releases a pending Alt.
+            }
+            client.pump(display);
+            QCOMPARE(completions,1);
+            QCOMPARE(downs,scenario==8?0:1);QCOMPARE(ups,downs);
+            QCOMPARE(clicks,scenario==0?1:0);
+            QCOMPARE(client.buttons.size(),scenario==0?size_t(2):size_t(0));
+            if(scenario==0){QCOMPARE(client.lastMotion,QPointF(196,116));QCOMPARE(client.keys,std::vector<uint32_t>{56});QCOMPARE(client.releases,std::vector<uint32_t>{56});}
+            QCOMPARE(primary.pointerPos(),physical);
+        }
+    }
+
     void relativeDeliveryRequiresExactLiveBindingsAndLock()
     {
         KWin::Display display;

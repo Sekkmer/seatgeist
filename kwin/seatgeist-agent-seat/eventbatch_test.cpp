@@ -7,6 +7,15 @@ class EventBatchTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void stagedAltPointClickIsStandalone()
+    {
+        QJsonObject click{{"op","alt_point_click"},{"x",9},{"y",8}};
+        QJsonObject action{{"action","events"},{"protocol",1},{"expires_at_unix_ms",1000},{"events",QJsonArray{click}}};
+        QVector<KWin::SeatEvent> events;QString error;
+        QVERIFY(KWin::decodeSeatEvents(action,QSizeF(100,100),&events,&error));QCOMPARE(events[0].kind,KWin::SeatEvent::AltPointClick);
+        action["events"]=QJsonArray{click,click};QVERIFY(!KWin::decodeSeatEvents(action,QSizeF(100,100),&events,&error));QVERIFY(events.empty());
+        click["x"]=100;action["events"]=QJsonArray{click};QVERIFY(!KWin::decodeSeatEvents(action,QSizeF(100,100),&events,&error));
+    }
     void finiteRelativeMotionIsStandalone()
     {
         QJsonObject relative{{"op","relative_motion"},{"dx",8.5},{"dy",-3}};

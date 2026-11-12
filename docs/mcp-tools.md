@@ -493,3 +493,44 @@ not synthesize relative events and suppresses absolute motion under an active
 lock. Other backends fail closed; absolute `move_pointer` remains unchanged.
 Deploy a qualified matching daemon/native plugin pair at an owned safe boundary;
 MCP refresh alone cannot add native support. No primary-seat/portal fallback.
+
+### Alt-point click after a client unlock
+
+Expert MCP `seatgeist.alt_point_click` accepts required `session_id`, `x`, `y`,
+`coordinate_space` (`window_local` or `capture_output`), plus `capture_revision`
+when using capture coordinates. CLI:
+`seatgeist-cli input alt-point-click --session-id <owned-session> --x 196 --y 116 --coordinate-space window_local`.
+The action is one left click with Alt. It requires both ControlKeyboard and
+ControlPointer approval for method `alt_point_click`; the point, session and
+unlock barrier are journaled. Existing atomic click/drag APIs are unchanged.
+
+The exact lane must already focus the pinned target and have actual keyboard /
+pointer bindings and an active lock requested by that same seat/client. The
+native host presses Alt, returns to the compositor event loop, then waits for
+that client to destroy the original lock and for the object to disappear. A
+server-only deactivation, another seat's lock, or a fixed delay is insufficient.
+Before motion/buttons, an authenticated daemon round trip rechecks that the
+original action is still waiting and its exact session/lane/window/app/PID lease
+is valid. The host rechecks its window, surface, app/PID, bounds, focus isolation,
+physical-interference and expiry guards again before one absolute motion and
+balanced button press/release. No physical-user focus or primary-seat fallback.
+
+The gesture has a fixed 1000 ms deadline, including unlock and revalidation;
+it always releases the virtual Alt state on success, refusal, timeout,
+cancellation, target loss, daemon disconnection or host destruction. If the
+original keyboard target is gone, cleanup resets virtual modifier state without
+sending a key event into a replacement target. No public held-key handle, timer
+control or general staged-input API is introduced. A timeout or lost reply still
+requires observation without replay; compositor delivery does not prove an
+application touch/pick.
+
+Daemon health and native runtime `agent_seat` both expose
+`alt_point_click_supported`. Native capability `alt_point_click_v1` is registered
+alongside `relative_pointer_v1` using the authenticated V3 registration. Old
+daemons refuse in new clients before input; old hosts refuse before queueing.
+Native protocol 1 adds only the standalone `alt_point_click {x,y}` operation;
+balanced primitive batches remain mandatory for existing actions. This uses
+KWin's seat APIs plus observed Wayland lock destruction, with unsupported hosts
+failing closed. Deploy the qualified matching pair at a normal saved-work login
+boundary; no live permanent-seat unload is supported. The original run77 is
+retained as unsupported; this source qualification is not a replay or GUI pass.

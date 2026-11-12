@@ -114,6 +114,7 @@ void SeatBindings::rememberPointerObject(wl_resource *resource, uint32_t id, Sur
     binding->client = wl_resource_get_client(resource);
     binding->id = id;
     binding->lock = lock;
+    if (lock) { binding->release = std::make_shared<LockReleaseObservation>(); }
     binding->surface = surface;
     binding->pointerDestroy.binding = binding.get();
     binding->pointerDestroy.listener.notify = pointerObjectDestroyed;
@@ -144,6 +145,18 @@ bool SeatBindings::lockedPointerReady(SeatInterface *seat, wl_client *client, Su
         if (binding->lock && binding->seat == seat && binding->client == client && binding->surface == surface && binding->object()) { return true; }
     }
     return false;
+}
+
+std::shared_ptr<SeatBindings::LockReleaseObservation> SeatBindings::observeActiveLock(SeatInterface *seat, wl_client *client, SurfaceInterface *surface)
+{
+    if (!lockedPointerReady(seat, client, surface)) { return {}; }
+    for (const auto &binding : m_pointerObjects) {
+        if (binding->lock && binding->seat == seat && binding->client == client && binding->surface == surface && binding->object()) {
+            binding->release->lock = surface->lockedPointer();
+            return binding->release;
+        }
+    }
+    return {};
 }
 
 bool SeatBindings::deliverRelativePointer(SeatInterface *seat, wl_client *client, SurfaceInterface *surface,
@@ -186,6 +199,9 @@ void SeatBindings::protocolMessage(
             // before a destroy listener could be attached. ID reuse is fresh.
             auto *client = wl_resource_get_client(message->resource);
             const auto id = wl_resource_get_id(message->resource);
+            for (const auto &binding : self.m_pointerObjects) {
+                if (binding->client == client && binding->id == id && binding->release) { binding->release->clientDestroyed = true; }
+            }
             self.m_pointerObjects.remove_if([client, id](const auto &binding) { return binding->client == client && binding->id == id; });
         }
 

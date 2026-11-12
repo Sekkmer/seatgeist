@@ -78,6 +78,16 @@ bool decodeSeatEvents(const QJsonObject &action, const QSizeF &targetSize,
             }
             event.kind = SeatEvent::RelativeMotion;
             event.position = QPointF(dx.toDouble(), dy.toDouble());
+        } else if (op == QLatin1String("alt_point_click")) {
+            const auto x = object.value("x"); const auto y = object.value("y");
+            if (array.size() != 1 || !x.isDouble() || !y.isDouble()
+                || !std::isfinite(x.toDouble()) || !std::isfinite(y.toDouble())
+                || x.toDouble() < 0 || y.toDouble() < 0
+                || x.toDouble() >= targetSize.width() || y.toDouble() >= targetSize.height()) {
+                return fail("invalid standalone Alt-point click");
+            }
+            event.kind = SeatEvent::AltPointClick;
+            event.position = QPointF(x.toDouble(), y.toDouble());
         } else if (op == QLatin1String("motion")) {
             event.kind = SeatEvent::Motion;
             const auto x = object.value("x");

@@ -14,12 +14,17 @@ namespace KWin
 {
 class SeatInterface;
 class SurfaceInterface;
+class LockedPointerV1Interface;
 
 // Track actual client bindings, not just the compositor's focused surface.
 // No key contents or other application protocol traffic are retained.
 class SeatBindings
 {
 public:
+    struct LockReleaseObservation {
+        QPointer<LockedPointerV1Interface> lock;
+        bool clientDestroyed = false;
+    };
     explicit SeatBindings(wl_display *display);
     ~SeatBindings();
     void watch(SeatInterface *seat);
@@ -29,6 +34,7 @@ public:
     bool pointerReady(SeatInterface *seat, wl_client *client) const;
     bool relativePointerReady(SeatInterface *seat, wl_client *client);
     bool lockedPointerReady(SeatInterface *seat, wl_client *client, SurfaceInterface *surface);
+    std::shared_ptr<LockReleaseObservation> observeActiveLock(SeatInterface *, wl_client *, SurfaceInterface *);
     bool deliverRelativePointer(SeatInterface *seat, wl_client *client, SurfaceInterface *surface,
                                 const QPointF &delta, std::chrono::microseconds timestamp);
 
@@ -50,6 +56,7 @@ private:
         bool lock;
         bool objectObserved = false;
         QPointer<SurfaceInterface> surface;
+        std::shared_ptr<LockReleaseObservation> release;
         wl_resource *object();
     };
     void rememberPointerObject(wl_resource *pointer, uint32_t id, SurfaceInterface *surface, bool lock);

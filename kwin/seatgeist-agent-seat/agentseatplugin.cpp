@@ -2,6 +2,7 @@
 
 #include "agentseatplugin.h"
 #include "seatbindings.h"
+#include "altpointclick.h"
 #include <agent_seat_build_id.h>
 
 #include <input.h>
@@ -72,6 +73,11 @@ SeatgeistAgentSeatPlugin::SeatgeistAgentSeatPlugin()
 {
     m_monotonicClock.start();
     m_bindings = std::make_unique<SeatBindings>(*waylandServer()->display());
+    m_altClickTimer = new QTimer(this);
+    m_altClickTimer->setInterval(10);
+    connect(m_altClickTimer, &QTimer::timeout, this, [this] {
+        if (m_altClick) { m_altClick->tick(m_monotonicClock.elapsed()); }
+    });
     m_bindingTimer = new QTimer(this);
     m_bindingTimer->setInterval(BindingCheckIntervalMs);
     connect(m_bindingTimer, &QTimer::timeout, this, &SeatgeistAgentSeatPlugin::resumePendingAction);
@@ -165,7 +171,7 @@ void SeatgeistAgentSeatPlugin::registerBackend()
     auto message = methodCall(QStringLiteral("RegisterAgentSeatBackendV3"));
     message << QString::fromLatin1(Backend);
     message << QString::fromLatin1(BuildId);
-    message << QStringLiteral("relative_pointer_v1");
+    message << QStringLiteral("relative_pointer_v1,alt_point_click_v1");
     auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(message), this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, generation = m_serviceGeneration] {
         QDBusPendingReply<> reply = *watcher;
@@ -180,7 +186,7 @@ void SeatgeistAgentSeatPlugin::registerBackend()
 
 void SeatgeistAgentSeatPlugin::poll()
 {
-    if (!m_serviceAvailable || m_pollInFlight || !m_pendingAction.isEmpty()) {
+    if (!m_serviceAvailable || m_pollInFlight || !m_pendingAction.isEmpty() || m_altClick) {
         return;
     }
     m_pollInFlight = true;
@@ -309,7 +315,7 @@ void SeatgeistAgentSeatPlugin::resumePendingAction()
         auto *seat = laneIt->second->seat.get();
         auto *client = window->surface()->client()->client();
         const bool keyboard = std::any_of(m_pendingEvents.begin(), m_pendingEvents.end(),
-            [](const auto &event) { return event.kind == SeatEvent::Key; });
+            [](const auto &event) { return event.kind == SeatEvent::Key || event.kind == SeatEvent::AltPointClick; });
         const bool pointer = std::any_of(m_pendingEvents.begin(), m_pendingEvents.end(),
             [](const auto &event) { return event.kind != SeatEvent::Key; });
         const bool relative = std::any_of(m_pendingEvents.begin(), m_pendingEvents.end(),
@@ -357,6 +363,10 @@ void SeatgeistAgentSeatPlugin::dispatchAction(const QJsonObject &action, AgentLa
         complete(action.value("id").toString(), false, error);
         return;
     }
+    if (events.first().kind == SeatEvent::AltPointClick) {
+        startAltPointClick(action, lane, window, events.first().position);
+        return;
+    }
     if (events.first().kind == SeatEvent::RelativeMotion) {
         auto *client = window->surface()->client()->client();
         const auto timestamp = std::chrono::microseconds(m_monotonicClock.nsecsElapsed() / 1000);
@@ -388,6 +398,7 @@ void SeatgeistAgentSeatPlugin::dispatchAction(const QJsonObject &action, AgentLa
             xkb_state_update_key(lane.xkbState, event.code + 8, event.pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
             updateKeyboardModifiers(lane);
             break;
+        case SeatEvent::AltPointClick:
         case SeatEvent::RelativeMotion:
             Q_UNREACHABLE(); // decoder requires a standalone relative event
         case SeatEvent::Motion:
@@ -409,8 +420,87 @@ void SeatgeistAgentSeatPlugin::dispatchAction(const QJsonObject &action, AgentLa
     complete(action.value("id").toString(), true);
 }
 
+void SeatgeistAgentSeatPlugin::startAltPointClick(const QJsonObject &action, AgentLane &lane, Window *window, const QPointF &point)
+{
+    const QString id = action.value("id").toString();
+    const QString laneId = action.value("lane_id").toString();
+    const QString sessionId = action.value("session_id").toString();
+    const QString windowId = action.value("window_id").toString();
+    if (m_altClick || sessionId.isEmpty() || lane.target != window) {
+        complete(id, false, QStringLiteral("Alt-point click needs its existing exact lane/session target")); return;
+    }
+    const QPointer<Window> target = window;
+    const QPointer<SurfaceInterface> surface = window->surface();
+    const auto app = window->resourceClass(); const auto desktop = window->desktopFileName(); const auto pid = window->pid();
+    const auto geometry=window->clientGeometry();
+    const auto transform=window->inputTransformation();
+    const auto policyApp = desktop.isEmpty() ? app : desktop;
+    if (action.value("expected_app_id").toString() != policyApp || action.value("expected_pid").toDouble() != pid || pid <= 0) {
+        complete(id, false, QStringLiteral("Alt-point click pinned app/PID changed before delivery")); return;
+    }
+    const auto generation = m_serviceGeneration;
+    const auto expires = action.value("expires_at_unix_ms").toDouble();
+    m_altClickId = id; m_altClickWindow = window;
+    AltPointClick::Hooks hooks;
+    hooks.valid = [this, target, surface, app, desktop, pid, geometry, transform, laneId, generation, expires, point] {
+        auto it = m_lanes.find(laneId); QString error;
+        return m_serviceAvailable && generation == m_serviceGeneration && target && surface
+            && it != m_lanes.end() && it->second->target == target && target->surface() == surface
+            && target->resourceClass() == app && target->desktopFileName() == desktop && target->pid() == pid
+            && target->clientGeometry() == geometry && target->inputTransformation() == transform
+            && expires > QDateTime::currentMSecsSinceEpoch()
+            && QRectF(QPointF(0,0), target->clientGeometry().size()).contains(point)
+            && validateClientFocusIsolation(target, &error);
+    };
+    hooks.alt = [this, laneId, surface](bool pressed) {
+        auto it = m_lanes.find(laneId); if (it == m_lanes.end()) { return; }
+        auto &lane = *it->second; setTimestamp(lane);
+        // Cleanup resets the virtual modifier even if the original surface is
+        // gone; never send a key event into a replacement keyboard target.
+        if (surface && lane.seat->focusedKeyboardSurface() == surface) {
+            lane.seat->notifyKeyboardKey(KEY_LEFTALT, pressed ? KeyboardKeyState::Pressed : KeyboardKeyState::Released,
+                                        waylandServer()->display()->nextSerial());
+        }
+        xkb_state_update_key(lane.xkbState, KEY_LEFTALT + 8, pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
+        updateKeyboardModifiers(lane);
+    };
+    hooks.authorize = [this, id, laneId, sessionId, generation, windowId] {
+        auto message = methodCall(QStringLiteral("CheckAltPointClickAction"));
+        message << id << sessionId << laneId << windowId;
+        auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(message), this);
+        connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, id, generation] {
+            QDBusPendingReply<bool> reply = *watcher; watcher->deleteLater();
+            if (m_altClick && m_altClickId == id && generation == m_serviceGeneration) {
+                m_altClick->authorized(!reply.isError() && reply.value(), m_monotonicClock.elapsed());
+            }
+        });
+    };
+    hooks.click = [this, laneId, target, point] {
+        auto it = m_lanes.find(laneId); QString error;
+        if (!target || it == m_lanes.end() || !bindTarget(*it->second, target, point, &error)) { return false; }
+        auto &lane = *it->second; setTimestamp(lane);
+        lane.seat->notifyPointerButton(BTN_LEFT, PointerButtonState::Pressed);
+        lane.seat->notifyPointerButton(BTN_LEFT, PointerButtonState::Released);
+        lane.seat->notifyPointerFrame(); return true;
+    };
+    hooks.finished = [this, id, generation](bool ok, const QString &error) {
+        m_altClickTimer->stop();
+        if (generation == m_serviceGeneration && m_serviceAvailable) { complete(id, ok, error); }
+        QTimer::singleShot(0, this, [this, id] {
+            if (m_altClickId == id) { m_altClick.reset(); m_altClickId.clear(); m_altClickWindow = nullptr; }
+            poll();
+        });
+    };
+    m_altClick = std::make_unique<AltPointClick>(*m_bindings, lane.seat.get(), surface, std::move(hooks));
+    m_altClickTimer->start();
+    m_altClick->start(m_monotonicClock.elapsed());
+}
+
 void SeatgeistAgentSeatPlugin::cancelPendingFor(Window *window)
 {
+    if (window && window == m_altClickWindow && m_altClick) {
+        m_altClick->cancel(QStringLiteral("Alt-point click received physical user input"));
+    }
     if (window && window == m_pendingWindow) {
         m_pendingCancelled = true;
     }
@@ -660,6 +750,7 @@ void SeatgeistAgentSeatPlugin::clearLaneTarget(AgentLane &lane)
 
 void SeatgeistAgentSeatPlugin::detachDaemon()
 {
+    if (m_altClick) { m_altClick->cancel(QStringLiteral("Alt-point click daemon disconnected")); }
     m_bindingTimer->stop();
     m_pendingAction = {};
     m_pendingEvents.clear();

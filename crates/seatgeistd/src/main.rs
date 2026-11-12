@@ -64,9 +64,9 @@ use desktop_launch::{DesktopEntryLauncher, SystemdDesktopEntryLauncher};
 #[cfg(test)]
 use eis_key_combo::codes_with_keymap as eis_key_combo_codes_with_keymap;
 use input_actions::{
-    agent_click_pointer, agent_drag_pointer, agent_key_combo, agent_move_pointer,
-    agent_relative_pointer, agent_scroll_pointer, agent_type_text, click_pointer, drag_pointer,
-    key_combo, move_pointer, page_zoom, scroll_pointer, type_text,
+    agent_alt_point_click, agent_click_pointer, agent_drag_pointer, agent_key_combo,
+    agent_move_pointer, agent_relative_pointer, agent_scroll_pointer, agent_type_text,
+    click_pointer, drag_pointer, key_combo, move_pointer, page_zoom, scroll_pointer, type_text,
 };
 use input_diagnostics::uinput_status;
 #[cfg(test)]
@@ -1322,6 +1322,7 @@ fn journal_backend_for_request(
         | DaemonRequest::KeyCombo(_)
         | DaemonRequest::MovePointer(_)
         | DaemonRequest::RelativePointer(_)
+        | DaemonRequest::AltPointClick(_)
         | DaemonRequest::ClickPointer(_)
         | DaemonRequest::DragPointer(_)
         | DaemonRequest::ScrollPointer(_) => {
@@ -1538,6 +1539,13 @@ fn journal_requested_target_for_request(request: &DaemonRequest) -> Option<Journ
             if let Some(session_id) = request.session_id.as_deref() {
                 target.add("session_id", session_id);
             }
+            target
+        }
+        DaemonRequest::AltPointClick(request) => {
+            let mut target = journal_point_target("alt_point_click", &request.point);
+            target.add("session_id", &request.session_id);
+            target.add("required_safety_classes", "ControlPointer,ControlKeyboard");
+            target.add("unlock_barrier", "same_seat_client_destroy");
             target
         }
         DaemonRequest::RelativePointer(request) => {
@@ -1969,6 +1977,11 @@ async fn handle_request_inner(
     }
     if let Err(err) = validate_targeted_key_combo(&request, runtime.input_backend_preference) {
         return daemon_error_with_kind(err, ErrorKind::Validation);
+    }
+    if let DaemonRequest::AltPointClick(r) = &request {
+        if let Err(err) = r.validate() {
+            return daemon_error_with_kind(anyhow::anyhow!(err), ErrorKind::Validation);
+        }
     }
     if let Err(err) = validate_relative_pointer(&request, runtime.input_backend_preference) {
         return daemon_error_with_kind(err, ErrorKind::Validation);
@@ -2684,6 +2697,41 @@ async fn execute_request(
                 Err(err) => daemon_error(err),
             }
         }
+        DaemonRequest::AltPointClick(mut request) => {
+            request.point = match resolve_capture_output_point(
+                request.point,
+                Some(&request.session_id),
+                request.capture_revision.as_deref(),
+                runtime,
+            )
+            .await
+            {
+                Ok(point) => point,
+                Err(err) => return daemon_error_with_kind(err, ErrorKind::Validation),
+            };
+            let session_id = request.session_id.clone();
+            let result = interaction::execute_agent_seat_action(
+                runtime,
+                Some(&session_id),
+                SafetyClass::ControlPointer,
+                |target| async move {
+                    agent_alt_point_click(
+                        request,
+                        &TargetedInputContext {
+                            lane_id: target.lane_id,
+                        },
+                        &target.window,
+                        &runtime.agent_seat_backend,
+                    )
+                    .await
+                },
+            )
+            .await;
+            match result {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(err) => daemon_error(err),
+            }
+        }
         DaemonRequest::RelativePointer(request) => {
             let session_id = request.session_id.clone();
             let result = interaction::execute_agent_seat_action(
@@ -3259,6 +3307,7 @@ fn health(
         atomic_shift_drag_supported: true,
         atomic_pointer_modifiers_supported: true,
         relative_pointer_supported: true,
+        alt_point_click_supported: true,
         service: "seatgeistd".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         status: "ok".to_string(),
@@ -3935,6 +3984,7 @@ fn session_backend_role_for_request(
         | DaemonRequest::KeyCombo(_)
         | DaemonRequest::MovePointer(_)
         | DaemonRequest::RelativePointer(_)
+        | DaemonRequest::AltPointClick(_)
         | DaemonRequest::ClickPointer(_)
         | DaemonRequest::DragPointer(_)
         | DaemonRequest::ScrollPointer(_) => Some(session_execution::BackendRole::RawInput),
@@ -4129,6 +4179,7 @@ fn enforce_required_focus_guard(settings: &SafetySettings, request: &DaemonReque
 
 fn pointer_request_uses_window_local(request: &DaemonRequest) -> bool {
     match request {
+        DaemonRequest::AltPointClick(_) => true,
         DaemonRequest::MovePointer(request) => matches!(
             request.point.space,
             CoordinateSpace::WindowLocal | CoordinateSpace::CaptureOutput
@@ -4246,6 +4297,11 @@ fn validate_interaction_session_request(request: &DaemonRequest) -> Result<()> {
 
 fn validate_capture_output_request(request: &DaemonRequest) -> Result<()> {
     let (points, revision, session_id): (&[Point], Option<&str>, Option<&str>) = match request {
+        DaemonRequest::AltPointClick(request) => (
+            std::slice::from_ref(&request.point),
+            request.capture_revision.as_deref(),
+            Some(request.session_id.as_str()),
+        ),
         DaemonRequest::MovePointer(request) => (
             std::slice::from_ref(&request.point),
             request.capture_revision.as_deref(),
@@ -4297,6 +4353,7 @@ fn interaction_session_id_for_request(request: &DaemonRequest) -> Option<&str> {
         DaemonRequest::KeyCombo(request) => request.session_id.as_deref(),
         DaemonRequest::MovePointer(request) => request.session_id.as_deref(),
         DaemonRequest::RelativePointer(request) => Some(request.session_id.as_str()),
+        DaemonRequest::AltPointClick(request) => Some(request.session_id.as_str()),
         DaemonRequest::ClickPointer(request) => request.session_id.as_deref(),
         DaemonRequest::DragPointer(request) => request.session_id.as_deref(),
         DaemonRequest::ScrollPointer(request) => request.session_id.as_deref(),
@@ -4316,6 +4373,7 @@ fn uses_independent_agent_seat(
                 | DaemonRequest::KeyCombo(_)
                 | DaemonRequest::MovePointer(_)
                 | DaemonRequest::RelativePointer(_)
+                | DaemonRequest::AltPointClick(_)
                 | DaemonRequest::ClickPointer(_)
                 | DaemonRequest::DragPointer(_)
                 | DaemonRequest::ScrollPointer(_)
@@ -4475,6 +4533,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         }
         DaemonRequest::MovePointer(_)
         | DaemonRequest::RelativePointer(_)
+        | DaemonRequest::AltPointClick(_)
         | DaemonRequest::ClickPointer(_)
         | DaemonRequest::DragPointer(_)
         | DaemonRequest::ScrollPointer(_) => SafetyClass::ControlPointer,
@@ -4650,6 +4709,7 @@ fn enforce_mcp_focus_isolation(
 
 fn pointer_modifiers(request: &DaemonRequest) -> &[libseatgeist::DragModifier] {
     match request {
+        DaemonRequest::AltPointClick(_) => &[libseatgeist::DragModifier::Alt],
         DaemonRequest::ClickPointer(r) => &r.modifiers,
         DaemonRequest::DragPointer(r) => &r.modifiers,
         _ => &[],
@@ -8132,6 +8192,58 @@ mod tests {
     use std::{collections::VecDeque, os::fd::RawFd};
 
     #[test]
+    fn alt_point_click_requires_both_policies_and_native_exact_session() {
+        let request = DaemonRequest::AltPointClick(libseatgeist::AltPointClickRequest {
+            point: Point {
+                x: 196.,
+                y: 116.,
+                space: CoordinateSpace::WindowLocal,
+            },
+            session_id: "owned".into(),
+            capture_revision: None,
+        });
+        assert_eq!(
+            required_safety_classes(&request),
+            vec![SafetyClass::ControlPointer, SafetyClass::ControlKeyboard]
+        );
+        assert!(validate_modified_drag(&request, InputBackendPreference::KwinAgentSeat).is_ok());
+        assert!(validate_modified_drag(&request, InputBackendPreference::Uinput).is_err());
+        assert_eq!(interaction_session_id_for_request(&request), Some("owned"));
+        assert!(uses_independent_agent_seat(
+            &request,
+            InputBackendPreference::KwinAgentSeat
+        ));
+        assert!(
+            serde_json::to_value(journal_requested_target_for_request(&request).unwrap())
+                .unwrap()
+                .to_string()
+                .contains("same_seat_client_destroy")
+        );
+        let path = temp_test_path("alt-point-policy");
+        let store = ApprovalStore::new(Some(path.clone()));
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let expiry = unix_time_ms().unwrap() + 60000;
+        for class in [SafetyClass::ControlPointer, SafetyClass::ControlKeyboard] {
+            write_test_approval_grant(&path, class, "alt_point_click", expiry);
+            assert!(enforce_policy_with_approvals(&policy, &store, &request).is_err());
+        }
+        let keyboard = std::fs::read_to_string(&path).unwrap();
+        write_test_approval_grant(
+            &path,
+            SafetyClass::ControlPointer,
+            "alt_point_click",
+            expiry,
+        );
+        std::fs::write(
+            &path,
+            format!("{}{}", keyboard, std::fs::read_to_string(&path).unwrap()),
+        )
+        .unwrap();
+        assert!(enforce_policy_with_approvals(&policy, &store, &request).is_ok());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn relative_pointer_requires_native_session_pointer_policy_and_journal() {
         let r = DaemonRequest::RelativePointer(libseatgeist::RelativePointerRequest {
             dx: 8.5,
@@ -8600,6 +8712,7 @@ mod tests {
                     atomic_shift_drag_supported: false,
                     atomic_pointer_modifiers_supported: false,
                     relative_pointer_supported: false,
+                    alt_point_click_supported: false,
                     service: "seatgeistd".to_string(),
                     version: "0.1.0".to_string(),
                     status: "ok".to_string(),

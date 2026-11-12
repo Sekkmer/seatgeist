@@ -111,6 +111,27 @@ pub(crate) async fn agent_key_combo(
     ))
 }
 
+pub(crate) async fn agent_alt_point_click(
+    request: libseatgeist::AltPointClickRequest,
+    context: &TargetedInputContext,
+    target: &WindowInfo,
+    backend: &dyn TargetedInputBackend,
+) -> Result<ActionResult> {
+    request.validate().map_err(anyhow::Error::msg)?;
+    validate_agent_point(target, request.point)?;
+    let delivery = backend
+        .alt_point_click(context, target, request.point, &request.session_id)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    Ok(agent_result(
+        delivery,
+        format!(
+            "Alt-point click x={} y={} target_window={} unlock=client_confirmed routing=independent",
+            request.point.x, request.point.y, target.id
+        ),
+    ))
+}
+
 pub(crate) async fn agent_relative_pointer(
     request: libseatgeist::RelativePointerRequest,
     context: &TargetedInputContext,

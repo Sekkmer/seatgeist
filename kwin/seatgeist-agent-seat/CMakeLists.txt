@@ -41,6 +41,8 @@ set(SEATGEIST_AGENT_SEAT_BUILD_INPUTS
     seatbindings.h
     eventbatch.cpp
     eventbatch.h
+    altpointclick.cpp
+    altpointclick.h
 )
 set_property(
     DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
@@ -68,6 +70,8 @@ add_library(seatgeistagentseat MODULE
     seatbindings.h
     eventbatch.cpp
     eventbatch.h
+    altpointclick.cpp
+    altpointclick.h
     ${CMAKE_CURRENT_BINARY_DIR}/generated/agent_seat_build_id.h
     ${CMAKE_CURRENT_BINARY_DIR}/generated/kwin_plugin_abi.h
     main.cpp
@@ -110,7 +114,7 @@ if(BUILD_TESTING)
             DEPENDS ${PROTOCOL_XML} VERBATIM)
         list(APPEND POINTER_TEST_PROTOCOLS "${CMAKE_CURRENT_BINARY_DIR}/${PROTOCOL}-client.h" "${CMAKE_CURRENT_BINARY_DIR}/${PROTOCOL}-code.c")
     endforeach()
-    add_executable(seatbindings_test seatbindings_test.cpp seatbindings.cpp ${POINTER_TEST_PROTOCOLS})
+    add_executable(seatbindings_test seatbindings_test.cpp seatbindings.cpp altpointclick.cpp ${POINTER_TEST_PROTOCOLS})
     target_include_directories(seatbindings_test PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
     target_include_directories(seatbindings_test PRIVATE ${KWIN_INCLUDE_DIR})
     target_link_libraries(seatbindings_test PRIVATE

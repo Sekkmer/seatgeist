@@ -27,6 +27,7 @@ namespace KWin
 
 class SeatInterface;
 class SeatBindings;
+class AltPointClick;
 class SurfaceInterface;
 class Window;
 
@@ -58,6 +59,7 @@ private:
     void poll();
     void handlePendingAction(QDBusPendingCallWatcher *watcher);
     void executeAction(const QJsonObject &action);
+    void startAltPointClick(const QJsonObject &, AgentLane &, Window *, const QPointF &);
     void dispatchAction(const QJsonObject &action, AgentLane &lane, Window *window);
     void resumePendingAction();
     void cancelPendingFor(Window *window);
@@ -82,6 +84,10 @@ private:
     bool m_pollInFlight = false;
     quint64 m_serviceGeneration = 0;
     std::unique_ptr<SeatBindings> m_bindings;
+    std::unique_ptr<AltPointClick> m_altClick;
+    QTimer *m_altClickTimer = nullptr;
+    QString m_altClickId;
+    QPointer<Window> m_altClickWindow;
     QTimer *m_bindingTimer = nullptr;
     QJsonObject m_pendingAction;
     QVector<SeatEvent> m_pendingEvents;

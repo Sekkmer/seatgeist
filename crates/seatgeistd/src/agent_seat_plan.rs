@@ -19,6 +19,10 @@ pub(super) enum Event {
         x: f64,
         y: f64,
     },
+    AltPointClick {
+        x: f64,
+        y: f64,
+    },
     RelativeMotion {
         dx: f64,
         dy: f64,
@@ -44,6 +48,10 @@ enum Action {
         chords: Vec<Vec<u16>>,
     },
     PointerMove {
+        x: f64,
+        y: f64,
+    },
+    AltPointClick {
         x: f64,
         y: f64,
     },
@@ -143,6 +151,10 @@ pub(super) fn plan(value: serde_json::Value) -> Result<Vec<Event>> {
             }
         }
         Action::PointerMove { x, y } => events.push(motion(x, y)?),
+        Action::AltPointClick { x, y } => {
+            motion(x, y)?;
+            events.push(Event::AltPointClick { x, y });
+        }
         Action::RelativePointer { dx, dy } => {
             libseatgeist::RelativePointerRequest {
                 dx,
@@ -222,6 +234,15 @@ pub(super) fn plan(value: serde_json::Value) -> Result<Vec<Event>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn alt_point_click_is_one_staged_operation_not_an_unbalanced_batch() {
+        assert_eq!(
+            plan(serde_json::json!({"action":"alt_point_click","x":196,"y":116})).unwrap(),
+            vec![Event::AltPointClick { x: 196., y: 116. }]
+        );
+        assert!(plan(serde_json::json!({"action":"alt_point_click","x":-1,"y":116})).is_err());
+    }
 
     #[test]
     fn relative_pointer_plans_only_one_delta_and_keeps_absolute_semantics() {

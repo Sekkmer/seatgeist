@@ -214,6 +214,18 @@ pub trait TargetedInputBackend: std::fmt::Debug + Send + Sync {
         target: &WindowInfo,
         point: Point,
     ) -> Result<TargetedInputDelivery>;
+    /// Bounded Alt-down, actual client unlock, point-click, Alt-up gesture.
+    async fn alt_point_click(
+        &self,
+        _context: &TargetedInputContext,
+        _target: &WindowInfo,
+        _point: Point,
+        _session_id: &str,
+    ) -> Result<TargetedInputDelivery> {
+        Err(SeatgeistError::BackendUnavailable(
+            "Alt-point click is unsupported by this targeted backend".into(),
+        ))
+    }
     /// Finite relative motion on a previously bound, locked exact agent seat.
     async fn relative_pointer(
         &self,

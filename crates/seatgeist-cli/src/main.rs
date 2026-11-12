@@ -18,8 +18,8 @@ use libseatgeist::{
     AccessibilityInvokeRequest, AccessibilityPasteTextRequest, AccessibilitySetCaretRequest,
     AccessibilitySetSelectionRequest, AccessibilitySetTextRequest,
     AccessibilityTextAttributesRequest, ActivateLinkRequest, ActivateTabRequest, ActiveWindowGuard,
-    ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest, ClipboardSetRequest,
-    CloseWindowRequest, CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES,
+    AltPointClickRequest, ClickButtonRequest, ClickPointerRequest, ClipboardGetRequest,
+    ClipboardSetRequest, CloseWindowRequest, CoordinateSpace, DEFAULT_CLIPBOARD_MAX_BYTES,
     DEFAULT_REMOTE_DESKTOP_SESSION_TIMEOUT_MS, DEFAULT_WAIT_FOR_CHANGE_INTERVAL_MS,
     DEFAULT_WAIT_FOR_CHANGE_THRESHOLD, DEFAULT_WAIT_FOR_CHANGE_TIMEOUT_MS, DaemonClientIdentity,
     DaemonRequest, DaemonRequestEnvelope, DaemonResponse, DragPointerRequest,
@@ -411,6 +411,18 @@ enum InputCommand {
     },
     RemoteDesktopEisSessionStatus,
     RemoteDesktopEisStop,
+    AltPointClick {
+        #[arg(long)]
+        session_id: String,
+        #[arg(long)]
+        x: f64,
+        #[arg(long)]
+        y: f64,
+        #[arg(long)]
+        coordinate_space: CoordinateSpace,
+        #[arg(long)]
+        capture_revision: Option<String>,
+    },
     RelativePointer {
         #[arg(long)]
         session_id: String,
@@ -1309,6 +1321,28 @@ fn main() -> Result<()> {
         Command::Input {
             command: InputCommand::RemoteDesktopEisStop,
         } => print_daemon_response(&socket, DaemonRequest::RemoteDesktopEisStop)?,
+        Command::Input {
+            command:
+                InputCommand::AltPointClick {
+                    session_id,
+                    x,
+                    y,
+                    coordinate_space,
+                    capture_revision,
+                },
+        } => {
+            let r = AltPointClickRequest {
+                point: Point {
+                    x,
+                    y,
+                    space: coordinate_space,
+                },
+                session_id,
+                capture_revision,
+            };
+            r.validate().map_err(anyhow::Error::msg)?;
+            print_daemon_response(&socket, DaemonRequest::AltPointClick(r))?;
+        }
         Command::Input {
             command: InputCommand::RelativePointer { session_id, dx, dy },
         } => {
@@ -2676,6 +2710,13 @@ fn trace_step_context(index: usize, step: &libseatgeist::TraceStep) -> String {
 }
 
 fn send_request(socket: &PathBuf, request: DaemonRequest) -> Result<DaemonResponse> {
+    if let DaemonRequest::AltPointClick(r) = &request {
+        r.validate().map_err(anyhow::Error::msg)?;
+        match send_request(socket, DaemonRequest::Health)? {
+            DaemonResponse::Health(h) if h.alt_point_click_supported => {}
+            _ => bail!("daemon does not support Alt-point click; no input sent"),
+        }
+    }
     if let DaemonRequest::RelativePointer(r) = &request {
         r.validate().map_err(anyhow::Error::msg)?;
         match send_request(socket, DaemonRequest::Health)? {
