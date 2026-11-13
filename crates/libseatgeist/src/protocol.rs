@@ -2,6 +2,7 @@ use crate::{
     AccessibilityRefActionRequest, AccessibilitySnapshot, AccessibilitySnapshotRequest,
     ActionDisposition,
 };
+use crate::{NativeGestureRequest, SeatState, SeatStateRequest};
 use std::{collections::BTreeMap, fmt, path::PathBuf, str::FromStr};
 
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,8 @@ pub struct HealthStatus {
     pub relative_pointer_supported: bool,
     #[serde(default)]
     pub alt_point_click_supported: bool,
+    #[serde(default)]
+    pub native_gesture_supported: bool,
     pub service: String,
     pub version: String,
     pub status: String,
@@ -244,6 +247,8 @@ pub struct AgentSeatRuntimeStatus {
     pub relative_pointer_supported: bool,
     #[serde(default)]
     pub alt_point_click_supported: bool,
+    #[serde(default)]
+    pub native_gesture_supported: bool,
     pub protocol: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_id: Option<String>,
@@ -1676,6 +1681,8 @@ pub enum DaemonRequest {
     MovePointer(MovePointerRequest),
     RelativePointer(RelativePointerRequest),
     AltPointClick(AltPointClickRequest),
+    NativeGesture(NativeGestureRequest),
+    SeatState(SeatStateRequest),
     ClickPointer(ClickPointerRequest),
     DragPointer(DragPointerRequest),
     ScrollPointer(ScrollPointerRequest),
@@ -1757,6 +1764,8 @@ impl DaemonRequest {
             Self::MovePointer(_) => "move_pointer",
             Self::RelativePointer(_) => "relative_pointer",
             Self::AltPointClick(_) => "alt_point_click",
+            Self::NativeGesture(_) => "native_gesture",
+            Self::SeatState(_) => "seat_state",
             Self::ClickPointer(_) => "click_pointer",
             Self::DragPointer(_) => "drag_pointer",
             Self::ScrollPointer(_) => "scroll_pointer",
@@ -1813,6 +1822,7 @@ impl DaemonRequest {
             | Self::AccessibilitySnapshot(_)
             | Self::CaptureSnapshot(_)
             | Self::CaptureWait(_)
+            | Self::SeatState(_)
             | Self::JournalTail(_) => true,
             _ => false,
         }
@@ -1837,6 +1847,7 @@ impl DaemonRequest {
                 | Self::MovePointer(_)
                 | Self::RelativePointer(_)
                 | Self::AltPointClick(_)
+                | Self::NativeGesture(_)
                 | Self::ClickPointer(_)
                 | Self::DragPointer(_)
                 | Self::ScrollPointer(_)
@@ -1862,6 +1873,7 @@ impl DaemonRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum DaemonResponse {
+    SeatState(SeatState),
     Health(HealthStatus),
     Capabilities(CapabilitySet),
     PolicyStatus(PolicyStatus),
@@ -1918,6 +1930,7 @@ impl DaemonResponse {
 
     pub fn response_type(&self) -> &'static str {
         match self {
+            Self::SeatState(_) => "seat_state",
             Self::Health(_) => "health",
             Self::Capabilities(_) => "capabilities",
             Self::PolicyStatus(_) => "policy_status",
@@ -2947,6 +2960,7 @@ mod tests {
             agent_seat: Some(AgentSeatRuntimeStatus {
                 relative_pointer_supported: false,
                 alt_point_click_supported: false,
+                native_gesture_supported: false,
                 protocol: "kwin_agent_seat_v2".to_string(),
                 build_id: Some("a".repeat(64)),
                 heartbeat_fresh: true,
@@ -3337,6 +3351,7 @@ mod tests {
             atomic_pointer_modifiers_supported: false,
             relative_pointer_supported: false,
             alt_point_click_supported: false,
+            native_gesture_supported: false,
             service: "seatgeistd".to_string(),
             version: "0.1.0".to_string(),
             status: "ok".to_string(),

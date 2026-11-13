@@ -411,6 +411,16 @@ enum InputCommand {
     },
     RemoteDesktopEisSessionStatus,
     RemoteDesktopEisStop,
+    NativeGesture {
+        #[arg(long)]
+        session_id: String,
+        #[arg(long)]
+        steps_json: String,
+    },
+    SeatState {
+        #[arg(long)]
+        session_id: String,
+    },
     AltPointClick {
         #[arg(long)]
         session_id: String,
@@ -1321,6 +1331,31 @@ fn main() -> Result<()> {
         Command::Input {
             command: InputCommand::RemoteDesktopEisStop,
         } => print_daemon_response(&socket, DaemonRequest::RemoteDesktopEisStop)?,
+        Command::Input {
+            command:
+                InputCommand::NativeGesture {
+                    session_id,
+                    steps_json,
+                },
+        } => {
+            let request = libseatgeist::NativeGestureRequest {
+                session_id,
+                steps: serde_json::from_str(&steps_json)?,
+            };
+            request.validate().map_err(anyhow::Error::msg)?;
+            print_daemon_response(&socket, DaemonRequest::NativeGesture(request))?;
+        }
+        Command::Input {
+            command: InputCommand::SeatState { session_id },
+        } => {
+            if session_id.trim().is_empty() {
+                bail!("seat state requires exact session");
+            }
+            print_daemon_response(
+                &socket,
+                DaemonRequest::SeatState(libseatgeist::SeatStateRequest { session_id }),
+            )?;
+        }
         Command::Input {
             command:
                 InputCommand::AltPointClick {
@@ -2710,6 +2745,18 @@ fn trace_step_context(index: usize, step: &libseatgeist::TraceStep) -> String {
 }
 
 fn send_request(socket: &PathBuf, request: DaemonRequest) -> Result<DaemonResponse> {
+    if let DaemonRequest::NativeGesture(r) = &request {
+        r.validate().map_err(anyhow::Error::msg)?;
+    }
+    if matches!(
+        &request,
+        DaemonRequest::NativeGesture(_) | DaemonRequest::SeatState(_)
+    ) {
+        match send_request(socket, DaemonRequest::Health)? {
+            DaemonResponse::Health(h) if h.native_gesture_supported => {}
+            _ => bail!("daemon does not support native gesture/state; no input sent"),
+        }
+    }
     if let DaemonRequest::AltPointClick(r) = &request {
         r.validate().map_err(anyhow::Error::msg)?;
         match send_request(socket, DaemonRequest::Health)? {

@@ -39,6 +39,109 @@ use libseatgeist::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+fn native_gesture_schema() -> Value {
+    let variants = vec![
+        object_schema(
+            vec![
+                ("op", json!({"const":"key"})),
+                ("code", json!({"type":"integer","minimum":1,"maximum":767})),
+                ("pressed", json!({"type":"boolean"})),
+            ],
+            vec!["op", "code", "pressed"],
+        ),
+        object_schema(
+            vec![
+                ("op", json!({"const":"button"})),
+                (
+                    "button",
+                    json!({"type":"string","enum":["left","right","middle","back","forward"]}),
+                ),
+                ("pressed", json!({"type":"boolean"})),
+            ],
+            vec!["op", "button", "pressed"],
+        ),
+        object_schema(
+            vec![
+                ("op", json!({"const":"motion"})),
+                ("x", json!({"type":"number","minimum":0})),
+                ("y", json!({"type":"number","minimum":0})),
+            ],
+            vec!["op", "x", "y"],
+        ),
+        object_schema(
+            vec![
+                ("op", json!({"const":"relative_motion"})),
+                (
+                    "dx",
+                    json!({"type":"number","minimum":-4096,"maximum":4096}),
+                ),
+                (
+                    "dy",
+                    json!({"type":"number","minimum":-4096,"maximum":4096}),
+                ),
+            ],
+            vec!["op", "dx", "dy"],
+        ),
+        object_schema(
+            vec![
+                ("op", json!({"const":"scroll"})),
+                (
+                    "axis",
+                    json!({"type":"string","enum":["horizontal","vertical"]}),
+                ),
+                (
+                    "delta",
+                    json!({"type":"number","minimum":-1000000,"maximum":1000000}),
+                ),
+                (
+                    "delta_v120",
+                    json!({"type":"integer","minimum":-2147483648i64,"maximum":2147483647i64}),
+                ),
+                (
+                    "source",
+                    json!({"type":"string","enum":["wheel","finger","continuous"]}),
+                ),
+                ("inverted", json!({"type":"boolean"})),
+            ],
+            vec!["op", "axis", "delta", "delta_v120", "source"],
+        ),
+        object_schema(
+            vec![
+                ("op", json!({"const":"wait"})),
+                (
+                    "duration_ms",
+                    json!({"type":"integer","minimum":1,"maximum":1500}),
+                ),
+            ],
+            vec!["op", "duration_ms"],
+        ),
+        object_schema(
+            vec![
+                ("op", json!({"const":"await"})),
+                (
+                    "condition",
+                    json!({"type":"string","enum":["bindings_ready","pointer_locked","client_unlocked"]}),
+                ),
+                (
+                    "timeout_ms",
+                    json!({"type":"integer","minimum":1,"maximum":1500}),
+                ),
+            ],
+            vec!["op", "condition", "timeout_ms"],
+        ),
+    ];
+    object_schema(
+        vec![
+            ("session_id", json!({"type":"string","minLength":1})),
+            (
+                "steps",
+                json!({"type":"array","minItems":1,"maxItems":256,"items":{"oneOf":variants}}),
+            ),
+        ],
+        vec!["session_id", "steps"],
+    )
+}
+
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "seatgeist";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -233,6 +336,18 @@ impl McpServer {
         request: DaemonRequest,
         response_options: Option<DaemonResponseOptions>,
     ) -> Result<DaemonResponse> {
+        if let DaemonRequest::NativeGesture(r) = &request {
+            r.validate().map_err(anyhow::Error::msg)?;
+        }
+        if matches!(
+            &request,
+            DaemonRequest::NativeGesture(_) | DaemonRequest::SeatState(_)
+        ) {
+            match self.send_daemon_request(DaemonRequest::Health, None)? {
+                DaemonResponse::Health(h) if h.native_gesture_supported => {}
+                _ => bail!("daemon does not support native gesture/state; no input sent"),
+            }
+        }
         if let DaemonRequest::AltPointClick(r) = &request {
             r.validate().map_err(anyhow::Error::msg)?;
             match self.send_daemon_request(DaemonRequest::Health, None)? {
@@ -632,6 +747,20 @@ fn daemon_request_for_tool(name: &str, arguments: &Value) -> Result<DaemonReques
             guard: active_window_guard(arguments)?,
             session_id: optional_string(arguments, "session_id")?,
         })),
+        "seatgeist.native_gesture" => {
+            let request: libseatgeist::NativeGestureRequest =
+                serde_json::from_value(arguments.clone())?;
+            request.validate().map_err(anyhow::Error::msg)?;
+            Ok(DaemonRequest::NativeGesture(request))
+        }
+        "seatgeist.seat_state" => {
+            let request: libseatgeist::SeatStateRequest =
+                serde_json::from_value(arguments.clone())?;
+            if request.session_id.trim().is_empty() {
+                bail!("seat state requires exact session");
+            }
+            Ok(DaemonRequest::SeatState(request))
+        }
         "seatgeist.alt_point_click" => {
             for key in arguments
                 .as_object()
@@ -1216,6 +1345,10 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
 }
 fn compact_tool_text_inner(tool_name: &str, response: &DaemonResponse) -> String {
     match response {
+        DaemonResponse::SeatState(s) => format!(
+            "agent seat bound={} locked={} cursor={} revision={}",
+            s.target_bound, s.pointer_locked, s.cursor.kind, s.cursor.revision
+        ),
         DaemonResponse::Health(status) => {
             let build = status
                 .git_sha
@@ -2519,6 +2652,21 @@ fn expert_tool_definitions() -> Vec<Value> {
             ),
         ),
         tool(
+            "seatgeist.native_gesture",
+            "Native Gesture",
+            "Finite exact-session native gesture: balanced key/button transitions, paced window-local/relative motion, precision scroll, waits and observed client conditions. At most 256 steps and 1500ms total wait budget. Both keyboard/pointer policy required. Releases on cancellation; no held state between calls, physical focus fallback or delivery replay.",
+            native_gesture_schema(),
+        ),
+        tool(
+            "seatgeist.seat_state",
+            "Agent Seat State",
+            "Read the exact session agent seat's bindings, lock, local pointer position and cursor metadata. Does not focus, move, capture pixels or initialize an interaction. Unknown cursor shape remains unknown.",
+            object_schema(
+                vec![("session_id", json!({"type":"string","minLength":1}))],
+                vec!["session_id"],
+            ),
+        ),
+        tool(
             "seatgeist.alt_point_click",
             "Alt Point Click",
             "Bounded exact-session left click: Alt down, yield until the same client destroys its active same-seat pointer lock, revalidate, move/click, Alt up. Requires keyboard and pointer approval; timeout/cancel releases Alt without clicking. No persistent held key or physical-seat fallback.",
@@ -3680,6 +3828,87 @@ fn i64_to_i32(value: i64) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn native_gesture_and_state_refuse_old_daemon_before_input() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            os::unix::net::UnixListener,
+        };
+        for request in [
+            DaemonRequest::NativeGesture(libseatgeist::NativeGestureRequest {
+                session_id: "owned".into(),
+                steps: vec![libseatgeist::GestureStep::Motion { x: 1., y: 2. }],
+            }),
+            DaemonRequest::SeatState(libseatgeist::SeatStateRequest {
+                session_id: "owned".into(),
+            }),
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "sg-native-preflight-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            let socket = dir.join("bus");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Value>(&line).unwrap()["request"]["method"],
+                    "health"
+                );
+                writeln!(stream,"{}",json!({"type":"health","data":{"service":"seatgeistd","version":"old","status":"ok"}})).unwrap();
+                listener
+            });
+            let error = McpServer {
+                socket,
+                tool_profile: ToolProfile::All,
+                readiness_cache: Default::default(),
+            }
+            .send_daemon_request(request, None)
+            .unwrap_err();
+            assert!(error.to_string().contains("no input sent"));
+            let listener = server.join().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            assert!(listener.accept().is_err());
+            drop(listener);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+    #[test]
+    fn native_gesture_parser_and_schema_are_strict_and_finite() {
+        let args = json!({"session_id":"owned","steps":[{"op":"motion","x":1,"y":2}]});
+        assert!(matches!(
+            daemon_request_for_tool("seatgeist.native_gesture", &args).unwrap(),
+            DaemonRequest::NativeGesture(_)
+        ));
+        let mut bad = args.clone();
+        bad["steps"][0]["hold"] = json!(true);
+        assert!(daemon_request_for_tool("seatgeist.native_gesture", &bad).is_err());
+        assert!(
+            daemon_request_for_tool(
+                "seatgeist.native_gesture",
+                &json!({"session_id":"owned","steps":[{"op":"key","code":17,"pressed":true}]})
+            )
+            .is_err()
+        );
+        assert_eq!(
+            native_gesture_schema()["properties"]["steps"]["maxItems"],
+            256
+        );
+        assert!(matches!(
+            daemon_request_for_tool("seatgeist.seat_state", &json!({"session_id":"owned"}))
+                .unwrap(),
+            DaemonRequest::SeatState(_)
+        ));
+    }
+    #[test]
     fn alt_point_click_parser_and_schema_preserve_the_specialized_contract() {
         let args = json!({"x":196,"y":116,"coordinate_space":"window_local","session_id":"owned"});
         assert!(matches!(
@@ -4665,6 +4894,7 @@ mod tests {
                 agent_seat: Some(libseatgeist::AgentSeatRuntimeStatus {
                     relative_pointer_supported: false,
                     alt_point_click_supported: false,
+                    native_gesture_supported: false,
                     protocol: "kwin_agent_seat_v2".to_string(),
                     build_id: Some("a".repeat(64)),
                     heartbeat_fresh: true,

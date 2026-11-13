@@ -625,7 +625,8 @@ async fn run(
     let activity_tracker = activity::ActivityTracker::default();
     let window_action_queue = WindowActionQueue::default();
     let agent_seat_backend =
-        agent_seat::KwinAgentSeatBackend::with_lanes(interaction_session_store.clone());
+        agent_seat::KwinAgentSeatBackend::with_lanes(interaction_session_store.clone())
+            .with_gesture_safety(policy.clone(), approval_store.clone(), panic_stop.clone());
     let focus_backend: Arc<dyn interaction::FocusBackend> = Arc::new(interaction::KwinFocusBackend);
     let _kwin_bridge_connection = if kwin_bridge_enabled {
         match start_kwin_bridge(
@@ -1323,6 +1324,7 @@ fn journal_backend_for_request(
         | DaemonRequest::MovePointer(_)
         | DaemonRequest::RelativePointer(_)
         | DaemonRequest::AltPointClick(_)
+        | DaemonRequest::NativeGesture(_)
         | DaemonRequest::ClickPointer(_)
         | DaemonRequest::DragPointer(_)
         | DaemonRequest::ScrollPointer(_) => {
@@ -1539,6 +1541,18 @@ fn journal_requested_target_for_request(request: &DaemonRequest) -> Option<Journ
             if let Some(session_id) = request.session_id.as_deref() {
                 target.add("session_id", session_id);
             }
+            target
+        }
+        DaemonRequest::NativeGesture(request) => {
+            let mut target = journal_target("native_gesture");
+            target.add("session_id", &request.session_id);
+            target.add("step_count", request.steps.len().to_string());
+            target.add("required_safety_classes", "ControlPointer,ControlKeyboard");
+            target
+        }
+        DaemonRequest::SeatState(request) => {
+            let mut target = journal_target("seat_state");
+            target.add("session_id", &request.session_id);
             target
         }
         DaemonRequest::AltPointClick(request) => {
@@ -1978,6 +1992,29 @@ async fn handle_request_inner(
     if let Err(err) = validate_targeted_key_combo(&request, runtime.input_backend_preference) {
         return daemon_error_with_kind(err, ErrorKind::Validation);
     }
+    if let DaemonRequest::NativeGesture(r) = &request {
+        if let Err(e) = r.validate() {
+            return daemon_error_with_kind(anyhow::anyhow!(e), ErrorKind::Validation);
+        }
+    }
+    if matches!(
+        &request,
+        DaemonRequest::NativeGesture(_) | DaemonRequest::SeatState(_)
+    ) && runtime.input_backend_preference != InputBackendPreference::KwinAgentSeat
+    {
+        return daemon_error_with_kind(
+            anyhow::anyhow!("native gesture/state requires independent KWin agent seat"),
+            ErrorKind::Validation,
+        );
+    }
+    if let DaemonRequest::SeatState(r) = &request {
+        if r.session_id.trim().is_empty() {
+            return daemon_error_with_kind(
+                anyhow::anyhow!("seat state requires exact session"),
+                ErrorKind::Validation,
+            );
+        }
+    }
     if let DaemonRequest::AltPointClick(r) = &request {
         if let Err(err) = r.validate() {
             return daemon_error_with_kind(anyhow::anyhow!(err), ErrorKind::Validation);
@@ -2183,7 +2220,12 @@ async fn execute_request(
         DaemonRequest::PanicStopStatus => DaemonResponse::PanicStop(runtime.panic_stop.status()),
         DaemonRequest::SetPanicStop(request) => {
             match set_panic_stop(&runtime.panic_stop, request) {
-                Ok(status) => DaemonResponse::PanicStop(status),
+                Ok(status) => {
+                    if runtime.panic_stop.status().enabled {
+                        runtime.agent_seat_backend.cancel_all();
+                    }
+                    DaemonResponse::PanicStop(status)
+                }
                 Err(err) => daemon_error(err),
             }
         }
@@ -2695,6 +2737,73 @@ async fn execute_request(
             match result {
                 Ok(result) => DaemonResponse::Action(Box::new(result)),
                 Err(err) => daemon_error(err),
+            }
+        }
+        DaemonRequest::NativeGesture(request) => {
+            let session_id = request.session_id.clone();
+            let result = interaction::execute_agent_seat_action(
+                runtime,
+                Some(&session_id),
+                SafetyClass::ControlPointer,
+                |target| async move {
+                    let delivery = runtime
+                        .agent_seat_backend
+                        .native_gesture(
+                            &TargetedInputContext {
+                                lane_id: target.lane_id,
+                            },
+                            &target.window,
+                            &request,
+                        )
+                        .await
+                        .map_err(anyhow::Error::msg)?;
+                    Ok(input_actions::agent_result(
+                        delivery,
+                        "finite native gesture delivered; app consumption requires observation"
+                            .into(),
+                    ))
+                },
+            )
+            .await;
+            match result {
+                Ok(result) => DaemonResponse::Action(Box::new(result)),
+                Err(e) => daemon_error(e),
+            }
+        }
+        DaemonRequest::SeatState(request) => {
+            let result = async {
+                interaction::require_live_capture_session(runtime, &request.session_id).await?;
+                let windows = runtime
+                    .window_backend
+                    .list_windows()
+                    .await
+                    .map_err(anyhow::Error::msg)?;
+                let target = runtime
+                    .interaction_session_store
+                    .resolve(&request.session_id, &windows)
+                    .await?;
+                enforce_app_policy_for_app(
+                    &runtime.app_policy,
+                    target.window.app_id.as_deref(),
+                    "agent seat observation",
+                )?;
+                let state = runtime
+                    .agent_seat_backend
+                    .seat_state(
+                        &TargetedInputContext {
+                            lane_id: target.lane_id,
+                        },
+                        &target.window,
+                        &request.session_id,
+                    )
+                    .await
+                    .map_err(anyhow::Error::msg)?;
+                Ok::<_, anyhow::Error>(state)
+            }
+            .await;
+            match result {
+                Ok(state) => DaemonResponse::SeatState(state),
+                Err(e) => daemon_error(e),
             }
         }
         DaemonRequest::AltPointClick(mut request) => {
@@ -3308,6 +3417,7 @@ fn health(
         atomic_pointer_modifiers_supported: true,
         relative_pointer_supported: true,
         alt_point_click_supported: true,
+        native_gesture_supported: true,
         service: "seatgeistd".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         status: "ok".to_string(),
@@ -3814,7 +3924,8 @@ fn enforce_policy_with_scoped_cleanup(
 
 fn required_safety_classes(request: &DaemonRequest) -> Vec<SafetyClass> {
     let mut classes = vec![safety_class_for_request(request)];
-    if !pointer_modifiers(request).is_empty() {
+    if !pointer_modifiers(request).is_empty() || matches!(request, DaemonRequest::NativeGesture(_))
+    {
         classes.push(SafetyClass::ControlKeyboard);
     }
     classes
@@ -3985,6 +4096,7 @@ fn session_backend_role_for_request(
         | DaemonRequest::MovePointer(_)
         | DaemonRequest::RelativePointer(_)
         | DaemonRequest::AltPointClick(_)
+        | DaemonRequest::NativeGesture(_)
         | DaemonRequest::ClickPointer(_)
         | DaemonRequest::DragPointer(_)
         | DaemonRequest::ScrollPointer(_) => Some(session_execution::BackendRole::RawInput),
@@ -4179,7 +4291,7 @@ fn enforce_required_focus_guard(settings: &SafetySettings, request: &DaemonReque
 
 fn pointer_request_uses_window_local(request: &DaemonRequest) -> bool {
     match request {
-        DaemonRequest::AltPointClick(_) => true,
+        DaemonRequest::AltPointClick(_) | DaemonRequest::NativeGesture(_) => true,
         DaemonRequest::MovePointer(request) => matches!(
             request.point.space,
             CoordinateSpace::WindowLocal | CoordinateSpace::CaptureOutput
@@ -4354,6 +4466,8 @@ fn interaction_session_id_for_request(request: &DaemonRequest) -> Option<&str> {
         DaemonRequest::MovePointer(request) => request.session_id.as_deref(),
         DaemonRequest::RelativePointer(request) => Some(request.session_id.as_str()),
         DaemonRequest::AltPointClick(request) => Some(request.session_id.as_str()),
+        DaemonRequest::NativeGesture(request) => Some(request.session_id.as_str()),
+        DaemonRequest::SeatState(request) => Some(request.session_id.as_str()),
         DaemonRequest::ClickPointer(request) => request.session_id.as_deref(),
         DaemonRequest::DragPointer(request) => request.session_id.as_deref(),
         DaemonRequest::ScrollPointer(request) => request.session_id.as_deref(),
@@ -4374,6 +4488,7 @@ fn uses_independent_agent_seat(
                 | DaemonRequest::MovePointer(_)
                 | DaemonRequest::RelativePointer(_)
                 | DaemonRequest::AltPointClick(_)
+                | DaemonRequest::NativeGesture(_)
                 | DaemonRequest::ClickPointer(_)
                 | DaemonRequest::DragPointer(_)
                 | DaemonRequest::ScrollPointer(_)
@@ -4501,6 +4616,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         | DaemonRequest::FocusedAccessibilityTree(_)
         | DaemonRequest::AccessibilityFind(_)
         | DaemonRequest::AccessibilityTextAttributes(_)
+        | DaemonRequest::SeatState(_)
         | DaemonRequest::AccessibilitySnapshot(_) => SafetyClass::Observe,
         DaemonRequest::Observe(request) => {
             if request
@@ -4534,6 +4650,7 @@ fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
         DaemonRequest::MovePointer(_)
         | DaemonRequest::RelativePointer(_)
         | DaemonRequest::AltPointClick(_)
+        | DaemonRequest::NativeGesture(_)
         | DaemonRequest::ClickPointer(_)
         | DaemonRequest::DragPointer(_)
         | DaemonRequest::ScrollPointer(_) => SafetyClass::ControlPointer,
@@ -7660,6 +7777,10 @@ fn rotated_journal_path(path: &Path) -> PathBuf {
 
 fn summarize_response(response: &DaemonResponse) -> String {
     match response {
+        DaemonResponse::SeatState(state) => format!(
+            "agent seat bound={} locked={} cursor={}",
+            state.target_bound, state.pointer_locked, state.cursor.kind
+        ),
         DaemonResponse::Health(status) => format!("{} {}", status.service, status.status),
         DaemonResponse::Capabilities(capabilities) => {
             format!("{} capabilities", capabilities.capabilities.len())
@@ -8192,6 +8313,46 @@ mod tests {
     use std::{collections::VecDeque, os::fd::RawFd};
 
     #[test]
+    fn native_gestures_require_keyboard_and_pointer_and_state_is_observe() {
+        let r = DaemonRequest::NativeGesture(libseatgeist::NativeGestureRequest {
+            session_id: "owned".into(),
+            steps: vec![libseatgeist::GestureStep::Motion { x: 1., y: 2. }],
+        });
+        assert_eq!(
+            required_safety_classes(&r),
+            vec![SafetyClass::ControlPointer, SafetyClass::ControlKeyboard]
+        );
+        assert_eq!(interaction_session_id_for_request(&r), Some("owned"));
+        assert!(uses_independent_agent_seat(
+            &r,
+            InputBackendPreference::KwinAgentSeat
+        ));
+        let path = temp_test_path("native-gesture-policy");
+        let store = ApprovalStore::new(Some(path.clone()));
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let expiry = unix_time_ms().unwrap() + 60000;
+        for class in [SafetyClass::ControlPointer, SafetyClass::ControlKeyboard] {
+            write_test_approval_grant(&path, class, "native_gesture", expiry);
+            assert!(enforce_policy_with_approvals(&policy, &store, &r).is_err());
+        }
+        let keyboard = std::fs::read_to_string(&path).unwrap();
+        write_test_approval_grant(&path, SafetyClass::ControlPointer, "native_gesture", expiry);
+        std::fs::write(
+            &path,
+            format!("{}{}", keyboard, std::fs::read_to_string(&path).unwrap()),
+        )
+        .unwrap();
+        assert!(enforce_policy_with_approvals(&policy, &store, &r).is_ok());
+        std::fs::remove_file(path).unwrap();
+        assert!(enforce_policy_with_approvals(&policy, &store, &r).is_err());
+        let state = DaemonRequest::SeatState(libseatgeist::SeatStateRequest {
+            session_id: "owned".into(),
+        });
+        assert!(state.is_read_only());
+        assert_eq!(safety_class_for_request(&state), SafetyClass::Observe);
+        assert_eq!(interaction_session_id_for_request(&state), Some("owned"));
+    }
+    #[test]
     fn alt_point_click_requires_both_policies_and_native_exact_session() {
         let request = DaemonRequest::AltPointClick(libseatgeist::AltPointClickRequest {
             point: Point {
@@ -8713,6 +8874,7 @@ mod tests {
                     atomic_pointer_modifiers_supported: false,
                     relative_pointer_supported: false,
                     alt_point_click_supported: false,
+                    native_gesture_supported: false,
                     service: "seatgeistd".to_string(),
                     version: "0.1.0".to_string(),
                     status: "ok".to_string(),

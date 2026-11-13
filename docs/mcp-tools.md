@@ -534,3 +534,5 @@ KWin's seat APIs plus observed Wayland lock destruction, with unsupported hosts
 failing closed. Deploy the qualified matching pair at a normal saved-work login
 boundary; no live permanent-seat unload is supported. The original run77 is
 retained as unsupported; this source qualification is not a replay or GUI pass.
+
+The expert `seatgeist.native_gesture` and `seatgeist.seat_state` tools provide bounded timed native input and exact-seat observation. See [native gesture contract](native-gestures.md). They require a matching `native_gesture_v1` host; daemon health alone is not native readiness.

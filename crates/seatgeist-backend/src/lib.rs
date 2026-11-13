@@ -214,6 +214,26 @@ pub trait TargetedInputBackend: std::fmt::Debug + Send + Sync {
         target: &WindowInfo,
         point: Point,
     ) -> Result<TargetedInputDelivery>;
+    async fn native_gesture(
+        &self,
+        _context: &TargetedInputContext,
+        _target: &WindowInfo,
+        _request: &libseatgeist::NativeGestureRequest,
+    ) -> Result<TargetedInputDelivery> {
+        Err(SeatgeistError::BackendUnavailable(
+            "native gestures are unsupported by this backend".into(),
+        ))
+    }
+    async fn seat_state(
+        &self,
+        _context: &TargetedInputContext,
+        _target: &WindowInfo,
+        _session_id: &str,
+    ) -> Result<libseatgeist::SeatState> {
+        Err(SeatgeistError::BackendUnavailable(
+            "seat observation is unsupported by this backend".into(),
+        ))
+    }
     /// Bounded Alt-down, actual client unlock, point-click, Alt-up gesture.
     async fn alt_point_click(
         &self,

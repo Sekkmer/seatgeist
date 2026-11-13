@@ -59,3 +59,5 @@ control-rate limiter, and private approval-file parsing together in
 `crates/seatgeistd/src/safety_runtime.rs`. Request classification and policy
 decisions remain in the daemon dispatcher; the runtime module only supplies
 the stateful safety primitives used before backend execution.
+
+Finite native gestures require both pointer and keyboard authorization, a live owned exact session, bounded waits, balanced transitions, fresh step authorization and automatic release on every exit. They never retain held state between requests. See [native gesture safety and limits](native-gestures.md).

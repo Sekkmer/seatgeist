@@ -555,7 +555,7 @@ fn require_injection_activity_safe(safe: bool) -> Result<()> {
     bail!("human input activity occurred during the focus lease; input was not injected")
 }
 
-async fn require_live_capture_session(
+pub(crate) async fn require_live_capture_session(
     runtime: &super::DaemonRuntime,
     session_id: &str,
 ) -> Result<()> {

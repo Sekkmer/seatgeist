@@ -34,8 +34,33 @@ pub(crate) struct KwinAgentSeatBackend {
     inner: Arc<Mutex<AgentSeatState>>,
     wake: Arc<Notify>,
     lanes: Option<crate::interaction::InteractionSessionStore>,
+    gesture_safety: Option<GestureSafety>,
 }
 
+#[derive(Debug, Clone)]
+struct GestureSafety {
+    policy: seatgeist_policy::PolicyEngine,
+    approvals: crate::safety_runtime::ApprovalStore,
+    panic: crate::safety_runtime::PanicStopState,
+}
+impl GestureSafety {
+    fn authorized(&self, method: &str) -> bool {
+        let classes = if method == "seat_state" {
+            vec![libseatgeist::SafetyClass::Observe]
+        } else {
+            if self.panic.status().enabled {
+                return false;
+            }
+            vec![
+                libseatgeist::SafetyClass::ControlPointer,
+                libseatgeist::SafetyClass::ControlKeyboard,
+            ]
+        };
+        classes.into_iter().all(|class| {
+            super::enforce_safety_class(&self.policy, &self.approvals, method, class, false).is_ok()
+        })
+    }
+}
 #[derive(Debug, Default)]
 struct AgentSeatState {
     pending: VecDeque<PendingAction>,
@@ -47,11 +72,13 @@ struct AgentSeatState {
     last_delivery: Option<DeliveryValidation>,
     relative_pointer_supported: bool,
     alt_point_click_supported: bool,
+    native_gesture_supported: bool,
     staged_clicks: HashMap<Uuid, StagedClick>,
 }
 
 #[derive(Debug, Clone)]
 struct StagedClick {
+    method: &'static str,
     session_id: String,
     lane_id: String,
     window_id: String,
@@ -77,6 +104,8 @@ struct AgentSeatActionResult {
     ok: bool,
     backend: Option<String>,
     error: Option<String>,
+    #[serde(default)]
+    state: Option<libseatgeist::SeatState>,
 }
 
 #[derive(Serialize)]
@@ -160,6 +189,19 @@ struct PointerScrollAction<'a> {
 }
 
 impl KwinAgentSeatBackend {
+    pub(crate) fn with_gesture_safety(
+        mut self,
+        policy: seatgeist_policy::PolicyEngine,
+        approvals: crate::safety_runtime::ApprovalStore,
+        panic: crate::safety_runtime::PanicStopState,
+    ) -> Self {
+        self.gesture_safety = Some(GestureSafety {
+            policy,
+            approvals,
+            panic,
+        });
+        self
+    }
     pub(crate) fn with_lanes(lanes: crate::interaction::InteractionSessionStore) -> Self {
         Self {
             lanes: Some(lanes),
@@ -168,7 +210,7 @@ impl KwinAgentSeatBackend {
     }
 
     pub(crate) fn register(&self, backend: &str, caller: &str) -> Result<()> {
-        self.register_identified(backend, None, caller, false, false)
+        self.register_identified(backend, None, caller, false, false, false)
     }
 
     pub(crate) fn register_with_build_id(
@@ -185,6 +227,7 @@ impl KwinAgentSeatBackend {
             backend,
             Some(build_id.to_ascii_lowercase()),
             caller,
+            false,
             false,
             false,
         )
@@ -204,9 +247,12 @@ impl KwinAgentSeatBackend {
         let capabilities = capabilities.split(',').collect::<Vec<_>>();
         if backend != KWIN_AGENT_SEAT_BACKEND
             || capabilities.is_empty()
-            || capabilities
-                .iter()
-                .any(|c| !matches!(*c, "relative_pointer_v1" | "alt_point_click_v1"))
+            || capabilities.iter().any(|c| {
+                !matches!(
+                    *c,
+                    "relative_pointer_v1" | "alt_point_click_v1" | "native_gesture_v1"
+                )
+            })
             || capabilities
                 .iter()
                 .collect::<std::collections::HashSet<_>>()
@@ -221,6 +267,7 @@ impl KwinAgentSeatBackend {
             caller,
             capabilities.contains(&"relative_pointer_v1"),
             capabilities.contains(&"alt_point_click_v1"),
+            capabilities.contains(&"native_gesture_v1"),
         )
     }
 
@@ -231,6 +278,7 @@ impl KwinAgentSeatBackend {
         caller: &str,
         relative_pointer_supported: bool,
         alt_point_click_supported: bool,
+        native_gesture_supported: bool,
     ) -> Result<()> {
         if backend != KWIN_AGENT_SEAT_BACKEND && backend != LEGACY_BACKEND {
             bail!("unsupported KWin agent-seat backend: {backend}");
@@ -247,6 +295,7 @@ impl KwinAgentSeatBackend {
             || state.build_id != build_id
             || state.relative_pointer_supported != relative_pointer_supported
             || state.alt_point_click_supported != alt_point_click_supported
+            || state.native_gesture_supported != native_gesture_supported
         {
             // Never transfer old work to a replacement host or wire protocol.
             state.staged_clicks.clear();
@@ -260,6 +309,7 @@ impl KwinAgentSeatBackend {
         state.build_id = build_id;
         state.relative_pointer_supported = relative_pointer_supported;
         state.alt_point_click_supported = alt_point_click_supported;
+        state.native_gesture_supported = native_gesture_supported;
         self.registered.store(true, Ordering::Release);
         Ok(())
     }
@@ -290,6 +340,7 @@ impl KwinAgentSeatBackend {
         Some(AgentSeatRuntimeStatus {
             relative_pointer_supported: state.relative_pointer_supported,
             alt_point_click_supported: state.alt_point_click_supported,
+            native_gesture_supported: state.native_gesture_supported,
             protocol,
             build_id: state.build_id.clone(),
             heartbeat_fresh: heartbeat_age <= BACKEND_HEARTBEAT_TTL,
@@ -347,6 +398,13 @@ impl KwinAgentSeatBackend {
         {
             bail!("KWin agent-seat completion reported unexpected backend");
         }
+        let observation = state
+            .staged_clicks
+            .get(&result.id)
+            .is_some_and(|request| request.method == "seat_state");
+        if result.ok && observation != result.state.is_some() {
+            bail!("native host completion kind does not match requested operation");
+        }
         let sender = state
             .waiters
             .remove(&result.id)
@@ -369,7 +427,9 @@ impl KwinAgentSeatBackend {
         sender
             .send(result)
             .map_err(|_| anyhow::anyhow!("KWin agent-seat action receiver closed"))?;
-        state.last_delivery = Some(delivery);
+        if !observation {
+            state.last_delivery = Some(delivery);
+        }
         Ok(())
     }
 
@@ -379,6 +439,18 @@ impl KwinAgentSeatBackend {
         window_id: &str,
         action: &T,
     ) -> seatgeist_backend::Result<TargetedInputDelivery> {
+        let result = self.submit_result(id, window_id, action).await?;
+        Ok(TargetedInputDelivery {
+            action_id: id,
+            backend: result.backend.unwrap_or_default(),
+        })
+    }
+    async fn submit_result<T: Serialize>(
+        &self,
+        id: Uuid,
+        window_id: &str,
+        action: &T,
+    ) -> seatgeist_backend::Result<AgentSeatActionResult> {
         if !self.ready() {
             return Err(backend_error(anyhow::anyhow!(
                 "KWin agent-seat plugin is not registered; install and enable seatgeistagentseat or select another input backend"
@@ -406,6 +478,15 @@ impl KwinAgentSeatBackend {
                     "atomic modified pointer action requires the v2 balanced event host"
                 )));
             }
+            if matches!(
+                value["action"].as_str(),
+                Some("native_gesture" | "seat_state")
+            ) && !state.native_gesture_supported
+            {
+                return Err(backend_error(anyhow::anyhow!(
+                    "registered host does not support native_gesture_v1; no input queued"
+                )));
+            }
             if value["action"] == "relative_pointer" && !state.relative_pointer_supported {
                 return Err(backend_error(anyhow::anyhow!(
                     "registered native host does not support relative_pointer_v1; no input queued"
@@ -421,7 +502,10 @@ impl KwinAgentSeatBackend {
                     "id": id, "action": "events", "protocol": plan::HOST_PROTOCOL,
                     "lane_id": value["lane_id"], "window_id": window_id, "events": events,
                 });
-                if value["action"] == "alt_point_click" {
+                if matches!(
+                    value["action"].as_str(),
+                    Some("alt_point_click" | "native_gesture" | "seat_state")
+                ) {
                     batch["session_id"] = value["session_id"].clone();
                     batch["expected_app_id"] = value["expected_app_id"].clone();
                     batch["expected_pid"] = value["expected_pid"].clone();
@@ -436,10 +520,18 @@ impl KwinAgentSeatBackend {
                 window_id: window_id.to_string(),
                 payload,
             });
-            if value["action"] == "alt_point_click" {
+            if matches!(
+                value["action"].as_str(),
+                Some("alt_point_click" | "native_gesture" | "seat_state")
+            ) {
                 state.staged_clicks.insert(
                     id,
                     StagedClick {
+                        method: match value["action"].as_str() {
+                            Some("native_gesture") => "native_gesture",
+                            Some("seat_state") => "seat_state",
+                            _ => "alt_point_click",
+                        },
                         session_id: value["session_id"].as_str().unwrap_or("").into(),
                         lane_id: value["lane_id"].as_str().unwrap_or("").into(),
                         window_id: window_id.into(),
@@ -451,7 +543,7 @@ impl KwinAgentSeatBackend {
             backend
         };
         self.wake.notify_one();
-        let result = match tokio::time::timeout(ACTION_TIMEOUT, receiver).await {
+        let mut result = match tokio::time::timeout(ACTION_TIMEOUT, receiver).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => {
                 self.remove(id);
@@ -481,6 +573,7 @@ impl KwinAgentSeatBackend {
         }
         let backend = result
             .backend
+            .clone()
             .filter(|backend| !backend.trim().is_empty())
             .unwrap_or_else(|| expected_backend.clone());
         if backend != expected_backend {
@@ -488,10 +581,8 @@ impl KwinAgentSeatBackend {
                 "KWin agent-seat completion reported unexpected backend {backend}"
             )));
         }
-        Ok(TargetedInputDelivery {
-            action_id: id,
-            backend,
-        })
+        result.backend = Some(backend);
+        Ok(result)
     }
 
     pub(crate) async fn check_alt_point_click(
@@ -512,6 +603,13 @@ impl KwinAgentSeatBackend {
             let Some(staged) = state.staged_clicks.get(&id) else {
                 return Ok(false);
             };
+            if self
+                .gesture_safety
+                .as_ref()
+                .is_some_and(|safety| !safety.authorized(staged.method))
+            {
+                return Ok(false);
+            }
             if staged.session_id != session_id
                 || staged.lane_id != lane_id
                 || staged.window_id != window_id
@@ -558,6 +656,13 @@ impl KwinAgentSeatBackend {
         }
     }
 
+    pub(crate) fn cancel_all(&self) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.staged_clicks.clear();
+            state.pending.clear();
+            state.waiters.clear();
+        }
+    }
     pub(crate) fn cancel_pending_for_target(&self, window_id: &str) -> usize {
         let Ok(mut state) = self.inner.lock() else {
             return 0;
@@ -585,6 +690,7 @@ impl KwinAgentSeatBackend {
                     id: *id,
                     ok: false,
                     backend: Some(KWIN_AGENT_SEAT_BACKEND.to_string()),
+                    state: None,
                     error: Some(
                         "agent target received physical user input before delivery".to_string(),
                     ),
@@ -750,6 +856,38 @@ impl TargetedInputBackend for KwinAgentSeatBackend {
         .await
     }
 
+    async fn native_gesture(
+        &self,
+        context: &TargetedInputContext,
+        target: &WindowInfo,
+        request: &libseatgeist::NativeGestureRequest,
+    ) -> seatgeist_backend::Result<TargetedInputDelivery> {
+        validate_context(context)?;
+        request
+            .validate()
+            .map_err(|e| backend_error(anyhow::anyhow!(e)))?;
+        let id = Uuid::new_v4();
+        self.submit(id,&target.id,&serde_json::json!({"id":id,"action":"native_gesture","session_id":request.session_id,"lane_id":context.lane_id,"window_id":target.id,"expected_app_id":target.app_id,"expected_pid":target.pid,"steps":request.steps})).await
+    }
+    async fn seat_state(
+        &self,
+        context: &TargetedInputContext,
+        target: &WindowInfo,
+        session_id: &str,
+    ) -> seatgeist_backend::Result<libseatgeist::SeatState> {
+        validate_context(context)?;
+        let id = Uuid::new_v4();
+        let result=self.submit_result(id,&target.id,&serde_json::json!({"id":id,"action":"seat_state","session_id":session_id,"lane_id":context.lane_id,"window_id":target.id,"expected_app_id":target.app_id,"expected_pid":target.pid})).await?;
+        let state = result
+            .state
+            .ok_or_else(|| backend_error(anyhow::anyhow!("native seat observation missing")))?;
+        if state.window_id != target.id {
+            return Err(backend_error(anyhow::anyhow!(
+                "seat observation target mismatch"
+            )));
+        }
+        Ok(state)
+    }
     async fn alt_point_click(
         &self,
         context: &TargetedInputContext,
@@ -941,6 +1079,132 @@ fn backend_error(error: anyhow::Error) -> SeatgeistError {
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_gesture_rechecks_prompt_grants_and_external_panic_file() {
+        let path = std::env::temp_dir().join(format!("gesture-panic-{}", Uuid::new_v4()));
+        let safety = GestureSafety {
+            policy: seatgeist_policy::PolicyEngine::new(seatgeist_policy::PolicyConfig {
+                default_control: libseatgeist::ToolApprovalLevel::Allow,
+                ..Default::default()
+            }),
+            approvals: Default::default(),
+            panic: crate::safety_runtime::PanicStopState::new(path.clone()),
+        };
+        assert!(safety.authorized("native_gesture"));
+        std::fs::write(&path, b"panic").unwrap();
+        assert!(!safety.authorized("native_gesture"));
+        assert!(safety.authorized("seat_state"));
+        std::fs::remove_file(path).unwrap();
+        let denied = GestureSafety {
+            policy: seatgeist_policy::PolicyEngine::new(Default::default()),
+            ..safety
+        };
+        assert!(!denied.authorized("native_gesture"));
+    }
+    #[tokio::test]
+    async fn native_gesture_requires_capability_and_cancelled_dequeued_work_cannot_continue() {
+        use libseatgeist::{GestureStep, NativeGestureRequest};
+        let backend = KwinAgentSeatBackend::default();
+        backend
+            .register(KWIN_AGENT_SEAT_BACKEND, "kwin-owner")
+            .unwrap();
+        let request = NativeGestureRequest {
+            session_id: "owned".into(),
+            steps: vec![GestureStep::Motion { x: 1., y: 2. }],
+        };
+        assert!(
+            backend
+                .native_gesture(&context(), &target(), &request)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("native_gesture_v1")
+        );
+        assert_eq!(backend.take("kwin-owner").unwrap(), "");
+        backend
+            .register_with_capabilities(
+                KWIN_AGENT_SEAT_BACKEND,
+                &"a".repeat(64),
+                "relative_pointer_v1,alt_point_click_v1,native_gesture_v1",
+                "kwin-owner",
+            )
+            .unwrap();
+        assert!(backend.runtime_status().unwrap().native_gesture_supported);
+        let sender = backend.clone();
+        let r = request.clone();
+        let task =
+            tokio::spawn(async move { sender.native_gesture(&context(), &target(), &r).await });
+        tokio::task::yield_now().await;
+        let payload: serde_json::Value =
+            serde_json::from_str(&backend.take("kwin-owner").unwrap()).unwrap();
+        assert_eq!(payload["events"][0]["op"], "gesture");
+        assert_eq!(payload["expected_pid"], serde_json::json!(target().pid));
+        let id: Uuid = serde_json::from_value(payload["id"].clone()).unwrap();
+        assert_eq!(backend.cancel_pending_for_target(&target().id), 1);
+        assert!(task.await.unwrap().is_err());
+        assert!(
+            !backend
+                .check_alt_point_click(
+                    "kwin-owner",
+                    id,
+                    "owned",
+                    &context().lane_id,
+                    &target().id,
+                    &[target()]
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            backend
+                .complete(
+                    "kwin-owner",
+                    &serde_json::json!({"id":id,"ok":true,"backend":KWIN_AGENT_SEAT_BACKEND})
+                        .to_string()
+                )
+                .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn native_seat_observation_does_not_claim_input_delivery() {
+        let backend = KwinAgentSeatBackend::default();
+        backend
+            .register_with_capabilities(
+                KWIN_AGENT_SEAT_BACKEND,
+                &"a".repeat(64),
+                "native_gesture_v1",
+                "kwin-owner",
+            )
+            .unwrap();
+        let sender = backend.clone();
+        let task =
+            tokio::spawn(async move { sender.seat_state(&context(), &target(), "owned").await });
+        tokio::task::yield_now().await;
+        let payload: serde_json::Value =
+            serde_json::from_str(&backend.take("kwin-owner").unwrap()).unwrap();
+        assert_eq!(payload["events"][0]["op"], "state");
+        backend.complete("kwin-owner",&serde_json::json!({"id":payload["id"],"ok":true,"backend":KWIN_AGENT_SEAT_BACKEND,"state":{"window_id":target().id,"target_bound":false,"keyboard_bound":true,"pointer_bound":true,"relative_pointer_bound":false,"pointer_locked":false,"pointer_position":null,"cursor":{"revision":0,"kind":"unknown","name":null}}}).to_string()).unwrap();
+        let observed = task.await.unwrap().unwrap();
+        assert!(!observed.target_bound);
+        assert_eq!(observed.cursor.kind, "unknown");
+        assert_eq!(
+            backend.runtime_status().unwrap().delivery_validation,
+            "heartbeat_only"
+        );
+        let sender = backend.clone();
+        let failed =
+            tokio::spawn(async move { sender.seat_state(&context(), &target(), "owned").await });
+        tokio::task::yield_now().await;
+        let payload: serde_json::Value =
+            serde_json::from_str(&backend.take("kwin-owner").unwrap()).unwrap();
+        assert!(backend.complete("kwin-owner",&serde_json::json!({"id":payload["id"],"ok":true,"backend":KWIN_AGENT_SEAT_BACKEND}).to_string()).is_err());
+        backend.complete("kwin-owner",&serde_json::json!({"id":payload["id"],"ok":false,"backend":KWIN_AGENT_SEAT_BACKEND,"error":"observation unavailable"}).to_string()).unwrap();
+        assert!(failed.await.unwrap().is_err());
+        assert_eq!(
+            backend.runtime_status().unwrap().delivery_validation,
+            "heartbeat_only"
+        );
+    }
     #[tokio::test]
     async fn alt_point_click_refuses_old_host_and_rechecks_live_action_session_and_target() {
         let lanes = crate::interaction::InteractionSessionStore::default();

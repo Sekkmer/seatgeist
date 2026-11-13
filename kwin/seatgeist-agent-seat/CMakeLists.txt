@@ -37,12 +37,15 @@ configure_file(
 set(SEATGEIST_AGENT_SEAT_BUILD_INPUTS
     agentseatplugin.cpp
     agentseatplugin.h
+    agentcursor.h
     seatbindings.cpp
     seatbindings.h
     eventbatch.cpp
     eventbatch.h
     altpointclick.cpp
     altpointclick.h
+    gesturerunner.cpp
+    gesturerunner.h
 )
 set_property(
     DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
@@ -66,12 +69,15 @@ configure_file(
 add_library(seatgeistagentseat MODULE
     agentseatplugin.cpp
     agentseatplugin.h
+    agentcursor.h
     seatbindings.cpp
     seatbindings.h
     eventbatch.cpp
     eventbatch.h
     altpointclick.cpp
     altpointclick.h
+    gesturerunner.cpp
+    gesturerunner.h
     ${CMAKE_CURRENT_BINARY_DIR}/generated/agent_seat_build_id.h
     ${CMAKE_CURRENT_BINARY_DIR}/generated/kwin_plugin_abi.h
     main.cpp
@@ -114,7 +120,7 @@ if(BUILD_TESTING)
             DEPENDS ${PROTOCOL_XML} VERBATIM)
         list(APPEND POINTER_TEST_PROTOCOLS "${CMAKE_CURRENT_BINARY_DIR}/${PROTOCOL}-client.h" "${CMAKE_CURRENT_BINARY_DIR}/${PROTOCOL}-code.c")
     endforeach()
-    add_executable(seatbindings_test seatbindings_test.cpp seatbindings.cpp altpointclick.cpp ${POINTER_TEST_PROTOCOLS})
+    add_executable(seatbindings_test seatbindings_test.cpp seatbindings.cpp altpointclick.cpp gesturerunner.cpp ${POINTER_TEST_PROTOCOLS})
     target_include_directories(seatbindings_test PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
     target_include_directories(seatbindings_test PRIVATE ${KWIN_INCLUDE_DIR})
     target_link_libraries(seatbindings_test PRIVATE
@@ -124,6 +130,9 @@ if(BUILD_TESTING)
     add_executable(eventbatch_test eventbatch_test.cpp eventbatch.cpp)
     target_link_libraries(eventbatch_test PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME eventbatch COMMAND eventbatch_test)
+    add_executable(gesturerunner_test gesturerunner_test.cpp gesturerunner.cpp)
+    target_link_libraries(gesturerunner_test PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME gesture_runner COMMAND gesturerunner_test)
     add_executable(focus_fixture focus_fixture.cpp)
     target_link_libraries(focus_fixture PRIVATE Qt6::Widgets PkgConfig::WAYLAND_CLIENT)
 endif()

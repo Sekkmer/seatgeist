@@ -260,7 +260,7 @@ pub(crate) async fn agent_scroll_pointer(
     ))
 }
 
-fn agent_result(delivery: TargetedInputDelivery, message: String) -> ActionResult {
+pub(crate) fn agent_result(delivery: TargetedInputDelivery, message: String) -> ActionResult {
     ActionResult {
         disposition: None,
         id: delivery.action_id,

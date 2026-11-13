@@ -11,6 +11,10 @@ const KEY_MAX: u16 = 0x2ff;
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub(super) enum Event {
+    Gesture {
+        steps: Vec<libseatgeist::GestureStep>,
+    },
+    State,
     Key {
         code: u16,
         pressed: bool,
@@ -41,6 +45,11 @@ pub(super) enum Event {
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum Action {
+    NativeGesture {
+        session_id: String,
+        steps: Vec<libseatgeist::GestureStep>,
+    },
+    SeatState,
     KeyCombo {
         keycodes: Vec<u16>,
     },
@@ -141,6 +150,16 @@ fn modifier_keys(events: &mut Vec<Event>, modifiers: &[DragModifier], pressed: b
 pub(super) fn plan(value: serde_json::Value) -> Result<Vec<Event>> {
     let mut events = Vec::new();
     match serde_json::from_value::<Action>(value)? {
+        Action::NativeGesture { session_id, steps } => {
+            libseatgeist::NativeGestureRequest {
+                session_id,
+                steps: steps.clone(),
+            }
+            .validate()
+            .map_err(anyhow::Error::msg)?;
+            events.push(Event::Gesture { steps });
+        }
+        Action::SeatState => events.push(Event::State),
         Action::KeyCombo { keycodes } => chord(&mut events, &keycodes, 8)?,
         Action::KeySequence { chords } => {
             if chords.is_empty() || chords.len() > 8192 {
