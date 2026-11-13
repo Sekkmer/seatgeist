@@ -4,11 +4,14 @@
 #include <wayland-server-core.h>
 #include <QPointer>
 #include <QPointF>
+#include <QObject>
 #include <chrono>
 
 #include <list>
 #include <memory>
 #include <set>
+#include <map>
+#include <vector>
 
 namespace KWin
 {
@@ -18,14 +21,14 @@ class LockedPointerV1Interface;
 
 // Track actual client bindings, not just the compositor's focused surface.
 // No key contents or other application protocol traffic are retained.
-class SeatBindings
+class SeatBindings : public QObject
 {
 public:
     struct LockReleaseObservation {
         QPointer<LockedPointerV1Interface> lock;
         bool clientDestroyed = false;
     };
-    explicit SeatBindings(wl_display *display);
+    explicit SeatBindings(wl_display *display, SeatInterface *physicalSeat = nullptr);
     ~SeatBindings();
     void watch(SeatInterface *seat);
     void forget(SeatInterface *seat);
@@ -33,12 +36,22 @@ public:
     bool keyboardReady(SeatInterface *seat, wl_client *client) const;
     bool pointerReady(SeatInterface *seat, wl_client *client) const;
     bool relativePointerReady(SeatInterface *seat, wl_client *client);
+    bool lockedPointerRequested(SeatInterface *seat, wl_client *client, SurfaceInterface *surface);
+    bool pointerLockRegionContains(SeatInterface *seat, SurfaceInterface *surface) const;
+    // Only the policy-authorized lane target may activate a client constraint.
+    // This never enters/focuses a surface or moves either seat's pointer.
+    void setConstraintTarget(SeatInterface *seat, SurfaceInterface *surface);
     bool lockedPointerReady(SeatInterface *seat, wl_client *client, SurfaceInterface *surface);
     std::shared_ptr<LockReleaseObservation> observeActiveLock(SeatInterface *, wl_client *, SurfaceInterface *);
     bool deliverRelativePointer(SeatInterface *seat, wl_client *client, SurfaceInterface *surface,
                                 const QPointF &delta, std::chrono::microseconds timestamp);
 
 private:
+    struct LockTarget;
+    void reconcilePointerLock(SeatInterface *seat);
+    void clearConstraintTarget(SeatInterface *seat);
+    QPointer<SeatInterface> m_physicalSeat;
+    std::map<SeatInterface *, std::unique_ptr<LockTarget>> m_lockTargets;
     struct KeyboardBinding {
         wl_listener destroy;
         SeatBindings *owner;

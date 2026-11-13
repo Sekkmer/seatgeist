@@ -1,4 +1,5 @@
 pub mod accessibility_snapshot;
+pub mod request_timing;
 pub mod transport;
 pub use accessibility_snapshot::*;
 pub mod gesture;

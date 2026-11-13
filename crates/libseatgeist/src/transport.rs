@@ -20,17 +20,22 @@ fn send_with_timeout(
     request: &DaemonRequestEnvelope,
     timeout: Duration,
 ) -> Result<DaemonResponse, serde_json::Error> {
+    let timing_id = crate::request_timing::next_id();
+    let method = Some(request.request.method_name());
+    crate::request_timing::record("transport_send_start", timing_id, method, None);
     let line = serde_json::to_string(request)?;
     let control = !request.request.is_read_only();
     let mut stream = match UnixStream::connect(socket) {
         Ok(stream) => stream,
         Err(_) => return Ok(failure(false, control)),
     };
+    crate::request_timing::record("transport_connected", timing_id, method, None);
     if stream.set_read_timeout(Some(timeout)).is_err()
         || stream.set_write_timeout(Some(timeout)).is_err()
     {
         return Ok(failure(false, control));
     }
+    crate::request_timing::record("transport_write_start", timing_id, method, None);
     if stream
         .write_all(line.as_bytes())
         .and_then(|_| stream.write_all(b"\n"))
@@ -38,10 +43,12 @@ fn send_with_timeout(
     {
         return Ok(failure(true, control));
     }
+    crate::request_timing::record("transport_written", timing_id, method, None);
     let mut response = String::new();
     if BufReader::new(stream).read_line(&mut response).is_err() {
         return Ok(failure(true, control));
     }
+    crate::request_timing::record("transport_response_read", timing_id, method, None);
     Ok(serde_json::from_str(&response).unwrap_or_else(|_| failure(true, control)))
 }
 fn failure(attempted: bool, control: bool) -> DaemonResponse {

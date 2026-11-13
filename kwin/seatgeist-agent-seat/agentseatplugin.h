@@ -89,6 +89,8 @@ private:
   QTimer *m_pollTimer = nullptr;
   QElapsedTimer m_monotonicClock;
   bool m_serviceAvailable = false;
+  bool m_registrationReady = false;
+  bool m_constraintLifecycleAvailable = false;
   bool m_pollInFlight = false;
   quint64 m_serviceGeneration = 0;
   std::unique_ptr<SeatBindings> m_bindings;

@@ -196,6 +196,12 @@ pub struct SeatState {
     pub keyboard_bound: bool,
     pub pointer_bound: bool,
     pub relative_pointer_bound: bool,
+    /// None means an older host did not report the exact seat/client request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pointer_lock_requested: Option<bool>,
+    /// Actual committed constraint region contains this seat's local position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pointer_lock_region_contains: Option<bool>,
     pub pointer_locked: bool,
     pub pointer_position: Option<[f64; 2]>,
     pub cursor: SeatCursorState,
@@ -212,6 +218,23 @@ pub struct SeatCursorState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn old_host_lock_request_observation_is_unknown_not_false() {
+        let old = serde_json::json!({"window_id":"exact", "target_bound":true,
+            "keyboard_bound":true,"pointer_bound":true,"relative_pointer_bound":true,
+            "pointer_locked":false,"pointer_position":null,
+            "cursor":{"revision":0,"kind":"unknown","name":null}});
+        let state: SeatState = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(state.pointer_lock_requested, None);
+        assert_eq!(state.pointer_lock_region_contains, None);
+        let mut new = old;
+        new["pointer_lock_requested"] = true.into();
+        new["pointer_lock_region_contains"] = false.into();
+        let state: SeatState = serde_json::from_value(new).unwrap();
+        assert_eq!(state.pointer_lock_requested, Some(true));
+        assert_eq!(state.pointer_lock_region_contains, Some(false));
+        assert!(!state.pointer_locked);
+    }
     fn req(steps: serde_json::Value) -> NativeGestureRequest {
         serde_json::from_value(serde_json::json!({"session_id":"owned","steps":steps})).unwrap()
     }

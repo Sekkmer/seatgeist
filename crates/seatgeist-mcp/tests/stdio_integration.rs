@@ -168,6 +168,94 @@ fn configure_isolated_desktop_env(command: &mut Command, root: &Path) -> Result<
     Ok(())
 }
 
+#[test]
+fn request_timing_is_opt_in_payload_free_and_keeps_stdio_json_clean() -> Result<()> {
+    let daemon = DaemonFixture::start_with_config_and_env(
+        "[daemon]\nsocket = \"__SOCKET__\"\njournal = \"__JOURNAL__\"\npanic_stop_file = \"__PANIC_STOP__\"\n[policy]\ndefault_control = \"deny\"\n",
+        &[("SEATGEIST_REQUEST_TIMING", "1")],
+    )?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_seatgeist-mcp"))
+        .args(["--stdio", "--socket"])
+        .arg(&daemon.socket)
+        .env("SEATGEIST_REQUEST_TIMING", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let peer = child.id();
+    let secret = "PRIVATE_TIMING_PAYLOAD_MUST_NOT_APPEAR";
+    let request = json!({"jsonrpc":"2.0","id":991,"method":"tools/call","params":{"name":"seatgeist.type_text","arguments":{"text":secret}}});
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        serde_json::to_writer(&mut stdin, &request)?;
+        stdin.write_all(b"\n")?;
+    }
+    let output = child.wait_with_output()?;
+    require_success("timed MCP", &output)?;
+    let responses = parse_json_lines(&output.stdout)?;
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0]["id"], 991);
+    let stderr = String::from_utf8(output.stderr)?;
+    let entries = parse_json_lines(stderr.as_bytes())?;
+    for phase in [
+        "mcp_line_received",
+        "mcp_dispatch_start",
+        "transport_send_start",
+        "transport_connected",
+        "transport_written",
+        "transport_response_read",
+        "mcp_dispatch_done",
+        "mcp_response_write_start",
+        "mcp_response_flushed",
+    ] {
+        assert!(
+            entries.iter().any(|e| e["stage"] == phase),
+            "missing {phase}"
+        );
+    }
+    assert!(!stderr.contains(secret));
+    let daemon_stderr = fs::read_to_string(daemon.root.join("daemon.stderr"))?;
+    assert!(!daemon_stderr.contains(secret));
+    let daemon_entries: Vec<Value> = daemon_stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .filter(|e: &Value| e["event"] == "seatgeist_request_timing")
+        .collect();
+    for phase in [
+        "daemon_client_accepted",
+        "daemon_handler_start",
+        "daemon_peer_validated",
+        "daemon_line_received",
+        "daemon_request_start",
+        "daemon_response_ready",
+    ] {
+        assert!(
+            daemon_entries
+                .iter()
+                .any(|e| e["stage"] == phase && e["peer_pid"] == peer),
+            "missing {phase}"
+        );
+    }
+    let mut plain = Command::new(env!("CARGO_BIN_EXE_seatgeist-mcp"))
+        .args(["--stdio", "--socket"])
+        .arg(&daemon.socket)
+        .env_remove("SEATGEIST_REQUEST_TIMING")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    plain
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":992,\"method\":\"ping\"}\n")?;
+    let plain = plain.wait_with_output()?;
+    require_success("untimed MCP", &plain)?;
+    assert_eq!(parse_json_lines(&plain.stdout)?[0]["id"], 992);
+    assert!(!String::from_utf8(plain.stderr)?.contains("seatgeist_request_timing"));
+    Ok(())
+}
+
 impl Drop for DaemonFixture {
     fn drop(&mut self) {
         let _ = self.child.kill();

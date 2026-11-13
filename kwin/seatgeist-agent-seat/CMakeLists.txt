@@ -110,6 +110,7 @@ include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
     pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
+    pkg_check_modules(LIBDRM REQUIRED IMPORTED_TARGET libdrm)
     enable_language(C)
     find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
     foreach(PROTOCOL relative-pointer pointer-constraints)
@@ -125,8 +126,15 @@ if(BUILD_TESTING)
     target_include_directories(seatbindings_test PRIVATE ${KWIN_INCLUDE_DIR})
     target_link_libraries(seatbindings_test PRIVATE
         ${KWIN_LIBRARY} Qt6::Core Qt6::Gui Qt6::Test
-        PkgConfig::WAYLAND_SERVER PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON)
-    add_test(NAME seatbindings COMMAND seatbindings_test)
+        PkgConfig::WAYLAND_SERVER PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::LIBDRM)
+    # Real SHM/constraint protocol tests need KWin's manager singleton but no
+    # GPU or desktop access. Private devices prevent udmabuf/DRM initialization.
+    find_program(BWRAP bwrap REQUIRED)
+    add_test(NAME seatbindings COMMAND ${BWRAP}
+        --die-with-parent --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp
+        --setenv TMPDIR /tmp --setenv KWIN_RENDER_NODES ""
+        --unsetenv WAYLAND_DISPLAY --unsetenv DISPLAY --unsetenv DBUS_SESSION_BUS_ADDRESS
+        $<TARGET_FILE:seatbindings_test>)
     add_executable(eventbatch_test eventbatch_test.cpp eventbatch.cpp)
     target_link_libraries(eventbatch_test PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME eventbatch COMMAND eventbatch_test)

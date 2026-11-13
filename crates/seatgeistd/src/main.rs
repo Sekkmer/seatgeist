@@ -729,9 +729,12 @@ async fn run(
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, _addr) = accepted.context("accept client")?;
+                let timing_id = libseatgeist::request_timing::next_id();
+                let timing_peer = stream.peer_cred().ok().and_then(|c| c.pid()).and_then(|p| u32::try_from(p).ok());
+                libseatgeist::request_timing::record("daemon_client_accepted", timing_id, None, timing_peer);
                 let runtime = runtime.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = handle_client(stream, runtime).await {
+                    if let Err(err) = handle_client(stream, runtime, timing_id, timing_peer).await {
                         warn!(error = %err, "client request failed");
                     }
                 });
@@ -824,8 +827,15 @@ struct DaemonRuntime {
     desktop_entry_launcher: Arc<dyn DesktopEntryLauncher>,
 }
 
-async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()> {
+async fn handle_client(
+    stream: UnixStream,
+    runtime: DaemonRuntime,
+    timing_id: u64,
+    timing_peer: Option<u32>,
+) -> Result<()> {
+    libseatgeist::request_timing::record("daemon_handler_start", timing_id, None, timing_peer);
     let peer_client = validate_peer_client(&stream)?;
+    libseatgeist::request_timing::record("daemon_peer_validated", timing_id, None, timing_peer);
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     let bytes = reader
@@ -835,6 +845,7 @@ async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()>
     if bytes == 0 {
         bail!("empty request");
     }
+    libseatgeist::request_timing::record("daemon_line_received", timing_id, None, timing_peer);
 
     let (mut request, request_client, response_options) = parse_daemon_request_line(&line)?;
     let client = merge_client_context(peer_client, request_client);
@@ -843,6 +854,12 @@ async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()>
     let _ = prepare_accessibility_ref_request(&mut request, client.as_ref(), &runtime);
     let method = request.method_name();
     let mut journal_context = journal_context_for_request(&request, &runtime, client.clone());
+    libseatgeist::request_timing::record(
+        "daemon_request_start",
+        timing_id,
+        Some(method),
+        timing_peer,
+    );
     let response = handle_request(
         request,
         response_options.as_ref(),
@@ -850,6 +867,12 @@ async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()>
         &runtime,
     )
     .await;
+    libseatgeist::request_timing::record(
+        "daemon_response_ready",
+        timing_id,
+        Some(method),
+        timing_peer,
+    );
     journal_context.active_window_after = active_window_context_for_safety_class(
         &journal_context.safety_class,
         &runtime.active_window_state,
@@ -866,6 +889,12 @@ async fn handle_client(stream: UnixStream, runtime: DaemonRuntime) -> Result<()>
         .await
         .context("write response")?;
     stream.write_all(b"\n").await.context("write newline")?;
+    libseatgeist::request_timing::record(
+        "daemon_response_written",
+        timing_id,
+        Some(method),
+        timing_peer,
+    );
     Ok(())
 }
 
@@ -7778,8 +7807,13 @@ fn rotated_journal_path(path: &Path) -> PathBuf {
 fn summarize_response(response: &DaemonResponse) -> String {
     match response {
         DaemonResponse::SeatState(state) => format!(
-            "agent seat bound={} locked={} cursor={}",
-            state.target_bound, state.pointer_locked, state.cursor.kind
+            "agent seat bound={} lock_requested={} locked={} cursor={}",
+            state.target_bound,
+            state
+                .pointer_lock_requested
+                .map_or("unknown", |v| if v { "true" } else { "false" }),
+            state.pointer_locked,
+            state.cursor.kind
         ),
         DaemonResponse::Health(status) => format!("{} {}", status.service, status.status),
         DaemonResponse::Capabilities(capabilities) => {

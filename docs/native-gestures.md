@@ -100,6 +100,59 @@ A per-lane revision increases on observed cursor changes and lane reset. It is
 not pixel capture, a cursor-shape inference, a full history or a timestamped app
 hover confirmation. No physical user cursor is moved or read.
 
+`pointer_lock_requested` distinguishes a live lock request made through this
+exact agent seat/client's pointer from `pointer_locked`, the active compositor
+state. `pointer_lock_region_contains` reports whether its committed effective
+region contains this seat's current surface-local position. Both new fields are
+absent for older hosts; absence means unknown, not false. A relative binding
+alone does not prove that the client requested a lock on the same seat.
+
+The independent host manages its own client-requested locks. KWin 6.8.2's normal
+`PointerInputRedirection::updatePointerConstraints` path requires primary-seat
+focus on the physically active window, so it cannot activate a background agent
+seat's request. The host instead requires an already policy-authorized lane
+target, live same-seat/client pointer request, keyboard/pointer focus, and a
+committed effective region containing that seat's position. It activates through
+KWin's surface constraint API without entering, warping, or activating a window.
+Region commits, pointer-focus loss, client destruction, lane release and daemon
+loss deactivate only locks this host activated. Persistent requests can become
+eligible again; one-shot constraints follow KWin's one-shot lifecycle.
+
+An agent lock is suspended when the physical pointer focuses its surface.
+Physical input on the target also clears its agent focus/owned lock; the next
+authorized action must bind its exact target again. KWin
+6.8.2 stores one constraint per surface rather than one per seat; simultaneous
+independent constraints on the same surface are not supported. Requests through
+the primary seat or another agent lane are never adopted. Absolute motion under
+an active lock refuses; it does not unlock or silently warp. Use the client-unlock
+barrier for an absolute HUD action.
+
+The matching daemon includes active lane rosters in idle long-poll heartbeats,
+so closing or expiring an owner releases its native focus/lock without requiring
+another input action. This happens at the next idle heartbeat (two-second long
+poll, plus event-loop/IPC scheduling). This lifecycle requires the qualified matching daemon/plugin pair. Older
+daemons without authenticated `SupportsIdleAgentSeatRoster` confirmation leave
+automatic constraint activation disabled; legacy input remains available.
+Older
+KWin private APIs are not guessed: rebuild for the running ABI or refuse the
+unsupported host. Source reference: [KWin 6.8.2 constraint activation](https://invent.kde.org/plasma/kwin/-/blob/v6.8.2/src/pointer_input.cpp#L655).
+
+The native SHM/constraint test uses bubblewrap with private devices and no render
+nodes, so real client buffer commits do not initialize or use a host GPU.
+
+For the next required consumer, `SEATGEIST_REQUEST_TIMING=1` on its own MCP
+connector and the matching daemon enables payload-free stderr timestamps. These
+mark MCP full-line receipt, dispatch, response-write/flush; Unix connect,
+write/read; and daemon accept, spawned-handler entry, peer validation, full-line receipt and timed
+request start/response. No arguments, text, screenshots, credentials or raw
+JSON-RPC IDs are logged. Drain stderr while enabled. IDs are process-local;
+join the synchronous MCP transport to daemon records by MCP PID/daemon peer PID,
+method and ordered request boundaries. Unix milliseconds join processes;
+process-relative monotonic nanoseconds measure durations within one process.
+The journal's existing elapsed time begins after peer validation and line
+parsing, so it alone cannot prove pre-MCP delay. Diagnostics are off by default
+and neither authorize input nor replay a timed-out operation.
+
 ## Future input families and international text
 
 These primitives cover paced selection, long press, multiple clicks, modifier

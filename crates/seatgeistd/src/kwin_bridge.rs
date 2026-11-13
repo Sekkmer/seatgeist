@@ -917,6 +917,16 @@ impl Bridge {
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
+    async fn supports_idle_agent_seat_roster(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<bool> {
+        let caller = message_sender(&header)?;
+        self.agent_seat_backend
+            .supports_idle_roster(&caller)
+            .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
+    }
+
     async fn take_pending_agent_seat_action(
         &self,
         #[zbus(header)] header: zbus::message::Header<'_>,

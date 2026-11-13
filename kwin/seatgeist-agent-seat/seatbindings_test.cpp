@@ -14,9 +14,12 @@
 #include <wayland/relativepointer_v1.h>
 #include <wayland/seat.h>
 #include <wayland/surface.h>
+#include <core/gpumanager.h>
 
 #include <QCoreApplication>
 #include <QTest>
+#include <QTemporaryFile>
+#include <QScopeGuard>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -37,6 +40,8 @@ struct Client {
   wl_registry *registry;
   wl_compositor *compositor = nullptr;
   wl_surface *surface = nullptr;
+  wl_shm *shm = nullptr;
+  wl_buffer *buffer = nullptr;
   std::vector<wl_seat *> seats;
   std::vector<wl_keyboard *> keyboards;
   std::vector<wl_pointer *> pointers;
@@ -44,6 +49,7 @@ struct Client {
   int enters = 0;
   uint32_t pointerEnterSerial = 0;
   int motions = 0;
+  int lockEvents = 0, unlockEvents = 0;
   bool unlockOnAlt = false;
   std::vector<uint32_t> releases, buttons;
   QPointF lastMotion;
@@ -85,6 +91,10 @@ struct Client {
             self.constraints =
                 static_cast<zwp_pointer_constraints_v1 *>(wl_registry_bind(
                     registry, name, &zwp_pointer_constraints_v1_interface, 1));
+          } else if (std::strcmp(interface, "wl_shm") == 0) {
+            self.shm = static_cast<wl_shm *>(wl_registry_bind(registry, name, &wl_shm_interface, 1));
+            static const wl_shm_listener listener{[](void *, wl_shm *, uint32_t) {}};
+            wl_shm_add_listener(self.shm, &listener, nullptr);
           } else if (std::strcmp(interface, "wl_compositor") == 0) {
             self.compositor = static_cast<wl_compositor *>(
                 wl_registry_bind(registry, name, &wl_compositor_interface, 1));
@@ -97,6 +107,8 @@ struct Client {
   }
 
   ~Client() {
+    if (buffer) { wl_buffer_destroy(buffer); }
+    if (shm) { wl_shm_destroy(shm); }
     if (locked) {
       zwp_locked_pointer_v1_destroy(locked);
     }
@@ -193,13 +205,23 @@ struct Client {
     zwp_relative_pointer_v1_add_listener(relative, &listener, this);
   }
 
-  void lock(size_t pointerIndex) {
+  void mapSurface() {
+    QTemporaryFile file;
+    if (!shm || !file.open() || !file.resize(100 * 80 * 4)) { qFatal("fixture shm setup failed"); }
+    auto *pool = wl_shm_create_pool(shm, file.handle(), 100 * 80 * 4);
+    buffer = wl_shm_pool_create_buffer(pool, 0, 100, 80, 400, WL_SHM_FORMAT_ARGB8888);
+    wl_shm_pool_destroy(pool);
+    wl_surface_attach(surface, buffer, 0, 0);
+    wl_surface_damage(surface, 0, 0, 100, 80);
+    wl_surface_commit(surface);
+  }
+
+  void lock(size_t pointerIndex, wl_region *region = nullptr, uint32_t lifetime = ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT) {
     locked = zwp_pointer_constraints_v1_lock_pointer(
-        constraints, surface, pointers.at(pointerIndex), nullptr,
-        ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT);
+        constraints, surface, pointers.at(pointerIndex), region, lifetime);
     static const zwp_locked_pointer_v1_listener listener{
-        [](void *, zwp_locked_pointer_v1 *) {},
-        [](void *, zwp_locked_pointer_v1 *) {}};
+        [](void *data, zwp_locked_pointer_v1 *) { ++static_cast<Client *>(data)->lockEvents; },
+        [](void *data, zwp_locked_pointer_v1 *) { ++static_cast<Client *>(data)->unlockEvents; }};
     zwp_locked_pointer_v1_add_listener(locked, &listener, this);
   }
 
@@ -255,6 +277,133 @@ void press(KWin::Display &display, SeatInterface &seat, uint32_t key) {
 class SeatBindingsTest : public QObject {
   Q_OBJECT
 private Q_SLOTS:
+  void independentConstraintLifecycleUsesRealClientRequestAndCommittedRegion() {
+    // KWin SHM buffers require its manager singleton even without rendering.
+    // CTest gives this fixture a private /dev and no render-node enumeration.
+    QVERIFY(!QFile::exists(QStringLiteral("/dev/udmabuf")));
+    QVERIFY(qEnvironmentVariableIsSet("KWIN_RENDER_NODES") && qEnvironmentVariableIsEmpty("KWIN_RENDER_NODES"));
+    GpuManager::s_self = std::make_unique<GpuManager>();
+    const auto resetManager = qScopeGuard([] { GpuManager::s_self.reset(); });
+    KWin::Display display;
+    display.createShm();
+    CompositorInterface compositor(&display);
+    PointerConstraintsV1Interface constraints(&display);
+    RelativePointerManagerV1Interface manager(&display);
+    std::vector<SurfaceInterface *> surfaces;
+    connect(&compositor, &CompositorInterface::surfaceCreated, this, [&](auto *s) { surfaces.push_back(s); });
+    SeatInterface primary(&display, QStringLiteral("primary")), agent(&display, QStringLiteral("agent"));
+    primary.setHasPointer(true);
+    agent.setHasPointer(true);
+    agent.setHasKeyboard(true);
+    keymap(agent);
+    SeatBindings bindings(display, &primary);
+    bindings.watch(&agent);
+    Client client(display), other(display);
+    client.pump(display);
+    other.pump(display);
+    client.mapSurface();
+    other.mapSurface();
+    client.bindPointer(1); // pointers[0] is the agent, pointers[1] is primary.
+    client.bindPointer(0);
+    client.bindKeyboard(1);
+    client.bindRelative(0);
+    client.pump(display);
+    other.pump(display);
+    auto *surface = surfaces.at(0);
+    primary.notifyPointerEnter(surfaces.at(1), QPointF(12, 13));
+    agent.setFocusedKeyboardSurface(surface);
+    agent.notifyPointerEnter(surface, QPointF(30, 40));
+    const auto physical = primary.pointerPos();
+    auto *physicalFocus = primary.focusedPointerSurface();
+
+    // A primary-pointer request must never become an agent lock.
+    bindings.setConstraintTarget(&agent, surface);
+    client.lock(1);
+    client.pump(display);
+    QVERIFY(!bindings.lockedPointerRequested(&agent, client.serverClient, surface));
+    QVERIFY(!surface->lockedPointer()->isLocked());
+    zwp_locked_pointer_v1_destroy(client.locked);
+    client.locked = nullptr;
+    client.pump(display);
+    bindings.setConstraintTarget(&agent, nullptr);
+
+    client.lock(0);
+    client.pump(display);
+    QVERIFY(bindings.lockedPointerRequested(&agent, client.serverClient, surface));
+    QVERIFY(bindings.pointerLockRegionContains(&agent, surface));
+    QVERIFY(!surface->lockedPointer()->isLocked()); // no authorized target
+    bindings.setConstraintTarget(&agent, surface);
+    client.pump(display);
+    QVERIFY(bindings.lockedPointerReady(&agent, client.serverClient, surface));
+    QCOMPARE(client.lockEvents, 1); // No test-side setLocked(true).
+    QVERIFY(bindings.deliverRelativePointer(&agent, client.serverClient, surface, QPointF(8, -3), std::chrono::microseconds(1000)));
+    client.pump(display);
+    QCOMPARE(client.deltas.size(), size_t(1));
+    QCOMPARE(client.deltas.front(), QPointF(8, -3));
+
+    auto *outside = wl_compositor_create_region(client.compositor);
+    wl_region_add(outside, 60, 60, 10, 10);
+    zwp_locked_pointer_v1_set_region(client.locked, outside);
+    client.pump(display);
+    QVERIFY(surface->lockedPointer()->isLocked()); // set_region is double buffered
+    wl_surface_commit(client.surface);
+    client.pump(display);
+    QVERIFY(!bindings.pointerLockRegionContains(&agent, surface));
+    QVERIFY(!surface->lockedPointer()->isLocked());
+    QCOMPARE(client.unlockEvents, 1);
+    zwp_locked_pointer_v1_set_region(client.locked, nullptr);
+    wl_surface_commit(client.surface);
+    client.pump(display);
+    QVERIFY(surface->lockedPointer()->isLocked());
+    QCOMPARE(client.lockEvents, 2);
+    wl_region_destroy(outside);
+
+    agent.notifyPointerLeave();
+    client.pump(display);
+    QVERIFY(!surface->lockedPointer()->isLocked());
+    agent.notifyPointerEnter(surface, QPointF(30, 40));
+    client.pump(display);
+    QVERIFY(surface->lockedPointer()->isLocked());
+    // A physical pointer on this surface suspends our activation. No primary
+    // position/focus changes are made by the lifecycle itself.
+    primary.notifyPointerEnter(surface, physical);
+    client.pump(display);
+    QVERIFY(!surface->lockedPointer()->isLocked());
+    primary.notifyPointerEnter(physicalFocus, physical);
+    client.pump(display);
+    QVERIFY(surface->lockedPointer()->isLocked());
+    auto release = bindings.observeActiveLock(&agent, client.serverClient, surface);
+    QVERIFY(release);
+    zwp_locked_pointer_v1_destroy(client.locked);
+    client.locked = nullptr;
+    client.pump(display);
+    QVERIFY(release->clientDestroyed && !release->lock);
+    QVERIFY(!bindings.lockedPointerRequested(&agent, client.serverClient, surface));
+    client.lock(0, nullptr, ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT);
+    client.pump(display);
+    QVERIFY(surface->lockedPointer()->isLocked());
+    bindings.setConstraintTarget(&agent, nullptr); // lane release / owner expiry
+    client.pump(display);
+    QVERIFY(!surface->lockedPointer());
+    QVERIFY(!bindings.lockedPointerRequested(&agent, client.serverClient, surface));
+    zwp_locked_pointer_v1_destroy(client.locked);
+    client.locked = nullptr;
+    client.pump(display);
+    bindings.setConstraintTarget(&agent, surface);
+    client.lock(0);
+    client.pump(display);
+    QVERIFY(surface->lockedPointer()->isLocked());
+    QPointer<SurfaceInterface> destroyed = surface;
+    wl_surface_destroy(client.surface);
+    client.surface = nullptr;
+    client.pump(display);
+    QCoreApplication::processEvents();
+    QVERIFY(!destroyed);
+    QCOMPARE(primary.pointerPos(), physical);
+    QCOMPARE(primary.focusedPointerSurface(), physicalFocus);
+    bindings.forget(&agent);
+  }
+
   void cursorMetadataTracksActualClientHideWithoutPhysicalCursorOrPixels() {
     KWin::Display display;
     CompositorInterface compositor(&display);

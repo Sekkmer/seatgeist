@@ -6,19 +6,37 @@
 #include <wayland/seat.h>
 #include <wayland/surface.h>
 #include <wayland/pointerconstraints_v1.h>
+#include <QTimer>
 
 #include <cstring>
 #include <cmath>
 
 namespace KWin
 {
-SeatBindings::SeatBindings(wl_display *display)
-    : m_logger(wl_display_add_protocol_logger(display, protocolMessage, this))
+struct SeatBindings::LockTarget {
+    QPointer<SurfaceInterface> surface;
+    QPointer<LockedPointerV1Interface> activated;
+    std::vector<QMetaObject::Connection> connections;
+    bool updating = false;
+};
+
+SeatBindings::SeatBindings(wl_display *display, SeatInterface *physicalSeat)
+    : m_physicalSeat(physicalSeat)
+    , m_logger(wl_display_add_protocol_logger(display, protocolMessage, this))
 {
+    if (physicalSeat) {
+        connect(physicalSeat->pointer(), &PointerInterface::focusedSurfaceChanged, this, [this] {
+            for (const auto &[seat, target] : m_lockTargets) {
+                Q_UNUSED(target)
+                reconcilePointerLock(seat);
+            }
+        });
+    }
 }
 
 SeatBindings::~SeatBindings()
 {
+    while (!m_lockTargets.empty()) { clearConstraintTarget(m_lockTargets.begin()->first); }
     m_pointerObjects.clear();
     if (m_logger) {
         wl_protocol_logger_destroy(m_logger);
@@ -35,12 +53,17 @@ bool SeatBindings::available() const
 
 void SeatBindings::watch(SeatInterface *seat)
 {
-    m_seats.insert(seat);
+    if (!m_seats.insert(seat).second) { return; }
+    connect(seat->pointer(), &PointerInterface::focusedSurfaceChanged, this,
+            [this, seat] { reconcilePointerLock(seat); });
+    connect(seat, &SeatInterface::pointerPosChanged, this,
+            [this, seat] { reconcilePointerLock(seat); });
 }
 
 void SeatBindings::forget(SeatInterface *seat)
 {
     m_seats.erase(seat);
+    clearConstraintTarget(seat);
     m_pointerObjects.remove_if([seat](const auto &binding) { return binding->seat == seat; });
     if (m_requestedSeat == seat) {
         m_requestedSeat = nullptr;
@@ -126,7 +149,11 @@ void SeatBindings::pointerObjectDestroyed(wl_listener *listener, void *)
 {
     auto *link = reinterpret_cast<PointerBinding::Link *>(listener);
     auto *binding = link->binding;
-    binding->owner->m_pointerObjects.remove_if([binding](const auto &entry) { return entry.get() == binding; });
+    auto *owner = binding->owner;
+    auto *seat = binding->seat;
+    owner->m_pointerObjects.remove_if([binding](const auto &entry) { return entry.get() == binding; });
+    // The protocol object can be in its destructor; reconcile after dispatch.
+    QTimer::singleShot(0, owner, [owner, seat] { owner->reconcilePointerLock(seat); });
 }
 
 bool SeatBindings::relativePointerReady(SeatInterface *seat, wl_client *client)
@@ -139,12 +166,83 @@ bool SeatBindings::relativePointerReady(SeatInterface *seat, wl_client *client)
 
 bool SeatBindings::lockedPointerReady(SeatInterface *seat, wl_client *client, SurfaceInterface *surface)
 {
-    if (!surface || seat->focusedPointerSurface() != surface || seat->pointer()->focusedSurface() != surface
+    if (!surface || (m_physicalSeat && m_physicalSeat->focusedPointerSurface() == surface)
+        || seat->focusedPointerSurface() != surface || seat->pointer()->focusedSurface() != surface
         || surface->client()->client() != client || !surface->lockedPointer() || !surface->lockedPointer()->isLocked()) { return false; }
+    return lockedPointerRequested(seat, client, surface);
+}
+
+bool SeatBindings::lockedPointerRequested(SeatInterface *seat, wl_client *client, SurfaceInterface *surface)
+{
+    if (!m_seats.contains(seat) || !surface || surface->client()->client() != client || !surface->lockedPointer()) { return false; }
     for (const auto &binding : m_pointerObjects) {
         if (binding->lock && binding->seat == seat && binding->client == client && binding->surface == surface && binding->object()) { return true; }
     }
     return false;
+}
+
+bool SeatBindings::pointerLockRegionContains(SeatInterface *seat, SurfaceInterface *surface) const
+{
+    if (!surface || seat->focusedPointerSurface() != surface || seat->pointer()->focusedSurface() != surface) { return false; }
+    const auto region = surface->lockedPointerRegion();
+    return region && region->contains(seat->focusedPointerSurfaceTransformation().map(seat->pointerPos()));
+}
+
+void SeatBindings::clearConstraintTarget(SeatInterface *seat)
+{
+    const auto found = m_lockTargets.find(seat);
+    if (found == m_lockTargets.end()) { return; }
+    auto target = std::move(found->second);
+    m_lockTargets.erase(found);
+    for (const auto &connection : target->connections) { disconnect(connection); }
+    // Never deactivate a constraint belonging to a different seat, resource,
+    // replacement surface, or a lock we merely observed active.
+    if (target->surface && target->activated && target->surface->lockedPointer() == target->activated && target->activated->isLocked()) {
+        target->surface->setPointerLocked(false);
+    }
+}
+
+void SeatBindings::setConstraintTarget(SeatInterface *seat, SurfaceInterface *surface)
+{
+    if (!surface) { clearConstraintTarget(seat); return; }
+    const auto existing = m_lockTargets.find(seat);
+    if (existing != m_lockTargets.end() && existing->second->surface == surface) { reconcilePointerLock(seat); return; }
+    clearConstraintTarget(seat);
+    if (!surface || !m_physicalSeat || !m_seats.contains(seat) || seat == m_physicalSeat) { return; }
+    auto target = std::make_unique<LockTarget>();
+    target->surface = surface;
+    for (auto signal : {&SurfaceInterface::committed, &SurfaceInterface::pointerConfinementChangedWithoutCommit}) {
+        target->connections.push_back(connect(surface, signal, this, [this, seat] { reconcilePointerLock(seat); }));
+    }
+    target->connections.push_back(connect(surface, &QObject::destroyed, this, [this, seat] { clearConstraintTarget(seat); }));
+    m_lockTargets.emplace(seat, std::move(target));
+    reconcilePointerLock(seat);
+}
+
+void SeatBindings::reconcilePointerLock(SeatInterface *seat)
+{
+    const auto found = m_lockTargets.find(seat);
+    if (found == m_lockTargets.end() || found->second->updating) { return; }
+    auto &target = *found->second;
+    auto *surface = target.surface.data();
+    const bool eligible = m_seats.contains(seat) && surface &&
+        seat->focusedKeyboardSurface() == surface &&
+        m_physicalSeat && m_physicalSeat->focusedPointerSurface() != surface &&
+        lockedPointerRequested(seat, surface->client()->client(), surface) &&
+        pointerLockRegionContains(seat, surface);
+    target.updating = true;
+    if (eligible) {
+        auto *lock = surface->lockedPointer();
+        if (!lock->isLocked()) {
+            target.activated = lock;
+            surface->setPointerLocked(true);
+        }
+    } else if (surface && target.activated && surface->lockedPointer() == target.activated) {
+        auto lock = target.activated;
+        target.activated = nullptr;
+        if (lock->isLocked()) { surface->setPointerLocked(false); }
+    }
+    target.updating = false;
 }
 
 std::shared_ptr<SeatBindings::LockReleaseObservation> SeatBindings::observeActiveLock(SeatInterface *seat, wl_client *client, SurfaceInterface *surface)

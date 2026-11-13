@@ -68,7 +68,7 @@ namespace KWin {
 
 SeatgeistAgentSeatPlugin::SeatgeistAgentSeatPlugin() {
   m_monotonicClock.start();
-  m_bindings = std::make_unique<SeatBindings>(*waylandServer()->display());
+  m_bindings = std::make_unique<SeatBindings>(*waylandServer()->display(), waylandServer()->seat());
   m_gestureTimer = new QTimer(this);
   m_gestureTimer->setInterval(1);
   connect(m_gestureTimer, &QTimer::timeout, this, [this] {
@@ -178,15 +178,25 @@ void SeatgeistAgentSeatPlugin::registerBackend() {
             QDBusPendingReply<> reply = *watcher;
             watcher->deleteLater();
             if (!reply.isError() && generation == m_serviceGeneration) {
-              // The five-second watchdog exceeds the daemon action timeout.
-              // Begin the first pull immediately after registration succeeds.
-              poll();
+              // An older daemon cannot retire idle lane locks. Keep automatic
+              // activation disabled unless this authenticated contract exists.
+              auto *capability = new QDBusPendingCallWatcher(
+                  QDBusConnection::sessionBus().asyncCall(methodCall(QStringLiteral("SupportsIdleAgentSeatRoster")), 500), this);
+              connect(capability, &QDBusPendingCallWatcher::finished, this,
+                      [this, capability, generation] {
+                        QDBusPendingReply<bool> supported = *capability;
+                        capability->deleteLater();
+                        if (generation != m_serviceGeneration || !m_serviceAvailable) { return; }
+                        m_constraintLifecycleAvailable = !supported.isError() && supported.value();
+                        m_registrationReady = true;
+                        poll();
+                      });
             }
           });
 }
 
 void SeatgeistAgentSeatPlugin::poll() {
-  if (!m_serviceAvailable || m_pollInFlight || !m_pendingAction.isEmpty() ||
+  if (!m_serviceAvailable || !m_registrationReady || m_pollInFlight || !m_pendingAction.isEmpty() ||
       m_altClick || m_gesture) {
     return;
   }
@@ -229,22 +239,8 @@ void SeatgeistAgentSeatPlugin::handlePendingAction(
 
 void SeatgeistAgentSeatPlugin::executeAction(const QJsonObject &action) {
   const QString id = action.value(QStringLiteral("id")).toString();
-  if (id.isEmpty()) {
-    return;
-  }
-  QString error;
-  Window *window = resolveNativeWaylandWindow(
-      action.value(QStringLiteral("window_id")).toString(), &error);
-  if (!window) {
-    complete(id, false, error);
-    return;
-  }
-  if (!decodeSeatEvents(action, window->clientGeometry().size(),
-                        &m_pendingEvents, &error)) {
-    complete(id, false, error);
-    return;
-  }
   const auto roster = action.value(QStringLiteral("active_lane_ids"));
+  if (!roster.isArray()) { return; }
   QSet<QString> activeLanes;
   if (roster.isArray()) {
     for (const auto value : roster.toArray()) {
@@ -257,8 +253,8 @@ void SeatgeistAgentSeatPlugin::executeAction(const QJsonObject &action) {
     }
   }
   if (activeLanes.size() > MaxAgentLanes ||
-      !activeLanes.contains(
-          action.value(QStringLiteral("lane_id")).toString())) {
+      (!id.isEmpty() && !activeLanes.contains(
+          action.value(QStringLiteral("lane_id")).toString()))) {
     complete(id, false,
              QStringLiteral("agent lane lease is inactive or exceeds quota"));
     return;
@@ -273,6 +269,21 @@ void SeatgeistAgentSeatPlugin::executeAction(const QJsonObject &action) {
     } else {
       ++it;
     }
+  }
+  if (id.isEmpty()) {
+    return;
+  }
+  QString error;
+  Window *window = resolveNativeWaylandWindow(
+      action.value(QStringLiteral("window_id")).toString(), &error);
+  if (!window) {
+    complete(id, false, error);
+    return;
+  }
+  if (!decodeSeatEvents(action, window->clientGeometry().size(),
+                        &m_pendingEvents, &error)) {
+    complete(id, false, error);
+    return;
   }
   AgentLane *lane =
       laneFor(action.value(QStringLiteral("lane_id")).toString(), &error);
@@ -469,6 +480,11 @@ void SeatgeistAgentSeatPlugin::dispatchAction(const QJsonObject &action,
                          ? lane.localPointerPosition
                          : QPointF(window->clientGeometry().width() / 2.0,
                                    window->clientGeometry().height() / 2.0);
+  if (std::any_of(events.begin(), events.end(), [](const auto &event) { return event.kind == SeatEvent::Motion; }) &&
+      m_bindings->lockedPointerReady(lane.seat.get(), window->surface()->client()->client(), window->surface())) {
+    complete(action.value("id").toString(), false, QStringLiteral("absolute motion requires client pointer unlock"));
+    return;
+  }
   if (events.first().kind == SeatEvent::Motion) {
     position = events.first().position;
   }
@@ -540,6 +556,8 @@ QJsonObject SeatgeistAgentSeatPlugin::observeSeat(const AgentLane &lane,
           {"pointer_bound", m_bindings->pointerReady(seat, client)},
           {"relative_pointer_bound",
            m_bindings->relativePointerReady(seat, client)},
+          {"pointer_lock_requested", m_bindings->lockedPointerRequested(seat, client, surface)},
+          {"pointer_lock_region_contains", m_bindings->pointerLockRegionContains(seat, surface)},
           {"pointer_locked",
            pointerFocused &&
                m_bindings->lockedPointerReady(seat, client, window->surface())},
@@ -899,6 +917,10 @@ void SeatgeistAgentSeatPlugin::cancelPendingFor(Window *window) {
   if (window && window == m_pendingWindow) {
     m_pendingCancelled = true;
   }
+  for (auto &[id, lane] : m_lanes) {
+    Q_UNUSED(id)
+    if (window && lane->target == window) { clearLaneTarget(*lane); }
+  }
 }
 
 void SeatgeistAgentSeatPlugin::keyboardKey(KeyboardKeyEvent *) {
@@ -1065,6 +1087,7 @@ bool SeatgeistAgentSeatPlugin::bindTarget(AgentLane &lane, Window *window,
     return false;
   }
   const QPointF globalPosition = client.topLeft() + localPosition;
+  if (lane.target != window) { m_bindings->setConstraintTarget(lane.seat.get(), nullptr); }
   setTimestamp(lane);
   lane.seat->setFocusedKeyboardSurface(window->surface());
   if (lane.seat->focusedPointerSurface() == window->surface()) {
@@ -1080,6 +1103,7 @@ bool SeatgeistAgentSeatPlugin::bindTarget(AgentLane &lane, Window *window,
   lane.seat->notifyPointerFrame();
   lane.target = window;
   lane.localPointerPosition = localPosition;
+  if (m_constraintLifecycleAvailable) { m_bindings->setConstraintTarget(lane.seat.get(), window->surface()); }
   return true;
 }
 
@@ -1113,6 +1137,7 @@ void SeatgeistAgentSeatPlugin::complete(const QString &id, bool ok,
 }
 
 void SeatgeistAgentSeatPlugin::clearLaneTarget(AgentLane &lane) {
+  m_bindings->setConstraintTarget(lane.seat.get(), nullptr);
   if (!lane.seat) {
     return;
   }
@@ -1131,6 +1156,8 @@ void SeatgeistAgentSeatPlugin::clearLaneTarget(AgentLane &lane) {
 }
 
 void SeatgeistAgentSeatPlugin::detachDaemon() {
+  m_registrationReady = false;
+  m_constraintLifecycleAvailable = false;
   if (m_gesture) {
     m_gesture->cancel(QStringLiteral("gesture daemon disconnected"));
   }

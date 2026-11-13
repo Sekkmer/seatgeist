@@ -227,22 +227,51 @@ impl McpServer {
         let mut stdout = io::stdout().lock();
         for line in stdin.lock().lines() {
             let line = line.context("read MCP request line")?;
+            let timing_id = libseatgeist::request_timing::next_id();
+            libseatgeist::request_timing::record("mcp_line_received", timing_id, None, None);
             if line.trim().is_empty() {
                 continue;
             }
-            match self.handle_line(&line) {
+            libseatgeist::request_timing::record("mcp_dispatch_start", timing_id, None, None);
+            let response = self.handle_line(&line);
+            libseatgeist::request_timing::record("mcp_dispatch_done", timing_id, None, None);
+            match response {
                 Ok(Some(response)) => {
+                    libseatgeist::request_timing::record(
+                        "mcp_response_write_start",
+                        timing_id,
+                        None,
+                        None,
+                    );
                     serde_json::to_writer(&mut stdout, &response).context("write MCP response")?;
                     stdout.write_all(b"\n").context("write response newline")?;
                     stdout.flush().context("flush MCP response")?;
+                    libseatgeist::request_timing::record(
+                        "mcp_response_flushed",
+                        timing_id,
+                        None,
+                        None,
+                    );
                 }
                 Ok(None) => {}
                 Err(err) => {
+                    libseatgeist::request_timing::record(
+                        "mcp_response_write_start",
+                        timing_id,
+                        None,
+                        None,
+                    );
                     let response = JsonRpcResponse::error(None, -32603, err.to_string());
                     serde_json::to_writer(&mut stdout, &response)
                         .context("write MCP error response")?;
                     stdout.write_all(b"\n").context("write error newline")?;
                     stdout.flush().context("flush MCP error response")?;
+                    libseatgeist::request_timing::record(
+                        "mcp_response_flushed",
+                        timing_id,
+                        None,
+                        None,
+                    );
                 }
             }
         }
@@ -1346,8 +1375,13 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
 fn compact_tool_text_inner(tool_name: &str, response: &DaemonResponse) -> String {
     match response {
         DaemonResponse::SeatState(s) => format!(
-            "agent seat bound={} locked={} cursor={} revision={}",
-            s.target_bound, s.pointer_locked, s.cursor.kind, s.cursor.revision
+            "agent seat bound={} lock_requested={} locked={} cursor={} revision={}",
+            s.target_bound,
+            s.pointer_lock_requested
+                .map_or("unknown", |v| if v { "true" } else { "false" }),
+            s.pointer_locked,
+            s.cursor.kind,
+            s.cursor.revision
         ),
         DaemonResponse::Health(status) => {
             let build = status

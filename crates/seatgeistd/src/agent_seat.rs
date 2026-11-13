@@ -351,6 +351,15 @@ impl KwinAgentSeatBackend {
         })
     }
 
+    pub(crate) fn supports_idle_roster(&self, caller: &str) -> Result<bool> {
+        let state = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("KWin agent-seat queue lock is poisoned"))?;
+        require_registered_caller(&state, caller)?;
+        Ok(self.lanes.is_some())
+    }
+
     pub(crate) fn take(&self, caller: &str) -> Result<String> {
         let mut state = self
             .inner
@@ -371,14 +380,16 @@ impl KwinAgentSeatBackend {
             let _ = tokio::time::timeout(ACTION_LONG_POLL_TIMEOUT, notified).await;
             payload = self.take(caller)?;
         }
-        if !payload.is_empty() {
-            if let Some(lanes) = &self.lanes {
-                // Snapshot at dequeue, not submission: closed/expired owners
-                // cannot retain native seats through stale queued actions.
-                let mut value: serde_json::Value = serde_json::from_str(&payload)?;
-                value["active_lane_ids"] = serde_json::to_value(lanes.active_lane_ids().await)?;
-                payload = serde_json::to_string(&value)?;
-            }
+        if let Some(lanes) = &self.lanes {
+            // Snapshot at dequeue, not submission: closed/expired owners
+            // cannot retain native seats through stale queued actions.
+            let mut value: serde_json::Value = if payload.is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(&payload)?
+            };
+            value["active_lane_ids"] = serde_json::to_value(lanes.active_lane_ids().await)?;
+            payload = serde_json::to_string(&value)?;
         }
         Ok(payload)
     }
@@ -1983,6 +1994,41 @@ mod tests {
             )
             .unwrap();
         assert!(action.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn idle_heartbeat_reports_closed_lanes_without_another_input() {
+        let legacy = KwinAgentSeatBackend::default();
+        legacy
+            .register(KWIN_AGENT_SEAT_BACKEND, "kwin-owner")
+            .unwrap();
+        assert!(!legacy.supports_idle_roster("kwin-owner").unwrap());
+        let lanes = crate::interaction::InteractionSessionStore::default();
+        lanes
+            .bind(
+                "one".into(),
+                &target(),
+                crate::session_owner::SessionOwner::test_process(101),
+            )
+            .await
+            .unwrap();
+        let lane = lanes.resolve("one", &[target()]).await.unwrap().lane_id;
+        let backend = KwinAgentSeatBackend::with_lanes(lanes.clone());
+        backend
+            .register(KWIN_AGENT_SEAT_BACKEND, "kwin-owner")
+            .unwrap();
+        assert!(backend.supports_idle_roster("kwin-owner").unwrap());
+        assert!(backend.supports_idle_roster("other-owner").is_err());
+        backend.wake.notify_one();
+        let active: serde_json::Value =
+            serde_json::from_str(&backend.take_wait("kwin-owner").await.unwrap()).unwrap();
+        assert_eq!(active, serde_json::json!({"active_lane_ids":[lane]}));
+        lanes.clear("one").await.unwrap();
+        backend.wake.notify_one();
+        let idle: serde_json::Value =
+            serde_json::from_str(&backend.take_wait("kwin-owner").await.unwrap()).unwrap();
+        assert_eq!(idle, serde_json::json!({"active_lane_ids":[]}));
+        assert!(backend.take_wait("other-owner").await.is_err());
     }
 
     #[tokio::test]
