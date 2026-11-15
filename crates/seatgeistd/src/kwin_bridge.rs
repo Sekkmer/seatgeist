@@ -39,6 +39,8 @@ pub(super) struct WindowActionQueue {
     script_ready: Arc<AtomicBool>,
     move_ready: Arc<AtomicBool>,
     launch_ready: Arc<AtomicBool>,
+    launch_arm_ready: Arc<AtomicBool>,
+    pub(crate) launch_intents: crate::launch_intent::LaunchIntentStore,
     close_ready: Arc<AtomicBool>,
     inner: Arc<Mutex<WindowActionState>>,
     wake: Arc<Notify>,
@@ -206,6 +208,10 @@ impl WindowActionQueue {
             .map(str::trim)
             .any(|capability| capability == "launch_window");
         self.launch_ready.store(launch_window, Ordering::Release);
+        self.launch_arm_ready.store(
+            capabilities.split(',').any(|c| c == "launch_window_arm_v1"),
+            Ordering::Release,
+        );
         let close_window = capabilities
             .split(',')
             .map(str::trim)
@@ -370,6 +376,53 @@ impl WindowActionQueue {
             Err(_) => {
                 self.remove(&id)?;
                 bail!("KWin script bridge did not arm the launch intent in time")
+            }
+        }
+    }
+
+    pub(super) async fn arm_child_launch(
+        &self,
+        request: &libseatgeist::LaunchWindowRequest,
+        app_id: &str,
+        id: &str,
+        child_pid: u32,
+        previous: &str,
+    ) -> Result<LaunchWindowTicket> {
+        if !self.registered.load(Ordering::Acquire) || !self.script_heartbeat_fresh() {
+            bail!("KWin bridge unavailable or heartbeat stale; no child intent armed");
+        }
+        if !self.launch_arm_ready.load(Ordering::Acquire) {
+            bail!("installed KWin bridge lacks launch_window_arm_v1; no child intent armed");
+        }
+        let payload = serde_json::json!({
+            "id":id, "action":"launch_window", "desktop_entry":request.desktop_entry,
+            "expected_app_id":app_id, "expected_pid":child_pid, "expected_active_window_id":previous,
+            "anchor":request.anchor, "monitor_id":request.monitor_id, "width":request.width,
+            "height":request.height, "margin":request.margin, "activation":"preserve_focus", "timeout_ms":request.timeout_ms
+        }).to_string();
+        let (result_sender, result_receiver) = oneshot::channel();
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        {
+            let mut state = self
+                .inner
+                .lock()
+                .map_err(|_| anyhow::anyhow!("KWin action queue lock is poisoned"))?;
+            state.pending.push_back(PendingWindowAction {
+                id: id.into(),
+                payload,
+            });
+            state.waiters.insert(id.into(), result_sender);
+            state.acknowledgements.insert(id.into(), ack_sender);
+        }
+        self.wake.notify_one();
+        match tokio::time::timeout(WINDOW_ACTION_TIMEOUT, ack_receiver).await {
+            Ok(Ok(())) => Ok(LaunchWindowTicket {
+                id: id.into(),
+                receiver: result_receiver,
+            }),
+            _ => {
+                self.cancel_launch_window(id)?;
+                bail!("KWin did not arm the child launch intent in time");
             }
         }
     }
@@ -707,7 +760,7 @@ impl WindowListState {
         }
     }
 
-    fn update_age_ms(&self) -> Result<Option<u64>> {
+    pub(super) fn update_age_ms(&self) -> Result<Option<u64>> {
         let snapshot = self
             .inner
             .lock()
@@ -806,7 +859,18 @@ impl Bridge {
             .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
     }
 
-    async fn register_action_capabilities(&self, capabilities: &str) -> zbus::fdo::Result<()> {
+    async fn register_action_capabilities(
+        &self,
+        capabilities: &str,
+        #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        if capabilities
+            .split(',')
+            .any(|cap| cap.trim() == "launch_window_arm_v1")
+        {
+            verified_kwin_caller(connection, &header).await?;
+        }
         self.window_action_queue
             .register_script_capabilities(capabilities)
             .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
@@ -925,6 +989,22 @@ impl Bridge {
         self.agent_seat_backend
             .supports_idle_roster(&caller)
             .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
+    }
+
+    async fn check_launch_window_intent(
+        &self,
+        id: &str,
+        pid: u32,
+        app_id: &str,
+        window_id: &str,
+        #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<bool> {
+        verified_kwin_caller(connection, &header).await?;
+        Ok(self
+            .window_action_queue
+            .launch_intents
+            .validate(id, pid, app_id, window_id))
     }
 
     async fn take_pending_agent_seat_action(
@@ -1611,5 +1691,54 @@ mod tests {
         assert_eq!(outcome.window.id, "window-2");
         assert_eq!(outcome.window.geometry.expect("geometry").x, 1500);
         assert!(outcome.focus_preserved);
+    }
+    #[tokio::test]
+    async fn child_launch_requires_feature_and_round_trips_exact_bound_payload() {
+        let queue = WindowActionQueue::default();
+        queue.set_registered(true);
+        queue.register_script_capabilities("launch_window").unwrap();
+        let request = libseatgeist::LaunchWindowRequest {
+            desktop_entry: "owned-wrapper".into(),
+            anchor: WindowPlacementAnchor::TopRight,
+            monitor_id: None,
+            width: Some(800),
+            height: Some(600),
+            margin: 4,
+            activation: WindowActivationMode::PreserveFocus,
+            timeout_ms: 30000,
+            guard: None,
+        };
+        assert!(
+            queue
+                .arm_child_launch(&request, "eyrivo-viewer", "bound", 84, "previous")
+                .await
+                .is_err()
+        );
+        assert!(queue.take().unwrap().is_empty());
+        queue
+            .register_script_capabilities("launch_window,launch_window_arm_v1")
+            .unwrap();
+        let sender = queue.clone();
+        let task = tokio::spawn(async move {
+            sender
+                .arm_child_launch(&request, "eyrivo-viewer", "bound", 84, "previous")
+                .await
+        });
+        tokio::task::yield_now().await;
+        let payload: serde_json::Value = serde_json::from_str(&queue.take().unwrap()).unwrap();
+        assert_eq!(payload["expected_pid"], 84);
+        assert_eq!(payload["expected_app_id"], "eyrivo-viewer");
+        assert_eq!(payload["expected_active_window_id"], "previous");
+        assert_eq!(payload["activation"], "preserve_focus");
+        assert_eq!(payload["timeout_ms"], 30000);
+        queue.acknowledge("bound").unwrap();
+        let ticket = task.await.unwrap().unwrap();
+        queue.cancel_launch_window("bound").unwrap();
+        assert!(
+            queue
+                .finish_launch_window(ticket, Duration::from_millis(1))
+                .await
+                .is_err()
+        );
     }
 }

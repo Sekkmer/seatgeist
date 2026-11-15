@@ -2367,3 +2367,34 @@ fn unix_time_ms() -> Result<u64> {
         .context("system time is before unix epoch")?;
     u64::try_from(duration.as_millis()).context("unix time milliseconds overflowed u64")
 }
+
+#[test]
+fn child_launch_intent_cli_obeys_control_policy_and_journals_without_launching() -> Result<()> {
+    let daemon = DaemonFixture::start()?;
+    let output = daemon.cli_output(&[
+        "launch-intent",
+        "arm",
+        "--child-pid",
+        "123",
+        "--child-start-ticks",
+        "456",
+        "--desktop-entry",
+        "owned-wrapper",
+        "--app-id",
+        "eyrivo-viewer",
+        "--expected-active-window",
+        "previous",
+    ])?;
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("policy prompt required for ControlSemantic")
+    );
+    let journal = fs::read_to_string(daemon.root.join("journal.jsonl"))?;
+    assert!(journal.contains("launch_intent"));
+    assert!(journal.contains("control_semantic"));
+    let output = daemon.cli_output(&["launch-intent", "cancel", "--launch-id", "not-owned"])?;
+    assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("policy prompt required"));
+    Ok(())
+}

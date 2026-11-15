@@ -32,6 +32,7 @@ mod interaction;
 mod keymap;
 mod kwin_bridge;
 mod kwin_capture_backend;
+mod launch_intent;
 mod launched_window;
 mod observation;
 mod observation_policy;
@@ -1326,6 +1327,7 @@ fn journal_backend_for_request(
         DaemonRequest::CloseWindow(_)
         | DaemonRequest::MoveWindow(_)
         | DaemonRequest::LaunchWindow(_)
+        | DaemonRequest::LaunchIntent(_)
         | DaemonRequest::ResizeWindow(_) => "kwin_script_bridge",
         DaemonRequest::PageZoom(_) => {
             return Some(input_backend_preference.status_name().to_string());
@@ -1442,6 +1444,32 @@ fn journal_requested_target_for_request(request: &DaemonRequest) -> Option<Journ
             target.add("window_id", &request.window_id);
             target.add("x", request.x.to_string());
             target.add("y", request.y.to_string());
+            target
+        }
+        DaemonRequest::LaunchIntent(request) => {
+            let mut target = journal_target("window_launch_intent");
+            match request {
+                libseatgeist::LaunchIntentRequest::Arm {
+                    launch,
+                    app_id,
+                    child_pid,
+                    child_start_ticks,
+                } => {
+                    target.add("operation", "arm");
+                    target.add("app_id", app_id);
+                    target.add("desktop_entry", &launch.desktop_entry);
+                    target.add("child_pid", child_pid.to_string());
+                    target.add("child_start_ticks", child_start_ticks.to_string());
+                }
+                libseatgeist::LaunchIntentRequest::Wait { launch_id } => {
+                    target.add("operation", "wait");
+                    target.add("launch_id", launch_id);
+                }
+                libseatgeist::LaunchIntentRequest::Cancel { launch_id } => {
+                    target.add("operation", "cancel");
+                    target.add("launch_id", launch_id);
+                }
+            }
             target
         }
         DaemonRequest::LaunchWindow(request) => {
@@ -3220,6 +3248,12 @@ async fn execute_request(
                 Err(err) => daemon_error(err),
             }
         }
+        DaemonRequest::LaunchIntent(request) => {
+            match launch_intent_request(request, runtime, client).await {
+                Ok(status) => DaemonResponse::LaunchIntent(status),
+                Err(err) => daemon_error(err),
+            }
+        }
         DaemonRequest::LaunchWindow(request) => match launch_window(request, runtime, client).await
         {
             Ok(result) => DaemonResponse::Action(Box::new(result)),
@@ -4151,6 +4185,7 @@ fn session_backend_role_for_request(
         | DaemonRequest::CloseWindow(_)
         | DaemonRequest::MoveWindow(_)
         | DaemonRequest::LaunchWindow(_)
+        | DaemonRequest::LaunchIntent(_)
         | DaemonRequest::ResizeWindow(_) => Some(session_execution::BackendRole::Other),
         DaemonRequest::PageZoom(_) => Some(session_execution::BackendRole::RawInput),
         _ => None,
@@ -4530,6 +4565,9 @@ fn active_window_guard_for_request(request: &DaemonRequest) -> Option<&ActiveWin
         DaemonRequest::CloseWindow(request) => request.guard.as_ref(),
         DaemonRequest::MoveWindow(request) => request.guard.as_ref(),
         DaemonRequest::LaunchWindow(request) => request.guard.as_ref(),
+        DaemonRequest::LaunchIntent(libseatgeist::LaunchIntentRequest::Arm { launch, .. }) => {
+            launch.guard.as_ref()
+        }
         DaemonRequest::ResizeWindow(request) => request.guard.as_ref(),
         DaemonRequest::PageZoom(request) => Some(&request.guard),
         DaemonRequest::AccessibilityInvoke(request) => request.guard.as_ref(),
@@ -4610,6 +4648,11 @@ fn resolve_semantic_handle_for_request(
 
 fn safety_class_for_request(request: &DaemonRequest) -> SafetyClass {
     match request {
+        DaemonRequest::LaunchIntent(libseatgeist::LaunchIntentRequest::Arm { .. }) => {
+            SafetyClass::ControlSemantic
+        }
+        DaemonRequest::LaunchIntent(_) => SafetyClass::Observe,
+
         DaemonRequest::Health
         | DaemonRequest::Capabilities
         | DaemonRequest::PolicyStatus
@@ -5341,12 +5384,8 @@ fn normalize_desktop_entry(value: &str) -> Result<String> {
     Ok(value.to_string())
 }
 
-async fn launch_window(
-    request: LaunchWindowRequest,
-    runtime: &DaemonRuntime,
-    client: Option<&JournalClientContext>,
-) -> Result<ActionResult> {
-    let desktop_entry = normalize_desktop_entry(&request.desktop_entry)?;
+fn validate_launch_request(request: &LaunchWindowRequest) -> Result<()> {
+    normalize_desktop_entry(&request.desktop_entry)?;
     if request
         .monitor_id
         .as_ref()
@@ -5367,6 +5406,143 @@ async fn launch_window(
     if !(1_000..=30_000).contains(&request.timeout_ms) {
         bail!("launch window timeout must be between 1000 and 30000 milliseconds");
     }
+
+    Ok(())
+}
+
+async fn launch_intent_request(
+    request: libseatgeist::LaunchIntentRequest,
+    runtime: &DaemonRuntime,
+    client: Option<&JournalClientContext>,
+) -> Result<libseatgeist::LaunchIntentStatus> {
+    use libseatgeist::{LaunchIntentRequest, WindowActivationMode};
+    let queue = &runtime.window_action_queue;
+    match request {
+        LaunchIntentRequest::Arm {
+            launch,
+            app_id,
+            child_pid,
+            child_start_ticks,
+        } => {
+            validate_launch_request(&launch)?;
+            if launch.activation != WindowActivationMode::PreserveFocus {
+                bail!("child launch intent must preserve physical focus");
+            }
+            let previous = launch
+                .guard
+                .as_ref()
+                .and_then(|g| g.expected_window_id.as_deref())
+                .filter(|id| !id.trim().is_empty())
+                .context("child launch intent requires an exact active-window guard")?
+                .to_owned();
+            let desktop = normalize_desktop_entry(&launch.desktop_entry)?;
+            enforce_app_policy_for_app(
+                &runtime.app_policy,
+                Some(&desktop),
+                "child launch desktop entry",
+            )?;
+            let app = normalize_desktop_entry(&app_id)?;
+            enforce_app_policy_for_app(
+                &runtime.app_policy,
+                Some(&app),
+                "child launch window identity",
+            )?;
+            if runtime
+                .window_list_state
+                .update_age_ms()?
+                .is_none_or(|age| age > 5000)
+            {
+                bail!("child launch requires fresh KWin inventory");
+            }
+            if runtime
+                .window_list_state
+                .snapshot()?
+                .unwrap_or_default()
+                .iter()
+                .any(|w| w.pid == Some(child_pid))
+            {
+                bail!("launch child already has a window; late-window adoption is forbidden");
+            }
+            let status = queue.launch_intents.reserve(
+                child_pid,
+                child_start_ticks,
+                app.clone(),
+                launch.timeout_ms,
+                client,
+                launch_intent::IntentSafety {
+                    policy: runtime.policy.clone(),
+                    approvals: runtime.approval_store.clone(),
+                    panic: runtime.panic_stop.clone(),
+                },
+            )?;
+            let id = status.launch_id.clone();
+            let mut launch = launch;
+            launch.desktop_entry = desktop;
+            let ticket = queue
+                .arm_child_launch(&launch, &app, &id, child_pid, &previous)
+                .await;
+            let result = ticket.and_then(|ticket| queue.launch_intents.attach(&id, ticket));
+            if let Err(error) = result {
+                queue.launch_intents.discard(&id);
+                queue.cancel_launch_window(&id)?;
+                return Err(error);
+            }
+            let pending = queue.clone();
+            let expiry = status.expires_unix_ms;
+            tokio::spawn(async move {
+                let remaining = expiry.saturating_sub(unix_time_ms().unwrap_or(expiry));
+                tokio::time::sleep(Duration::from_millis(remaining.min(30000) as u64)).await;
+                if pending.launch_intents.discard(&id) {
+                    let _ = pending.cancel_launch_window(&id);
+                }
+            });
+            Ok(status)
+        }
+        LaunchIntentRequest::Wait { launch_id } => {
+            let (ticket, remaining) = queue.launch_intents.take_ticket(&launch_id, client)?;
+            let outcome = queue.finish_launch_window(ticket, remaining).await;
+            match outcome {
+                Ok(outcome) => {
+                    let mut status = queue
+                        .launch_intents
+                        .remove_owned(&launch_id, client, true)?;
+                    if outcome.window.pid != Some(status.child_pid) || !outcome.focus_preserved {
+                        bail!("launch intent confirmation identity or focus mismatch");
+                    }
+                    runtime
+                        .launched_window_store
+                        .record(&outcome.window, client)
+                        .await?;
+                    status.state = "confirmed".into();
+                    status.window = Some(outcome.window);
+                    status.focus_preserved = Some(true);
+                    Ok(status)
+                }
+                Err(error) => {
+                    queue.launch_intents.discard(&launch_id);
+                    queue.cancel_launch_window(&launch_id)?;
+                    Err(error)
+                }
+            }
+        }
+        LaunchIntentRequest::Cancel { launch_id } => {
+            let mut status = queue
+                .launch_intents
+                .remove_owned(&launch_id, client, false)?;
+            queue.cancel_launch_window(&launch_id)?;
+            status.state = "cancelled".into();
+            Ok(status)
+        }
+    }
+}
+
+async fn launch_window(
+    request: LaunchWindowRequest,
+    runtime: &DaemonRuntime,
+    client: Option<&JournalClientContext>,
+) -> Result<ActionResult> {
+    validate_launch_request(&request)?;
+    let desktop_entry = normalize_desktop_entry(&request.desktop_entry)?;
 
     let ticket = runtime
         .window_action_queue
@@ -8174,6 +8350,10 @@ fn summarize_response(response: &DaemonResponse) -> String {
             attributes.end_offset,
             attributes.attributes.len(),
             attributes.node_id
+        ),
+        DaemonResponse::LaunchIntent(status) => format!(
+            "launch intent {} state={} child={} generation={}",
+            status.launch_id, status.state, status.child_pid, status.child_start_ticks
         ),
         DaemonResponse::Journal(entries) => format!("{} journal entries", entries.len()),
         DaemonResponse::Action(result) => {

@@ -1374,6 +1374,10 @@ fn compact_tool_text(tool_name: &str, response: &DaemonResponse) -> String {
 }
 fn compact_tool_text_inner(tool_name: &str, response: &DaemonResponse) -> String {
     match response {
+        DaemonResponse::LaunchIntent(status) => format!(
+            "launch intent state={} child={}",
+            status.state, status.child_pid
+        ),
         DaemonResponse::SeatState(s) => format!(
             "agent seat bound={} lock_requested={} locked={} cursor={} revision={}",
             s.target_bound,

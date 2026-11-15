@@ -196,6 +196,10 @@ enum Command {
         #[arg(long)]
         active_title_contains: Option<String>,
     },
+    LaunchIntent {
+        #[command(subcommand)]
+        command: LaunchIntentCommand,
+    },
     PageZoom {
         #[arg(long, value_enum)]
         operation: CliPageZoomOperation,
@@ -247,6 +251,48 @@ enum Command {
     Trace {
         #[command(subcommand)]
         command: TraceCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LaunchIntentCommand {
+    Arm {
+        #[arg(long)]
+        app_id: String,
+        #[arg(long)]
+        child_pid: u32,
+        #[arg(long)]
+        child_start_ticks: u64,
+        #[arg(long)]
+        desktop_entry: String,
+        #[arg(long, value_enum, default_value = "top-left")]
+        anchor: CliWindowAnchor,
+        #[arg(long)]
+        monitor: Option<String>,
+        #[arg(long)]
+        width: Option<u32>,
+        #[arg(long)]
+        height: Option<u32>,
+        #[arg(long, default_value_t = 0)]
+        margin: u32,
+        #[arg(long, value_enum, default_value = "preserve-focus")]
+        activation: CliWindowActivation,
+        #[arg(long, default_value_t = 30_000)]
+        timeout_ms: u64,
+        #[arg(long)]
+        expected_active_window: String,
+        #[arg(long)]
+        expected_active_app: Option<String>,
+        #[arg(long)]
+        active_title_contains: Option<String>,
+    },
+    Wait {
+        #[arg(long)]
+        launch_id: String,
+    },
+    Cancel {
+        #[arg(long)]
+        launch_id: String,
     },
 }
 
@@ -1169,6 +1215,52 @@ fn main() -> Result<()> {
                 ),
             }),
         )?,
+        Command::LaunchIntent { command } => {
+            let request = match command {
+                LaunchIntentCommand::Arm {
+                    app_id,
+                    child_pid,
+                    child_start_ticks,
+                    desktop_entry,
+                    anchor,
+                    monitor,
+                    width,
+                    height,
+                    margin,
+                    activation,
+                    timeout_ms,
+                    expected_active_window,
+                    expected_active_app,
+                    active_title_contains,
+                } => libseatgeist::LaunchIntentRequest::Arm {
+                    app_id,
+                    child_pid,
+                    child_start_ticks,
+                    launch: LaunchWindowRequest {
+                        desktop_entry,
+                        anchor: anchor.into(),
+                        monitor_id: monitor,
+                        width,
+                        height,
+                        margin,
+                        activation: activation.into(),
+                        timeout_ms,
+                        guard: active_window_guard(
+                            Some(expected_active_window),
+                            expected_active_app,
+                            active_title_contains,
+                        ),
+                    },
+                },
+                LaunchIntentCommand::Wait { launch_id } => {
+                    libseatgeist::LaunchIntentRequest::Wait { launch_id }
+                }
+                LaunchIntentCommand::Cancel { launch_id } => {
+                    libseatgeist::LaunchIntentRequest::Cancel { launch_id }
+                }
+            };
+            print_daemon_response(&socket, DaemonRequest::LaunchIntent(request))?;
+        }
         Command::PageZoom {
             operation,
             steps,

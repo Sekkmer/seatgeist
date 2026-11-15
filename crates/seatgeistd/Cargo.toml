@@ -20,6 +20,7 @@ clap.workspace = true
 image.workspace = true
 libseatgeist.workspace = true
 listenfd.workspace = true
+rustix = { version = "=1.1.4", features = ["process", "event"] }
 seatgeist-atspi.workspace = true
 seatgeist-backend.workspace = true
 seatgeist-eis.workspace = true

@@ -1055,6 +1055,7 @@ dependencies = [
  "image",
  "libseatgeist",
  "listenfd",
+ "rustix",
  "seatgeist-atspi",
  "seatgeist-backend",
  "seatgeist-eis",

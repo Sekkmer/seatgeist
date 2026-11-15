@@ -89,7 +89,7 @@ function publishWindows() {
 }
 
 function publishSnapshot() {
-  callDBus(SERVICE, PATH, INTERFACE, "RegisterActionCapabilities", "resize_window,move_window,launch_window,close_window");
+  callDBus(SERVICE, PATH, INTERFACE, "RegisterActionCapabilities", "resize_window,move_window,launch_window,close_window,launch_window_arm_v1");
   publishActiveWindow(workspace.activeWindow);
   publishWindows();
 }
@@ -187,47 +187,76 @@ function applyLaunchIntent(intent, window) {
   return geometryFor(window);
 }
 
+// Bound intents retain their record through asynchronous authorization and
+// settle timers, so cancellation and expiry also fence callbacks already queued.
+function retireBoundLaunch(intent) {
+  if (!intent.expected_pid) return;
+  intent.cancelled = true;
+  launchIntents = launchIntents.filter(function (entry) { return entry !== intent; });
+}
+
+function withLaunchAuthorization(intent, window, proceed) {
+  if (!intent.expected_pid) { proceed(); return; }
+  function valid() {
+    const active = windowId(workspace.activeWindow);
+    return !intent.cancelled && Date.now() < intent.expires_at &&
+      findWindowById(windowId(window)) === window &&
+      maybeInteger(window.pid) === intent.expected_pid &&
+      (active === intent.previous_window_id || active === windowId(window)) &&
+      findWindowById(intent.previous_window_id) &&
+      (normalizeDesktopEntry(window.desktopFileName) === (intent.expected_app_id || intent.window_app_id || intent.desktop_entry) ||
+       normalizeDesktopEntry(window.resourceClass) === (intent.expected_app_id || intent.window_app_id || intent.desktop_entry));
+  }
+  function refused() {
+    if (intent.cancelled) return;
+    retireBoundLaunch(intent);
+    completeAction({ id: intent.id, ok: false, error: "bound launch identity, controller, focus guard, authorization or deadline changed" });
+  }
+  if (!valid()) { refused(); return; }
+  callDBus(SERVICE, PATH, INTERFACE, "CheckLaunchWindowIntent", intent.id,
+    maybeInteger(window.pid), intent.expected_app_id || intent.window_app_id || intent.desktop_entry, windowId(window),
+    function (authorized) {
+      if (authorized !== true || !valid()) { refused(); return; }
+      proceed();
+    });
+}
+
 function finishLaunchIntent(intent, window) {
   if (typeof QTimer === "undefined") {
+    retireBoundLaunch(intent);
     completeAction({ id: intent.id, ok: false, error: "QTimer is unavailable for launch verification" });
     return;
   }
   var firstTimer = new QTimer();
   firstTimer.timeout.connect(function () {
     firstTimer.stop();
-    const expected = applyLaunchIntent(intent, window);
-    var verifyTimer = new QTimer();
-    verifyTimer.timeout.connect(function () {
-      verifyTimer.stop();
-      const actual = geometryFor(window);
-      const previous = findWindowById(intent.previous_window_id);
-      const focusPreserved =
-        (!intent.previous_window_id && !workspace.activeWindow) ||
-        (previous && windowId(workspace.activeWindow) === intent.previous_window_id);
-      const activationConfirmed =
-        intent.activation === "preserve_focus"
-          ? focusPreserved
-          : windowId(workspace.activeWindow) === windowId(window);
-      const placementConfirmed =
-        Math.abs(actual.x - expected.x) <= 1 &&
-        Math.abs(actual.y - expected.y) <= 1;
-      completeAction({
-        id: intent.id,
-        ok: placementConfirmed && activationConfirmed,
-        error: placementConfirmed
-          ? (activationConfirmed ? null : "requested focus policy was not retained")
-          : "KWin did not retain the anchored window position",
-        geometry: actual,
-        window_id: windowId(window),
-        app_id: maybeString(window.desktopFileName) || maybeString(window.resourceClass),
-        title: maybeString(window.caption) || "",
-        pid: maybeInteger(window.pid),
-        monitor_id: window.output ? maybeString(window.output.name) : null,
-        focus_preserved: focusPreserved,
+    withLaunchAuthorization(intent, window, function () {
+      const expected = applyLaunchIntent(intent, window);
+      var verifyTimer = new QTimer();
+      verifyTimer.timeout.connect(function () {
+        verifyTimer.stop();
+        withLaunchAuthorization(intent, window, function () {
+          const actual = geometryFor(window);
+          const previous = findWindowById(intent.previous_window_id);
+          const focusPreserved =
+            (!intent.previous_window_id && !workspace.activeWindow) ||
+            (previous && windowId(workspace.activeWindow) === intent.previous_window_id);
+          const activationConfirmed = intent.activation === "preserve_focus"
+            ? focusPreserved : windowId(workspace.activeWindow) === windowId(window);
+          const placementConfirmed = Math.abs(actual.x - expected.x) <= 1 && Math.abs(actual.y - expected.y) <= 1;
+          retireBoundLaunch(intent);
+          completeAction({ id: intent.id, ok: placementConfirmed && activationConfirmed,
+            error: placementConfirmed ? (activationConfirmed ? null : "requested focus policy was not retained")
+              : "KWin did not retain the anchored window position",
+            geometry: actual, window_id: windowId(window),
+            app_id: maybeString(window.desktopFileName) || maybeString(window.resourceClass),
+            title: maybeString(window.caption) || "", pid: maybeInteger(window.pid),
+            monitor_id: window.output ? maybeString(window.output.name) : null, focus_preserved: focusPreserved });
+          publishSnapshot();
+        });
       });
-      publishSnapshot();
+      verifyTimer.start(ACTION_SETTLE_MS);
     });
-    verifyTimer.start(ACTION_SETTLE_MS);
   });
   firstTimer.start(LAUNCH_APPLICATION_SETTLE_MS);
 }
@@ -239,12 +268,19 @@ function handleLaunchWindowAdded(window) {
     return;
   }
   for (var i = 0; i < launchIntents.length; i++) {
-    if (launchIntents[i].existing_windows.indexOf(window) < 0 &&
+    if (!launchIntents[i].candidate_window_id &&
+        (!launchIntents[i].expected_pid || launchIntents[i].expected_pid === maybeInteger(window.pid)) &&
+        launchIntents[i].existing_windows.indexOf(window) < 0 &&
         launchIntents[i].existing_window_ids.indexOf(windowId(window)) < 0 &&
-        (launchIntents[i].desktop_entry === desktop || launchIntents[i].desktop_entry === resource)) {
-      const intent = launchIntents.splice(i, 1)[0];
-      applyLaunchIntent(intent, window);
-      finishLaunchIntent(intent, window);
+        ((launchIntents[i].expected_app_id || launchIntents[i].window_app_id || launchIntents[i].desktop_entry) === desktop ||
+         (launchIntents[i].expected_app_id || launchIntents[i].window_app_id || launchIntents[i].desktop_entry) === resource)) {
+      const intent = launchIntents[i];
+      if (intent.expected_pid) intent.candidate_window_id = windowId(window);
+      else launchIntents.splice(i, 1);
+      withLaunchAuthorization(intent, window, function () {
+        applyLaunchIntent(intent, window);
+        finishLaunchIntent(intent, window);
+      });
       return;
     }
   }
@@ -255,6 +291,7 @@ function pruneLaunchIntents() {
   const retained = [];
   for (var i = 0; i < launchIntents.length; i++) {
     if (launchIntents[i].expires_at <= now) {
+      launchIntents[i].cancelled = true;
       completeAction({ id: launchIntents[i].id, ok: false, error: "launch intent expired before a matching window appeared; the application may have reused an existing window or its identity may not match the desktop entry. Inspect inventory; no existing window was adopted." });
     } else {
       retained.push(launchIntents[i]);
@@ -276,8 +313,19 @@ function handleLaunchWindow(action) {
     completeAction({ id: action.id, ok: false, error: "invalid desktop entry" });
     return;
   }
+  const expectedPid = maybeInteger(action.expected_pid);
+  if (expectedPid && (!normalizeDesktopEntry(action.expected_app_id) || maybeString(action.activation) !== "preserve_focus" ||
+      !maybeString(action.expected_active_window_id) ||
+      windowId(workspace.activeWindow) !== action.expected_active_window_id)) {
+    completeAction({ id: action.id, ok: false, error: "bound launch active-window guard changed before arming" });
+    return; // no acknowledgement: controller must not release its child
+  }
   launchIntents.push({
     id: action.id,
+    expected_pid: expectedPid,
+    expected_app_id: normalizeDesktopEntry(action.expected_app_id),
+    candidate_window_id: null,
+    cancelled: false,
     desktop_entry: desktopEntry,
     anchor: maybeString(action.anchor) || "top_left",
     monitor_id: maybeString(action.monitor_id),
@@ -302,6 +350,8 @@ function handleCancelLaunchWindow(action) {
   for (var i = 0; i < launchIntents.length; i++) {
     if (launchIntents[i].id !== launchId) {
       retained.push(launchIntents[i]);
+    } else {
+      launchIntents[i].cancelled = true;
     }
   }
   launchIntents = retained;

@@ -77,6 +77,17 @@ pub(crate) async fn enforce_app_policy(
         )
         .await;
     }
+    if let DaemonRequest::LaunchIntent(request) = request {
+        return if let libseatgeist::LaunchIntentRequest::Arm { launch, .. } = request {
+            enforce_app_policy_for_app(
+                app_policy,
+                Some(&launch.desktop_entry),
+                "child launch desktop entry",
+            )
+        } else {
+            Ok(()) // the recorded app identity/authorization is checked by the ticket
+        };
+    }
     if let DaemonRequest::LaunchWindow(request) = request {
         let desktop_entry = request
             .desktop_entry

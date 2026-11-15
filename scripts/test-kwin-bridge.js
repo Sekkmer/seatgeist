@@ -36,6 +36,7 @@ function runBridge({
   pendingActions = [],
   dropFirstActionPoll = false,
   applyResize = true,
+  launchAuthorization = true,
 } = {}) {
   const calls = [];
   const timers = [];
@@ -96,7 +97,14 @@ function runBridge({
         return nowMs;
       },
     },
-    callDBus(service, objectPath, interfaceName, method, payload) {
+    callDBus(service, objectPath, interfaceName, method, payload, ...args) {
+      if (method === "CheckLaunchWindowIntent") {
+        calls.push({service, objectPath, interfaceName, method, payload, args});
+        const callback = args[args.length - 1];
+        if (typeof launchAuthorization === "function") launchAuthorization(callback);
+        else callback(launchAuthorization);
+        return;
+      }
       if (method === "RegisterActionCapabilities") {
         registeredCapabilities.push(payload);
         return;
@@ -140,6 +148,7 @@ function runBridge({
     timers,
     workspace,
     registeredCapabilities,
+    cancelLaunch(id) { context.handleCancelLaunchWindow({launch_id:id}); },
     advanceTime(milliseconds) {
       nowMs += milliseconds;
     },
@@ -159,7 +168,7 @@ function assertSnapshot(calls, offset, activeId = "window-1") {
 {
   const runtime = runBridge();
   assertSnapshot(runtime.calls, 0);
-  assert.deepEqual(runtime.registeredCapabilities, ["resize_window,move_window,launch_window,close_window"]);
+  assert.deepEqual(runtime.registeredCapabilities, ["resize_window,move_window,launch_window,close_window,launch_window_arm_v1"]);
   assert.equal(runtime.timers.length, 2);
   assert.equal(runtime.timers[0].interval, 2000);
   assert.equal(runtime.timers[0].started, true);
@@ -398,6 +407,64 @@ function assertSnapshot(calls, offset, activeId = "window-1") {
   const result = JSON.parse(runtime.calls.find(call => call.method === "CompleteAction").payload);
   assert.equal(result.window_id, "late-window");
   assert.equal(runtime.workspace.activeWindow, existing);
+}
+
+
+// Arm-only: actual child identity is checked before each placement/focus effect.
+function boundLaunchRuntime(authorization = true, extra = {}) {
+  return runBridge({launchAuthorization:authorization, pendingActions:[JSON.stringify({
+    id:"bound-1", action:"launch_window", desktop_entry:"wrapper", window_app_id:"eyrivo-viewer",
+    expected_app_id:"eyrivo-viewer", expected_pid:84, expected_active_window_id:"window-1", activation:"preserve_focus", timeout_ms:30000,
+    width:400, height:300, anchor:"top_left", ...extra})]});
+}
+function candidate(runtime, pid = 84) {
+  const window = {internalId:"viewer-exact", desktopFileName:"eyrivo-viewer", pid,
+    x:100,y:100,width:600,height:500,writes:0};
+  Object.defineProperty(window,"frameGeometry",{set(g) {++this.writes; Object.assign(this,g);}});
+  runtime.workspace.stackingOrder.push(window);
+  return window;
+}
+for (const allowed of [false,true]) {
+  const runtime = boundLaunchRuntime(allowed); const previous = runtime.workspace.activeWindow;
+  runtime.timers[1].timeout.emit();
+  const wrong = candidate(runtime,85); wrong.internalId="other-process";
+  runtime.workspace.windowAdded.emit(wrong);
+  assert.equal(wrong.writes,0);
+  assert.equal(runtime.calls.filter(c=>c.method==="CheckLaunchWindowIntent").length,0);
+  const window = candidate(runtime); runtime.workspace.activeWindow=window;
+  runtime.workspace.windowAdded.emit(window);
+  assert.equal(window.writes,allowed ? 1 : 0);
+  if (allowed) {
+    runtime.timers[2].timeout.emit(); runtime.timers[3].timeout.emit();
+    assert.equal(window.writes,2);
+    assert.equal(runtime.workspace.activeWindow,previous);
+    assert.equal(runtime.calls.filter(c=>c.method==="CheckLaunchWindowIntent").length,3);
+  }
+  assert.equal(JSON.parse(runtime.calls.find(c=>c.method==="CompleteAction").payload).ok,allowed);
+}
+for (const reason of ["cancel", "expire", "user-focus", "gone"]) {
+  let authorize;
+  const runtime = boundLaunchRuntime(callback=>{authorize=callback;});
+  runtime.timers[1].timeout.emit();
+  const window = candidate(runtime); runtime.workspace.activeWindow=window;
+  runtime.workspace.windowAdded.emit(window);
+  assert.equal(window.writes,0); // pending authenticated response cannot apply
+  if (reason==="cancel") {
+    // Poll the normal cancel operation while authorization is in flight.
+    // The VM exports its script functions for this exact callback test.
+    runtime.cancelLaunch("bound-1");
+  } else if (reason==="expire") runtime.advanceTime(30001);
+  else if (reason==="user-focus") {
+    const other={internalId:"user-selected"}; runtime.workspace.stackingOrder.push(other);
+    runtime.workspace.activeWindow=other;
+  } else runtime.workspace.stackingOrder.splice(runtime.workspace.stackingOrder.indexOf(window),1);
+  authorize(true);
+  assert.equal(window.writes,0);
+}
+{
+  const runtime=boundLaunchRuntime(true,{expected_active_window_id:"stale-active"});
+  runtime.timers[1].timeout.emit();
+  assert.equal(runtime.calls.some(c=>c.method==="AcknowledgeAction"),false);
 }
 
 console.log("test-kwin-bridge: ok");

@@ -1593,6 +1593,40 @@ pub struct LaunchWindowRequest {
     pub guard: Option<ActiveWindowGuard>,
 }
 
+/// Arm placement/focus policy for a child already admitted by its controller.
+/// This never launches, execs, reparents or moves a process between cgroups.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LaunchIntentRequest {
+    Arm {
+        launch: LaunchWindowRequest,
+        app_id: String,
+        child_pid: u32,
+        child_start_ticks: u64,
+    },
+    Wait {
+        launch_id: String,
+    },
+    Cancel {
+        launch_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LaunchIntentStatus {
+    pub launch_id: String,
+    pub state: String,
+    pub expires_unix_ms: u64,
+    pub controller_pid: u32,
+    pub controller_start_ticks: u64,
+    pub child_pid: u32,
+    pub child_start_ticks: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<WindowInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_preserved: Option<bool>,
+}
+
 fn default_window_activation_mode() -> WindowActivationMode {
     WindowActivationMode::PreserveFocus
 }
@@ -1700,6 +1734,7 @@ pub enum DaemonRequest {
     CloseWindow(CloseWindowRequest),
     MoveWindow(MoveWindowRequest),
     LaunchWindow(LaunchWindowRequest),
+    LaunchIntent(LaunchIntentRequest),
     ResizeWindow(ResizeWindowRequest),
     PageZoom(PageZoomRequest),
 }
@@ -1783,6 +1818,7 @@ impl DaemonRequest {
             Self::CloseWindow(_) => "close_window",
             Self::MoveWindow(_) => "move_window",
             Self::LaunchWindow(_) => "launch_window",
+            Self::LaunchIntent(_) => "launch_intent",
             Self::ResizeWindow(_) => "resize_window",
             Self::PageZoom(_) => "page_zoom",
         }
@@ -1873,6 +1909,7 @@ impl DaemonRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum DaemonResponse {
+    LaunchIntent(LaunchIntentStatus),
     SeatState(SeatState),
     Health(HealthStatus),
     Capabilities(CapabilitySet),
@@ -1930,6 +1967,7 @@ impl DaemonResponse {
 
     pub fn response_type(&self) -> &'static str {
         match self {
+            Self::LaunchIntent(_) => "launch_intent",
             Self::SeatState(_) => "seat_state",
             Self::Health(_) => "health",
             Self::Capabilities(_) => "capabilities",
@@ -2051,6 +2089,23 @@ pub struct ActionResult {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn child_launch_intent_is_a_separate_strict_control_contract() {
+        let request: DaemonRequest = serde_json::from_value(serde_json::json!({
+            "method":"launch_intent", "operation":"wait","launch_id":"exact"
+        }))
+        .unwrap();
+        assert_eq!(request.method_name(), "launch_intent");
+        assert!(!request.is_read_only());
+        assert!(!request.returns_action());
+        assert!(
+            serde_json::from_value::<LaunchIntentRequest>(serde_json::json!({
+                "operation":"cancel","launch_id":"exact","exec":"not-supported"
+            }))
+            .is_err()
+        );
+    }
+
     #[test]
     fn alt_point_click_protocol_is_exact_and_finite() {
         let r = AltPointClickRequest {
