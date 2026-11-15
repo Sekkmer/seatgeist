@@ -65,6 +65,12 @@ old ticket is insufficient. This requires the matching script's authenticated
 released. Tickets are daemon-local and cannot survive a daemon restart. The
 permanent native-seat plugin and existing MCP connector need no replacement.
 
+The KWin JavaScript `CheckLaunchWindowIntent` callback uses D-Bus signature
+`siss`: Qt marshals its integer-valued PID as signed int32. The daemon rejects
+nonpositive PIDs and converts valid values to its unsigned kernel PID identity.
+An older daemon expecting `suss` rejects that callback before placement; an arm
+acknowledgement alone therefore never proves window placement or focus retention.
+
 This handshake must follow admission, so queuing for GPU/CPU capacity cannot
 consume the30-second compositor window. Keep the handshake automated and bounded;
 do not hold an admission reservation across human input. The final GUI consumer

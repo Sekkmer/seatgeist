@@ -994,13 +994,22 @@ impl Bridge {
     async fn check_launch_window_intent(
         &self,
         id: &str,
-        pid: u32,
+        // KWin's JavaScript callDBus marshals integer-valued Numbers as D-Bus
+        // int32 (i), not uint32 (u). Keep the wire signature compatible while
+        // retaining the positive kernel PID in the authorization store.
+        pid: i32,
         app_id: &str,
         window_id: &str,
         #[zbus(connection)] connection: &zbus::Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<bool> {
         verified_kwin_caller(connection, &header).await?;
+        let Ok(pid) = u32::try_from(pid) else {
+            return Ok(false);
+        };
+        if pid == 0 {
+            return Ok(false);
+        }
         Ok(self
             .window_action_queue
             .launch_intents
@@ -1433,6 +1442,52 @@ async fn service_owned_by_connection(connection: &zbus::Connection) -> Result<bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_authorization_accepts_kwin_javascript_signed_pid_wire_type() {
+        let bridge = Bridge {
+            active_window_state: Default::default(),
+            window_list_state: Default::default(),
+            activity_tracker: Default::default(),
+            capture_session_store: Default::default(),
+            window_action_queue: Default::default(),
+            agent_seat_backend: Default::default(),
+        };
+        let mut xml = String::new();
+        zbus::object_server::Interface::introspect_to_writer(&bridge, &mut xml, 0);
+        let method = xml
+            .split("<method name=\"CheckLaunchWindowIntent\">")
+            .nth(1)
+            .unwrap()
+            .split("</method>")
+            .next()
+            .unwrap();
+        let pid_arg = method
+            .lines()
+            .find(|line| line.contains("name=\"pid\""))
+            .unwrap();
+        assert!(pid_arg.contains("type=\"i\""), "{method}");
+
+        // Retain the actual run94 boundary: Qt callDBus sent (siss). A plain
+        // queue/JavaScript mock does not exercise D-Bus numeric marshalling.
+        let message = zbus::Message::method_call(PATH, "CheckLaunchWindowIntent")
+            .unwrap()
+            .interface(INTERFACE)
+            .unwrap()
+            .build(&("intent", 84_i32, "eyrivo-viewer", "exact-window"))
+            .unwrap();
+        let (_, pid, _, _) = message
+            .body()
+            .deserialize::<(&str, i32, &str, &str)>()
+            .unwrap();
+        assert_eq!(pid, 84);
+        assert!(
+            message
+                .body()
+                .deserialize::<(&str, u32, &str, &str)>()
+                .is_err()
+        );
+    }
 
     #[test]
     fn parses_enabled_state_only_from_plugins_group() {
